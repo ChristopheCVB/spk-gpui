@@ -9,11 +9,14 @@ async-channel = "2.5"
 cookie_store = "0.22"
 dirs = "6"
 futures = "0.3"
+global-hotkey = "=0.10.0"
 gpui-kit = "=0.10.0"
+image-webp = "0.2.4"
 keyring = "4.2"
 livekit = { version = "=0.12.0", features = ["rustls-tls-native-roots"] }
 reqwest = { version = "0.13", default-features = false, features = ["cookies", "json", "rustls-no-provider"] }
 reqwest_cookie_store = "0.10"
+rodio = { version = "=0.23.0", default-features = false, features = ["playback"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -26,11 +29,18 @@ uuid = { version = "1", features = ["v4"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
 objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSEvent"] }
 objc2-av-foundation = { version = "0.3", default-features = false, features = ["AVCaptureDevice", "AVMediaFormat", "block2"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+cpal = { version = "0.18.2", features = ["pulseaudio"] }
+raw-window-handle = "0.6"
+x11rb = { version = "0.13", features = ["allow-unsafe-code", "xkb"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = ["Win32_Media_Audio", "Win32_System_Com"] }
 
 [build-dependencies]
+embed-resource = "3.0"
 url = "2.5"
 

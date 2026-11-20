@@ -8,8 +8,20 @@ fn main() {
     println!("cargo::rerun-if-changed=build/endpoints.rs");
     println!("cargo::rerun-if-env-changed=SPK_URL");
     println!("cargo::rerun-if-env-changed=LIVEKIT_URL");
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
-        println!("cargo::rustc-link-arg=-ObjC");
+    match env::var("CARGO_CFG_TARGET_OS").as_deref() {
+        Ok("macos") => println!("cargo::rustc-link-arg=-ObjC"),
+        Ok("windows") => {
+            println!("cargo::rerun-if-changed=build/windows.rc");
+            println!("cargo::rerun-if-changed=assets/logo.ico");
+            embed_resource::compile_for(
+                "build/windows.rc",
+                ["spk-gpui"],
+                embed_resource::ParamsIncludeDirs(["assets"]),
+            )
+            .manifest_required()
+            .expect("Could not embed the Windows app icon");
+        }
+        _ => {}
     }
 
     let allow_loopback = env::var("PROFILE").as_deref() == Ok("debug");

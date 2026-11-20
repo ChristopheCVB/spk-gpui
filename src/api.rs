@@ -12,9 +12,25 @@ use tokio_tungstenite::{
     connect_async,
     tungstenite::{Error as WsError, Message, client::IntoClientRequest},
 };
-use url::Url;
+use url::{Host, Url};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
+const MAX_AVATAR_BYTES: usize = 8 * 1024 * 1024;
+
+fn avatar_storage_url(url: &Url) -> bool {
+    if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
+        return false;
+    }
+    match (url.scheme(), url.host()) {
+        ("https", Some(_)) => true,
+        ("http", Some(host)) if cfg!(debug_assertions) => match host {
+            Host::Domain(name) => name == "localhost",
+            Host::Ipv4(ip) => ip.is_loopback(),
+            Host::Ipv6(ip) => ip.is_loopback(),
+        },
+        _ => false,
+    }
+}
 
 #[derive(Debug)]
 pub enum Failure {
@@ -49,6 +65,7 @@ pub struct Profile {
     pub id: Option<String>,
     pub email: String,
     pub display_name: Option<String>,
+    pub avatar_key: Option<String>,
 }
 
 impl Profile {
@@ -73,8 +90,15 @@ pub struct Channel {
 pub struct User {
     pub id: String,
     pub display_name: Option<String>,
+    pub avatar_key: Option<String>,
     #[serde(default)]
     pub banned: bool,
+}
+
+impl User {
+    pub fn name(&self) -> Option<&str> {
+        self.display_name.as_deref().filter(|name| !name.is_empty())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -198,6 +222,7 @@ impl VoiceSocket {
 #[derive(Clone)]
 pub struct SpkClient {
     http: Client,
+    avatar_storage: Client,
     base: Url,
     origin: String,
     cookies: Arc<CookieStoreMutex>,
@@ -213,9 +238,15 @@ impl SpkClient {
             .cookie_provider(cookies.clone())
             .build()
             .map_err(|_| Failure::Connection)?;
+        let avatar_storage = Client::builder()
+            .redirect(Policy::none())
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .map_err(|_| Failure::Connection)?;
 
         Ok(Self {
             http,
+            avatar_storage,
             base,
             origin,
             cookies,
@@ -273,6 +304,53 @@ impl SpkClient {
             .json()
             .await
             .map_err(|_| Failure::InvalidResponse)
+    }
+
+    pub async fn avatar(&self, user_id: &str, key: &str) -> Result<Vec<u8>, Failure> {
+        let mut url = self
+            .base
+            .join("/api/avatar/")
+            .expect("fixed SPK endpoint path");
+        if matches!(user_id, "" | "." | "..") {
+            return Err(Failure::InvalidResponse);
+        }
+        url.path_segments_mut()
+            .expect("SPK URL has a host")
+            .pop_if_empty()
+            .push(user_id);
+        url.query_pairs_mut().append_pair("v", key);
+        let response = self
+            .http
+            .get(url)
+            .header(header::ORIGIN, &self.origin)
+            .send()
+            .await
+            .map_err(|_| Failure::Connection)?;
+        if !response.status().is_redirection() {
+            return Err(Failure::Http(response.status()));
+        }
+        let url = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|location| Url::parse(location.to_str().ok()?).ok())
+            .filter(avatar_storage_url)
+            .ok_or(Failure::InvalidResponse)?;
+        // The storage URL carries its own authorization and can use a different host.
+        let mut response = Self::send(self.avatar_storage.get(url)).await?;
+        let mut bytes = Vec::new();
+        if response
+            .content_length()
+            .is_some_and(|len| len > MAX_AVATAR_BYTES as u64)
+        {
+            return Err(Failure::InvalidResponse);
+        }
+        while let Some(chunk) = response.chunk().await.map_err(|_| Failure::Connection)? {
+            if chunk.len() > MAX_AVATAR_BYTES - bytes.len() {
+                return Err(Failure::InvalidResponse);
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
     }
 
     pub async fn voice_token(&self, channel_id: &str) -> Result<VoiceToken, Failure> {

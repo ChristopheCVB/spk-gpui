@@ -1,5 +1,9 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 mod api;
 mod session;
+mod shortcuts;
+mod sounds;
 mod ui;
 mod voice;
 
@@ -16,6 +20,8 @@ use gpui_kit::{
 };
 
 use session::{Command, View};
+use shortcuts::{Chord, Shortcuts};
+use sounds::{Sound, SoundSetting, SoundSettings};
 use ui::{Appearance, VoiceControls, logo};
 use voice::DeviceKind;
 
@@ -28,8 +34,12 @@ struct Spk {
     device_picker: Option<(VoiceControls, DeviceKind)>,
     selected_room: Option<String>,
     sidebar_open: bool,
+    workspace_focus: FocusHandle,
     appearance: Appearance,
     appearance_error: bool,
+    shortcuts: Shortcuts,
+    sound_settings: tokio::sync::watch::Sender<SoundSettings>,
+    signing_out: bool,
 }
 
 impl Spk {
@@ -48,6 +58,13 @@ impl Spk {
             input.set_masked(true, window, cx);
             input
         });
+        let workspace_focus = cx.focus_handle().tab_stop(false);
+        cx.on_focus_lost(window, |this, window, cx| {
+            if matches!(this.view, View::SignedIn(_)) && !window.has_active_dialog(cx) {
+                this.workspace_focus.focus(window, cx);
+            }
+        })
+        .detach();
         for input in [&email, &password] {
             cx.subscribe_in(input, window, |this, _, event, window, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
@@ -59,11 +76,63 @@ impl Spk {
 
         let (commands, requests) = async_channel::bounded(8);
         let (updates, views) = async_channel::bounded(16);
+        let shortcuts = Shortcuts::new(window);
+        let (sound_settings, sounds) = tokio::sync::watch::channel(shortcuts.sound_settings());
+        let global_events = shortcuts.watch_events();
+        cx.spawn_in(window, async move |this, cx| {
+            while let Ok((generation, event)) = global_events.recv().await {
+                if this
+                    .update_in(cx, |this, _, cx| {
+                        if let Some(action) = this.shortcuts.global_action(generation, event) {
+                            if let Some(editor) = &this.shortcuts.editor {
+                                if editor.recording
+                                    && let Some(binding) = this.shortcuts.binding(action)
+                                {
+                                    this.record_chord(Some(binding.chord.clone()), cx);
+                                }
+                            } else {
+                                this.voice_action(action, cx);
+                            }
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+
+        let app = cx.weak_entity();
+        let window_id = window.window_handle().window_id();
+        cx.intercept_keystrokes(move |event, window, cx| {
+            if window.window_handle().window_id() == window_id {
+                let _ = app.update(cx, |this, cx| this.capture_shortcut(event, window, cx));
+            }
+        })
+        .detach();
+        cx.observe_window_activation(window, |this, window, cx| {
+            if !window.is_window_active() {
+                this.shortcuts.clear_focused();
+                if this
+                    .shortcuts
+                    .editor
+                    .as_ref()
+                    .is_some_and(|editor| editor.recording)
+                {
+                    this.cancel_shortcut_editor(cx);
+                }
+            }
+        })
+        .detach();
+
         let (finished, stopped) = tokio::sync::oneshot::channel();
         let shutdown = commands.clone();
+        let app = cx.weak_entity();
         let mut stopped = Some(stopped);
-        App::on_app_quit(cx, move |_| {
+        App::on_app_quit(cx, move |cx| {
             shutdown.close();
+            let _ = app.update(cx, |this, _| this.shortcuts.signed_in(false));
             let stopped = stopped.take();
             async move {
                 if let Some(stopped) = stopped {
@@ -77,7 +146,7 @@ impl Spk {
                 .enable_all()
                 .build()
             {
-                runtime.block_on(session::run(requests, updates));
+                runtime.block_on(session::run(requests, updates, sounds));
             }
             let _ = finished.send(());
         });
@@ -86,7 +155,15 @@ impl Spk {
             while let Ok(view) = views.recv().await {
                 if this
                     .update_in(cx, |this, window, cx| {
-                        if !matches!(view, View::SignedIn(_)) {
+                        if this.signing_out && matches!(view, View::SignedIn(_)) {
+                            return;
+                        }
+                        this.signing_out = false;
+                        let signed_in = matches!(view, View::SignedIn(_));
+                        this.shortcuts.signed_in(signed_in);
+                        if signed_in && !matches!(this.view, View::SignedIn(_)) {
+                            this.workspace_focus.focus(window, cx);
+                        } else if !signed_in {
                             this.selected_room = None;
                             this.device_picker = None;
                             window.close_all_dialogs(cx);
@@ -100,7 +177,7 @@ impl Spk {
                             let handle = input.focus_handle(cx);
                             window.focus(&handle, cx);
                         }
-                        this.view = view;
+                        this.set_session_view(view, window);
                         cx.notify();
                     })
                     .is_err()
@@ -109,11 +186,15 @@ impl Spk {
                 }
             }
             let _ = this.update_in(cx, |this, window, cx| {
+                this.shortcuts.signed_in(false);
                 window.close_all_dialogs(cx);
-                this.view = View::SignIn {
-                    message: Some("The SPK connection stopped. Close and reopen the app."),
-                    retry_restore: false,
-                };
+                this.set_session_view(
+                    View::SignIn {
+                        message: Some("The SPK connection stopped. Close and reopen the app."),
+                        retry_restore: false,
+                    },
+                    window,
+                );
                 cx.notify();
             });
         })
@@ -128,18 +209,107 @@ impl Spk {
             device_picker: None,
             selected_room: None,
             sidebar_open: true,
+            workspace_focus,
             appearance,
             appearance_error: false,
+            shortcuts,
+            sound_settings,
+            signing_out: false,
         }
+    }
+
+    fn set_session_view(&mut self, view: View, window: &mut Window) {
+        if let View::SignedIn(previous) = &self.view {
+            let next = match &view {
+                View::SignedIn(sidebar) => Some(&sidebar.avatars),
+                _ => None,
+            };
+            if !next.is_some_and(|next| std::sync::Arc::ptr_eq(&previous.avatars, next)) {
+                for (id, image) in previous.avatars.iter() {
+                    if next.and_then(|images| images.get(id)) != Some(image) {
+                        let _ = window.drop_image(image.clone());
+                    }
+                }
+            }
+        }
+        self.view = view;
     }
 
     fn send(&mut self, command: Command, busy: Option<&'static str>, cx: &mut Context<Self>) {
         self.form_error = None;
+        let signing_out = matches!(command, Command::SignOut);
         if self.commands.try_send(command).is_err() {
             self.form_error = Some("Could not reach the SPK connection. Try again.");
-        } else if let Some(label) = busy {
-            self.view = View::Busy(label);
+        } else {
+            if signing_out {
+                self.signing_out = true;
+                self.shortcuts.signed_in(false);
+            }
+            if let Some(label) = busy {
+                self.view = View::Busy(label);
+            }
         }
+        cx.notify();
+    }
+
+    fn cancel_shortcut_editor(&mut self, cx: &mut Context<Self>) {
+        if self.shortcuts.editor.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn capture_shortcut(
+        &mut self,
+        event: &KeystrokeEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = &self.shortcuts.editor else {
+            return;
+        };
+        let key = event.keystroke.key.as_str();
+        if key == "escape" {
+            self.cancel_shortcut_editor(cx);
+        } else if !editor.recording {
+            return;
+        } else if key == "tab" {
+            self.cancel_shortcut_editor(cx);
+            return;
+        } else if !event.keystroke.is_modifier_key() {
+            let chord = if event.input_preference == InputPreference::CharacterInput {
+                None
+            } else {
+                Chord::capture(&event.keystroke, window)
+            };
+            self.record_chord(chord, cx);
+        }
+        cx.stop_propagation();
+        window.prevent_default();
+    }
+
+    fn record_chord(&mut self, chord: Option<Chord>, cx: &mut Context<Self>) {
+        if let Some(editor) = &mut self.shortcuts.editor {
+            editor.recording = chord.is_none();
+            editor.error = chord.is_none().then_some(
+                "Use F1–F24 or add Ctrl, Alt, or your platform modifier to a letter or digit.",
+            );
+            if chord.is_some() {
+                editor.chord = chord;
+            }
+            cx.notify();
+        }
+    }
+
+    fn change_sound(
+        &mut self,
+        sound: Sound,
+        change: impl FnOnce(&mut SoundSetting),
+        cx: &mut Context<Self>,
+    ) {
+        let mut sounds = self.shortcuts.sound_settings();
+        change(sounds.get_mut(sound));
+        self.shortcuts.set_sound_settings(sounds);
+        self.sound_settings.send_replace(sounds);
         cx.notify();
     }
 
@@ -262,6 +432,8 @@ impl Render for Spk {
                 .into_any_element(),
         };
         div()
+            .id("spk-window")
+            .track_focus(&self.workspace_focus)
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
@@ -279,6 +451,7 @@ impl Render for Spk {
 fn main() {
     application().with_assets(assets::AllAssets).run(|cx| {
         init(cx);
+        gpui_kit::base::Root::register_plugin(cx, |_, _| ui::ShortcutKeys);
         ThemeRegistry::global_mut(cx)
             .load_themes_from_str(include_str!("../assets/themes.json"))
             .expect("SPK themes should be valid");

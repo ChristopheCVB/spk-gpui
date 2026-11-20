@@ -23,7 +23,7 @@ use crate::{
     voice::Status,
 };
 
-pub use settings::Appearance;
+pub use settings::{Appearance, ShortcutKeys};
 pub use voice::VoiceControls;
 
 pub fn logo(size: f32) -> Img {
@@ -34,6 +34,44 @@ pub fn logo(size: f32) -> Img {
         ))
     });
     img(Arc::clone(&LOGO)).size(px(size)).rounded_md()
+}
+
+fn profile_avatar(
+    fallback: Avatar,
+    photo: Option<&Arc<RenderImage>>,
+    diameter: f32,
+    speaking: bool,
+    cx: &App,
+) -> AnyElement {
+    let size = px(diameter);
+    let theme = cx.theme();
+    let Some(photo) = photo else {
+        return fallback
+            .size(size)
+            .when(speaking, |avatar| avatar.border_color(theme.success))
+            .into_any_element();
+    };
+
+    div()
+        .size(size)
+        .flex_shrink_0()
+        .rounded_full()
+        .overflow_hidden()
+        .bg(theme.tokens.secondary)
+        .border_1()
+        .border_color(if speaking {
+            theme.success
+        } else {
+            theme.border
+        })
+        .child(
+            img(Arc::clone(photo))
+                .id(("avatar-photo", photo.id.0))
+                .size_full()
+                .rounded_full()
+                .object_fit(ObjectFit::Cover),
+        )
+        .into_any_element()
 }
 
 fn tool_button(
@@ -249,20 +287,21 @@ impl Spk {
                                     IconName::MessageCircle,
                                     cx,
                                 ))
-                                .children(people.into_iter().enumerate().map(|(index, name)| {
+                                .children(people.into_iter().map(|(id, name)| {
                                     div()
-                                        .id(("person", index))
+                                        .id(SharedString::from(format!("person-{id}")))
                                         .flex()
                                         .items_center()
                                         .h_8()
                                         .gap_2()
                                         .px_2()
-                                        .child(
-                                            Avatar::new()
-                                                .name(name.to_owned())
-                                                .small()
-                                                .size(px(20.0)),
-                                        )
+                                        .child(profile_avatar(
+                                            Avatar::new().name(name.to_owned()).small(),
+                                            sidebar.avatar(Some(id)),
+                                            20.0,
+                                            false,
+                                            cx,
+                                        ))
                                         .child(Label::new(name.to_owned()).truncate())
                                 })),
                         )
@@ -353,9 +392,16 @@ impl Spk {
                     .bg(theme.secondary)
                     .child(
                         div()
+                            .id("footer-avatar")
                             .relative()
                             .flex_shrink_0()
-                            .child(Avatar::new().name(name.to_owned()).small().size(px(28.0)))
+                            .child(profile_avatar(
+                                Avatar::new().name(name.to_owned()).small(),
+                                sidebar.avatar(sidebar.profile.id.as_deref()),
+                                28.0,
+                                false,
+                                cx,
+                            ))
                             .child(
                                 div()
                                     .absolute()
@@ -464,9 +510,12 @@ impl Spk {
                     .pl_6()
                     .pr_2()
                     .h_6()
-                    .child(Avatar::new().name(person.name.to_owned()).xsmall().when(
+                    .child(profile_avatar(
+                        Avatar::new().name(person.name.to_owned()).xsmall(),
+                        sidebar.avatar(Some(person.id)),
+                        16.0,
                         flags.speaking && !flags.muted && !flags.deafened,
-                        |avatar| avatar.border_color(theme.success),
+                        cx,
                     ))
                     .child(
                         Label::new(person.name.to_owned())
@@ -679,7 +728,13 @@ impl Spk {
             })
             .rounded_lg()
             .bg(theme.secondary)
-            .child(Avatar::new().name(participant.name.to_owned()))
+            .child(profile_avatar(
+                Avatar::new().name(participant.name.to_owned()),
+                sidebar.avatar(Some(participant.id)),
+                48.0,
+                false,
+                cx,
+            ))
             .child(
                 div()
                     .absolute()

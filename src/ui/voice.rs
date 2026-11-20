@@ -1,6 +1,7 @@
 use super::*;
 use crate::{
     session::View,
+    shortcuts::Action,
     voice::{Device, DeviceKind, DeviceList},
 };
 use gpui_kit::component::popover::Popover;
@@ -18,7 +19,27 @@ fn device_label(kind: DeviceKind) -> &'static str {
     }
 }
 
+fn mic_needs_retry(sidebar: &Sidebar) -> bool {
+    !sidebar.voice_intent.mute.effective_muted()
+        && sidebar
+            .voice
+            .as_ref()
+            .is_some_and(|call| call.status == Status::ListenOnly)
+}
+
 impl Spk {
+    pub(crate) fn voice_action(&mut self, action: Action, cx: &mut Context<Self>) {
+        let View::SignedIn(sidebar) = &self.view else {
+            return;
+        };
+        let command = match action {
+            Action::Mute if mic_needs_retry(sidebar) => Command::RetryMicrophone,
+            Action::Mute => Command::ToggleMute,
+            Action::Deafen => Command::ToggleDeafen,
+        };
+        self.send(command, None, cx);
+    }
+
     pub(super) fn voice_controls(
         &self,
         sidebar: &Sidebar,
@@ -36,11 +57,6 @@ impl Spk {
             "Enable microphone"
         } else {
             "Mute"
-        };
-        let mic_action: fn() -> Command = if listen_only && !mute.effective_muted() {
-            || Command::RetryMicrophone
-        } else {
-            || Command::ToggleMute
         };
         let compact = location == VoiceControls::Profile;
         let theme = cx.theme();
@@ -64,7 +80,7 @@ impl Spk {
                             IconName::Mic
                         },
                         mic_label,
-                        mic_action,
+                        Action::Mute,
                         mute.effective_muted() || listen_only,
                     ),
                     (
@@ -75,12 +91,12 @@ impl Spk {
                             IconName::Headphones
                         },
                         if mute.deafened { "Undeafen" } else { "Deafen" },
-                        (|| Command::ToggleDeafen) as fn() -> Command,
+                        Action::Deafen,
                         mute.deafened,
                     ),
                 ]
                 .into_iter()
-                .map(|(kind, icon, label, command, off)| {
+                .map(|(kind, icon, label, action, off)| {
                     let picker_label = format!("Choose {}", device_label(kind).to_lowercase());
                     let open = self.device_picker == Some((location, kind));
                     div()
@@ -99,7 +115,7 @@ impl Spk {
                             )
                             .when(!compact, |button| button.label(label))
                             .on_click(
-                                cx.listener(move |this, _, _, cx| this.send(command(), None, cx)),
+                                cx.listener(move |this, _, _, cx| this.voice_action(action, cx)),
                             ),
                         )
                         .child({

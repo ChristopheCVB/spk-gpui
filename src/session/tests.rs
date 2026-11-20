@@ -138,6 +138,7 @@ fn live_membership_and_flags_win_over_an_in_flight_snapshot() {
             id: Some("reader".into()),
             email: "reader@example.test".into(),
             display_name: None,
+            avatar_key: None,
         },
         None,
     );
@@ -173,10 +174,11 @@ fn live_membership_and_flags_win_over_an_in_flight_snapshot() {
         Ok(Data::Users(vec![User {
             id: "alice".into(),
             display_name: Some("Alice".into()),
+            avatar_key: None,
             banned: false,
         }])),
     );
-    assert_eq!(sidebar.people(), ["Alice"]);
+    assert_eq!(sidebar.people(), [("alice", "Alice")]);
 
     let Frame::Presence { user_id, channel_id, flags } = serde_json::from_str(
         r#"{"type":"voice:presence","userId":"alice","channelId":"second","muted":true,"deafened":true,"speaking":false}"#,
@@ -229,6 +231,149 @@ fn live_membership_and_flags_win_over_an_in_flight_snapshot() {
     );
 }
 
+#[cfg(debug_assertions)]
+#[tokio::test]
+async fn avatar_loads_share_a_photo_and_discard_an_older_response() {
+    use image_webp::{ColorType, WebPEncoder};
+
+    async fn storage_request(spk: &TcpListener, storage: &TcpListener, version: &str) -> Request {
+        let request = Request::read(
+            spk,
+            &format!("GET /api/avatar/alice?v=avatars%2Falice%2F{version}.webp HTTP/1.1"),
+        )
+        .await;
+        let origin = format!("http://{}", spk.local_addr().unwrap());
+        assert_eq!(request.header("origin"), Some(origin.as_str()));
+        assert_eq!(request.header("cookie"), Some("session=avatar-test"));
+        let location = format!(
+            "Location: http://{}/{version}?signed=test",
+            storage.local_addr().unwrap()
+        );
+        request.respond_raw("302 Found", &[&location], b"").await;
+        let request = Request::read(storage, &format!("GET /{version}?signed=test HTTP/1.1")).await;
+        for header in ["cookie", "origin", "authorization", "referer"] {
+            assert_eq!(request.header(header), None);
+        }
+        request
+    }
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let spk = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let storage = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = Url::parse(&format!("http://{}", spk.local_addr().unwrap())).unwrap();
+    let mut cookies = CookieStore::default();
+    cookies.parse("session=avatar-test; Path=/", &base).unwrap();
+    let client = SpkClient::new(base, cookies).unwrap();
+    let (old_requested, wait_for_old) = tokio::sync::oneshot::channel();
+    let (new_applied, wait_for_new) = tokio::sync::oneshot::channel();
+
+    let server = async {
+        let old = storage_request(&spk, &storage, "old").await;
+        old_requested.send(()).unwrap();
+        let new = storage_request(&spk, &storage, "new").await;
+        let mut bytes = Vec::new();
+        WebPEncoder::new(&mut bytes)
+            .encode(&[255, 0, 0], 1, 1, ColorType::Rgb8)
+            .unwrap();
+        new.respond_raw(
+            "200 OK",
+            &["Content-Type: image/webp"],
+            include_bytes!("../../tests/fixtures/animated-avatar.webp"),
+        )
+        .await;
+        wait_for_new.await.unwrap();
+        old.respond_raw("200 OK", &["Content-Type: image/webp"], &bytes)
+            .await;
+
+        storage_request(&spk, &storage, "corrupt")
+            .await
+            .respond_raw("200 OK", &["Content-Type: image/webp"], b"not an image")
+            .await;
+        let request = Request::read(
+            &spk,
+            "GET /api/avatar/alice?v=avatars%2Falice%2Fmissing.webp HTTP/1.1",
+        )
+        .await;
+        request.respond_raw("404 Not Found", &[], b"").await;
+    };
+
+    let desktop = async {
+        let profile = serde_json::from_value(value!({
+            "id": "alice", "email": "alice@example.test", "avatarKey": "avatars/alice/old.webp"
+        }))
+        .unwrap();
+        let mut sidebar = Sidebar::new(profile, None);
+        let mut avatars = AvatarLoads::default();
+        let mut refresh = Refresh::default();
+        refresh.update_presence(
+            &mut sidebar,
+            "alice".into(),
+            Some("voice".into()),
+            VoiceFlags::default(),
+        );
+        let update = |sidebar: &mut Sidebar,
+                      avatars: &mut AvatarLoads,
+                      refresh: &mut Refresh,
+                      key: Option<&str>| {
+            let users = serde_json::from_value(value!([{
+                "id": "alice", "displayName": "Alice", "avatarKey": key
+            }]))
+            .unwrap();
+            refresh.complete(sidebar, Resource::Users, Ok(Data::Users(users)));
+            avatars.directory_changed(sidebar);
+            avatars.fill(&client, sidebar);
+        };
+
+        avatars.fill(&client, &sidebar);
+        avatars.fill(&client, &sidebar);
+        assert_eq!(avatars.tasks.len(), 1);
+        assert!(sidebar.avatar(Some("alice")).is_none());
+        wait_for_old.await.unwrap();
+        update(
+            &mut sidebar,
+            &mut avatars,
+            &mut refresh,
+            Some("avatars/alice/new.webp"),
+        );
+        let loaded = avatars.tasks.join_next().await.unwrap().unwrap();
+        avatars.complete(&mut sidebar, loaded);
+        let photo = sidebar
+            .avatar(sidebar.profile.id.as_deref())
+            .unwrap()
+            .clone();
+        assert_eq!(photo.frame_count(), 2);
+        new_applied.send(()).unwrap();
+        let loaded = avatars.tasks.join_next().await.unwrap().unwrap();
+        avatars.complete(&mut sidebar, loaded);
+        assert!(Arc::ptr_eq(
+            &photo,
+            sidebar
+                .avatar(Some(sidebar.participants("voice")[0].id))
+                .unwrap()
+        ));
+        avatars.fill(&client, &sidebar);
+        assert!(avatars.tasks.is_empty());
+
+        for version in ["corrupt", "missing"] {
+            let key = format!("avatars/alice/{version}.webp");
+            update(&mut sidebar, &mut avatars, &mut refresh, Some(key.as_str()));
+            assert!(sidebar.avatar(Some("alice")).is_none());
+            let loaded = avatars.tasks.join_next().await.unwrap().unwrap();
+            avatars.complete(&mut sidebar, loaded);
+            assert!(sidebar.avatar(Some("alice")).is_none());
+        }
+        update(&mut sidebar, &mut avatars, &mut refresh, None::<&str>);
+        assert!(sidebar.avatar_key("alice").is_none());
+        assert!(avatars.tasks.is_empty());
+    };
+
+    timeout(Duration::from_secs(10), async {
+        tokio::join!(server, desktop)
+    })
+    .await
+    .expect("loopback avatar requests timed out");
+}
+
 pub(crate) struct Request {
     stream: BufReader<TcpStream>,
     headers: String,
@@ -271,16 +416,129 @@ impl Request {
         })
     }
 
-    pub(crate) async fn respond(mut self, cookies: &[&str], body: &str) {
-        let mut response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
-            body.len(),
-        );
-        for cookie in cookies {
-            response.push_str(&format!("Set-Cookie: {cookie}\r\n"));
-        }
-        response.push_str("\r\n");
-        response.push_str(body);
-        self.stream.write_all(response.as_bytes()).await.unwrap();
+    pub(crate) async fn respond(self, cookies: &[&str], body: &str) {
+        let mut headers = vec!["Content-Type: application/json".to_owned()];
+        headers.extend(cookies.iter().map(|cookie| format!("Set-Cookie: {cookie}")));
+        let headers = headers.iter().map(String::as_str).collect::<Vec<_>>();
+        self.respond_raw("200 OK", &headers, body.as_bytes()).await;
     }
+
+    async fn respond_raw(mut self, status: &str, headers: &[&str], body: &[u8]) {
+        let mut response = format!(
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n",
+            body.len()
+        )
+        .into_bytes();
+        for header in headers {
+            response.extend_from_slice(header.as_bytes());
+            response.extend_from_slice(b"\r\n");
+        }
+        response.extend_from_slice(b"\r\n");
+        response.extend_from_slice(body);
+        self.stream.write_all(&response).await.unwrap();
+    }
+}
+
+#[test]
+fn room_cues_follow_live_membership_of_other_users() {
+    let profile = serde_json::from_str(r#"{"id":"me","email":"me@example.test"}"#).unwrap();
+    let mut sidebar = Sidebar::new(profile, None);
+    let mut call = VoiceView::joining("here".into());
+    call.status = VoiceStatus::ListenOnly;
+    sidebar.voice = Some(call);
+    let mut refresh = Refresh::default();
+
+    let present = |refresh: &mut Refresh, sidebar: &mut Sidebar, user: &str, room: Option<&str>| {
+        refresh.update_presence(
+            sidebar,
+            user.into(),
+            room.map(str::to_owned),
+            VoiceFlags::default(),
+        )
+    };
+
+    assert_eq!(
+        present(&mut refresh, &mut sidebar, "already-here", Some("here")),
+        None
+    );
+    let members =
+        serde_json::from_str(r#"[{"userId":"already-here","channelId":"here"}]"#).unwrap();
+    refresh.complete(
+        &mut sidebar,
+        Resource::Presence,
+        Ok(Data::Presence(members)),
+    );
+    assert_eq!(
+        present(&mut refresh, &mut sidebar, "already-here", Some("here")),
+        None
+    );
+    assert_eq!(
+        present(&mut refresh, &mut sidebar, "me", Some("here")),
+        None
+    );
+    assert_eq!(
+        present(&mut refresh, &mut sidebar, "peer", Some("other")),
+        None
+    );
+    assert_eq!(
+        present(&mut refresh, &mut sidebar, "peer", Some("here")),
+        Some(Sound::Join)
+    );
+    assert_eq!(
+        refresh.update_presence(
+            &mut sidebar,
+            "peer".into(),
+            Some("here".into()),
+            VoiceFlags {
+                muted: true,
+                ..VoiceFlags::default()
+            },
+        ),
+        None,
+    );
+    assert_eq!(
+        present(&mut refresh, &mut sidebar, "peer", Some("other")),
+        Some(Sound::Leave)
+    );
+    assert_eq!(present(&mut refresh, &mut sidebar, "peer", None), None);
+    assert_eq!(
+        present(&mut refresh, &mut sidebar, "already-here", None),
+        Some(Sound::Leave)
+    );
+
+    sidebar.voice.as_mut().unwrap().begin_leave(true);
+    assert_eq!(
+        present(&mut refresh, &mut sidebar, "peer", Some("here")),
+        None
+    );
+}
+
+#[test]
+fn local_cues_follow_first_ready_report_and_explicit_leave() {
+    let report = |status| {
+        Arc::new(VoiceReport {
+            status,
+            devices: Arc::default(),
+            microphone: None,
+            speakers: None,
+            speaking: HashSet::new(),
+        })
+    };
+    let mut call = VoiceView::joining("room".into());
+    assert!(call.update_media(report(VoiceStatus::ListenOnly)));
+    assert!(!call.update_media(report(VoiceStatus::Connected)));
+    assert!(call.begin_leave(true));
+    assert!(call.play_leave);
+    assert!(!call.begin_leave(true));
+    assert!(!call.update_media(report(VoiceStatus::ListenOnly)));
+
+    let mut cancelled = VoiceView::joining("room".into());
+    assert!(cancelled.begin_leave(true));
+    assert!(!cancelled.play_leave);
+    assert!(!cancelled.update_media(report(VoiceStatus::Connected)));
+
+    let mut disconnected = VoiceView::joining("room".into());
+    assert!(disconnected.update_media(report(VoiceStatus::Connected)));
+    assert!(disconnected.begin_leave(false));
+    assert!(!disconnected.play_leave);
 }

@@ -1,3 +1,5 @@
+mod avatars;
+
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
@@ -6,6 +8,7 @@ use std::{
 
 use async_channel::{Receiver, Sender};
 use cookie_store::{CookieStore, serde::json};
+use gpui_kit::RenderImage;
 use tokio::task::{JoinSet, spawn_blocking};
 use url::Url;
 
@@ -13,10 +16,12 @@ use crate::api::{
     Channel, Connection, Failure, Frame, Member, Profile, SocketEvent, SpkClient, User, VoiceFlags,
     VoiceSocket,
 };
+use crate::sounds::{Sound, SoundSettings, VoiceSounds};
 use crate::voice::{
     self, Call, Device, DeviceKind, DevicePreferences, Devices, Intent, Issue as VoiceIssue,
     Report as VoiceReport, Status as VoiceStatus, Update as VoiceUpdate,
 };
+use avatars::AvatarLoads;
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -62,7 +67,8 @@ pub struct Sidebar {
     pub voice_intent: Intent,
     pub devices: Arc<Devices>,
     pub device_notice: Option<&'static str>,
-    names: HashMap<String, String>,
+    pub avatars: Arc<HashMap<String, Arc<RenderImage>>>,
+    users: Arc<HashMap<String, User>>,
     rooms: HashMap<String, RoomMember>,
 }
 
@@ -71,6 +77,45 @@ pub struct VoiceView {
     pub channel_id: String,
     pub status: VoiceStatus,
     pub media: Option<Arc<VoiceReport>>,
+    play_leave: bool,
+}
+
+impl VoiceView {
+    fn joining(channel_id: String) -> Self {
+        Self {
+            channel_id,
+            status: VoiceStatus::Joining,
+            media: None,
+            play_leave: false,
+        }
+    }
+
+    fn listening(&self) -> bool {
+        matches!(
+            self.status,
+            VoiceStatus::Connected | VoiceStatus::ListenOnly
+        )
+    }
+
+    fn begin_leave(&mut self, explicit: bool) -> bool {
+        if self.status == VoiceStatus::Leaving {
+            return false;
+        }
+        self.play_leave = explicit && self.listening();
+        self.status = VoiceStatus::Leaving;
+        self.media = None;
+        true
+    }
+
+    fn update_media(&mut self, report: Arc<VoiceReport>) -> bool {
+        if self.status == VoiceStatus::Leaving {
+            return false;
+        }
+        let was_listening = self.listening();
+        self.status = report.status;
+        self.media = Some(report);
+        !was_listening && self.listening()
+    }
 }
 
 #[derive(Clone)]
@@ -98,18 +143,17 @@ impl Sidebar {
             voice_intent: Intent::default(),
             devices: Arc::default(),
             device_notice: None,
-            names: HashMap::new(),
+            avatars: Arc::default(),
+            users: Arc::default(),
             rooms: HashMap::new(),
         }
     }
 
     fn cancel_voice(&mut self, call: &mut Option<Call>, notice: Option<&'static str>) {
         if let (Some(call), Some(voice)) = (call, &mut self.voice)
-            && !matches!(voice.status, VoiceStatus::Leaving)
+            && voice.begin_leave(notice.is_none())
         {
             call.cancel();
-            voice.status = VoiceStatus::Leaving;
-            voice.media = None;
             self.voice_notice = notice;
         }
     }
@@ -121,7 +165,12 @@ impl Sidebar {
             .filter(|(_, member)| member.channel_id == channel)
             .map(|(user, member)| Participant {
                 id: user,
-                name: self.names.get(user).map_or("Unknown user", String::as_str),
+                name: self
+                    .users
+                    .get(user)
+                    .filter(|user| !user.banned)
+                    .and_then(User::name)
+                    .unwrap_or("Unknown user"),
                 flags: member.flags,
             })
             .collect::<Vec<_>>();
@@ -129,18 +178,31 @@ impl Sidebar {
         people
     }
 
-    pub fn people(&self) -> Vec<&str> {
+    pub fn people(&self) -> Vec<(&str, &str)> {
         let Some(me) = self.profile.id.as_deref() else {
             return Vec::new();
         };
         let mut people = self
-            .names
-            .iter()
-            .filter(|(id, _)| id.as_str() != me)
-            .map(|(_, name)| name.as_str())
+            .users
+            .values()
+            .filter(|user| user.id != me && !user.banned)
+            .filter_map(|user| Some((user.id.as_str(), user.name()?)))
             .collect::<Vec<_>>();
-        people.sort_by_cached_key(|name| name.to_lowercase());
+        people.sort_by_cached_key(|(id, name)| (name.to_lowercase(), *id));
         people
+    }
+
+    pub fn avatar(&self, id: Option<&str>) -> Option<&Arc<RenderImage>> {
+        self.avatars.get(id?)
+    }
+
+    fn avatar_key(&self, id: &str) -> Option<&str> {
+        match self.users.get(id) {
+            Some(user) if !user.banned => user.avatar_key.as_deref(),
+            None if self.profile.id.as_deref() == Some(id) => self.profile.avatar_key.as_deref(),
+            _ => None,
+        }
+        .filter(|key| !key.is_empty())
     }
 }
 
@@ -263,7 +325,16 @@ impl SavedSession {
     }
 }
 
-pub async fn run(commands: Receiver<Command>, views: Sender<View>) {
+struct VoiceSettings {
+    devices: DeviceSettings,
+    sounds: VoiceSounds,
+}
+
+pub async fn run(
+    commands: Receiver<Command>,
+    views: Sender<View>,
+    sound_settings: tokio::sync::watch::Receiver<SoundSettings>,
+) {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let base = Url::parse(env!("SPK_URL")).expect("validated SPK URL");
     let mut saved = SavedSession {
@@ -271,7 +342,10 @@ pub async fn run(commands: Receiver<Command>, views: Sender<View>) {
         persisted: None,
     };
     let mut next = Command::Restore;
-    let mut device_settings = DeviceSettings::load();
+    let mut settings = VoiceSettings {
+        devices: DeviceSettings::load(),
+        sounds: VoiceSounds::new(sound_settings),
+    };
     loop {
         let auth = match next {
             Command::Restore => restore(&base, &mut saved).await,
@@ -290,7 +364,7 @@ pub async fn run(commands: Receiver<Command>, views: Sender<View>) {
                     profile,
                     notice,
                     &mut saved,
-                    &mut device_settings,
+                    &mut settings,
                     &commands,
                     &views,
                 )
@@ -435,6 +509,7 @@ struct Refresh {
     dirty: HashSet<Resource>,
     failed: HashSet<Resource>,
     presence_updates: Option<HashMap<String, Option<RoomMember>>>,
+    presence_ready: bool,
 }
 
 impl Refresh {
@@ -469,12 +544,36 @@ impl Refresh {
         user_id: String,
         channel_id: Option<String>,
         flags: VoiceFlags,
-    ) {
+    ) -> Option<Sound> {
+        let cue = sidebar
+            .voice
+            .as_ref()
+            .filter(|voice| self.presence_ready && voice.listening())
+            .filter(|_| {
+                sidebar
+                    .profile
+                    .id
+                    .as_deref()
+                    .is_some_and(|me| me != user_id)
+            })
+            .and_then(|voice| {
+                let was_here = sidebar
+                    .rooms
+                    .get(&user_id)
+                    .is_some_and(|member| member.channel_id == voice.channel_id);
+                let is_here = channel_id.as_deref() == Some(voice.channel_id.as_str());
+                match (was_here, is_here) {
+                    (false, true) => Some(Sound::Join),
+                    (true, false) => Some(Sound::Leave),
+                    _ => None,
+                }
+            });
         let member = channel_id.map(|channel_id| RoomMember { channel_id, flags });
         if let Some(updates) = &mut self.presence_updates {
             updates.insert(user_id.clone(), member.clone());
         }
         apply_presence(&mut sidebar.rooms, user_id, member);
+        cue
     }
 
     fn complete(&mut self, sidebar: &mut Sidebar, resource: Resource, data: Result<Data, Failure>) {
@@ -485,17 +584,15 @@ impl Refresh {
                 match data {
                     Data::Channels(channels) => sidebar.channels = Some(channels),
                     Data::Users(users) => {
-                        sidebar.names = users
-                            .into_iter()
-                            .filter(|user| !user.banned)
-                            .filter_map(|user| {
-                                user.display_name
-                                    .filter(|name| !name.is_empty())
-                                    .map(|name| (user.id, name))
-                            })
-                            .collect();
+                        sidebar.users = Arc::new(
+                            users
+                                .into_iter()
+                                .map(|user| (user.id.clone(), user))
+                                .collect(),
+                        );
                     }
                     Data::Presence(members) => {
+                        self.presence_ready = true;
                         sidebar.rooms = members
                             .into_iter()
                             .map(|member| {
@@ -542,7 +639,7 @@ async fn watch_session(
     profile: Profile,
     notice: Option<&'static str>,
     saved: &mut SavedSession,
-    settings: &mut DeviceSettings,
+    settings: &mut VoiceSettings,
     commands: &Receiver<Command>,
     views: &Sender<View>,
 ) -> SessionEnd {
@@ -554,8 +651,10 @@ async fn watch_session(
     let mut refresh = Refresh::default();
     refresh.fetch_all(client);
     let mut sidebar = Sidebar::new(profile, notice);
-    sidebar.voice_intent.preferred = settings.preferred.clone();
-    sidebar.device_notice = settings.notice;
+    let mut avatars = AvatarLoads::default();
+    avatars.fill(client, &sidebar);
+    sidebar.voice_intent.preferred = settings.devices.preferred.clone();
+    sidebar.device_notice = settings.devices.notice;
     sidebar.devices = idle_devices();
     let mut voice_socket: Option<VoiceSocket> = None;
     let mut call = None;
@@ -578,15 +677,21 @@ async fn watch_session(
                         && sidebar.channels.iter().flatten().any(|channel| channel.kind == "voice" && channel.id == channel_id)
                     {
                         call = Some(Call::start(channel_id.clone(), client.clone(), socket.clone(), sidebar.voice_intent.clone()));
-                        sidebar.voice = Some(VoiceView { channel_id, status: VoiceStatus::Joining, media: None });
+                        sidebar.voice = Some(VoiceView::joining(channel_id));
                         sidebar.voice_notice = None;
                     }
                 }
                 Ok(Command::LeaveVoice) => sidebar.cancel_voice(&mut call, None),
                 Ok(command @ (Command::ToggleMute | Command::ToggleDeafen | Command::RetryMicrophone | Command::RefreshDevices | Command::ChooseDevice(..))) => {
                     match command {
-                        Command::ToggleMute => sidebar.voice_intent.mute.toggle_mic(),
-                        Command::ToggleDeafen => sidebar.voice_intent.mute.toggle_deafen(),
+                        Command::ToggleMute => {
+                            sidebar.voice_intent.mute.toggle_mic();
+                            settings.sounds.play(Sound::Mute, !sidebar.voice_intent.mute.effective_muted());
+                        }
+                        Command::ToggleDeafen => {
+                            sidebar.voice_intent.mute.toggle_deafen();
+                            settings.sounds.play(Sound::Deafen, !sidebar.voice_intent.mute.deafened);
+                        }
                         Command::RetryMicrophone => sidebar.voice_intent.retry_mic += 1,
                         Command::RefreshDevices => {
                             if call.is_none() {
@@ -606,9 +711,9 @@ async fn watch_session(
                             if let Some(call) = &call {
                                 call.apply(&sidebar.voice_intent);
                             }
-                            if changed || settings.notice.is_some() {
-                                settings.save(&sidebar.voice_intent.preferred).await;
-                                sidebar.device_notice = settings.notice;
+                            if changed || settings.devices.notice.is_some() {
+                                settings.devices.save(&sidebar.voice_intent.preferred).await;
+                                sidebar.device_notice = settings.devices.notice;
                             }
                             continue;
                         }
@@ -636,13 +741,20 @@ async fn watch_session(
                 Ok(SocketEvent::Connection(state)) => {
                     sidebar.connection = state;
                     voice_socket = None;
+                    refresh.presence_ready = false;
                     sidebar.cancel_voice(&mut call, Some(VoiceIssue::Socket.message()));
                 }
                 Ok(SocketEvent::Frame(frame)) => match frame {
                     Frame::ChannelsChanged => refresh.fetch(client, Resource::Channels),
                     Frame::UsersChanged => refresh.fetch(client, Resource::Users),
                     Frame::Presence { user_id, channel_id, flags } => {
-                        refresh.update_presence(&mut sidebar, user_id, channel_id, flags);
+                        let new_member = channel_id.is_some() && !sidebar.rooms.contains_key(&user_id);
+                        if let Some(cue) = refresh.update_presence(&mut sidebar, user_id, channel_id, flags) {
+                            settings.sounds.play(cue, cue == Sound::Join);
+                        }
+                        if new_member {
+                            avatars.fill(client, &sidebar);
+                        }
                     }
                     Frame::VoiceJoined { sid, channel_id, nonce } => {
                         if let Some(call) = &mut call {
@@ -663,14 +775,17 @@ async fn watch_session(
                     if let Some(voice) = &mut sidebar.voice
                         && !matches!(voice.status, VoiceStatus::Leaving)
                     {
-                        voice.status = report.status;
                         sidebar.devices = report.devices.clone();
-                        voice.media = Some(report);
+                        if voice.update_media(report) {
+                            settings.sounds.play(Sound::Join, true);
+                        }
                     }
                 }
                 VoiceUpdate::Finished(result) => {
                     call = None;
-                    sidebar.voice = None;
+                    if sidebar.voice.take().is_some_and(|voice| voice.play_leave) && result.is_ok() {
+                        settings.sounds.play(Sound::Leave, false);
+                    }
                     if matches!(result, Err(VoiceIssue::Unauthorized)) {
                         break SessionEnd::Invalidated(SESSION_EXPIRED);
                     }
@@ -679,6 +794,12 @@ async fn watch_session(
                     }
                 }
             },
+            Some(result) = avatars.tasks.join_next() => {
+                if let Ok(loaded) = result {
+                    avatars.complete(&mut sidebar, loaded);
+                }
+                avatars.fill(client, &sidebar);
+            }
             Some(result) = refresh.tasks.join_next() => {
                 let Ok((resource, data)) = result else {
                     break SessionEnd::Closed;
@@ -686,7 +807,14 @@ async fn watch_session(
                 if data.as_ref().is_err_and(Failure::unauthorized) {
                     break SessionEnd::Invalidated(SESSION_EXPIRED);
                 }
+                let refresh_avatars = data.is_ok() && matches!(resource, Resource::Users | Resource::Presence);
                 refresh.complete(&mut sidebar, resource, data);
+                if refresh_avatars {
+                    if resource == Resource::Users {
+                        avatars.directory_changed(&mut sidebar);
+                    }
+                    avatars.fill(client, &sidebar);
+                }
                 if let (Some(voice), Some(channels)) = (&sidebar.voice, &sidebar.channels)
                     && !channels.iter().any(|channel| channel.kind == "voice" && channel.id == voice.channel_id)
                 {

@@ -13,13 +13,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, windows-2022, ubuntu-24.04]
+        include:
+          - os: macos-15
+            artifact: spk-gpui-macos-arm64.zip
+          - os: windows-2022
+            artifact: spk-gpui.exe
+          - os: ubuntu-24.04
+            artifact: spk-gpui-linux-x64.tar.gz
     runs-on: ${{ matrix.os }}
     env:
-      SPK_URL: https://spk.example
-      LIVEKIT_URL: wss://voice.example
+      SPK_URL: ${{ github.event_name == 'push' && vars.LIVEKIT_URL != '' && vars.SPK_URL || 'https://spk.example' }}
+      LIVEKIT_URL: ${{ github.event_name == 'push' && vars.SPK_URL != '' && vars.LIVEKIT_URL || 'wss://voice.example' }}
+      UPLOAD_BINARIES: ${{ github.event_name == 'push' && vars.SPK_URL != '' && vars.LIVEKIT_URL != '' }}
       CARGO_PROFILE_DEV_DEBUG: "0"
     steps:
+      - name: Warn when download configuration is missing
+        if: github.event_name == 'push' && env.UPLOAD_BINARIES != 'true'
+        shell: bash
+        run: echo "::warning::Set the SPK_URL and LIVEKIT_URL repository variables to enable build downloads."
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v5
       - name: Install Linux build dependencies
@@ -30,7 +41,7 @@ jobs:
           curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /usr/share/keyrings/apt.llvm.org.asc >/dev/null
           printf 'deb [signed-by=/usr/share/keyrings/apt.llvm.org.asc] https://apt.llvm.org/noble/ llvm-toolchain-noble-%s main\n' "$clang_major" | sudo tee /etc/apt/sources.list.d/spk-llvm.list
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libfontconfig-dev libwayland-dev libxkbcommon-x11-dev libx11-xcb-dev libglib2.0-dev libjpeg-turbo8-dev "clang-$clang_major"
+          sudo apt-get install -y build-essential pkg-config libfontconfig-dev libwayland-dev libxkbcommon-x11-dev libx11-xcb-dev libglib2.0-dev libjpeg-turbo8-dev libasound2-dev "clang-$clang_major"
           printf 'CC=clang-%s\nCXX=clang++-%s\n' "$clang_major" "$clang_major" >> "$GITHUB_ENV"
       - run: mise exec -- cargo fmt --all --check
       - run: mise exec -- cargo test --locked
@@ -40,3 +51,18 @@ jobs:
         run: |
           sh build/macos-bundle.sh
           codesign --verify --strict target/debug/SPK.app
+      - name: Package macOS app
+        if: env.UPLOAD_BINARIES == 'true' && runner.os == 'macOS'
+        run: ditto -c -k --sequesterRsrc --keepParent target/debug/SPK.app "target/debug/${{ matrix.artifact }}"
+      - name: Package Linux executable
+        if: env.UPLOAD_BINARIES == 'true' && runner.os == 'Linux'
+        run: tar -czf "target/debug/${{ matrix.artifact }}" -C target/debug spk-gpui
+      - name: Upload build
+        if: env.UPLOAD_BINARIES == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: target/debug/${{ matrix.artifact }}
+          archive: false
+          if-no-files-found: error
+          overwrite: true

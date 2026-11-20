@@ -2,6 +2,22 @@
 
 A native desktop client for the self-hosted SPK chat and voice app. Sign in with an existing account to see who's in voice, join a channel, and talk through your preferred microphone and speakers. [SPK upstream](https://github.com/meeehdi-dev/spk) · [Roadmap](docs/ROADMAP.md)
 
+## Download a CI build
+
+In the GitHub repository, open **Actions → Build**, select a run from `main`, and download your platform's artifact.
+
+| Platform | Download | Launch |
+| --- | --- | --- |
+| macOS 15 or later, Apple Silicon | `spk-gpui-macos-arm64.zip` | Extract and open `SPK.app`. |
+| Windows x64 | `spk-gpui.exe` | Open the executable. |
+| Ubuntu 24.04 x64 | `spk-gpui-linux-x64.tar.gz` | Extract with `tar -xzf spk-gpui-linux-x64.tar.gz` and run `./spk-gpui`. |
+
+If macOS blocks a download you trust, use **System Settings → Privacy & Security → Open Anyway**. [Apple launch instructions](https://support.apple.com/en-us/102445)
+
+On Linux, use an X11 or Wayland session with Vulkan and working PulseAudio or ALSA audio.
+
+To enable downloads for your deployment, set the `SPK_URL` HTTPS origin and `LIVEKIT_URL` WSS endpoint in **Settings → Secrets and variables → Actions → Variables**. Use credential-free URLs because the binaries embed them. The next push to `main` builds for that deployment and uploads each successful platform build. If either variable is missing, CI warns and runs its checks with example URLs. [GitHub repository variables](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-variables#creating-configuration-variables-for-a-repository)
+
 ## Build prerequisites
 
 - **macOS 15 or later, Apple Silicon.** Install the Xcode Command Line Tools with `xcode-select --install`.
@@ -11,7 +27,8 @@ A native desktop client for the self-hosted SPK chat and voice app. Sign in with
 ```sh
 sudo apt-get update
 sudo apt-get install -y build-essential pkg-config libfontconfig-dev libwayland-dev \
-  libxkbcommon-x11-dev libx11-xcb-dev libvulkan1 libglib2.0-dev libjpeg-turbo8-dev clang-21
+  libxkbcommon-x11-dev libx11-xcb-dev libvulkan1 libglib2.0-dev libjpeg-turbo8-dev \
+  libasound2-dev clang-21
 export CC=clang-21 CXX=clang++-21
 ```
 
@@ -48,6 +65,10 @@ mise exec -- cargo build --locked
 Open **SPK** and sign in with your existing email and password. Select a channel from **Voice channels**, then select **Join voice** to listen and talk. Use the arrows next to the microphone and headphone controls, or open **Settings → Voice & Video**, to choose your devices. SPK remembers your choices after you close the app and uses **System default** while a preferred device is disconnected.
 
 **Mute** releases your microphone. **Deafen** also silences call playback. Select **Enable microphone** if capture is unavailable, or choose another device and keep listening. Select **Leave voice** to end the call. Closing the app keeps your session in the OS credential store. Use **Settings → Profile → Sign out** to end the session and remove the saved sign-in. [Phase 4 verification](docs/PHASE-4.md)
+
+Record mute and deafen shortcuts in **Settings → Shortcuts**. **In SPK** works while SPK has focus. **Global** also works in the background on macOS, Windows, and Linux X11 while you are signed in. Wayland uses **In SPK**. On macOS, F21–F24 are available in **In SPK** when the system delivers the key event.
+
+Under **Settings → Voice & Video → Voice sounds**, you can adjust or silence the cues for joining, leaving, muting, and deafening. Join and leave cues include other participants in your room. Cues play through the system default media output, even while deafened.
 
 SPK starts in Dark mode. Choose **Dark**, **Light**, or **System** in **Settings → Appearance**. SPK saves the theme for the next launch.
 

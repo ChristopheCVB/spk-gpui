@@ -4,11 +4,18 @@ use std::{
     path::PathBuf,
 };
 
-use gpui_kit::component::{Theme, ThemeMode, ThemeRegistry, WindowExt};
+mod shortcuts;
+
+use gpui_kit::component::{
+    Theme, ThemeMode, ThemeRegistry, WindowExt,
+    slider::{SliderEvent, SliderState, SliderValue},
+};
 
 use super::voice::device_options;
 use super::*;
-use crate::{session::View, voice::DeviceKind};
+use crate::{session::View, sounds::Sound, voice::DeviceKind};
+
+pub use shortcuts::ShortcutKeys;
 
 #[derive(Clone, Copy, Default, Eq, PartialEq)]
 pub enum Appearance {
@@ -77,19 +84,39 @@ enum Tab {
     Profile,
     Appearance,
     Voice,
+    Shortcuts,
 }
 
 impl Spk {
     pub(super) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.device_picker = None;
         let spk = cx.entity();
+        let sounds = self.shortcuts.sound_settings();
         let content = cx.new(|cx: &mut Context<Settings>| {
             cx.observe(&spk, |_, _, cx| cx.notify()).detach();
+            let volumes = Sound::ALL.map(|sound| {
+                let volume = cx
+                    .new(|_| SliderState::new().default_value(f32::from(sounds.get(sound).volume)));
+                cx.subscribe(&volume, move |settings, _, event, cx| {
+                    if let SliderEvent::Release(SliderValue::Single(value)) = event {
+                        settings.spk.update(cx, |app, cx| {
+                            app.change_sound(sound, |setting| setting.volume = *value as u8, cx)
+                        });
+                    }
+                    cx.notify();
+                })
+                .detach();
+                volume
+            });
             Settings {
                 spk,
                 tab: Tab::Profile,
+                volumes,
+                recorder_focus: cx.focus_handle(),
             }
         });
+        cx.observe_release(&content, |this, _, cx| this.cancel_shortcut_editor(cx))
+            .detach();
         window.open_dialog(cx, move |dialog, window, _| {
             dialog
                 .centered()
@@ -106,6 +133,8 @@ impl Spk {
 struct Settings {
     spk: Entity<Spk>,
     tab: Tab,
+    volumes: [Entity<SliderState>; 4],
+    recorder_focus: FocusHandle,
 }
 
 impl Render for Settings {
@@ -119,6 +148,7 @@ impl Render for Settings {
             Tab::Profile => self.profile(sidebar, cx).into_any_element(),
             Tab::Appearance => self.appearance(app, cx).into_any_element(),
             Tab::Voice => self.audio(sidebar, cx).into_any_element(),
+            Tab::Shortcuts => self.shortcuts(cx).into_any_element(),
         };
         div()
             .size_full()
@@ -150,8 +180,13 @@ impl Render for Settings {
                             ),
                     )
                     .child(
-                        tool_button("close-settings", IconName::X, "Close settings")
-                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                        tool_button("close-settings", IconName::X, "Close settings").on_click(
+                            cx.listener(|this, _, window, cx| {
+                                this.spk
+                                    .update(cx, |app, cx| app.cancel_shortcut_editor(cx));
+                                window.close_dialog(cx);
+                            }),
+                        ),
                     ),
             )
             .child(
@@ -174,6 +209,7 @@ impl Render for Settings {
                                     (Tab::Profile, "Profile", IconName::User),
                                     (Tab::Appearance, "Appearance", IconName::Palette),
                                     (Tab::Voice, "Voice & Video", IconName::Mic),
+                                    (Tab::Shortcuts, "Shortcuts", IconName::Settings2),
                                 ]
                                 .into_iter()
                                 .map(|(tab, label, icon)| {
@@ -205,6 +241,11 @@ impl Render for Settings {
                                                 ),
                                         )
                                         .on_click(cx.listener(move |this, _, _, cx| {
+                                            if this.tab == Tab::Shortcuts && tab != Tab::Shortcuts {
+                                                this.spk.update(cx, |app, cx| {
+                                                    app.cancel_shortcut_editor(cx)
+                                                });
+                                            }
                                             this.tab = tab;
                                             if tab == Tab::Voice {
                                                 this.spk.update(cx, |app, cx| {
@@ -268,7 +309,13 @@ impl Settings {
                         .flex()
                         .flex_col()
                         .gap_4()
-                        .child(Avatar::new().name(profile.name().to_owned()).size(px(40.0)))
+                        .child(profile_avatar(
+                            Avatar::new().name(profile.name().to_owned()),
+                            sidebar.avatar(profile.id.as_deref()),
+                            40.0,
+                            false,
+                            cx,
+                        ))
                         .child(
                             div()
                                 .flex()
@@ -369,6 +416,7 @@ impl Settings {
                 device_options(sidebar, DeviceKind::Speakers, &self.spk, cx),
                 cx,
             ))
+            .child(self.voice_sounds(cx))
             .children(
                 sidebar
                     .device_notice
