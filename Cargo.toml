@@ -1,0 +1,36 @@
+[package]
+name = "spk-gpui"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+async-channel = "2.5"
+cookie_store = "0.22"
+dirs = "6"
+futures = "0.3"
+gpui-kit = "=0.10.0"
+keyring = "4.2"
+livekit = { version = "=0.12.0", features = ["rustls-tls-native-roots"] }
+reqwest = { version = "0.13", default-features = false, features = ["cookies", "json", "rustls-no-provider"] }
+reqwest_cookie_store = "0.10"
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "net", "rt", "sync", "time"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
+url = "2.5"
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2 = "0.6"
+objc2-av-foundation = { version = "0.3", default-features = false, features = ["AVCaptureDevice", "AVMediaFormat", "block2"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Media_Audio", "Win32_System_Com"] }
+
+[build-dependencies]
+url = "2.5"
+

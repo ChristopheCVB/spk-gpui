@@ -1,0 +1,286 @@
+use super::*;
+use crate::{
+    session::View,
+    voice::{Device, DeviceKind, DeviceList},
+};
+use gpui_kit::component::popover::Popover;
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum VoiceControls {
+    Profile,
+    Room,
+}
+
+fn device_label(kind: DeviceKind) -> &'static str {
+    match kind {
+        DeviceKind::Microphone => "Microphone",
+        DeviceKind::Speakers => "Speakers",
+    }
+}
+
+impl Spk {
+    pub(super) fn voice_controls(
+        &self,
+        sidebar: &Sidebar,
+        location: VoiceControls,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let mute = sidebar.voice_intent.mute;
+        let listen_only = sidebar
+            .voice
+            .as_ref()
+            .is_some_and(|call| call.status == Status::ListenOnly);
+        let mic_label = if mute.effective_muted() {
+            "Unmute"
+        } else if listen_only {
+            "Enable microphone"
+        } else {
+            "Mute"
+        };
+        let mic_action: fn() -> Command = if listen_only && !mute.effective_muted() {
+            || Command::RetryMicrophone
+        } else {
+            || Command::ToggleMute
+        };
+        let compact = location == VoiceControls::Profile;
+        let theme = cx.theme();
+
+        div()
+            .id(if compact {
+                "profile-voice-controls"
+            } else {
+                "room-voice-controls"
+            })
+            .flex()
+            .items_center()
+            .gap_1()
+            .children(
+                [
+                    (
+                        DeviceKind::Microphone,
+                        if mute.effective_muted() || listen_only {
+                            IconName::MicOff
+                        } else {
+                            IconName::Mic
+                        },
+                        mic_label,
+                        mic_action,
+                        mute.effective_muted() || listen_only,
+                    ),
+                    (
+                        DeviceKind::Speakers,
+                        if mute.deafened {
+                            IconName::HeadphoneOff
+                        } else {
+                            IconName::Headphones
+                        },
+                        if mute.deafened { "Undeafen" } else { "Deafen" },
+                        (|| Command::ToggleDeafen) as fn() -> Command,
+                        mute.deafened,
+                    ),
+                ]
+                .into_iter()
+                .map(|(kind, icon, label, command, off)| {
+                    let picker_label = format!("Choose {}", device_label(kind).to_lowercase());
+                    let open = self.device_picker == Some((location, kind));
+                    div()
+                        .id(device_label(kind))
+                        .flex()
+                        .items_center()
+                        .child(
+                            tool_button(
+                                "toggle",
+                                themed_icon(
+                                    icon,
+                                    if off { theme.danger } else { theme.foreground },
+                                    16.0,
+                                ),
+                                label,
+                            )
+                            .when(!compact, |button| button.label(label))
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.send(command(), None, cx)),
+                            ),
+                        )
+                        .child({
+                            let app = cx.weak_entity();
+                            let popup_app = app.clone();
+                            Popover::new("device-picker")
+                                .anchor(Anchor::BottomRight)
+                                .w(px(280.0))
+                                .open(open)
+                                .trigger(
+                                    tool_button(
+                                        "devices",
+                                        if open {
+                                            IconName::ChevronDown
+                                        } else {
+                                            IconName::ChevronUp
+                                        },
+                                        picker_label,
+                                    )
+                                    .w(px(18.0))
+                                    .px_0(),
+                                )
+                                .on_open_change(move |open, _, cx| {
+                                    let _ = app.update(cx, |app, cx| {
+                                        if *open {
+                                            app.device_picker = Some((location, kind));
+                                            app.send(Command::RefreshDevices, None, cx);
+                                        } else if app.device_picker == Some((location, kind)) {
+                                            app.device_picker = None;
+                                            cx.notify();
+                                        }
+                                    });
+                                })
+                                .content(move |_, _, cx| {
+                                    let Some(app) = popup_app.upgrade() else {
+                                        return div();
+                                    };
+                                    let View::SignedIn(sidebar) = &app.read(cx).view else {
+                                        return div();
+                                    };
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_2()
+                                        .child(Label::new(device_label(kind)).font_semibold())
+                                        .child(device_options(sidebar, kind, &app, cx))
+                                })
+                        })
+                }),
+            )
+    }
+}
+
+pub(super) fn device_options(
+    sidebar: &Sidebar,
+    kind: DeviceKind,
+    entity: &Entity<Spk>,
+    cx: &App,
+) -> impl IntoElement {
+    let theme = cx.theme();
+    let (list, active, preferred) = devices(sidebar, kind);
+    let selected = list
+        .preferred(preferred)
+        .filter(|device| Some(*device) == active);
+    let entity = entity.downgrade();
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .id(device_label(kind))
+        .child(
+            Label::new(device_status(active, preferred, list))
+                .text_xs()
+                .text_color(theme.muted_foreground),
+        )
+        .child(
+            div()
+                .id("choices")
+                .flex()
+                .flex_col()
+                .gap_1()
+                .max_h(px(140.0))
+                .overflow_y_scroll()
+                .children(
+                    std::iter::once(None)
+                        .chain(list.choices.iter().map(Some))
+                        .enumerate()
+                        .map(|(index, device)| {
+                            let chosen = device == selected;
+                            let name = device
+                                .map_or("System default", |device| device.name.as_str())
+                                .to_owned();
+                            let device = device.cloned();
+                            let entity = entity.clone();
+                            Button::new(index)
+                                .ghost()
+                                .small()
+                                .tab_stop(true)
+                                .selected(chosen)
+                                .accessibility_label(name.clone())
+                                .when(chosen, |button| button.bg(theme.accent))
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .gap_2()
+                                        .child(Label::new(name).truncate())
+                                        .when(chosen, |row| {
+                                            row.child(themed_icon(
+                                                IconName::Check,
+                                                theme.primary,
+                                                14.0,
+                                            ))
+                                        }),
+                                )
+                                .on_click(move |_, _, cx| {
+                                    let _ = entity.update(cx, |app, cx| {
+                                        app.device_picker = None;
+                                        app.send(
+                                            Command::ChooseDevice(kind, device.clone()),
+                                            None,
+                                            cx,
+                                        );
+                                    });
+                                })
+                        }),
+                ),
+        )
+}
+
+fn devices(sidebar: &Sidebar, kind: DeviceKind) -> (&DeviceList, Option<&Device>, Option<&Device>) {
+    let media = sidebar.voice.as_ref().and_then(|call| call.media.as_ref());
+    let preferred = &sidebar.voice_intent.preferred;
+    match kind {
+        DeviceKind::Microphone => {
+            let list = &sidebar.devices.microphones;
+            let preferred = preferred.microphone.as_ref();
+            let active = match media {
+                Some(media) if !sidebar.voice_intent.mute.effective_muted() => {
+                    media.microphone.as_ref().or_else(|| {
+                        if media.status == Status::ListenOnly {
+                            None
+                        } else {
+                            list.resolve(preferred)
+                        }
+                    })
+                }
+                _ => list.resolve(preferred),
+            };
+            (list, active, preferred)
+        }
+        DeviceKind::Speakers => {
+            let list = &sidebar.devices.speakers;
+            let preferred = preferred.speakers.as_ref();
+            let active =
+                media.map_or_else(|| list.resolve(preferred), |media| media.speakers.as_ref());
+            (list, active, preferred)
+        }
+    }
+}
+
+fn device_status(active: Option<&Device>, preferred: Option<&Device>, list: &DeviceList) -> String {
+    let Some(active) = active else {
+        return preferred.map_or_else(
+            || "Unavailable".into(),
+            |device| format!("{} unavailable", device.name),
+        );
+    };
+    if list.preferred(preferred) == Some(active) {
+        return active.name.clone();
+    }
+    let label = if list.default.as_ref() == Some(active) {
+        "System default"
+    } else {
+        &active.name
+    };
+    if let Some(preferred) = preferred {
+        format!("{label} ({} unavailable)", preferred.name)
+    } else {
+        label.to_owned()
+    }
+}

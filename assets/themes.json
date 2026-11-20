@@ -1,0 +1,57 @@
+{
+  "name": "SPK",
+  "themes": [
+    {
+      "name": "SPK Dark",
+      "mode": "dark",
+      "colors": {
+        "background": "#18181b",
+        "foreground": "#e4e4e7",
+        "border": "#27272a",
+        "muted.foreground": "#9f9fa9",
+        "accent.background": "#27272a",
+        "accent.foreground": "#e4e4e7",
+        "secondary.background": "#1f1f23",
+        "secondary.hover.background": "#27272a",
+        "secondary.foreground": "#e4e4e7",
+        "popover.background": "#1f1f23",
+        "popover.foreground": "#e4e4e7",
+        "input.border": "#3f3f46",
+        "primary.background": "#ffb900",
+        "primary.hover.background": "#f2aa00",
+        "primary.active.background": "#f2aa00",
+        "primary.foreground": "#18181b",
+        "danger.background": "#ff6467",
+        "success.background": "#05df72",
+        "ring": "#ffb900",
+        "overlay": "#27272bb8"
+      }
+    },
+    {
+      "name": "SPK Light",
+      "mode": "light",
+      "colors": {
+        "background": "#ffffff",
+        "foreground": "#18181b",
+        "border": "#e4e4e7",
+        "muted.foreground": "#52525b",
+        "accent.background": "#f4f4f5",
+        "accent.foreground": "#18181b",
+        "secondary.background": "#f4f4f5",
+        "secondary.hover.background": "#e4e4e7",
+        "secondary.foreground": "#18181b",
+        "popover.background": "#ffffff",
+        "popover.foreground": "#18181b",
+        "input.border": "#a1a1aa",
+        "primary.background": "#bb4d00",
+        "primary.hover.background": "#9b3d00",
+        "primary.active.background": "#9b3d00",
+        "primary.foreground": "#ffffff",
+        "danger.background": "#c41d28",
+        "success.background": "#067a44",
+        "ring": "#bb4d00",
+        "overlay": "#18181b73"
+      }
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+name: Build
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-2022, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    env:
+      SPK_URL: https://spk.example
+      LIVEKIT_URL: wss://voice.example
+      CARGO_PROFILE_DEV_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          clang_major="$(mise exec -- printenv SPK_CLANG_MAJOR)"
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /usr/share/keyrings/apt.llvm.org.asc >/dev/null
+          printf 'deb [signed-by=/usr/share/keyrings/apt.llvm.org.asc] https://apt.llvm.org/noble/ llvm-toolchain-noble-%s main\n' "$clang_major" | sudo tee /etc/apt/sources.list.d/spk-llvm.list
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libfontconfig-dev libwayland-dev libxkbcommon-x11-dev libx11-xcb-dev libglib2.0-dev libjpeg-turbo8-dev "clang-$clang_major"
+          printf 'CC=clang-%s\nCXX=clang++-%s\n' "$clang_major" "$clang_major" >> "$GITHUB_ENV"
+      - run: mise exec -- cargo fmt --all --check
+      - run: mise exec -- cargo test --locked
+      - run: mise exec -- cargo build --locked
+      - name: Verify macOS development bundle
+        if: runner.os == 'macOS'
+        run: |
+          sh build/macos-bundle.sh
+          codesign --verify --strict target/debug/SPK.app

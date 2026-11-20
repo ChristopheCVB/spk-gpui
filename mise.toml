@@ -1,0 +1,9 @@
+[tools]
+rust = { version = "1.100.0", profile = "default" }
+
+[vars]
+clang_major = "21"
+
+[env]
+_.file = ".env"
+SPK_CLANG_MAJOR = "{{ vars.clang_major }}"

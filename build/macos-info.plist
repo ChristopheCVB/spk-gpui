@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>dev.meeehdi.spk.desktop</string>
+    <key>CFBundleName</key>
+    <string>SPK</string>
+    <key>CFBundleExecutable</key>
+    <string>spk-gpui</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>SPK uses your microphone so people in your voice channel can hear you.</string>
+</dict>
+</plist>
