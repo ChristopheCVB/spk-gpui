@@ -11,6 +11,7 @@ Implement every feature available in the SPK web app. Use the upstream web clien
 ## Tooling
 
 - Use mise to manage Rust and other versioned development tools. Pin shared tool versions in the repository's mise configuration.
+- Use Conventional Commits for commit messages and PR titles to maintain a consistent and meaningful history.
 
 ## Server integration
 
@@ -24,3 +25,13 @@ Implement every feature available in the SPK web app. Use the upstream web clien
 Open the app, sign in with an existing account, and list and join voice channels. Use the system-default microphone and speakers or select devices in the app. Talk and listen, see who is speaking, toggle mute and deafen, and leave.
 
 Verify the workflow on macOS, Windows, and Linux against an existing SPK deployment with a web client in the same room. Check two-way audio, input and output device selection, speaking indicators, mute, deafen, and leaving.
+
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked in GitHub Issues for `ChristopheCVB/spk-gpui`. See `docs/agents/issue-tracker.md`.
+
+### Domain docs
+
+This repository uses a single context with a root `GLOSSARY.md` and ADRs in `docs/adr/`. See `docs/agents/domain.md`.
