@@ -64,6 +64,9 @@ windows-wgc = { package = "windows", version = "0.61", features = ["Graphics_Cap
 embed-resource = "3.0"
 url = "2.5"
 
+[profile.dev.package.gpui-pre-windows]
+# Embed DirectX shaders so distributed builds can run without the Cargo source cache.
+debug-assertions = false
 
 # Keep DeepFilterNet within its 10 ms frame budget in the debug builds shipped by CI.
 [profile.dev.package.dfn3_rs]
