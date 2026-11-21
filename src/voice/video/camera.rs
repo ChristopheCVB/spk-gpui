@@ -4,15 +4,18 @@ use std::{
     time::{Duration, Instant},
 };
 
-use image::imageops::{self, FilterType};
+use image::{
+    ImageFormat, RgbaImage,
+    imageops::{self, FilterType},
+};
 use livekit::webrtc::{
     native::yuv_helper::abgr_to_i420,
     video_frame::{I420Buffer, VideoBuffer, VideoFrame, VideoRotation},
 };
 use nokhwa::{
-    Camera,
+    Buffer, Camera,
     pixel_format::{FormatDecoder, RgbAFormat},
-    utils::{ApiBackend, CameraInfo, RequestedFormat, RequestedFormatType},
+    utils::{ApiBackend, CameraInfo, FrameFormat, RequestedFormat, RequestedFormatType},
 };
 use tokio::{
     io::{AsyncReadExt, BufReader},
@@ -228,7 +231,7 @@ fn capture(resolution: CameraResolution, id: Option<&str>) -> Result<(), u8> {
             continue;
         }
         last_frame = Some(now);
-        let mut image = frame.decode_image::<RgbAFormat>().map_err(|_| 3u8)?;
+        let mut image = decode_frame(&frame).ok_or(3u8)?;
         if image.width() > max_width || image.height() > max_height {
             let scale = (max_width as f64 / image.width() as f64)
                 .min(max_height as f64 / image.height() as f64);
@@ -267,6 +270,16 @@ fn capture(resolution: CameraResolution, id: Option<&str>) -> Result<(), u8> {
     }
 }
 
+fn decode_frame(frame: &Buffer) -> Option<RgbaImage> {
+    if frame.source_frame_format() == FrameFormat::MJPEG {
+        image::load_from_memory_with_format(frame.buffer(), ImageFormat::Jpeg)
+            .ok()
+            .map(|image| image.into_rgba8())
+    } else {
+        frame.decode_image::<RgbAFormat>().ok()
+    }
+}
+
 fn write_frame(output: &mut impl Write, frame: &VideoFrame<I420Buffer>) -> io::Result<()> {
     output.write_all(&frame.buffer.width().to_le_bytes())?;
     output.write_all(&frame.buffer.height().to_le_bytes())?;
@@ -281,6 +294,21 @@ fn write_frame(output: &mut impl Write, frame: &VideoFrame<I420Buffer>) -> io::R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn camera_decodes_mjpeg_without_a_native_jpeg_library() {
+        use image::{ExtendedColorType, codecs::jpeg::JpegEncoder};
+        use nokhwa::utils::Resolution;
+
+        let mut jpeg = Vec::new();
+        JpegEncoder::new(&mut jpeg)
+            .encode(&[128; 8 * 8 * 3], 8, 8, ExtendedColorType::Rgb8)
+            .unwrap();
+        let frame = Buffer::new(Resolution::new(8, 8), &jpeg, FrameFormat::MJPEG);
+        let decoded = decode_frame(&frame).unwrap();
+        assert_eq!(decoded.dimensions(), (8, 8));
+        assert_eq!(decoded.get_pixel(0, 0).0, [128, 128, 128, 255]);
+    }
 
     #[tokio::test]
     async fn frame_crosses_capture_boundary_with_timestamp_and_planes() {
