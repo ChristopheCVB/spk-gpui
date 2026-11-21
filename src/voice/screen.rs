@@ -449,8 +449,8 @@ async fn capture_and_publish(
             let mut deadline = None;
             let mut replacement: Option<(VideoPublication, VideoFormat, oneshot::Receiver<bool>)> = None;
             loop {
+                // Audio can stay ready while WebRTC drains its buffer. Poll video fairly.
                 let changed = tokio::select! {
-                    biased;
                     result = requested.changed() => {
                         result.map_err(|_| CaptureError::Cancelled)?;
                         let next = requested.borrow_and_update().screen.quality;

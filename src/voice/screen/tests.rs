@@ -66,7 +66,7 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
         audio_stream::native::NativeAudioStream, video_frame::VideoRotation,
         video_stream::native::NativeVideoStream,
     };
-    use tokio::time::{interval, timeout};
+    use tokio::time::{Instant, interval, timeout, timeout_at};
 
     struct Fixture(oneshot::Receiver<()>, Option<Box<dyn Capture>>);
 
@@ -103,12 +103,14 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
                                 sink.video(frame, quality, quality.fps);
                             }
                             if audio {
-                                let samples = (0..480)
+                                let samples: Vec<_> = (0..480)
                                     .flat_map(|index| {
                                         let phase = (index as f32 + elapsed as f32 * 48.) * 0.057595866;
                                         [(phase.sin() * 7000.) as i16, (phase.cos() * 4000.) as i16]
                                     })
                                     .collect();
+                                // Keep audio ready while testing that video delivery makes progress.
+                                sink.audio(samples.clone());
                                 sink.audio(samples);
                             }
                             elapsed += 10;
@@ -286,9 +288,13 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
     })
     .await
     .unwrap();
-    timeout(Duration::from_secs(8), async {
-        let frame = frames.next().await.unwrap();
-        check_peer_dimensions((frame.buffer.width(), frame.buffer.height()), initial_size);
+    let media_deadline = Instant::now() + Duration::from_secs(8);
+    let frame = timeout_at(media_deadline, frames.next())
+        .await
+        .expect("peer receives the initial Screen Share video")
+        .expect("peer video stream closed");
+    check_peer_dimensions((frame.buffer.width(), frame.buffer.height()), initial_size);
+    timeout_at(media_deadline, async {
         loop {
             let sample = samples.next().await.unwrap();
             assert_eq!(sample.sample_rate, 48_000);
@@ -302,7 +308,7 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
         }
     })
     .await
-    .unwrap();
+    .expect("peer receives audible Screen Share audio");
 
     let preset = Quality {
         height: 720,
@@ -402,6 +408,7 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
         .expect("an unsupported live change keeps the previous preset and audio");
     }
 
+    samples = NativeAudioStream::new(samples.track(), 48_000, 2);
     timeout(Duration::from_secs(8), async {
         let frame = replacement_frames.next().await.unwrap();
         check_peer_dimensions(
