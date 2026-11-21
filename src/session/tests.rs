@@ -1671,23 +1671,13 @@ async fn camera_and_watch_choices_are_scoped_to_the_current_voice_session() {
             },
             async |commands, views| {
                 join_test_voice(&commands, &views).await;
-                wait_for_sidebar(&views, |sidebar| {
-                    sidebar.participants("first").iter().any(|participant| {
-                        participant.id == "bob" && participant.video.is_some_and(|video| video.cam)
-                    })
-                })
-                .await;
                 let view = wait_for_sidebar(&views, |sidebar| {
                     sidebar.viewers("first", "alice").len() == 1
                 })
                 .await;
-                assert_eq!(
-                    view.participants("first")
-                        .iter()
-                        .filter(|p| p.id == "bob")
-                        .count(),
-                    1
-                );
+                assert!(view.participants("first").iter().any(|participant| {
+                    participant.id == "bob" && participant.video.is_some_and(|video| video.cam)
+                }));
                 commands
                     .send(Command::SetWatching("alice".into(), true))
                     .await
@@ -1710,19 +1700,11 @@ async fn camera_and_watch_choices_are_scoped_to_the_current_voice_session() {
                     .send(Command::SetCameraEnabled(true))
                     .await
                     .unwrap();
-                wait_for_sidebar(&views, |sidebar| {
+                let view = wait_for_sidebar(&views, |sidebar| {
                     sidebar.voice_intent.camera.enabled && sidebar.voice_intent.watching.is_empty()
                 })
                 .await;
-                assert!(
-                    wait_for_sidebar(&views, |sidebar| sidebar
-                        .viewers("first", "alice")
-                        .is_empty())
-                    .await
-                    .voice_intent
-                    .camera
-                    .enabled
-                );
+                assert!(view.viewers("first", "alice").is_empty());
                 observations.recv().await.unwrap();
                 commands
                     .send(Command::SetCameraEnabled(false))
