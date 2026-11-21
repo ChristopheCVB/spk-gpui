@@ -46,6 +46,7 @@ pub enum Command {
     ChooseCamera(Option<String>),
     ChooseCameraResolution(CameraResolution),
     SetWatching(String, bool),
+    SetOutputVolume(u8),
 }
 
 pub enum View {

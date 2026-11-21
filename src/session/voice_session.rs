@@ -164,7 +164,7 @@ impl DeviceSettings {
             .await
             .unwrap_or(false);
         self.notice = (!saved).then_some(
-            "Could not save audio devices. Your choices will only last until you close SPK.",
+            "Could not save audio settings. Your choices will only last until you close SPK.",
         );
     }
 }
@@ -415,6 +415,15 @@ impl VoiceSession {
                 } else {
                     sidebar.voice_intent.refresh_devices += 1;
                 }
+            }
+            Command::SetOutputVolume(volume) => {
+                sidebar.voice_intent.preferred.output_volume = volume.min(200);
+                if let Some(call) = &self.call {
+                    call.apply(&sidebar.voice_intent);
+                }
+                settings.devices.save(&sidebar.voice_intent.preferred).await;
+                sidebar.device_notice = settings.devices.notice;
+                return;
             }
             Command::ChooseDevice(kind, device) => {
                 let choice = sidebar.voice_intent.preferred.get_mut(kind);

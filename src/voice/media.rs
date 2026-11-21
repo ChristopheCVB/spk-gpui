@@ -4,11 +4,11 @@ use std::{
     time::Duration,
 };
 
-use livekit::rtc_engine::lk_runtime::LkRuntime;
+use livekit::rtc_engine::{SessionStats, lk_runtime::LkRuntime};
 use livekit::webrtc::peer_connection_factory::native::PeerConnectionFactoryExt;
 use livekit::{DisconnectReason, prelude::*};
 use tokio::{
-    task::JoinHandle,
+    task::{JoinHandle, JoinSet},
     time::{Instant, MissedTickBehavior, interval},
 };
 
@@ -21,12 +21,17 @@ use super::{
 use crate::api::VoiceFlags;
 
 mod capture;
+mod diagnostics;
+pub use diagnostics::Diagnostics;
+use diagnostics::Sampler;
 #[cfg(test)]
 pub(crate) mod fixture;
 mod livekit_audio;
 #[cfg(target_os = "macos")]
 mod macos_audio;
 
+#[cfg(target_os = "macos")]
+pub(crate) use capture::microphone_permission;
 use capture::{Capture, stop_recording};
 use livekit_audio::LiveKitAudio;
 
@@ -38,7 +43,7 @@ pub(super) struct Media {
     capture: Capture,
     video: Video,
     connecting: Option<JoinHandle<Result<(Room, RoomEvents), Issue>>>,
-    room: Option<Room>,
+    room: Option<Arc<Room>>,
     #[cfg(test)]
     fixture: Option<fixture::TestRoom>,
 }
@@ -99,7 +104,7 @@ impl Media {
         let connected = connection.await.map_err(|_| Issue::Media)?;
         media.connecting.take();
         let (room, events) = connected?;
-        let room = media.room.insert(room);
+        let room: &Arc<Room> = media.room.insert(Arc::new(room));
         let mut backend = LiveKitAudio {
             room,
             audio,
@@ -150,6 +155,10 @@ impl Media {
         let mut retry_speakers = intent.retry_speakers;
         let mut reconnecting = false;
         let mut resync = false;
+
+        let mut diagnostics = Diagnostics::default();
+        let mut stats = Sampler::default();
+        let mut stats_job = JoinSet::new();
 
         loop {
             if reconnecting
@@ -232,6 +241,7 @@ impl Media {
                 microphone: backend.active_microphone().cloned(),
                 speakers: output.clone(),
                 speaking: speaking.0.keys().cloned().collect(),
+                diagnostics,
             };
             if reported.as_ref() != Some(&report) {
                 reported = Some(report.clone());
@@ -256,6 +266,9 @@ impl Media {
                     MediaEvent::ParticipantLeft(id) => speaking.remove(&id),
                     MediaEvent::Reconnecting => {
                         reconnecting = true;
+                        diagnostics = Diagnostics::default();
+                        stats = Sampler::default();
+                        stats_job = JoinSet::new();
                         backend.silence_microphone();
                         backend.set_playout(false);
                         playout.format = None;
@@ -272,11 +285,21 @@ impl Media {
                     }
                     MediaEvent::Disconnected(issue) => return Err(issue),
                     MediaEvent::MicrophoneChanged => check_routes = true,
+                    MediaEvent::Quality(quality) if !reconnecting => diagnostics.quality = Some(quality),
                     _ => {}
                 },
                 _ = scan.tick() => {
                     devices = Arc::new(backend.devices());
                     check_routes = true;
+                    if !reconnecting && stats_job.is_empty() {
+                        backend.start_stats(&mut stats_job);
+                    }
+                }
+                Some(result) = stats_job.join_next() => {
+                    let sample = result.ok().flatten();
+                    let quality = diagnostics.quality;
+                    diagnostics = stats.room(sample.as_ref());
+                    diagnostics.quality = quality;
                 }
                 _ = wait_until(speaking.deadline()) => {},
             }
@@ -304,6 +327,7 @@ trait RoomAudio {
     fn silence_microphone(&self);
     fn resume_microphone(&self);
     async fn reconcile_microphone(&mut self);
+    fn start_stats(&self, _: &mut JoinSet<Option<SessionStats>>) {}
     async fn next_event(&mut self, reconnecting: bool) -> Self::Event;
     async fn handle_event(&mut self, event: Self::Event) -> MediaEvent;
 }
@@ -315,6 +339,7 @@ enum MediaEvent {
     Reconnected,
     Disconnected(Issue),
     MicrophoneChanged,
+    Quality(ConnectionQuality),
     Other,
 }
 

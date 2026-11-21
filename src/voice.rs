@@ -13,11 +13,13 @@ use crate::api::{
     Failure, SpkClient, VideoPresence, VoiceFlags, VoiceFrame, VoiceJoin, VoiceSocket,
 };
 
+pub(crate) mod audio_preview;
 mod devices;
 mod media;
 pub(crate) mod video;
 
 pub use devices::{Device, DeviceKind, DeviceList, DevicePreferences, Devices};
+pub use media::Diagnostics;
 use media::Media;
 #[cfg(test)]
 pub(crate) use media::fixture;
@@ -112,6 +114,7 @@ pub struct Report {
     pub microphone: Option<Device>,
     pub speakers: Option<Device>,
     pub speaking: HashSet<String>,
+    pub diagnostics: Diagnostics,
 }
 
 #[derive(Clone)]
@@ -187,6 +190,7 @@ impl Call {
                             devices: Arc::default(),
                             microphone: None,
                             speakers: None,
+                            diagnostics: Diagnostics::default(),
                             speaking: if muted {
                                 HashSet::new()
                             } else {

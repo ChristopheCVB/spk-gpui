@@ -631,6 +631,7 @@ impl Spk {
                                                 cx,
                                             ))
                                             .child(self.camera_controls(sidebar, cx))
+                                            .child(super::voice::connection_diagnostics(cx))
                                     })
                                     .children(departing.and_then(|call| {
                                         self.leave_voice(

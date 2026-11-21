@@ -114,6 +114,12 @@ impl Peer {
             .unwrap();
     }
 
+    pub(crate) fn quality(&self, quality: ConnectionQuality) {
+        self.events
+            .send(MediaEvent::Quality(quality))
+            .unwrap_or_else(|_| panic!("voice fixture closed"));
+    }
+
     pub(crate) fn reconnecting(&self) {
         self.events.send(MediaEvent::Reconnecting).ok().unwrap();
     }
