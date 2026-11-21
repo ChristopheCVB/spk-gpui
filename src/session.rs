@@ -735,6 +735,9 @@ async fn watch_session(
                 }
                 Ok(SocketEvent::Online(socket)) => {
                     sidebar.connection = Connection::Online;
+                    if let Some(call) = &call {
+                        call.set_socket(Some(socket.clone()));
+                    }
                     voice_socket = Some(socket);
                     refresh.fetch_all(client);
                 }
@@ -742,7 +745,9 @@ async fn watch_session(
                     sidebar.connection = state;
                     voice_socket = None;
                     refresh.presence_ready = false;
-                    sidebar.cancel_voice(&mut call, Some(VoiceIssue::Socket.message()));
+                    if let Some(call) = &call {
+                        call.set_socket(None);
+                    }
                 }
                 Ok(SocketEvent::Frame(frame)) => match frame {
                     Frame::ChannelsChanged => refresh.fetch(client, Resource::Channels),
@@ -756,7 +761,7 @@ async fn watch_session(
                             avatars.fill(client, &sidebar);
                         }
                     }
-                    Frame::VoiceJoined { sid, channel_id, nonce } => {
+                    Frame::VoiceJoined { sid, channel_id, nonce: Some(nonce) } => {
                         if let Some(call) = &mut call {
                             call.acknowledge(&sid, &channel_id, &nonce);
                         }

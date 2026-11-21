@@ -132,6 +132,16 @@ async fn restored_http_session_authenticates_websocket_and_sign_out() {
 }
 
 #[test]
+fn voice_reclaim_acknowledgment_accepts_an_omitted_nonce() {
+    assert!(matches!(
+        serde_json::from_str::<Frame>(
+            r#"{"type":"voice:joined","sid":"session","channelId":"voice"}"#
+        ),
+        Ok(Frame::VoiceJoined { .. })
+    ));
+}
+
+#[test]
 fn live_membership_and_flags_win_over_an_in_flight_snapshot() {
     let mut sidebar = Sidebar::new(
         Profile {

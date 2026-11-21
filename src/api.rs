@@ -137,7 +137,7 @@ pub enum Frame {
     VoiceJoined {
         sid: String,
         channel_id: String,
-        nonce: String,
+        nonce: Option<String>,
     },
     #[serde(rename = "voice:kicked")]
     VoiceKicked { sid: String },
@@ -183,7 +183,10 @@ pub enum VoiceFrame<'a> {
     Join {
         sid: &'a str,
         channel_id: &'a str,
-        nonce: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        nonce: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ready: Option<bool>,
         muted: bool,
         deafened: bool,
         watching: [&'a str; 0],
@@ -206,6 +209,10 @@ type SocketWrite = (String, oneshot::Sender<()>);
 pub struct VoiceSocket(async_channel::Sender<SocketWrite>);
 
 impl VoiceSocket {
+    pub fn same_connection(&self, other: &Self) -> bool {
+        self.0.same_channel(&other.0)
+    }
+
     pub async fn send(&self, frame: VoiceFrame<'_>) -> Result<(), Failure> {
         let text = serde_json::to_string(&frame).expect("voice frames are serializable");
         let (written, receipt) = oneshot::channel();
@@ -400,6 +407,9 @@ impl SpkClient {
                                 _ => break,
                             },
                             Ok((text, written)) = outgoing.recv() => {
+                                if written.is_closed() {
+                                    continue;
+                                }
                                 if !matches!(
                                     timeout(REQUEST_TIMEOUT, socket.send(Message::text(text))).await,
                                     Ok(Ok(()))
