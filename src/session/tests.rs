@@ -1,3 +1,4 @@
+mod accounts;
 mod chat;
 mod media;
 mod profile;
@@ -188,12 +189,18 @@ async fn saved_session_restores_signs_out_and_clears_expired_credentials() {
                 let profile = Request::read(&http, "GET /api/profile/me HTTP/1.1").await;
                 assert_eq!(profile.header("cookie"), Some("session=new"));
                 profile
-                    .respond(&[], r#"{"id":"alice","email":"alice@example.test"}"#)
+                    .respond(
+                        &[],
+                        r#"{"id":"alice","email":"alice@example.test","displayName":"Alice"}"#,
+                    )
                     .await;
                 return;
             }
             request
-                .respond(&[], r#"{"id":"alice","email":"alice@example.test"}"#)
+                .respond(
+                    &[],
+                    r#"{"id":"alice","email":"alice@example.test","displayName":"Alice"}"#,
+                )
                 .await;
             let mut ws = accept_hdr_async(
                 sockets.accept().await.unwrap().0,
@@ -248,6 +255,16 @@ async fn saved_session_restores_signs_out_and_clears_expired_credentials() {
             }
             assert!(storage.lock().unwrap().is_none());
             if expired {
+                tx.send(Command::OpenAccountLink).await.unwrap();
+                assert!(matches!(rx.recv().await.unwrap(), View::AccountLink { .. }));
+                tx.send(Command::BackToSignIn).await.unwrap();
+                assert!(matches!(
+                    rx.recv().await.unwrap(),
+                    View::SignIn {
+                        message: Some(SESSION_EXPIRED),
+                        retry_restore: false
+                    }
+                ));
                 tx.send(Command::SignIn {
                     email: "alice@example.test".into(),
                     password: "test password".into(),

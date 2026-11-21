@@ -1,3 +1,4 @@
+mod accounts;
 mod chat;
 mod profile;
 mod radio;
@@ -24,7 +25,7 @@ use gpui_kit::{
 };
 
 use crate::{
-    session::{self, AvatarPhoto, Command, Sidebar, View},
+    session::{self, AccountLinkForm, AvatarPhoto, Command, Sidebar, View},
     shortcuts::{Chord, Shortcuts},
     sounds::{Sound, SoundSetting, SoundSettings},
     voice::{DeviceKind, Status},
@@ -37,6 +38,7 @@ use voice::VoiceControls;
 pub(super) struct Spk {
     email: Entity<InputState>,
     password: Entity<InputState>,
+    nickname: Entity<InputState>,
     chat_input: Entity<TextareaState>,
     chat_scroll: ScrollHandle,
     commands: async_channel::Sender<Command>,
@@ -70,6 +72,7 @@ impl Spk {
             input.set_masked(true, window, cx);
             input
         });
+        let nickname = cx.new(|cx| InputState::new(window, cx));
         let chat_input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .rows(2)
@@ -89,7 +92,7 @@ impl Spk {
             }
         })
         .detach();
-        for input in [&email, &password] {
+        for input in [&email, &password, &nickname] {
             cx.subscribe_in(input, window, |this, _, event, window, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
                     this.submit(window, cx);
@@ -192,15 +195,7 @@ impl Spk {
                             this.device_picker = None;
                             window.close_all_dialogs(cx);
                         }
-                        if matches!(view, View::SignIn { .. }) {
-                            let input = if this.email.read(cx).value().is_empty() {
-                                &this.email
-                            } else {
-                                &this.password
-                            };
-                            let handle = input.focus_handle(cx);
-                            window.focus(&handle, cx);
-                        }
+                        this.focus_account_input(&view, window, cx);
                         this.set_session_view(view, window, cx);
                         cx.notify();
                     })
@@ -228,6 +223,7 @@ impl Spk {
         Self {
             email,
             password,
+            nickname,
             chat_input,
             chat_scroll: ScrollHandle::new(),
             commands,
@@ -344,97 +340,6 @@ impl Spk {
         self.sound_settings.send_replace(sounds);
         cx.notify();
     }
-
-    fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !matches!(self.view, View::SignIn { .. }) {
-            return;
-        }
-        let email = self.email.read(cx).value().trim().to_owned();
-        let password = self.password.read(cx).value().to_string();
-        if email.is_empty() || password.is_empty() {
-            self.form_error = Some("Enter your email and password.");
-            cx.notify();
-            return;
-        }
-        self.password
-            .update(cx, |input, cx| input.set_value("", window, cx));
-        self.send(Command::SignIn { email, password }, Some("Signing in…"), cx);
-    }
-
-    fn login(
-        &self,
-        message: Option<&'static str>,
-        retry_restore: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        div()
-            .w_full()
-            .max_w(px(360.0))
-            .mx_auto()
-            .p_6()
-            .rounded_lg()
-            .border_1()
-            .border_color(cx.theme().border)
-            .flex()
-            .flex_col()
-            .gap_4()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(logo(32.0))
-                    .child(Label::new("Sign in to SPK").text_xl().font_semibold()),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(Label::new("Email"))
-                    .child(
-                        Input::new(&self.email)
-                            .aria_label("Email")
-                            .content_type(InputContentType::EmailAddress)
-                            .tab_index(0),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(Label::new("Password"))
-                    .child(
-                        Input::new(&self.password)
-                            .aria_label("Password")
-                            .content_type(InputContentType::Password)
-                            .tab_index(1),
-                    ),
-            )
-            .children(
-                self.form_error
-                    .or(message)
-                    .map(|message| Label::new(message).text_sm().text_color(cx.theme().danger)),
-            )
-            .child(
-                Button::new("sign-in")
-                    .primary()
-                    .label("Sign in")
-                    .tab_index(2)
-                    .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx))),
-            )
-            .when(retry_restore, |card| {
-                card.child(
-                    Button::new("restore")
-                        .label("Retry saved session")
-                        .tab_index(3)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.send(Command::Restore, Some("Checking saved session…"), cx);
-                        })),
-                )
-            })
-    }
 }
 
 impl Render for Spk {
@@ -446,6 +351,12 @@ impl Render for Spk {
                 message,
                 retry_restore,
             } => self.login(*message, *retry_restore, cx).into_any_element(),
+            View::AccountLink { form, message } => {
+                self.account_link(*form, *message, cx).into_any_element()
+            }
+            View::ChooseNickname { message, notice } => self
+                .choose_nickname(*message, *notice, cx)
+                .into_any_element(),
             View::SignedIn(sidebar) => self.workspace(sidebar, cx).into_any_element(),
             View::RetrySignOut => div()
                 .flex()

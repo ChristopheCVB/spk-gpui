@@ -130,7 +130,7 @@ async fn profile_changes_reach_another_session_and_failed_edits_keep_the_profile
             "id":id, "email":format!("{id}@example.test"), "displayName":name, "role":role
         }))
         .unwrap();
-        let (mut saved, _) = SavedSession::with_test_store(Vec::new());
+        let (mut saved, _) = SavedSession::with_test_store(None);
         let mut settings = fixture_settings(socket_endpoint.clone(), |_, _, _, _| {
             panic!("opening a profile must not start voice")
         });
