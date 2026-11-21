@@ -13,24 +13,40 @@ const STORE_UNAVAILABLE: &str =
 const DELETE_FAILED: &str = "Could not remove the saved session from secure storage.";
 
 pub(super) struct SavedSession {
-    pub(super) origin: String,
-    pub(super) persisted: Option<Vec<u8>>,
+    origin: String,
+    persisted: Option<Vec<u8>>,
+    #[cfg(test)]
+    storage: Option<TestStore>,
 }
 
+#[cfg(test)]
+type TestStore = std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>;
+
 impl SavedSession {
+    pub(super) fn new(base: &Url) -> Self {
+        Self {
+            origin: base.origin().ascii_serialization(),
+            persisted: None,
+            #[cfg(test)]
+            storage: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_test_store(bytes: Vec<u8>) -> (Self, TestStore) {
+        let storage = TestStore::new(std::sync::Mutex::new(Some(bytes)));
+        (
+            Self {
+                origin: String::new(),
+                persisted: None,
+                storage: Some(storage.clone()),
+            },
+            storage,
+        )
+    }
+
     async fn read(&mut self) -> Result<Option<CookieStore>, &'static str> {
-        let origin = self.origin.clone();
-        let bytes =
-            spawn_blocking(
-                move || match keyring::Entry::new("spk-gpui", &origin)?.get_secret() {
-                    Ok(bytes) => Ok(Some(bytes)),
-                    Err(keyring::Error::NoEntry) => Ok(None),
-                    Err(error) => Err(error),
-                },
-            )
-            .await
-            .map_err(|_| STORE_UNAVAILABLE)?
-            .map_err(|_| STORE_UNAVAILABLE)?;
+        let bytes = self.read_bytes().await?;
         let Some(bytes) = bytes else { return Ok(None) };
         match json::load(bytes.as_slice()) {
             Ok(cookies) => {
@@ -42,6 +58,24 @@ impl SavedSession {
                 Err("The saved session could not be read. Sign in again.")
             }
         }
+    }
+
+    async fn read_bytes(&self) -> Result<Option<Vec<u8>>, &'static str> {
+        #[cfg(test)]
+        if let Some(storage) = &self.storage {
+            return Ok(storage.lock().unwrap().clone());
+        }
+        let origin = self.origin.clone();
+        spawn_blocking(
+            move || match keyring::Entry::new("spk-gpui", &origin)?.get_secret() {
+                Ok(bytes) => Ok(Some(bytes)),
+                Err(keyring::Error::NoEntry) => Ok(None),
+                Err(error) => Err(error),
+            },
+        )
+        .await
+        .map_err(|_| STORE_UNAVAILABLE)?
+        .map_err(|_| STORE_UNAVAILABLE)
     }
 
     pub(super) async fn save(&mut self, client: &SpkClient) -> Result<(), &'static str> {
@@ -62,20 +96,38 @@ impl SavedSession {
             );
         }
 
-        let origin = self.origin.clone();
-        self.persisted = Some(
-            spawn_blocking(move || {
-                keyring::Entry::new("spk-gpui", &origin)?.set_secret(&bytes)?;
-                Ok::<_, keyring::Error>(bytes)
-            })
-            .await
-            .map_err(|_| STORE_UNAVAILABLE)?
-            .map_err(|_| STORE_UNAVAILABLE)?,
-        );
+        self.persisted = Some(self.write_bytes(bytes).await?);
         Ok(())
     }
 
+    async fn write_bytes(&self, bytes: Vec<u8>) -> Result<Vec<u8>, &'static str> {
+        #[cfg(test)]
+        if let Some(storage) = &self.storage {
+            *storage.lock().unwrap() = Some(bytes.clone());
+            return Ok(bytes);
+        }
+        let origin = self.origin.clone();
+        spawn_blocking(move || {
+            keyring::Entry::new("spk-gpui", &origin)?.set_secret(&bytes)?;
+            Ok::<_, keyring::Error>(bytes)
+        })
+        .await
+        .map_err(|_| STORE_UNAVAILABLE)?
+        .map_err(|_| STORE_UNAVAILABLE)
+    }
+
     pub(super) async fn clear(&mut self) -> Result<(), &'static str> {
+        self.delete_bytes().await?;
+        self.persisted = None;
+        Ok(())
+    }
+
+    async fn delete_bytes(&self) -> Result<(), &'static str> {
+        #[cfg(test)]
+        if let Some(storage) = &self.storage {
+            *storage.lock().unwrap() = None;
+            return Ok(());
+        }
         let origin = self.origin.clone();
         spawn_blocking(move || {
             match keyring::Entry::new("spk-gpui", &origin)?.delete_credential() {
@@ -85,9 +137,7 @@ impl SavedSession {
         })
         .await
         .map_err(|_| DELETE_FAILED)?
-        .map_err(|_| DELETE_FAILED)?;
-        self.persisted = None;
-        Ok(())
+        .map_err(|_| DELETE_FAILED)
     }
 }
 
