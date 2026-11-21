@@ -67,6 +67,8 @@ pub enum Command {
     SignOut,
     Refresh,
     OpenTextChannel(String),
+    OpenDirectMessage(String),
+    StartDirectMessage(String),
     CloseChat,
     LoadOlderMessages,
     RetryChatHistory,
@@ -158,6 +160,7 @@ pub struct Sidebar {
     pub notice: Option<&'static str>,
     pub load_failed: bool,
     pub chat: Option<ChatView>,
+    pub chat_notice: Option<&'static str>,
     pub voice: Option<VoiceView>,
     pub radio: RadioView,
     pub soundboard: SoundboardView,
@@ -183,6 +186,7 @@ impl Sidebar {
             notice,
             load_failed: false,
             chat: None,
+            chat_notice: None,
             voice: None,
             radio: RadioView::default(),
             soundboard: SoundboardView::default(),
@@ -209,8 +213,28 @@ impl Sidebar {
             .filter(|user| user.id != me && !user.banned)
             .filter_map(|user| Some((user.id.as_str(), user.name()?)))
             .collect::<Vec<_>>();
-        people.sort_by_cached_key(|(id, name)| (name.to_lowercase(), *id));
+        let activity: HashMap<_, _> = self
+            .channels
+            .iter()
+            .flatten()
+            .filter_map(|channel| {
+                Some((channel.other_user_id.as_deref()?, channel.last_activity_at?))
+            })
+            .collect();
+        people.sort_by_cached_key(|(id, name)| {
+            (
+                std::cmp::Reverse(activity.get(id).copied()),
+                name.to_lowercase(),
+                *id,
+            )
+        });
         people
+    }
+
+    pub fn direct_message(&self, user_id: &str) -> Option<&Channel> {
+        self.channels.iter().flatten().find(|channel| {
+            channel.kind == "dm" && channel.other_user_id.as_deref() == Some(user_id)
+        })
     }
 
     pub fn message_author(&self, id: &str) -> &str {
@@ -381,6 +405,7 @@ async fn watch_session(
     sidebar.device_notice = settings.devices.notice;
     sidebar.devices = Arc::new((settings.enumerate_devices)());
     let mut chat = ChatSession::default();
+    let mut direct_message_opens = JoinSet::new();
     let mut voice = VoiceSession::default();
     let mut radio = RadioSession::default();
     let mut soundboard = SoundboardSession::default();
@@ -412,6 +437,21 @@ async fn watch_session(
                 }
                 chat.complete(result);
             }
+            Some(result) = direct_message_opens.join_next() => {
+                match result.unwrap_or(Err(Failure::Connection)) {
+                    Ok(channel) => {
+                        sidebar.chat_notice = None;
+                        chat.open(client, &channel);
+                        let channels = sidebar.channels.get_or_insert_default();
+                        if !channels.iter().any(|listed| listed.id == channel.id) {
+                            channels.push(channel);
+                        }
+                        refresh.fetch(client, Resource::Channels);
+                    }
+                    Err(error) if error.unauthorized() => break SessionEnd::Invalidated(SESSION_EXPIRED),
+                    Err(_) => sidebar.chat_notice = Some("Could not open the direct message. Try again."),
+                }
+            }
             _ = sleep_until(retry_at.unwrap_or_else(Instant::now)), if retry_at.is_some() => {
                 voice.retry_presence();
                 refresh.fetch(client, Resource::Presence);
@@ -421,11 +461,39 @@ async fn watch_session(
                 Ok(Command::SignOut) => break SessionEnd::SignOut,
                 Ok(Command::Refresh) => refresh.fetch_all(client),
                 Ok(Command::OpenTextChannel(id)) => {
-                    if sidebar.channels.iter().flatten().any(|channel| channel.id == id && channel.kind == "text") {
-                        chat.open(client, id);
+                    if let Some(channel) = sidebar.channels.iter().flatten().find(|channel| channel.id == id && channel.kind == "text") {
+                        direct_message_opens = JoinSet::new();
+                        sidebar.chat_notice = None;
+                        chat.open(client, channel);
                     }
                 }
-                Ok(Command::CloseChat) => chat.close(),
+                Ok(Command::OpenDirectMessage(id)) => {
+                    direct_message_opens = JoinSet::new();
+                    if let Some(channel) = sidebar.channels.iter().flatten().find(|channel| channel.id == id && channel.kind == "dm" && channel.other_user_id.is_some()) {
+                        sidebar.chat_notice = None;
+                        chat.open(client, channel);
+                    } else {
+                        sidebar.chat_notice = Some("Direct message unavailable.");
+                    }
+                }
+                Ok(Command::StartDirectMessage(user_id)) => {
+                    direct_message_opens = JoinSet::new();
+                    if user_id.is_empty() || sidebar.profile.id.as_deref() == Some(&user_id) {
+                        sidebar.chat_notice = Some("Direct message unavailable.");
+                    } else if let Some(channel) = sidebar.direct_message(&user_id) {
+                        chat.open(client, channel);
+                        sidebar.chat_notice = None;
+                    } else {
+                        sidebar.chat_notice = Some("Opening direct message…");
+                        let client = client.clone();
+                        direct_message_opens.spawn(async move { client.open_direct_message(&user_id).await });
+                    }
+                }
+                Ok(Command::CloseChat) => {
+                    direct_message_opens = JoinSet::new();
+                    sidebar.chat_notice = None;
+                    chat.close();
+                }
                 Ok(Command::LoadOlderMessages) => chat.older(client),
                 Ok(Command::RetryChatHistory) => chat.retry_history(client),
                 Ok(Command::SendChatMessage { channel_id, body }) => chat.send(channel_id, body),
@@ -481,6 +549,11 @@ async fn watch_session(
                 }
                 Ok(SocketEvent::Frame(frame)) => match frame {
                     Frame::MessageNew { message, nonce } => {
+                        if sidebar.channels.iter().flatten().find(|channel| channel.id == message.channel_id)
+                            .is_none_or(|channel| channel.kind == "dm" && channel.last_activity_at.is_none_or(|at| at < message.created_at))
+                        {
+                            refresh.fetch(client, Resource::Channels);
+                        }
                         chat.message(message, nonce.as_deref(), sidebar.profile.id.as_deref());
                     }
                     Frame::MessageError { nonce: Some(nonce), error } => chat.error(&nonce, error),

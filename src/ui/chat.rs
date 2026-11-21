@@ -15,7 +15,9 @@ impl Spk {
     pub(super) fn update_chat(&mut self, next: &View, window: &mut Window, cx: &mut Context<Self>) {
         let previous = chat(&self.view);
         let next = chat(next);
-        if previous.map(|chat| &chat.channel_id) != next.map(|chat| &chat.channel_id) {
+        if previous.map(|chat| (&chat.channel_id, chat.unavailable()))
+            != next.map(|chat| (&chat.channel_id, chat.unavailable()))
+        {
             self.chat_input
                 .update(cx, |input, cx| input.set_value("", window, cx));
             self.chat_scroll = ScrollHandle::new();
@@ -41,7 +43,8 @@ impl Spk {
     }
 
     pub(super) fn submit_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(chat) = chat(&self.view).filter(|chat| chat.outgoing.is_none()) else {
+        let Some(chat) = chat(&self.view).filter(|chat| chat.can_send() && chat.outgoing.is_none())
+        else {
             return;
         };
         let body = self.chat_input.read(cx).value().to_string();
@@ -70,7 +73,9 @@ impl Spk {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
-        let status = if chat.history_failed() {
+        let status = if chat.unavailable() {
+            Some("Direct message unavailable.")
+        } else if chat.history_failed() {
             Some("Could not load message history.")
         } else if chat.loading() {
             Some("Loading messages…")
@@ -143,7 +148,7 @@ impl Spk {
                             .child(div().child(SharedString::from(message.body.clone())))
                     })),
             )
-            .child(
+            .children((!chat.unavailable()).then(|| {
                 div()
                     .px_4()
                     .py_3()
@@ -157,7 +162,7 @@ impl Spk {
                                 (format!("Could not send message. {error}"), true, true)
                             }
                             Delivery::Unconfirmed => (
-                                "Delivery unconfirmed. Check the channel history.".into(),
+                                "Delivery unconfirmed. Check message history.".into(),
                                 false,
                                 true,
                             ),
@@ -214,20 +219,20 @@ impl Spk {
                                 div().flex_1().min_w_0().child(
                                     Textarea::new(&self.chat_input)
                                         .aria_label("Write a message")
-                                        .disabled(chat.outgoing.is_some()),
+                                        .disabled(chat.outgoing.is_some() || !chat.can_send()),
                                 ),
                             )
                             .child(
                                 Button::new("send-chat")
                                     .label("Send")
                                     .tab_stop(true)
-                                    .disabled(chat.outgoing.is_some())
+                                    .disabled(chat.outgoing.is_some() || !chat.can_send())
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.submit_chat(window, cx)
                                     })),
                             ),
-                    ),
-            )
+                    )
+            }))
     }
 
     fn dismiss_chat_send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
