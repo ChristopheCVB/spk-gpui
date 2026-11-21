@@ -10,7 +10,10 @@ use std::{
 
 use ::windows::Win32::{
     Foundation::{E_ACCESSDENIED, HANDLE, HWND, WAIT_TIMEOUT},
-    System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject},
+    System::{
+        Com::{CO_MTA_USAGE_COOKIE, CoDecrementMTAUsage, CoIncrementMTAUsage},
+        Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject},
+    },
     UI::WindowsAndMessaging::GetClassNameW,
 };
 use livekit::webrtc::{native::yuv_helper::argb_to_i420, video_frame::VideoRotation};
@@ -19,25 +22,42 @@ use wasapi::{
     WasapiError, WaveFormat,
 };
 use windows_capture::{
-    capture::{Context, GraphicsCaptureApiError, GraphicsCaptureApiHandler},
-    frame::Frame,
-    graphics_capture_api::{Error as GraphicsError, GraphicsCaptureApi, InternalCaptureControl},
     monitor::Monitor,
-    settings::{
-        CaptureItemTypes, ColorFormat, CursorCaptureSettings, DirtyRegionSettings,
-        DrawBorderSettings, MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
-        TryIntoCaptureItemWithType,
-    },
+    settings::{CaptureItemTypes, TryIntoCaptureItemWithType},
     window::Window,
 };
-use windows_wgc::Graphics::Capture::GraphicsCaptureItem;
+use windows_wgc::{
+    Foundation::TypedEventHandler,
+    Graphics::{
+        Capture::{Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession},
+        DirectX::{Direct3D11::IDirect3DDevice, DirectXPixelFormat},
+        SizeInt32,
+    },
+    Win32::{
+        Foundation::{E_POINTER, HMODULE},
+        Graphics::{
+            Direct3D::D3D_DRIVER_TYPE_HARDWARE,
+            Direct3D11::{
+                D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAP_READ,
+                D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
+                D3D11_USAGE_STAGING, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext,
+                ID3D11Texture2D,
+            },
+            Dxgi::IDXGIDevice,
+        },
+        System::WinRT::Direct3D11::{
+            CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
+        },
+    },
+    core::Interface,
+};
 
 use super::*;
 
 pub(super) async fn choices() -> Result<Vec<Choice>, CaptureError> {
     tokio::task::spawn_blocking(|| {
         let _apartment = Apartment::new()?;
-        if !GraphicsCaptureApi::is_supported().unwrap_or(false) {
+        if !GraphicsCaptureSession::IsSupported().unwrap_or(false) {
             return Err(CaptureError::Unavailable);
         }
         Ok(sources().into_iter().map(|(choice, _)| choice).collect())
@@ -51,8 +71,9 @@ pub(super) async fn select(
     playback: Option<Device>,
 ) -> Result<Selection, CaptureError> {
     let label = choice.label.clone();
-    let (item, fps, audio) = tokio::task::spawn_blocking(move || {
+    let (item, window, fps, audio) = tokio::task::spawn_blocking(move || {
         let _apartment = Apartment::new()?;
+        let apartment = GraphicsApartment::new()?;
         let (_, target) = sources()
             .into_iter()
             .find(|(available, _)| available == &choice)
@@ -68,21 +89,20 @@ pub(super) async fn select(
             CaptureItemTypes::Monitor(monitor) => monitor.try_into_capture_item(),
             CaptureItemTypes::Window(window) => window.try_into_capture_item(),
         }
-        .map_err(|error| {
-            if error.code().0 == E_ACCESSDENIED.0 {
-                CaptureError::Permission
-            } else {
-                CaptureError::Unavailable
+        .map_err(graphics_error)?;
+        let window = match kind {
+            CaptureItemTypes::Monitor(_) => None,
+            CaptureItemTypes::Window(window) => {
+                if window_id(&window).as_ref() != Some(&choice.id)
+                    || matches!(&audio, Some(AudioTarget::Application(process)) if !process.alive())
+                {
+                    return Err(CaptureError::SourceLost);
+                }
+                let pid = window.process_id().map_err(|_| CaptureError::SourceLost)?;
+                Some((window, pid))
             }
-        })?;
-        if let CaptureItemTypes::Window(window) = &kind {
-            if window_id(window).as_ref() != Some(&choice.id)
-                || matches!(&audio, Some(AudioTarget::Application(process)) if !process.alive())
-            {
-                return Err(CaptureError::SourceLost);
-            }
-        }
-        Ok::<_, CaptureError>((SelectedItem(item, kind), fps, audio))
+        };
+        Ok::<_, CaptureError>((SelectedItem(item, apartment), window, fps, audio))
     })
     .await
     .map_err(|_| CaptureError::Unavailable)??;
@@ -94,7 +114,12 @@ pub(super) async fn select(
     Ok(Selection {
         label,
         audio: scope,
-        capture: Box::new(Selected { item, fps, audio }),
+        capture: Box::new(Selected {
+            item,
+            window,
+            fps,
+            audio,
+        }),
     })
 }
 
@@ -104,13 +129,14 @@ fn sources() -> Vec<(Choice, CaptureItemTypes)> {
         .into_iter()
         .enumerate()
         .map(|(index, monitor)| {
-            let name = monitor
-                .name()
-                .or_else(|_| monitor.device_name())
-                .unwrap_or_default();
+            let name = monitor.device_name().unwrap_or_default();
+            let label = name.strip_prefix(r"\\.\DISPLAY").map_or_else(
+                || format!("Display {}", index + 1),
+                |number| format!("Display {number}"),
+            );
             let choice = Choice {
-                id: format!("display:{:p}", monitor.as_raw_hmonitor()),
-                label: format!("Display {} · {name}", index + 1),
+                id: format!("display:{:p}:{name}", monitor.as_raw_hmonitor()),
+                label,
             };
             (choice, CaptureItemTypes::Monitor(monitor))
         });
@@ -153,18 +179,31 @@ impl Drop for Apartment {
     }
 }
 
-struct SelectedItem(GraphicsCaptureItem, CaptureItemTypes);
+// Keep the MTA active while the selected WinRT object is held between native worker threads.
+struct GraphicsApartment(CO_MTA_USAGE_COOKIE);
 
-impl TryIntoCaptureItemWithType for SelectedItem {
-    fn try_into_capture_item(
-        self,
-    ) -> Result<(GraphicsCaptureItem, CaptureItemTypes), windows_wgc::core::Error> {
-        Ok((self.0, self.1))
+// Windows exposes the cookie as an opaque pointer and allows decrementing it on another thread.
+unsafe impl Send for GraphicsApartment {}
+
+impl GraphicsApartment {
+    fn new() -> Result<Self, CaptureError> {
+        unsafe { CoIncrementMTAUsage() }
+            .map(Self)
+            .map_err(|_| CaptureError::Unavailable)
     }
 }
 
+impl Drop for GraphicsApartment {
+    fn drop(&mut self) {
+        let _ = unsafe { CoDecrementMTAUsage(self.0) };
+    }
+}
+
+struct SelectedItem(GraphicsCaptureItem, GraphicsApartment);
+
 struct Selected {
     item: SelectedItem,
+    window: Option<(Window, u32)>,
     fps: Option<u32>,
     audio: Option<oneshot::Sender<AudioStart>>,
 }
@@ -209,31 +248,82 @@ impl Selected {
             .fps
             .filter(|fps| *fps > 0)
             .map_or(quality.fps, |fps| quality.fps.min(fps));
-        let settings = Settings::new(
-            self.item,
-            CursorCaptureSettings::Default,
-            DrawBorderSettings::Default,
-            SecondaryWindowSettings::Default,
-            MinimumUpdateIntervalSettings::Default,
-            DirtyRegionSettings::Default,
-            ColorFormat::Bgra8,
-            Frames {
-                sink: sink.clone(),
-                stop: stop.clone(),
-                quality,
-                fps,
-                started: Instant::now(),
-                next_frame: Duration::ZERO,
-            },
-        );
-        let capture = Frames::start_free_threaded(settings).map_err(|error| match error {
-            GraphicsCaptureApiError::GraphicsCaptureApiError(GraphicsError::WindowsError(
-                error,
-            )) if error.code().0 == E_ACCESSDENIED.0 => CaptureError::Permission,
-            _ => CaptureError::Unavailable,
-        })?;
+        let _apartment = Apartment::new()?;
+        // Keep the selection MTA alive until the capture worker has entered it.
+        let SelectedItem(item, apartment) = self.item;
+        drop(apartment);
+
+        let mut device = None;
+        let mut context = None;
+        unsafe {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_HARDWARE,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                Some(&mut context),
+            )
+        }
+        .map_err(graphics_error)?;
+        let mut frames = Frames {
+            device: device.ok_or(CaptureError::Unavailable)?,
+            context: context.ok_or(CaptureError::Unavailable)?,
+            staging: None,
+            packed: Vec::new(),
+        };
+        let dxgi_device = frames
+            .device
+            .cast::<IDXGIDevice>()
+            .map_err(graphics_error)?;
+        let device = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi_device) }
+            .and_then(|device| device.cast::<IDirect3DDevice>())
+            .map_err(graphics_error)?;
+        let pixel = DirectXPixelFormat::B8G8R8A8UIntNormalized;
+        let mut size = item.Size().map_err(graphics_error)?;
+        let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&device, pixel, 1, size)
+            .map_err(graphics_error)?;
+        let session = pool.CreateCaptureSession(&item).map_err(graphics_error)?;
+        let capture_thread = thread::current();
+        let frame_ready = Arc::new(AtomicBool::new(false));
+        let frame_event = pool
+            .FrameArrived(&TypedEventHandler::new({
+                let frame_ready = frame_ready.clone();
+                let capture_thread = capture_thread.clone();
+                move |_, _| {
+                    if !frame_ready.swap(true, Ordering::AcqRel) {
+                        capture_thread.unpark();
+                    }
+                    Ok(())
+                }
+            }))
+            .map_err(graphics_error)?;
+        let ended = Arc::new(AtomicBool::new(false));
+        let closed_event = item
+            .Closed(&TypedEventHandler::new({
+                let ended = ended.clone();
+                move |_, _| {
+                    ended.store(true, Ordering::Release);
+                    capture_thread.unpark();
+                    Ok(())
+                }
+            }))
+            .map_err(graphics_error)?;
+        let capture = GraphicsCapture {
+            item,
+            pool,
+            session,
+            closed_event,
+            frame_event,
+        };
+        if stop.load(Ordering::Acquire) {
+            return Err(CaptureError::Cancelled);
+        }
+        capture.session.StartCapture().map_err(graphics_error)?;
         if with_audio
-            && !stop.load(Ordering::Acquire)
             && self.audio.is_none_or(|audio| {
                 audio
                     .send(AudioStart {
@@ -245,63 +335,177 @@ impl Selected {
         {
             sink.audio_unavailable();
         }
-        while !stop.load(Ordering::Acquire) && !capture.is_finished() {
-            thread::sleep(Duration::from_millis(50));
+
+        let started = Instant::now();
+        let interval = Duration::from_nanos(1_000_000_000 / u64::from(fps));
+        let mut next_frame = started;
+        while !stop.load(Ordering::Acquire) && !ended.load(Ordering::Acquire) {
+            if self
+                .window
+                .as_ref()
+                .is_some_and(|(window, pid)| window.process_id().ok() != Some(*pid))
+            {
+                return Err(CaptureError::SourceLost);
+            }
+            let now = Instant::now();
+            if now < next_frame {
+                thread::park_timeout((next_frame - now).min(Duration::from_millis(50)));
+                continue;
+            }
+            if !frame_ready.swap(false, Ordering::AcqRel) {
+                thread::park_timeout(Duration::from_millis(50));
+                continue;
+            }
+            next_frame = (next_frame + interval).max(now + interval / 2);
+            let frame = match capture.pool.TryGetNextFrame() {
+                Ok(frame) => frame,
+                Err(error) if error.code() == E_POINTER => continue,
+                Err(_) => return Err(CaptureError::SourceLost),
+            };
+            let content = frame.ContentSize().map_err(|_| CaptureError::SourceLost)?;
+            if content.Width != size.Width || content.Height != size.Height {
+                frame.Close().map_err(|_| CaptureError::SourceLost)?;
+                if content.Width >= 2 && content.Height >= 2 {
+                    size = content;
+                    capture
+                        .pool
+                        .Recreate(&device, pixel, 1, size)
+                        .map_err(|_| CaptureError::SourceLost)?;
+                }
+                continue;
+            }
+            let output = render_frame(&mut frames, &frame, size, quality);
+            frame.Close().map_err(|_| CaptureError::SourceLost)?;
+            let mut output = output?;
+            output.timestamp_us = now.duration_since(started).as_micros() as i64;
+            sink.video(output, fps);
         }
-        if capture.is_finished() {
-            let _ = capture.wait();
+        if ended.load(Ordering::Acquire) {
             Err(CaptureError::SourceLost)
         } else {
-            let _ = capture.stop();
             Err(CaptureError::Cancelled)
         }
     }
 }
 
-struct Frames {
-    sink: CaptureSink,
-    stop: Arc<AtomicBool>,
-    quality: Quality,
-    fps: u32,
-    started: Instant,
-    next_frame: Duration,
+fn graphics_error(error: windows_wgc::core::Error) -> CaptureError {
+    if error.code().0 == E_ACCESSDENIED.0 {
+        CaptureError::Permission
+    } else {
+        CaptureError::Unavailable
+    }
 }
 
-impl GraphicsCaptureApiHandler for Frames {
-    type Flags = Self;
-    type Error = CaptureError;
+struct GraphicsCapture {
+    item: GraphicsCaptureItem,
+    pool: Direct3D11CaptureFramePool,
+    session: GraphicsCaptureSession,
+    closed_event: i64,
+    frame_event: i64,
+}
 
-    fn new(context: Context<Self>) -> Result<Self, Self::Error> {
-        Ok(context.flags)
+impl Drop for GraphicsCapture {
+    fn drop(&mut self) {
+        let _ = self.item.RemoveClosed(self.closed_event);
+        let _ = self.pool.RemoveFrameArrived(self.frame_event);
+        let _ = self.session.Close();
+        let _ = self.pool.Close();
     }
+}
 
-    fn on_frame_arrived(
+struct Frames {
+    device: ID3D11Device,
+    context: ID3D11DeviceContext,
+    staging: Option<((u32, u32), ID3D11Texture2D)>,
+    packed: Vec<u8>,
+}
+
+fn render_frame(
+    frames: &mut Frames,
+    frame: &windows_wgc::Graphics::Capture::Direct3D11CaptureFrame,
+    size: SizeInt32,
+    quality: Quality,
+) -> Result<VideoFrame<I420Buffer>, CaptureError> {
+    let dimensions = quality
+        .dimensions(size.Width as u32, size.Height as u32)
+        .ok_or(CaptureError::SourceLost)?;
+    let surface = frame
+        .Surface()
+        .and_then(|surface| surface.cast::<IDirect3DDxgiInterfaceAccess>())
+        .map_err(|_| CaptureError::SourceLost)?;
+    let texture = unsafe { surface.GetInterface::<ID3D11Texture2D>() }
+        .map_err(|_| CaptureError::SourceLost)?;
+    frames
+        .read_frame(
+            &texture,
+            (size.Width as u32, size.Height as u32),
+            dimensions,
+        )
+        .map(|buffer| VideoFrame::new(VideoRotation::VideoRotation0, buffer))
+}
+
+impl Frames {
+    fn read_frame(
         &mut self,
-        frame: &mut Frame,
-        control: InternalCaptureControl,
-    ) -> Result<(), Self::Error> {
-        if self.stop.load(Ordering::Acquire) {
-            control.stop();
-            return Ok(());
+        source: &ID3D11Texture2D,
+        (width, height): (u32, u32),
+        dimensions: (u32, u32),
+    ) -> Result<I420Buffer, CaptureError> {
+        // Own the staging resource until the mapped bytes have been read and unmapped.
+        if self
+            .staging
+            .as_ref()
+            .is_none_or(|(size, _)| *size != (width, height))
+        {
+            let mut descriptor = D3D11_TEXTURE2D_DESC::default();
+            unsafe { source.GetDesc(&mut descriptor) };
+            if descriptor.Width < width || descriptor.Height < height {
+                return Err(CaptureError::SourceLost);
+            }
+            descriptor.Usage = D3D11_USAGE_STAGING;
+            descriptor.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+            descriptor.BindFlags = 0;
+            descriptor.MiscFlags = 0;
+            let mut texture = None;
+            unsafe {
+                self.device
+                    .CreateTexture2D(&descriptor, None, Some(&mut texture))
+            }
+            .map_err(|_| CaptureError::SourceLost)?;
+            self.staging = texture.map(|texture| ((width, height), texture));
         }
-        let elapsed = self.started.elapsed();
-        if elapsed < self.next_frame {
-            return Ok(());
+        let (_, staging) = self.staging.as_ref().ok_or(CaptureError::SourceLost)?;
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        unsafe {
+            self.context.CopyResource(staging, source);
+            self.context
+                .Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
         }
-        let interval = Duration::from_nanos(1_000_000_000 / u64::from(self.fps));
-        self.next_frame = (self.next_frame + interval).max(elapsed);
-        let (width, height) = (frame.width(), frame.height());
-        let Some(dimensions) = self.quality.dimensions(width, height) else {
-            return Ok(());
-        };
-        let mut pixels = frame.buffer().map_err(|_| CaptureError::SourceLost)?;
-        let stride = pixels.row_pitch();
-        let buffer = screen_frame(pixels.as_raw_buffer(), width, height, stride, dimensions)
-            .ok_or(CaptureError::SourceLost)?;
-        let mut frame = VideoFrame::new(VideoRotation::VideoRotation0, buffer);
-        frame.timestamp_us = elapsed.as_micros() as i64;
-        self.sink.video(frame, self.fps);
-        Ok(())
+        .map_err(|_| CaptureError::SourceLost)?;
+        let row = width.checked_mul(4);
+        let result = row.and_then(|row| {
+            let pitch = mapped.RowPitch;
+            let size = pitch.checked_mul(height)? as usize;
+            if mapped.pData.is_null() || pitch < row || size > isize::MAX as usize {
+                return None;
+            }
+            let address = mapped.pData.cast::<u8>();
+            if pitch == row {
+                let bytes = unsafe { std::slice::from_raw_parts(address, size) };
+                return screen_frame(bytes, width, height, row, dimensions);
+            }
+            // Only the active pixels in each mapped row are initialized.
+            self.packed.clear();
+            for index in 0..height as usize {
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(address.add(index * pitch as usize), row as usize)
+                };
+                self.packed.extend_from_slice(bytes);
+            }
+            screen_frame(&self.packed, width, height, row, dimensions)
+        });
+        unsafe { self.context.Unmap(staging, 0) };
+        result.ok_or(CaptureError::SourceLost)
     }
 }
 
