@@ -5,6 +5,7 @@ mod chat;
 mod presence;
 mod profiles;
 mod radio;
+mod search;
 mod soundboard;
 mod unread;
 mod voice_session;
@@ -22,8 +23,8 @@ use tokio::{
 use url::Url;
 
 use crate::api::{
-    Channel, Connection, Failure, Frame, Profile, SocketEvent, SpkClient, UnreadState, User,
-    UserPresence,
+    Channel, Connection, Failure, Frame, MessageChange, Profile, SocketEvent, SpkClient,
+    UnreadState, User, UserPresence,
 };
 use crate::sounds::{Sound, SoundSettings, VoiceSounds};
 use crate::voice::{
@@ -40,14 +41,15 @@ use chat::ChatSession;
 use presence::{PresenceReporter, PresenceSettings, Refresh, Resource, VoiceMembership};
 use profiles::Work as ProfileWork;
 use radio::{RadioSession, RadioView};
+use search::{SearchSession, SearchView};
 use soundboard::{SoundboardSession, SoundboardView};
 use unread::{Mark, UnreadSession};
 use voice_session::{DeviceSettings, StartCall, VoiceDestination, VoiceSession};
 pub use {
-    crate::api::UserStatus,
+    crate::api::{MessageAction, UserStatus},
     accounts::AccountLinkForm,
     avatars::AvatarPhoto,
-    chat::{AttachmentInput, ChatView, Delivery, UploadStatus, image_preview},
+    chat::{AttachmentInput, ChatView, Delivery, Pins, UploadStatus, image_preview},
     presence::Participant,
     profiles::ProfileEdit,
     radio::RadioPlayback,
@@ -121,8 +123,23 @@ pub enum Command {
         attachment_id: String,
         reply: oneshot::Sender<Result<Vec<u8>, Failure>>,
     },
+    SearchMessages {
+        query: String,
+        scope: crate::api::SearchScope,
+    },
+    MoreSearchResults,
+    OpenMessageTarget(crate::api::MessageTarget),
     RetryChatSend,
     DismissChatSend,
+    MutateChatMessage {
+        channel_id: String,
+        message_id: String,
+        action: MessageAction,
+    },
+    ShowChatPins {
+        channel_id: String,
+        shown: bool,
+    },
     SaveNickname(String),
     UploadAvatar(PathBuf),
     InspectProfileEmail(String, oneshot::Sender<Option<String>>),
@@ -207,6 +224,7 @@ pub struct Sidebar {
     pub notice: Option<&'static str>,
     pub load_failed: bool,
     pub chat: Option<ChatView>,
+    pub search: SearchView,
     pub chat_notice: Option<&'static str>,
     pub read_notice: Option<&'static str>,
     unread: Arc<HashMap<String, UnreadState>>,
@@ -238,6 +256,7 @@ impl Sidebar {
             notice,
             load_failed: false,
             chat: None,
+            search: SearchView::default(),
             chat_notice: None,
             read_notice: None,
             unread: Arc::default(),
@@ -486,6 +505,8 @@ async fn watch_session(
     let mut direct_message_opens = JoinSet::new();
     let mut voice = VoiceSession::default();
     let mut radio = RadioSession::default();
+    let mut search = SearchSession::default();
+    let mut pending_message_target = None;
     let mut soundboard = SoundboardSession::default();
     let mut camera_previews = JoinSet::new();
     let mut profiles = JoinSet::new();
@@ -494,6 +515,7 @@ async fn watch_session(
             break SessionEnd::Closed;
         }
         unread.write_next(client);
+        chat.fill_previews(client);
         sidebar.chat = chat.view();
         radio.sync(&mut sidebar, &voice);
         soundboard.sync(&mut sidebar, &voice);
@@ -532,6 +554,21 @@ async fn watch_session(
                     break SessionEnd::Invalidated(SESSION_EXPIRED);
                 }
                 chat.complete(client, result);
+            }
+            Some(result) = chat.action_tasks.join_next() => {
+                let result = result.unwrap_or(Err(Failure::Connection));
+                if result.as_ref().is_err_and(Failure::unauthorized) {
+                    break SessionEnd::Invalidated(SESSION_EXPIRED);
+                }
+                chat.action_complete(client, result);
+            }
+            Some(Ok(result)) = chat.preview_tasks.join_next() => chat.preview_complete(result),
+            Some(result) = chat.pin_tasks.join_next() => {
+                let result = result.unwrap_or(Err(Failure::Connection));
+                if result.as_ref().is_err_and(Failure::unauthorized) {
+                    break SessionEnd::Invalidated(SESSION_EXPIRED);
+                }
+                chat.pins_complete(result);
             }
             Some(result) = chat.attachments.tasks.join_next() => {
                 if matches!(result, Ok(true)) {
@@ -573,6 +610,7 @@ async fn watch_session(
                     }
                 }
                 Ok(Command::OpenTextChannel(id)) => {
+                    pending_message_target = None;
                     if let Some(channel) = sidebar.channels.iter().flatten().find(|channel| channel.id == id && channel.kind == "text") {
                         direct_message_opens = JoinSet::new();
                         sidebar.chat_notice = None;
@@ -580,6 +618,7 @@ async fn watch_session(
                     }
                 }
                 Ok(Command::OpenDirectMessage(id)) => {
+                    pending_message_target = None;
                     direct_message_opens = JoinSet::new();
                     if let Some(channel) = sidebar.channels.iter().flatten().find(|channel| channel.id == id && channel.kind == "dm" && channel.other_user_id.is_some()) {
                         sidebar.chat_notice = None;
@@ -589,6 +628,7 @@ async fn watch_session(
                     }
                 }
                 Ok(Command::StartDirectMessage(user_id)) => {
+                    pending_message_target = None;
                     direct_message_opens = JoinSet::new();
                     if user_id.is_empty() || sidebar.profile.id.as_deref() == Some(&user_id) {
                         sidebar.chat_notice = Some("Direct message unavailable.");
@@ -602,6 +642,7 @@ async fn watch_session(
                     }
                 }
                 Ok(Command::CloseChat) => {
+                    pending_message_target = None;
                     direct_message_opens = JoinSet::new();
                     sidebar.chat_notice = None;
                     chat.close();
@@ -625,7 +666,11 @@ async fn watch_session(
                         unread.mark(&mut sidebar, channel_id, Mark::Unread(message_id, request));
                     }
                 },
-                Ok(Command::JumpToChatMessage { channel_id, message_id }) => chat.jump(client, &channel_id, message_id),
+                Ok(Command::JumpToChatMessage { channel_id, message_id }) => {
+                    pending_message_target = None;
+                    sidebar.chat_notice = None;
+                    chat.jump(client, &channel_id, message_id);
+                }
                 Ok(Command::LoadLatestMessages) => chat.latest(client),
                 Ok(Command::UpdateChatDraft { channel_id, body }) => chat.update_draft(channel_id, body),
                 Ok(Command::SetChatReply { channel_id, message_id }) => chat.set_reply(&channel_id, message_id.as_deref()),
@@ -636,8 +681,23 @@ async fn watch_session(
                 Ok(Command::ReadChatAttachment { channel_id, message_id, attachment_id, reply }) => {
                     chat.read_attachment(client, &channel_id, &message_id, attachment_id, reply);
                 }
+                Ok(Command::SearchMessages { query, scope }) => search.start(&mut sidebar.search, client, query, scope),
+                Ok(Command::MoreSearchResults) => search.more(&mut sidebar.search, client),
+                Ok(Command::OpenMessageTarget(target)) => {
+                    direct_message_opens = JoinSet::new();
+                    pending_message_target = None;
+                    if !search::open_message_target(&mut sidebar, &mut chat, client, &target) {
+                        sidebar.chat_notice = Some("Opening message…");
+                        pending_message_target = Some(target);
+                        refresh.fetch(client, Resource::Channels);
+                    }
+                }
                 Ok(Command::RetryChatSend) => chat.retry_send(),
                 Ok(Command::DismissChatSend) => chat.dismiss_send(),
+                Ok(Command::MutateChatMessage { channel_id, message_id, action }) => {
+                    chat.mutate(client, &sidebar, &channel_id, message_id, action);
+                }
+                Ok(Command::ShowChatPins { channel_id, shown }) => chat.show_pins(client, &channel_id, shown),
                 Ok(command @ (Command::SaveNickname(_) | Command::UploadAvatar(_) | Command::InspectProfileEmail(..))) => {
                     ProfileWork::start(&mut profiles, &mut sidebar, client, command);
                 }
@@ -698,12 +758,27 @@ async fn watch_session(
                         {
                             refresh.fetch(client, Resource::Channels);
                         }
-                        chat.message(message, nonce.as_deref(), sidebar.profile.id.as_deref());
+                        chat.message(*message, nonce.as_deref(), sidebar.profile.id.as_deref());
                     }
                     Frame::UnreadUpdate { channel_id, state } => {
                         unread.update(&mut sidebar, channel_id, state);
                     }
-                    Frame::MessageDelete { channel_id, id } => chat.delete_message(&channel_id, &id),
+                    Frame::MessageDelete { channel_id, id } => {
+                        chat.message_changed(client, &channel_id, &id, MessageChange::Delete);
+                    }
+                    Frame::MessageEdit { message } => {
+                        let (channel_id, id) = (message.channel_id.clone(), message.id.clone());
+                        chat.message_changed(client, &channel_id, &id, MessageChange::Edit(message));
+                    }
+                    Frame::MessagePreviews { channel_id, message_id, previews } => {
+                        chat.message_changed(client, &channel_id, &message_id, MessageChange::Previews(previews));
+                    }
+                    Frame::ReactionUpdate { channel_id, message_id, reactions } => {
+                        chat.message_changed(client, &channel_id, &message_id, MessageChange::Reactions(reactions));
+                    }
+                    Frame::PinUpdate { channel_id, message_id, pinned } => {
+                        chat.message_changed(client, &channel_id, &message_id, MessageChange::Pin(pinned));
+                    }
                     Frame::MessageError { nonce: Some(nonce), error } => chat.error(&nonce, error),
                     Frame::Typing { channel_id, user_id } if sidebar.profile.id.as_ref() != Some(&user_id) => {
                         chat.receive_typing(&channel_id, user_id);
@@ -813,6 +888,13 @@ async fn watch_session(
                     }
                 }
             },
+            Some(result) = search.tasks.join_next() => {
+                let result = result.unwrap_or(Err(Failure::Connection));
+                if result.as_ref().is_err_and(Failure::unauthorized) {
+                    break SessionEnd::Invalidated(SESSION_EXPIRED);
+                }
+                SearchSession::complete(&mut sidebar.search, result);
+            }
             () = RadioSession::playback_changed(&mut radio.player) => {}
             Some(Ok((id, result))) = radio.tasks.join_next_with_id() => {
                 if let Err(error) = radio.complete(&mut sidebar.radio, id, result) {
@@ -858,6 +940,13 @@ async fn watch_session(
                 let listed_voice_channel = matches!(resource, Resource::Channels)
                     && sidebar.voice.as_ref().is_some_and(|voice| sidebar.has_voice_channel(&voice.channel_id));
                 refresh.complete(&mut sidebar, resource, data);
+                if resource == Resource::Channels
+                    && !refresh.dirty.contains(&resource)
+                    && let Some(target) = pending_message_target.take()
+                    && (!presence_loaded || !search::open_message_target(&mut sidebar, &mut chat, client, &target))
+                {
+                    sidebar.chat_notice = Some("Message unavailable.");
+                }
                 if fresh_presence {
                     voice.presence_refreshed(&mut sidebar, presence_loaded);
                 }

@@ -5,6 +5,7 @@ mod chat;
 mod media;
 mod profile;
 mod radio;
+mod search;
 mod soundboard;
 mod unread;
 mod user_presence;

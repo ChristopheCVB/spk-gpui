@@ -1,6 +1,8 @@
+mod actions;
 mod attachments;
-mod markdown;
+pub(super) mod markdown;
 
+pub(super) use actions::MessageActionForm;
 pub(super) use attachments::AttachmentUi;
 
 use std::{
@@ -14,12 +16,12 @@ use gpui_kit::component::{
     text::{MarkdownExtensions, TextView},
 };
 
-use markdown::{message_markdown, safe_link};
+use markdown::{message_markdown, plain_text, safe_link};
 
 use super::*;
 
 use crate::{
-    api::{ChatMessage, UnreadState},
+    api::{ChatMessage, MessageTarget, UnreadState},
     session::{ChatView, Delivery},
 };
 
@@ -104,6 +106,7 @@ impl Spk {
         let signed_in = matches!(next, View::SignedIn(_));
         let next = chat(next);
         self.chat_attachments.sync(previous, next, signed_in);
+        Self::update_message_actions(&mut self.message_action_form, previous, next);
         if let Some(next) = next.filter(|chat| chat.latest_ready())
             && previous.is_none_or(|previous| {
                 previous.channel_id != next.channel_id
@@ -224,12 +227,12 @@ impl Spk {
     ) -> impl IntoElement {
         let theme = cx.theme();
         let app = cx.weak_entity();
-        let status = if chat.unavailable() {
+        let status = if chat.jump_failed {
+            Some("Message unavailable.")
+        } else if chat.unavailable() {
             Some("Direct message unavailable.")
         } else if chat.history_failed() {
             Some("Could not load message history.")
-        } else if chat.jump_failed {
-            Some("Original message unavailable.")
         } else if chat.loading() {
             Some("Loading messages…")
         } else if chat.messages.is_empty() {
@@ -242,6 +245,20 @@ impl Spk {
             .flex_col()
             .flex_1()
             .min_h_0()
+            .when(!chat.unavailable(), |area| {
+                area.child(self.pins(sidebar, chat, cx))
+            })
+            .when_some(
+                chat.action_outcome.as_ref().and_then(|result| result.error),
+                |area, error| {
+                    area.child(
+                        div()
+                            .px_4()
+                            .py_2()
+                            .child(Label::new(error).text_color(theme.danger)),
+                    )
+                },
+            )
             .when_some(status, |area, status| {
                 area.child(
                     div()
@@ -561,7 +578,9 @@ impl Spk {
         let link_app = app.clone();
         let link_filter = self.chat_spoiler_link.clone();
         let link_prefix = self.chat_spoiler_link.clone();
-        let text = TextView::markdown("message-body", rendered)
+        let share_text = SharedString::from(rendered);
+        let target = MessageTarget::new(&message.channel_id, &message.id);
+        let text = TextView::markdown("message-body", share_text.clone())
             .markdown_extensions(
                 MarkdownExtensions::default()
                     .parser_revision(1)
@@ -583,10 +602,19 @@ impl Spk {
                         });
                     }
                 } else if let Some(url) = safe_link(href) {
-                    cx.open_url(url.as_str());
+                    search::activate_chat_link(&link_app, url, cx);
                 }
             });
         let composer_busy = chat.outgoing.is_some() || !chat.can_send();
+        let message_actions = actions::MessageActions {
+            app: app.clone(),
+            channel: channel.clone(),
+            message: message_id.clone(),
+            can_edit: sidebar.profile.id.as_deref() == Some(&message.user_id),
+            can_delete: sidebar.can_remove_message_content(message),
+            pin_to: chat.can_pin(sidebar.is_admin()).then_some(!message.pinned),
+            disabled: chat.action_pending || !chat.can_send(),
+        };
         let pinged = chat.direct_message_peer.is_none()
             && sidebar
                 .profile
@@ -669,6 +697,20 @@ impl Spk {
                                 author.child(Label::new("Ping").text_xs().text_color(theme.primary))
                             }),
                     )
+                    .when(message.pinned, |row| {
+                        row.child(
+                            Label::new("Pinned")
+                                .text_xs()
+                                .text_color(theme.muted_foreground),
+                        )
+                    })
+                    .when(message.edited_at.is_some(), |row| {
+                        row.child(
+                            Label::new("(edited)")
+                                .text_xs()
+                                .text_color(theme.muted_foreground),
+                        )
+                    })
                     .child(
                         Button::new("message-actions")
                             .ghost()
@@ -733,8 +775,9 @@ impl Spk {
                                                     }
                                                 });
                                             }),
-                                    )
-                                    .item(PopupMenuItem::new("Mark as unread").on_click(
+                                    );
+                                let menu = message_actions.menu(menu).separator().item(
+                                    PopupMenuItem::new("Mark as unread").on_click(
                                         move |_, _, cx| {
                                             let _ = mark_app.update(cx, |this, cx| {
                                                 this.send(
@@ -747,7 +790,33 @@ impl Spk {
                                                 );
                                             });
                                         },
-                                    ));
+                                    ),
+                                );
+                                let copy_text = share_text.clone();
+                                let copy_markdown = body.clone();
+                                let menu = menu
+                                    .separator()
+                                    .item(PopupMenuItem::new("Copy text").on_click(
+                                        move |_, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                plain_text(&copy_text),
+                                            ));
+                                        },
+                                    ))
+                                    .item(PopupMenuItem::new("Copy Markdown").on_click(
+                                        move |_, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                copy_markdown.clone(),
+                                            ));
+                                        },
+                                    ))
+                                    .when_some(target.clone(), |menu, target| {
+                                        menu.item(PopupMenuItem::new("Copy link").on_click(
+                                            move |_, _, cx| {
+                                                search::copy_message_link(&target, cx);
+                                            },
+                                        ))
+                                    });
                                 if hidden.is_empty() {
                                     menu
                                 } else {
@@ -772,6 +841,13 @@ impl Spk {
             .when(!message.body.is_empty(), |row| row.child(text))
             .when(!message.attachments.is_empty(), |row| {
                 row.child(self.attachment_cards(message, cx))
+            })
+            .children(self.message_action_form(chat, message, cx))
+            .when(!message.previews.is_empty(), |row| {
+                row.child(self.link_previews(sidebar, chat, message, cx))
+            })
+            .when(!message.reactions.is_empty(), |row| {
+                row.child(self.reactions(sidebar, chat, message, cx))
             })
     }
 

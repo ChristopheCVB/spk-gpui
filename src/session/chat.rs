@@ -1,7 +1,12 @@
+mod actions;
 mod attachments;
+mod preview_images;
 
+pub use actions::Pins;
+use actions::{ActionOutcome, PendingAction, change_message};
 pub use attachments::{AttachmentInput, UploadStatus, image_preview};
 use attachments::{AttachmentWork, QueuedAttachment};
+use preview_images::{PreviewImages, PreviewResult};
 
 use std::{
     collections::{HashMap, HashSet},
@@ -12,7 +17,8 @@ use std::{
 use tokio::{task::JoinSet, time::Instant};
 
 use crate::api::{
-    AttachmentRef, Channel, ChatMessage, Failure, MessagePage, ReplyRef, SpkClient, VoiceSocket,
+    AttachmentRef, Channel, ChatMessage, Failure, MessageChange, MessagePage, ReplyRef, SpkClient,
+    VoiceSocket,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -38,6 +44,10 @@ pub struct ChatView {
     hold_read: bool,
     pending_unread: Option<u64>,
     pub outgoing: Option<Outgoing>,
+    pub pins: Option<Pins>,
+    pub preview_images: PreviewImages,
+    pub action_pending: bool,
+    pub action_outcome: Option<ActionOutcome>,
     history: History,
 }
 
@@ -127,6 +137,11 @@ pub(super) struct ChatSession {
     history: Option<HistoryRequest>,
     buffered: Vec<ChatMessage>,
     unread_request: u64,
+    buffered_changes: Vec<(String, MessageChange)>,
+    pending_action: Option<PendingAction>,
+    pub action_tasks: JoinSet<Result<MessageChange, Failure>>,
+    pub pin_tasks: JoinSet<Result<Vec<ChatMessage>, Failure>>,
+    pub preview_tasks: JoinSet<PreviewResult>,
     deleted_during_load: HashSet<String>,
     pub tasks: JoinSet<Result<MessagePage, Failure>>,
     pub(super) attachments: AttachmentWork,
@@ -135,15 +150,17 @@ pub(super) struct ChatSession {
 impl ChatSession {
     pub fn view(&self) -> Option<ChatView> {
         let mut view = self.selected.clone()?;
-        // Hide cached DM content until SPK confirms access during a refresh.
+        // Hide cached DM content until SPK confirms access to the conversation.
         if view.direct_message_peer.is_some()
             && view.history != History::Ready
             && matches!(
                 self.history,
-                Some(HistoryRequest::Refresh | HistoryRequest::Latest)
+                Some(HistoryRequest::Refresh | HistoryRequest::Latest | HistoryRequest::Around(_))
             )
         {
             view.messages = Arc::default();
+            view.pins = None;
+            view.preview_images = PreviewImages::default();
             view.has_more_before = false;
             view.has_more_after = false;
         } else if !view.unavailable() {
@@ -160,15 +177,29 @@ impl ChatSession {
     }
 
     pub fn open(&mut self, client: &SpkClient, channel: &Channel) {
-        if self
-            .selected
-            .as_ref()
-            .is_some_and(|chat| chat.channel_id == channel.id && !chat.unavailable())
-        {
-            return;
+        if self.select(channel) {
+            self.load(client, HistoryRequest::Refresh);
+        }
+    }
+
+    pub fn open_target(&mut self, client: &SpkClient, channel: &Channel, message_id: String) {
+        self.select(channel);
+        if let Some(view) = &mut self.selected {
+            Arc::make_mut(&mut view.messages).retain(|message| message.id != message_id);
+            view.jump = None;
+        }
+        self.load(client, HistoryRequest::Around(message_id));
+    }
+
+    fn select(&mut self, channel: &Channel) -> bool {
+        if self.selected.as_ref().is_some_and(|chat| {
+            chat.channel_id == channel.id && !chat.unavailable() && !chat.jump_failed
+        }) {
+            return false;
         }
         self.typers.clear();
         self.last_typing = None;
+        self.reset_actions();
         self.selected = Some(ChatView {
             channel_id: channel.id.clone(),
             direct_message_peer: channel
@@ -186,19 +217,29 @@ impl ChatSession {
             jump: None,
             jump_failed: false,
             outgoing: None,
+            pins: None,
+            preview_images: PreviewImages::default(),
+            action_pending: false,
+            action_outcome: None,
             history: History::Loading,
         });
-        self.load(client, HistoryRequest::Refresh);
+        true
     }
 
     pub fn close(&mut self) {
         self.cancel_history();
+        self.reset_actions();
         self.selected = None;
         self.typers.clear();
     }
 
     pub fn connected(&mut self, client: &SpkClient, socket: VoiceSocket) {
         self.socket = Some(socket);
+        if matches!(self.history, Some(HistoryRequest::Around(_)))
+            && self.selected.as_ref().is_some_and(ChatView::loading)
+        {
+            return;
+        }
         if self
             .selected
             .as_ref()
@@ -265,6 +306,7 @@ impl ChatSession {
     fn cancel_history(&mut self) {
         self.tasks = JoinSet::new();
         self.buffered.clear();
+        self.buffered_changes.clear();
         self.deleted_during_load.clear();
     }
 
@@ -327,13 +369,21 @@ impl ChatSession {
                         }
                     }
                 }
+                for (id, change) in self.buffered_changes.drain(..) {
+                    change_message(&mut view.messages, &id, &change);
+                }
                 view.has_more_before = page.has_more_before;
                 view.history = History::Ready;
+                if matches!(request, HistoryRequest::Refresh | HistoryRequest::Latest)
+                    || matches!(view.pins, Some(Pins::Loading))
+                {
+                    self.refresh_pins(client);
+                }
+                self.prune_previews();
             }
             Err(error) => {
-                if matches!(request, HistoryRequest::Around(_))
-                    && matches!(error, Failure::Http(reqwest::StatusCode::NOT_FOUND))
-                {
+                let jump = matches!(request, HistoryRequest::Around(_));
+                if jump && matches!(error, Failure::Http(reqwest::StatusCode::NOT_FOUND)) {
                     view.history = History::Ready;
                     view.jump = None;
                     view.jump_failed = true;
@@ -347,6 +397,10 @@ impl ChatSession {
                 }
                 if matches!(error, Failure::Http(reqwest::StatusCode::FORBIDDEN)) {
                     view.messages = Arc::default();
+                    view.pins = None;
+                    view.preview_images = PreviewImages::default();
+                    self.pin_tasks = JoinSet::new();
+                    self.preview_tasks = JoinSet::new();
                     view.has_more_before = false;
                     view.has_more_after = false;
                     if view.direct_message_peer.is_some() {
@@ -357,6 +411,9 @@ impl ChatSession {
                             }
                         }
                         self.typers.clear();
+                    }
+                    view.jump_failed = jump;
+                    if view.direct_message_peer.is_some() || view.jump_failed {
                         view.history = History::Unavailable;
                         self.buffered.clear();
                         return;
@@ -627,7 +684,6 @@ impl ChatSession {
                 self.deleted_during_load.insert(id.to_owned());
                 remove_message(&mut self.buffered, id);
             }
-            remove_message(Arc::make_mut(&mut view.messages), id);
         }
     }
 
