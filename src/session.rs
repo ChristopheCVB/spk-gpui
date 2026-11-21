@@ -9,6 +9,7 @@ mod profiles;
 mod radio;
 mod search;
 mod soundboard;
+mod soundboard_admin;
 mod unread;
 mod voice_session;
 
@@ -49,6 +50,7 @@ use profiles::Work as ProfileWork;
 use radio::{RadioSession, RadioView};
 use search::{SearchSession, SearchView};
 use soundboard::{SoundboardSession, SoundboardView};
+use soundboard_admin::{AdminSoundboard, SoundboardAdminView};
 use unread::{Mark, UnreadSession};
 use voice_session::{DeviceSettings, StartCall, VoiceDestination, VoiceSession};
 pub use {
@@ -64,6 +66,7 @@ pub use {
     presence::Participant,
     profiles::ProfileEdit,
     radio::RadioPlayback,
+    soundboard_admin::{SoundboardAdminAction, SoundboardCrop},
     voice_session::VoiceView,
 };
 
@@ -165,6 +168,11 @@ pub enum Command {
         channel_id: String,
         shown: bool,
     },
+    LoadChangelog {
+        page: u32,
+        head: Option<String>,
+        reply: oneshot::Sender<Result<crate::api::ChangelogPage, Failure>>,
+    },
     SaveNickname(String),
     UploadAvatar(PathBuf),
     InspectProfileEmail(String, oneshot::Sender<Option<String>>),
@@ -192,6 +200,7 @@ pub enum Command {
     ListenToRadio,
     SetRadioVolume(u8),
     LoadSoundboard,
+    AdminSoundboard(SoundboardAdminAction),
     PlaySound(String),
     PreviewSound(String),
     SetSoundboardEnabled(bool),
@@ -264,6 +273,7 @@ pub struct Sidebar {
     pub voice: Option<VoiceView>,
     pub radio: RadioView,
     pub soundboard: SoundboardView,
+    pub admin_soundboard: SoundboardAdminView,
     pub channel_radio: HashMap<String, String>,
     switching_to: Option<VoiceDestination>,
     pub voice_notice: Option<&'static str>,
@@ -301,6 +311,7 @@ impl Sidebar {
             voice: None,
             radio: RadioView::default(),
             soundboard: SoundboardView::default(),
+            admin_soundboard: SoundboardAdminView::default(),
             channel_radio: HashMap::new(),
             switching_to: None,
             voice_notice: None,
@@ -564,12 +575,14 @@ async fn watch_session(
     let mut unread = UnreadSession::default();
     unread.refresh(client);
     let mut direct_message_opens = JoinSet::new();
+    let mut changelog_pages = JoinSet::new();
     let mut voice = VoiceSession::default();
     let mut radio = RadioSession::default();
     let mut search = SearchSession::default();
     let mut pending_message_target = None;
     let mut alerts = LiveAlerts::default();
     let mut soundboard = SoundboardSession::default();
+    let mut admin_soundboard = AdminSoundboard::default();
     let mut camera_previews = JoinSet::new();
     let mut voice_moderation = JoinSet::new();
     let mut channel_mutations = JoinSet::new();
@@ -587,6 +600,7 @@ async fn watch_session(
         sidebar.voice_moderation_pending = !voice_moderation.is_empty();
         radio.sync(&mut sidebar, &voice);
         soundboard.sync(&mut sidebar, &voice);
+        admin_soundboard.sync(&mut sidebar);
         voice.start_pending(&mut sidebar, client, &settings.start_call);
         let mut next = sidebar.clone();
         next.alerts = std::mem::take(&mut alerts.ready);
@@ -813,6 +827,15 @@ async fn watch_session(
                         refresh.fetch(client, Resource::Channels);
                     }
                 }
+                Ok(Command::LoadChangelog { page, head, reply }) => {
+                    let client = client.clone();
+                    changelog_pages.spawn(async move {
+                        let result = client.changelog(page, head.as_deref()).await;
+                        let expired = result.as_ref().is_err_and(Failure::unauthorized);
+                        let _ = reply.send(result);
+                        expired
+                    });
+                }
                 Ok(Command::RetryChatSend) => chat.retry_send(),
                 Ok(Command::DismissChatSend) => chat.dismiss_send(),
                 Ok(Command::MutateChatMessage { channel_id, message_id, action }) => {
@@ -837,6 +860,7 @@ async fn watch_session(
                 Ok(command @ (Command::LoadSoundboard | Command::PlaySound(_) | Command::PreviewSound(_))) => {
                     soundboard.command(&mut sidebar, &voice, client, command);
                 }
+                Ok(Command::AdminSoundboard(action)) => admin_soundboard.command(&mut sidebar, client, action),
                 Ok(Command::PreviewCamera(frames)) => {
                     if !sidebar.camera_publishing() {
                         camera_previews.shutdown().await;
@@ -850,6 +874,11 @@ async fn watch_session(
                     voice.apply_controls(&mut sidebar, settings, command).await;
                 }
             },
+            Some(result) = changelog_pages.join_next() => {
+                if matches!(result, Ok(true)) {
+                    break SessionEnd::Invalidated(SESSION_EXPIRED);
+                }
+            }
             Some(_) = camera_previews.join_next() => {}
             Some(result) = channel_mutations.join_next() => {
                 let result = result.unwrap_or(Err(Failure::Connection));
@@ -1068,8 +1097,22 @@ async fn watch_session(
                 }
             }
             Some(Ok((id, result))) = soundboard.tasks.join_next_with_id() => {
-                if soundboard.complete(&mut sidebar.soundboard, id, result).is_err_and(|error| error.unauthorized()) {
+                if soundboard.complete(&mut sidebar.soundboard, client, id, result).is_err_and(|error| error.unauthorized()) {
                     break SessionEnd::Invalidated(SESSION_EXPIRED);
+                }
+            }
+            Some(Ok(result)) = admin_soundboard.tasks.join_next() => {
+                if admin_soundboard.complete(&mut sidebar.admin_soundboard, result).is_err() {
+                    break SessionEnd::Invalidated(SESSION_EXPIRED);
+                }
+            }
+            Some(Ok((kind, result))) = admin_soundboard.mutations.join_next() => {
+                match admin_soundboard.mutated(&mut sidebar.admin_soundboard, client, kind, result) {
+                    Ok(true) if sidebar.soundboard.clips.is_some() || sidebar.soundboard.loading => {
+                        soundboard.refresh(&mut sidebar.soundboard, client);
+                    }
+                    Ok(_) => {}
+                    Err(_) => break SessionEnd::Invalidated(SESSION_EXPIRED),
                 }
             }
             Some(result) = account_admin.loads.join_next() => {
@@ -1174,6 +1217,7 @@ async fn watch_session(
     drop(chat);
     camera_previews.shutdown().await;
     drop(soundboard);
+    drop(admin_soundboard);
     drop(radio);
     voice.stop().await;
     end

@@ -5,6 +5,7 @@ mod chat_actions;
 mod gifs;
 mod public_media;
 mod search;
+mod soundboard_admin;
 
 pub use account_admin::{
     AccountRole, AdminDirectory, AdminUser, Invite, InviteStatus, IssuedAccountLink,
@@ -15,6 +16,7 @@ pub use chat_actions::{LinkPreview, MessageAction, MessageChange, Reaction};
 pub use gifs::{GifItem, GifPage, gif_message_url};
 pub(crate) use public_media::{PublicDns, public_media_url};
 pub use search::{MessageTarget, SearchHit, SearchPage, SearchScope};
+pub use soundboard_admin::MAX_SOUND_BYTES;
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
@@ -88,6 +90,25 @@ impl Profile {
             .filter(|name| !name.is_empty())
             .unwrap_or(&self.email)
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangelogPage {
+    pub commits: Vec<ChangelogEntry>,
+    pub head: Option<String>,
+    pub next_page: Option<u32>,
+}
+
+#[derive(Deserialize)]
+pub struct ChangelogEntry {
+    pub sha: String,
+    pub message: String,
+    pub date: String,
+}
+
+fn commit_sha(value: &str) -> bool {
+    value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 #[derive(Clone, Deserialize)]
@@ -796,6 +817,28 @@ impl SpkClient {
             .map(|entry| entry.email))
     }
 
+    pub async fn changelog(&self, page: u32, head: Option<&str>) -> Result<ChangelogPage, Failure> {
+        let mut url = self.base.join("/api/changelog").expect("fixed SPK path");
+        url.query_pairs_mut().append_pair("page", &page.to_string());
+        if let Some(head) = head {
+            url.query_pairs_mut().append_pair("head", head);
+        }
+        let response = Self::send(self.http.get(url).header(header::ORIGIN, &self.origin)).await?;
+        let result: ChangelogPage = response
+            .json()
+            .await
+            .map_err(|_| Failure::InvalidResponse)?;
+        if result.head.as_deref().is_some_and(|head| !commit_sha(head))
+            || result
+                .next_page
+                .is_some_and(|next| next <= page || result.head.is_none())
+            || result.commits.iter().any(|entry| !commit_sha(&entry.sha))
+        {
+            return Err(Failure::InvalidResponse);
+        }
+        Ok(result)
+    }
+
     pub async fn channels(&self) -> Result<Vec<Channel>, Failure> {
         self.get("/api/channels").await
     }
@@ -956,7 +999,7 @@ impl SpkClient {
             .filter(signed_storage_url)
             .ok_or(Failure::InvalidResponse)?;
         // A storage response cannot expire the authenticated SPK session.
-        self.storage_bytes(url, 3 * 1024 * 1024)
+        self.storage_bytes(url, MAX_SOUND_BYTES)
             .await
             .map_err(|_| Failure::InvalidResponse)
     }

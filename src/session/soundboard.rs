@@ -35,6 +35,7 @@ pub(super) struct SoundboardSession {
     output: Option<watch::Sender<MediaOutput>>,
     playback: HashMap<Id, (bool, AbortHandle)>,
     pub tasks: JoinSet<SoundboardResult>,
+    reload: bool,
 }
 
 impl SoundboardSession {
@@ -60,15 +61,7 @@ impl SoundboardSession {
                 *preview
             });
         }
-        let output = MediaOutput {
-            device: sidebar
-                .devices
-                .media_outputs
-                .resolve(preferred.media_output.as_ref())
-                .cloned(),
-            volume: preferred.output_gain() * f32::from(preferred.soundboard_volume.min(100))
-                / 100.0,
-        };
+        let output = soundboard_output(sidebar);
         if let Some(settings) = &self.output {
             settings.send_if_modified(|current| {
                 if *current == output {
@@ -137,14 +130,7 @@ impl SoundboardSession {
         }
         let board = &mut sidebar.soundboard;
         match command {
-            Command::LoadSoundboard if !board.loading => {
-                board.loading = true;
-                board.directory_error = None;
-                let client = client.clone();
-                self.tasks.spawn(async move {
-                    SoundboardResult::Directory(client.soundboard_clips().await)
-                });
-            }
+            Command::LoadSoundboard => self.refresh(board, client),
             command @ (Command::PlaySound(_) | Command::PreviewSound(_)) => {
                 let (id, preview) = match command {
                     Command::PlaySound(id) => (id, false),
@@ -195,15 +181,33 @@ impl SoundboardSession {
         }
     }
 
+    pub fn refresh(&mut self, board: &mut SoundboardView, client: &SpkClient) {
+        if board.loading {
+            self.reload = true;
+            return;
+        }
+        board.loading = true;
+        board.directory_error = None;
+        let client = client.clone();
+        self.tasks
+            .spawn(async move { SoundboardResult::Directory(client.soundboard_clips().await) });
+    }
+
     pub fn complete(
         &mut self,
         board: &mut SoundboardView,
+        client: &SpkClient,
         id: Id,
         result: SoundboardResult,
     ) -> Result<(), Failure> {
         match result {
             SoundboardResult::Directory(result) => {
                 board.loading = false;
+                if std::mem::take(&mut self.reload)
+                    && !result.as_ref().is_err_and(Failure::unauthorized)
+                {
+                    self.refresh(board, client);
+                }
                 match result {
                     Ok(clips) => board.clips = Some(clips.into()),
                     Err(error) => {
@@ -228,5 +232,17 @@ impl SoundboardSession {
             SoundboardResult::Cooled => board.cooling = false,
         }
         Ok(())
+    }
+}
+
+pub(super) fn soundboard_output(sidebar: &Sidebar) -> MediaOutput {
+    let preferred = &sidebar.voice_intent.preferred;
+    MediaOutput {
+        device: sidebar
+            .devices
+            .media_outputs
+            .resolve(preferred.media_output.as_ref())
+            .cloned(),
+        volume: preferred.output_gain() * f32::from(preferred.soundboard_volume.min(100)) / 100.0,
     }
 }

@@ -38,11 +38,11 @@ fn call_status(call: &VoiceView, switching: bool) -> &'static str {
     }
 }
 
-fn channel_name(channel: &Channel) -> &str {
+pub(super) fn channel_name(channel: &Channel) -> &str {
     channel.name.as_deref().unwrap_or("Unnamed channel")
 }
 
-fn voice_channels(sidebar: &Sidebar) -> impl Iterator<Item = &Channel> {
+pub(super) fn voice_channels(sidebar: &Sidebar) -> impl Iterator<Item = &Channel> {
     sidebar
         .channels
         .iter()
@@ -51,6 +51,12 @@ fn voice_channels(sidebar: &Sidebar) -> impl Iterator<Item = &Channel> {
 }
 
 impl Spk {
+    pub(super) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_open = !self.sidebar_open;
+        self.device_picker = None;
+        cx.notify();
+    }
+
     pub(super) fn workspace(&self, sidebar: &Sidebar, cx: &mut Context<Self>) -> impl IntoElement {
         let selected_channel = voice_channels(sidebar)
             .find(|channel| Some(channel.id.as_str()) == self.selected_voice_channel.as_deref())
@@ -137,13 +143,9 @@ impl Spk {
                                             "Show sidebar"
                                         },
                                     )
-                                    .on_click(cx.listener(
-                                        |this, _, _, cx| {
-                                            this.sidebar_open = !this.sidebar_open;
-                                            this.device_picker = None;
-                                            cx.notify();
-                                        },
-                                    )),
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)),
+                                    ),
                                 )
                                 .child(themed_icon(stage_icon, theme.muted_foreground, 16.0))
                                 .child(Label::new(stage_name.to_owned()).font_semibold())
@@ -323,7 +325,11 @@ impl Spk {
                                                             &name, counts,
                                                         ))
                                                         .w_full()
-                                                        .h_8()
+                                                        .h(if self.compact() {
+                                                            px(26.0)
+                                                        } else {
+                                                            px(32.0)
+                                                        })
                                                         .when(
                                                             active || counts.mentions > 0,
                                                             |button| {
@@ -507,7 +513,7 @@ impl Spk {
                 div()
                     .flex()
                     .items_center()
-                    .h_8()
+                    .h(if self.compact() { px(26.0) } else { px(32.0) })
                     .rounded_md()
                     .pr_1()
                     .when(active, |row| row.bg(theme.primary.opacity(0.10)))
@@ -520,7 +526,7 @@ impl Spk {
                             .accessibility_label(name.clone())
                             .flex_1()
                             .min_w_0()
-                            .h_8()
+                            .h(if self.compact() { px(26.0) } else { px(32.0) })
                             .when(active, |button| button.bg(theme.transparent))
                             .child(Label::new(name.clone()).w_full().truncate().text_color(
                                 if active {
@@ -561,7 +567,7 @@ impl Spk {
                     .gap_2()
                     .pl_6()
                     .pr_2()
-                    .h_6()
+                    .h(if self.compact() { px(20.0) } else { px(24.0) })
                     .child(profile_avatar(
                         Avatar::new().name(person.name.to_owned()).xsmall(),
                         sidebar.avatar(Some(person.id)),
@@ -589,7 +595,7 @@ impl Spk {
             }))
     }
 
-    fn select_voice_channel(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub(super) fn select_voice_channel(&mut self, id: &str, cx: &mut Context<Self>) {
         self.selected_voice_channel = Some(id.to_owned());
         self.send(Command::CloseChat, None, cx);
         self.device_picker = None;
@@ -667,8 +673,12 @@ impl Spk {
                             .flex_wrap()
                             .items_center()
                             .justify_center()
-                            .gap_3()
-                            .when(theater.is_none(), |tiles| tiles.p_4().my_auto())
+                            .gap(if self.compact() { px(6.0) } else { px(12.0) })
+                            .when(theater.is_none(), |tiles| {
+                                tiles
+                                    .p(if self.compact() { px(8.0) } else { px(16.0) })
+                                    .my_auto()
+                            })
                             .when(theater.is_some(), |tiles| {
                                 tiles
                                     .flex_1()
@@ -854,8 +864,23 @@ impl Spk {
                 )
         };
         let (image, camera_inset) = self.video_images(&participant, is_me);
+        let hover_id = participant.id.to_owned();
+        let key_id = hover_id.clone();
         div()
             .id(SharedString::from(participant.id.to_owned()))
+            .focusable()
+            .tab_index(0)
+            .focus_visible(|tile| tile.border_color(theme.primary))
+            .on_hover(cx.listener(move |app, hovered: &bool, _, _| {
+                if *hovered {
+                    app.video_stage.hovered = Some(hover_id.clone());
+                } else if app.video_stage.hovered.as_deref() == Some(&hover_id) {
+                    app.video_stage.hovered = None;
+                }
+            }))
+            .on_key_down(cx.listener(move |app, event, window, cx| {
+                app.video_tile_key(&key_id, event, window, cx)
+            }))
             .relative()
             .flex()
             .items_center()
@@ -863,7 +888,10 @@ impl Spk {
             .role(Role::Group)
             .when(speaking, |tile| tile.aria_description("Speaking"))
             .when(theater, |tile| tile.size_full())
-            .when(!theater, |tile| tile.w(px(320.0)).max_w_full().h(px(180.0)))
+            .when(!theater, |tile| {
+                let width = if self.compact() { 256.0 } else { 320.0 };
+                tile.w(px(width)).max_w_full().h(px(width * 9.0 / 16.0))
+            })
             .overflow_hidden()
             .border_1()
             .border_color(if speaking {

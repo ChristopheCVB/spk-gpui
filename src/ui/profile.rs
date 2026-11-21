@@ -87,7 +87,7 @@ impl Spk {
             .id(SharedString::from(format!("person-{id}")))
             .flex()
             .items_center()
-            .h_8()
+            .h(if self.compact() { px(26.0) } else { px(32.0) })
             .gap_1()
             .child(
                 Button::new("open-direct-message")
@@ -99,7 +99,7 @@ impl Spk {
                         &format!("Direct message {name}, {}", status.label()),
                         counts,
                     ))
-                    .h_8()
+                    .h(if self.compact() { px(26.0) } else { px(32.0) })
                     .flex_1()
                     .min_w_0()
                     .when(active || counts.mentions > 0, |button| {

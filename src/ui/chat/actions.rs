@@ -49,7 +49,7 @@ impl Spk {
         }
     }
 
-    fn begin_message_action(
+    pub(super) fn begin_message_action(
         &mut self,
         channel_id: &str,
         message_id: &str,

@@ -330,7 +330,7 @@ async fn channel_changes_reach_another_session_and_close_removed_channels() {
     http.abort();
 }
 
-fn start_peer(
+pub(super) fn start_peer(
     base: &Url,
     socket_url: &str,
     id: &str,

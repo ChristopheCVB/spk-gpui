@@ -7,10 +7,12 @@ use std::{
 mod account_admin;
 mod audio;
 mod camera;
+mod changelog;
 mod channels;
 mod notifications;
 mod profile;
 mod shortcuts;
+mod soundboard_admin;
 
 use gpui_kit::component::{
     Theme, ThemeMode, ThemeRegistry, WindowExt,
@@ -34,13 +36,8 @@ pub enum Appearance {
 }
 
 impl Appearance {
-    fn path() -> Option<PathBuf> {
-        Some(dirs::config_dir()?.join("spk-gpui").join("appearance"))
-    }
-
     pub fn load() -> Self {
-        Self::path()
-            .and_then(|path| fs::read_to_string(path).ok())
+        load_preference(preference_path("appearance"))
             .as_deref()
             .map_or_else(Self::default, Self::from_preference)
     }
@@ -61,14 +58,8 @@ impl Appearance {
         }
     }
 
-    fn save(self) -> io::Result<()> {
-        let path = Self::path().ok_or_else(|| io::Error::other("Missing config directory"))?;
-        let directory = path.parent().expect("appearance file has a parent");
-        fs::create_dir_all(directory)?;
-        let mut file = tempfile::NamedTempFile::new_in(directory)?;
-        file.write_all(self.label().as_bytes())?;
-        file.persist(path)?;
-        Ok(())
+    pub(super) fn save(self) -> io::Result<()> {
+        save_preference(preference_path("appearance"), self.label())
     }
 
     pub fn apply(self, window: &Window, cx: &mut App) {
@@ -87,6 +78,73 @@ impl Appearance {
     }
 }
 
+fn preference_path(name: &str) -> Option<PathBuf> {
+    Some(dirs::config_dir()?.join("spk-gpui").join(name))
+}
+
+fn load_preference(path: Option<PathBuf>) -> Option<String> {
+    fs::read_to_string(path?).ok()
+}
+
+fn save_preference(path: Option<PathBuf>, value: &str) -> io::Result<()> {
+    let path = path.ok_or_else(|| io::Error::other("Missing config directory"))?;
+    let directory = path.parent().expect("preference file has a parent");
+    fs::create_dir_all(directory)?;
+    let mut file = tempfile::NamedTempFile::new_in(directory)?;
+    file.write_all(value.as_bytes())?;
+    file.persist(path)?;
+    Ok(())
+}
+
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
+pub(super) enum Density {
+    #[default]
+    Comfortable,
+    Compact,
+}
+
+impl Density {
+    pub(super) fn load() -> Self {
+        Self::load_from(preference_path("density"))
+    }
+
+    fn load_from(path: Option<PathBuf>) -> Self {
+        match load_preference(path).as_deref() {
+            Some("Compact") => Self::Compact,
+            _ => Self::Comfortable,
+        }
+    }
+
+    fn save_to(self, path: Option<PathBuf>) -> io::Result<()> {
+        save_preference(path, self.label())
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Comfortable => "Comfortable",
+            Self::Compact => "Compact",
+        }
+    }
+}
+
+impl Spk {
+    pub(super) fn set_appearance(
+        &mut self,
+        appearance: Appearance,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.appearance = appearance;
+        self.appearance_error = appearance.save().is_err();
+        appearance.apply(window, cx);
+        cx.notify();
+    }
+
+    pub(super) fn compact(&self) -> bool {
+        self.density == Density::Compact
+    }
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Tab {
     Profile,
@@ -94,14 +152,19 @@ enum Tab {
     Voice,
     Notifications,
     Shortcuts,
+    Changelog,
     Invites,
     Users,
     Channels,
+    Soundboard,
 }
 
 impl Tab {
     fn requires_admin(self) -> bool {
-        matches!(self, Self::Invites | Self::Users | Self::Channels)
+        matches!(
+            self,
+            Self::Invites | Self::Users | Self::Channels | Self::Soundboard
+        )
     }
 }
 
@@ -144,6 +207,7 @@ impl Spk {
             cx.observe(&spk, |settings, _, cx| {
                 settings.sync_account_admin(cx);
                 settings.sync_channel_form(cx);
+                settings.sync_soundboard_form(cx);
                 settings.sync_mic_test(cx);
                 settings.sync_camera_preview(cx);
                 cx.notify();
@@ -217,6 +281,7 @@ impl Spk {
             Settings {
                 spk,
                 tab: Tab::Profile,
+                changelog: Default::default(),
                 nickname,
                 invite_note,
                 ban_reason,
@@ -236,6 +301,7 @@ impl Spk {
                 playback_pending: false,
                 audio_test_error: None,
                 camera: camera::Preview::default(),
+                soundboard: soundboard_admin::SoundboardForm::new(window, cx),
             }
         });
         cx.observe_release_in(&content, window, |this, settings, window, cx| {
@@ -243,6 +309,13 @@ impl Spk {
             if settings.tab.admin_page().is_some() && matches!(this.view, View::SignedIn(_)) {
                 this.send(
                     Command::AdminAccounts(AdminAccountAction::Show(None)),
+                    None,
+                    cx,
+                );
+            }
+            if settings.tab == Tab::Soundboard && matches!(this.view, View::SignedIn(_)) {
+                this.send(
+                    Command::AdminSoundboard(crate::session::SoundboardAdminAction::Close),
                     None,
                     cx,
                 );
@@ -269,6 +342,7 @@ impl Spk {
 struct Settings {
     spk: Entity<Spk>,
     tab: Tab,
+    changelog: changelog::History,
     nickname: Entity<InputState>,
     invite_note: Entity<InputState>,
     ban_reason: Entity<InputState>,
@@ -288,6 +362,7 @@ struct Settings {
     playback_pending: bool,
     audio_test_error: Option<&'static str>,
     camera: camera::Preview,
+    soundboard: soundboard_admin::SoundboardForm,
 }
 
 impl Render for Settings {
@@ -307,6 +382,7 @@ impl Render for Settings {
             Tab::Voice => self.audio(sidebar, cx).into_any_element(),
             Tab::Notifications => self.notifications(cx).into_any_element(),
             Tab::Shortcuts => self.shortcuts(cx).into_any_element(),
+            Tab::Changelog => self.changelog(cx).into_any_element(),
             Tab::Invites | Tab::Users => self
                 .manage_accounts(
                     self.tab.admin_page().expect("admin account tab"),
@@ -315,6 +391,7 @@ impl Render for Settings {
                 )
                 .into_any_element(),
             Tab::Channels => self.channels(sidebar, cx).into_any_element(),
+            Tab::Soundboard => self.soundboard_admin(sidebar, cx).into_any_element(),
         };
         div()
             .size_full()
@@ -377,9 +454,11 @@ impl Render for Settings {
                                     (Tab::Voice, "Voice & Video", IconName::Mic),
                                     (Tab::Notifications, "Notifications", IconName::Bell),
                                     (Tab::Shortcuts, "Shortcuts", IconName::Settings2),
+                                    (Tab::Changelog, "Changelog", IconName::FileText),
                                     (Tab::Invites, "Invites", IconName::Link),
                                     (Tab::Users, "Users", IconName::Users),
                                     (Tab::Channels, "Channels", IconName::Hash),
+                                    (Tab::Soundboard, "Soundboard", IconName::Megaphone),
                                 ]
                                 .into_iter()
                                 .filter(|(tab, _, _)| !tab.requires_admin() || sidebar.is_admin())
@@ -426,7 +505,24 @@ impl Render for Settings {
                                                     cx,
                                                 );
                                             }
+                                            if this.tab != tab {
+                                                use crate::session::SoundboardAdminAction;
+                                                if this.tab == Tab::Soundboard {
+                                                    this.soundboard_action(
+                                                        SoundboardAdminAction::Close,
+                                                        cx,
+                                                    );
+                                                } else if tab == Tab::Soundboard {
+                                                    this.soundboard_action(
+                                                        SoundboardAdminAction::Show,
+                                                        cx,
+                                                    );
+                                                }
+                                            }
                                             this.tab = tab;
+                                            if tab == Tab::Changelog && this.changelog.initial() {
+                                                this.load_changelog(cx);
+                                            }
                                             this.sync_mic_test(cx);
                                             this.sync_camera_preview(cx);
                                             if tab == Tab::Voice {
@@ -503,51 +599,104 @@ fn card(title: &'static str, body: impl IntoElement, cx: &App) -> impl IntoEleme
 
 impl Settings {
     fn appearance(&self, app: &Spk, cx: &App) -> impl IntoElement {
-        card(
-            "Theme",
-            div()
-                .flex()
-                .flex_col()
-                .gap_3()
-                .child(
-                    div().flex().flex_wrap().gap_2().children(
-                        [Appearance::Dark, Appearance::Light, Appearance::System]
-                            .into_iter()
-                            .map(|appearance| {
-                                let spk = self.spk.downgrade();
-                                let active = app.appearance == appearance;
-                                Button::new(appearance.label())
-                                    .small()
-                                    .w(px(88.0))
-                                    .label(appearance.label())
-                                    .tab_stop(true)
-                                    .selected(active)
-                                    .when(active, |button| button.icon(IconName::Check))
-                                    .on_click(move |_, window, cx| {
-                                        let _ = spk.update(cx, |app, cx| {
-                                            app.appearance = appearance;
-                                            app.appearance_error = appearance.save().is_err();
-                                            appearance.apply(window, cx);
-                                            cx.notify();
-                                        });
-                                    })
-                            }),
-                    ),
-                )
-                .when(app.appearance_error, |body| {
-                    body.child(
-                        Label::new("Could not save your theme preference.")
-                            .text_color(cx.theme().danger),
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(card(
+                "Density",
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div().flex().flex_wrap().gap_2().children(
+                            [Density::Comfortable, Density::Compact]
+                                .into_iter()
+                                .map(|density| {
+                                    let spk = self.spk.downgrade();
+                                    let active = app.density == density;
+                                    Button::new(density.label())
+                                        .small()
+                                        .label(density.label())
+                                        .tab_stop(true)
+                                        .selected(active)
+                                        .when(active, |button| button.icon(IconName::Check))
+                                        .on_click(move |_, _, cx| {
+                                            let _ = spk.update(cx, |app, cx| {
+                                                app.density = density;
+                                                app.density_error = density
+                                                    .save_to(preference_path("density"))
+                                                    .is_err();
+                                                cx.notify();
+                                            });
+                                        })
+                                }),
+                        ),
                     )
-                }),
-            cx,
-        )
+                    .when(app.density_error, |body| {
+                        body.child(
+                            Label::new("Could not save your density preference.")
+                                .text_color(cx.theme().danger),
+                        )
+                    }),
+                cx,
+            ))
+            .child(card(
+                "Theme",
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div().flex().flex_wrap().gap_2().children(
+                            [Appearance::Dark, Appearance::Light, Appearance::System]
+                                .into_iter()
+                                .map(|appearance| {
+                                    let spk = self.spk.downgrade();
+                                    let active = app.appearance == appearance;
+                                    Button::new(appearance.label())
+                                        .small()
+                                        .w(px(88.0))
+                                        .label(appearance.label())
+                                        .tab_stop(true)
+                                        .selected(active)
+                                        .when(active, |button| button.icon(IconName::Check))
+                                        .on_click(move |_, window, cx| {
+                                            let _ = spk.update(cx, |app, cx| {
+                                                app.set_appearance(appearance, window, cx);
+                                            });
+                                        })
+                                }),
+                        ),
+                    )
+                    .when(app.appearance_error, |body| {
+                        body.child(
+                            Label::new("Could not save your theme preference.")
+                                .text_color(cx.theme().danger),
+                        )
+                    }),
+                cx,
+            ))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Appearance;
+    use super::{Appearance, Density};
+
+    #[test]
+    fn density_defaults_to_comfortable_and_restores_saved_choices() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("density");
+        assert!(Density::load_from(Some(path.clone())) == Density::Comfortable);
+        for choice in [Density::Compact, Density::Comfortable] {
+            Density::save_to(choice, Some(path.clone())).unwrap();
+            assert!(Density::load_from(Some(path.clone())) == choice);
+        }
+        std::fs::write(&path, "unknown").unwrap();
+        assert!(Density::load_from(Some(path)) == Density::Comfortable);
+    }
 
     #[test]
     fn appearance_defaults_to_dark_and_restores_saved_modes() {

@@ -20,10 +20,22 @@ struct SearchPanel {
     query: Entity<InputState>,
     scopes: Vec<(SearchScope, &'static str)>,
     selected: usize,
+    selected_result: Option<MessageTarget>,
+    results_scroll: ScrollHandle,
+    _keyboard: Subscription,
 }
 
 impl Spk {
     pub(super) fn open_message_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_search(false, window, cx);
+    }
+
+    pub(super) fn open_search(
+        &mut self,
+        everything: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let View::SignedIn(sidebar) = &self.view else {
             return;
         };
@@ -48,23 +60,56 @@ impl Spk {
                 (SearchScope::Everything, "Everything"),
             ])
             .collect::<Vec<_>>();
+        let selected = if everything { scopes.len() - 1 } else { 0 };
         let query = cx.new(|cx| InputState::new(window, cx).placeholder("Search messages"));
         let spk = cx.entity();
         let panel_query = query.clone();
         let panel = cx.new(|cx: &mut Context<SearchPanel>| {
             cx.observe(&spk, |_, _, cx| cx.notify()).detach();
             cx.subscribe(&panel_query, |this, _, event, cx| {
-                if matches!(event, InputEvent::PressEnter { .. }) {
-                    this.search(cx);
+                if matches!(event, InputEvent::Change) {
+                    this.selected_result = None;
+                    cx.notify();
                 }
-                cx.notify();
             })
             .detach();
+            let panel = cx.weak_entity();
+            let window_id = window.window_handle().window_id();
+            let keyboard = cx.intercept_keystrokes(move |event, window, cx| {
+                let key = &event.keystroke;
+                if window.window_handle().window_id() == window_id
+                    && !key.modifiers.modified()
+                    && matches!(key.key.as_str(), "up" | "down" | "enter")
+                    && panel
+                        .update(cx, |panel, cx| {
+                            if !panel.query.focus_handle(cx).is_focused(window) {
+                                return false;
+                            }
+                            if key.key == "enter" {
+                                if let Some(target) = panel.selected_result.clone() {
+                                    panel.open_result(target, window, cx);
+                                } else {
+                                    panel.search(cx);
+                                }
+                                true
+                            } else {
+                                panel.step_result(key.key == "up", cx)
+                            }
+                        })
+                        .unwrap_or(false)
+                {
+                    cx.stop_propagation();
+                    window.prevent_default();
+                }
+            });
             SearchPanel {
                 spk,
                 query: panel_query,
                 scopes,
-                selected: 0,
+                selected,
+                selected_result: None,
+                results_scroll: ScrollHandle::new(),
+                _keyboard: keyboard,
             }
         });
         self.send(
@@ -91,12 +136,45 @@ impl Spk {
 }
 
 impl SearchPanel {
-    fn search(&self, cx: &mut Context<Self>) {
+    fn search(&mut self, cx: &mut Context<Self>) {
+        self.selected_result = None;
         let query = self.query.read(cx).value().to_string();
         let scope = self.scopes[self.selected].0.clone();
         self.spk.update(cx, |spk, cx| {
             spk.send(Command::SearchMessages { query, scope }, None, cx)
         });
+    }
+
+    fn step_result(&mut self, backwards: bool, cx: &mut Context<Self>) -> bool {
+        let View::SignedIn(sidebar) = &self.spk.read(cx).view else {
+            return false;
+        };
+        let results = &sidebar.search.results;
+        if results.is_empty() || sidebar.search.loading {
+            return false;
+        }
+        let index = self
+            .selected_result
+            .as_ref()
+            .and_then(|selected| results.iter().position(|hit| hit.target == *selected))
+            .map_or(if backwards { results.len() - 1 } else { 0 }, |index| {
+                if backwards {
+                    index.saturating_sub(1)
+                } else {
+                    (index + 1).min(results.len() - 1)
+                }
+            });
+        self.selected_result = Some(results[index].target.clone());
+        self.results_scroll.scroll_to_item(index);
+        cx.notify();
+        true
+    }
+
+    fn open_result(&self, target: MessageTarget, window: &mut Window, cx: &mut Context<Self>) {
+        self.spk.update(cx, |spk, cx| {
+            spk.send(Command::OpenMessageTarget(target), None, cx)
+        });
+        window.close_dialog(cx);
     }
 
     fn result_row(
@@ -154,11 +232,9 @@ impl SearchPanel {
                     .min_w_0()
                     .tab_stop(true)
                     .accessibility_label(format!("Jump to message from {author} in {conversation}"))
+                    .selected(self.selected_result.as_ref() == Some(&target))
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.spk.update(cx, |spk, cx| {
-                            spk.send(Command::OpenMessageTarget(target.clone()), None, cx)
-                        });
-                        window.close_dialog(cx);
+                        this.open_result(target.clone(), window, cx);
                     }))
                     .child(
                         div()
@@ -275,6 +351,7 @@ impl Render for SearchPanel {
             .child(
                 div()
                     .id("search-results")
+                    .track_scroll(&self.results_scroll)
                     .flex()
                     .flex_col()
                     .min_h_0()

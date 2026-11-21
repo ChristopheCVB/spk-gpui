@@ -2,6 +2,7 @@ mod account_admin;
 mod accounts;
 #[cfg(debug_assertions)]
 mod attachments;
+mod changelog;
 mod channel_admin;
 mod chat;
 mod gifs;
@@ -11,6 +12,8 @@ mod profile;
 mod radio;
 mod search;
 mod soundboard;
+#[cfg(debug_assertions)]
+mod soundboard_admin;
 mod unread;
 mod user_presence;
 
