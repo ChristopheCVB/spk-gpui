@@ -33,8 +33,8 @@ impl SavedSession {
     }
 
     #[cfg(test)]
-    pub(super) fn with_test_store(bytes: Vec<u8>) -> (Self, TestStore) {
-        let storage = TestStore::new(std::sync::Mutex::new(Some(bytes)));
+    pub(super) fn with_test_store(bytes: Option<Vec<u8>>) -> (Self, TestStore) {
+        let storage = TestStore::new(std::sync::Mutex::new(bytes));
         (
             Self {
                 origin: String::new(),
