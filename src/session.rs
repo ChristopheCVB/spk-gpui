@@ -7,6 +7,7 @@ mod profiles;
 mod radio;
 mod search;
 mod soundboard;
+mod unread;
 mod voice_session;
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
@@ -22,7 +23,8 @@ use tokio::{
 use url::Url;
 
 use crate::api::{
-    Channel, Connection, Failure, Frame, Profile, SocketEvent, SpkClient, User, UserPresence,
+    Channel, Connection, Failure, Frame, Profile, SocketEvent, SpkClient, UnreadState, User,
+    UserPresence,
 };
 use crate::sounds::{Sound, SoundSettings, VoiceSounds};
 use crate::voice::{
@@ -41,6 +43,7 @@ use profiles::Work as ProfileWork;
 use radio::{RadioSession, RadioView};
 use search::{SearchSession, SearchView};
 use soundboard::{SoundboardSession, SoundboardView};
+use unread::{Mark, UnreadSession};
 use voice_session::{DeviceSettings, StartCall, VoiceDestination, VoiceSession};
 pub use {
     crate::api::UserStatus,
@@ -79,6 +82,12 @@ pub enum Command {
     CloseChat,
     LoadOlderMessages,
     RetryChatHistory,
+    ReadVisibleChat(String),
+    MarkChatRead(String),
+    MarkChatUnread {
+        channel_id: String,
+        message_id: String,
+    },
     JumpToChatMessage {
         channel_id: String,
         message_id: String,
@@ -190,6 +199,8 @@ pub struct Sidebar {
     pub chat: Option<ChatView>,
     pub search: SearchView,
     pub chat_notice: Option<&'static str>,
+    pub read_notice: Option<&'static str>,
+    unread: Arc<HashMap<String, UnreadState>>,
     pub voice: Option<VoiceView>,
     pub radio: RadioView,
     pub soundboard: SoundboardView,
@@ -220,6 +231,8 @@ impl Sidebar {
             chat: None,
             search: SearchView::default(),
             chat_notice: None,
+            read_notice: None,
+            unread: Arc::default(),
             voice: None,
             radio: RadioView::default(),
             soundboard: SoundboardView::default(),
@@ -235,6 +248,10 @@ impl Sidebar {
             voice_presence: HashMap::new(),
             user_presence: Arc::default(),
         }
+    }
+
+    pub fn unread(&self, channel_id: &str) -> UnreadState {
+        self.unread.get(channel_id).copied().unwrap_or_default()
     }
 
     pub fn user_presence(&self, id: &str) -> UserPresence {
@@ -456,6 +473,8 @@ async fn watch_session(
     sidebar.device_notice = settings.devices.notice;
     sidebar.devices = Arc::new((settings.enumerate_devices)());
     let mut chat = ChatSession::default();
+    let mut unread = UnreadSession::default();
+    unread.refresh(client);
     let mut direct_message_opens = JoinSet::new();
     let mut voice = VoiceSession::default();
     let mut radio = RadioSession::default();
@@ -468,6 +487,7 @@ async fn watch_session(
         if commands.is_closed() {
             break SessionEnd::Closed;
         }
+        unread.write_next(client);
         sidebar.chat = chat.view();
         radio.sync(&mut sidebar, &voice);
         soundboard.sync(&mut sidebar, &voice);
@@ -486,6 +506,20 @@ async fn watch_session(
             () = presence.report(sidebar.user_status, active) => {}
             Ok(()) = settings.presence.activity.changed() => {}
             _ = sleep_until(chat_timeout.unwrap_or_else(Instant::now)), if chat_timeout.is_some() => chat.expire(),
+            Some(result) = unread.writes.join_next() => {
+                let result = result.unwrap_or(Err(Failure::Connection));
+                if result.as_ref().is_err_and(Failure::unauthorized) {
+                    break SessionEnd::Invalidated(SESSION_EXPIRED);
+                }
+                unread.complete_write(&mut sidebar, &mut chat, result);
+            }
+            Some(result) = unread.refreshes.join_next() => {
+                let result = result.unwrap_or(Err(Failure::Connection));
+                if result.as_ref().is_err_and(Failure::unauthorized) {
+                    break SessionEnd::Invalidated(SESSION_EXPIRED);
+                }
+                unread.complete_refresh(&mut sidebar, result);
+            }
             Some(result) = chat.tasks.join_next() => {
                 let result = result.unwrap_or(Err(Failure::Connection));
                 if result.as_ref().is_err_and(Failure::unauthorized) {
@@ -521,6 +555,7 @@ async fn watch_session(
                 }
                 Ok(Command::Refresh) => {
                     refresh.fetch_all(client);
+                    unread.refresh(client);
                     if matches!(sidebar.connection, Connection::Online) {
                         refresh.fetch(client, Resource::UserPresence);
                     }
@@ -565,6 +600,23 @@ async fn watch_session(
                 }
                 Ok(Command::LoadOlderMessages) => chat.older(client),
                 Ok(Command::RetryChatHistory) => chat.retry_history(client),
+                Ok(Command::ReadVisibleChat(channel_id)) => {
+                    if matches!(sidebar.connection, Connection::Online) && chat.should_read(&channel_id) {
+                        unread.mark(&mut sidebar, channel_id, Mark::Visible);
+                    }
+                }
+                Ok(Command::MarkChatRead(channel_id)) => {
+                    if sidebar.channels.iter().flatten().any(|channel| {
+                        channel.id == channel_id && matches!(channel.kind.as_str(), "text" | "dm")
+                    }) {
+                        unread.mark(&mut sidebar, channel_id, Mark::Read);
+                    }
+                }
+                Ok(Command::MarkChatUnread { channel_id, message_id }) => {
+                    if let Some(request) = chat.start_mark_unread(&channel_id, &message_id) {
+                        unread.mark(&mut sidebar, channel_id, Mark::Unread(message_id, request));
+                    }
+                },
                 Ok(Command::JumpToChatMessage { channel_id, message_id }) => {
                     pending_message_target = None;
                     sidebar.chat_notice = None;
@@ -625,6 +677,7 @@ async fn watch_session(
                 Ok(SocketEvent::Online(socket)) => {
                     sidebar.connection = Connection::Online;
                     chat.connected(client, socket.clone());
+                    unread.refresh(client);
                     presence.connected(socket.clone());
                     voice.connected(socket);
                     refresh.fetch_all(client);
@@ -635,6 +688,7 @@ async fn watch_session(
                     sidebar.channel_radio.clear();
                     refresh.presence_ready = false;
                     chat.disconnected();
+                    unread.disconnected();
                     presence = PresenceReporter::default();
                     voice.disconnected();
                 }
@@ -646,6 +700,9 @@ async fn watch_session(
                             refresh.fetch(client, Resource::Channels);
                         }
                         chat.message(message, nonce.as_deref(), sidebar.profile.id.as_deref());
+                    }
+                    Frame::UnreadUpdate { channel_id, state } => {
+                        unread.update(&mut sidebar, channel_id, state);
                     }
                     Frame::MessageDelete { channel_id, id } => chat.delete_message(&channel_id, &id),
                     Frame::MessageError { nonce: Some(nonce), error } => chat.error(&nonce, error),

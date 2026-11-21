@@ -151,6 +151,9 @@ impl Spk {
             if window.window_handle().window_id() == window_id {
                 let _ = app.update(cx, |this, cx| {
                     this.record_activity(window);
+                    if event.keystroke.key == "escape" && this.shortcuts.editor.is_none() {
+                        this.dismiss_unread_marker(window, cx);
+                    }
                     this.capture_shortcut(event, window, cx);
                 });
             }
@@ -159,6 +162,7 @@ impl Spk {
         cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() {
                 this.record_activity(window);
+                this.read_visible_chat(window);
             } else {
                 this.activity
                     .send_if_modified(|active| std::mem::replace(active, false));

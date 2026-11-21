@@ -20,7 +20,7 @@ async fn searches_messages_and_opens_authenticated_exact_targets() {
                 "GET /api/voice HTTP/1.1" | "GET /api/users HTTP/1.1" => {
                     request.respond(&[], "[]").await
                 }
-                "GET /api/users/presence HTTP/1.1" => request.respond(&[], "{}").await,
+                "GET /api/unread HTTP/1.1" | "GET /api/users/presence HTTP/1.1" => request.respond(&[], "{}").await,
                 _ => requests.send((line, request)).await.unwrap(),
             }
         }

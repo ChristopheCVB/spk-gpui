@@ -11,13 +11,14 @@ use gpui_kit::component::{
     text::{MarkdownExtensions, TextView},
 };
 
-use crate::api::{ChatMessage, MessageTarget};
-
 use markdown::{message_markdown, plain_text, safe_link};
 
 use super::*;
 
-use crate::session::{ChatView, Delivery};
+use crate::{
+    api::{ChatMessage, MessageTarget, UnreadState},
+    session::{ChatView, Delivery},
+};
 
 fn chat(view: &View) -> Option<&ChatView> {
     match view {
@@ -26,10 +27,92 @@ fn chat(view: &View) -> Option<&ChatView> {
     }
 }
 
+pub(super) fn unread_badges(counts: UnreadState, cx: &App) -> impl IntoElement {
+    let theme = cx.theme();
+    div()
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .gap_1()
+        .when(counts.mentions > 0, |badges| {
+            badges.child(
+                Label::new(format!("@{}", counts.mentions))
+                    .text_xs()
+                    .font_semibold()
+                    .px_1()
+                    .rounded_md()
+                    .bg(theme.primary.opacity(0.16))
+                    .text_color(theme.primary),
+            )
+        })
+        .when(counts.unread > 0, |badges| {
+            badges.child(
+                Label::new(counts.unread.to_string())
+                    .text_xs()
+                    .px_1()
+                    .rounded_md()
+                    .bg(theme.secondary)
+                    .text_color(theme.foreground),
+            )
+        })
+}
+
+pub(super) fn unread_label(name: &str, counts: UnreadState) -> String {
+    if counts.unread == 0 {
+        return name.to_owned();
+    }
+    format!(
+        "{name}, {} unread, {} pings",
+        counts.unread, counts.mentions
+    )
+}
+
+pub(super) fn mark_read_item(channel_id: String, app: WeakEntity<Spk>) -> PopupMenuItem {
+    PopupMenuItem::new("Mark read").on_click(move |_, _, cx| {
+        let _ = app.update(cx, |this, cx| {
+            this.send(Command::MarkChatRead(channel_id.clone()), None, cx);
+        });
+    })
+}
+
 impl Spk {
+    pub(super) fn read_visible_chat(&self, window: &Window) {
+        if let Some(chat) = chat(&self.view).filter(|chat| chat.latest_ready())
+            && window.is_window_active()
+            && !self.video_stage.fullscreen
+        {
+            let _ = self
+                .commands
+                .try_send(Command::ReadVisibleChat(chat.channel_id.clone()));
+        }
+    }
+
+    pub(super) fn dismiss_unread_marker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_dialog(cx) || self.video_stage.fullscreen {
+            return;
+        }
+        if let Some(chat) = chat(&self.view).filter(|chat| chat.first_unread_id.is_some()) {
+            self.send(Command::MarkChatRead(chat.channel_id.clone()), None, cx);
+        }
+    }
+
     pub(super) fn update_chat(&mut self, next: &View, window: &mut Window, cx: &mut Context<Self>) {
         let previous = chat(&self.view);
         let next = chat(next);
+        if let Some(next) = next.filter(|chat| chat.latest_ready())
+            && previous.is_none_or(|previous| {
+                previous.channel_id != next.channel_id
+                    || !previous.latest_ready()
+                    || previous.messages.last().map(|message| &message.id)
+                        != next.messages.last().map(|message| &message.id)
+            })
+            && window.is_window_active()
+            && !self.video_stage.fullscreen
+        {
+            let _ = self
+                .commands
+                .try_send(Command::ReadVisibleChat(next.channel_id.clone()));
+        }
         if previous.map(|chat| (&chat.channel_id, chat.unavailable()))
             != next.map(|chat| (&chat.channel_id, chat.unavailable()))
         {
@@ -184,6 +267,37 @@ impl Spk {
                                 .label("Load older messages")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.send(Command::LoadOlderMessages, None, cx)
+                                })),
+                        ),
+                    )
+                },
+            )
+            .when_some(
+                chat.first_unread_id.as_ref().filter(|id| {
+                    (chat.has_more_before || chat.has_more_after)
+                        && !chat.loading()
+                        && !chat.jump_failed
+                        && !chat.messages.iter().any(|message| &message.id == *id)
+                }),
+                |area, message_id| {
+                    let channel_id = chat.channel_id.clone();
+                    let message_id = message_id.clone();
+                    area.child(
+                        div().px_4().py_1().child(
+                            Button::new("jump-to-unread")
+                                .ghost()
+                                .small()
+                                .tab_stop(true)
+                                .label("Jump to new messages")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.send(
+                                        Command::JumpToChatMessage {
+                                            channel_id: channel_id.clone(),
+                                            message_id: message_id.clone(),
+                                        },
+                                        None,
+                                        cx,
+                                    );
                                 })),
                         ),
                     )
@@ -444,15 +558,33 @@ impl Spk {
                 }
             });
         let composer_busy = chat.outgoing.is_some() || !chat.can_send();
+        let pinged = chat.direct_message_peer.is_none()
+            && sidebar
+                .profile
+                .id
+                .as_deref()
+                .is_some_and(|id| message.pings(id));
         div()
             .id(SharedString::from(format!("message-{}", message.id)))
             .px_4()
             .py_2()
             .flex_shrink_0()
             .when(
-                chat.jump.as_ref().is_some_and(|(id, _)| id == &message.id),
+                pinged || chat.jump.as_ref().is_some_and(|(id, _)| id == &message.id),
                 |row| row.bg(theme.primary.opacity(0.1)),
             )
+            .when(chat.first_unread_id.as_ref() == Some(&message.id), |row| {
+                row.child(
+                    Label::new("New messages")
+                        .text_xs()
+                        .text_color(theme.primary)
+                        .font_semibold()
+                        .mb_1()
+                        .border_t_1()
+                        .border_color(theme.primary)
+                        .w_full(),
+                )
+            })
             .when_some(message.reply_to.as_ref(), |row, reply| {
                 row.child(if reply.deleted {
                     Label::new("Original message deleted")
@@ -496,8 +628,17 @@ impl Spk {
                     .justify_between()
                     .gap_2()
                     .child(
-                        Label::new(sidebar.message_author(&message.user_id).to_owned())
-                            .font_semibold(),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                Label::new(sidebar.message_author(&message.user_id).to_owned())
+                                    .font_semibold(),
+                            )
+                            .when(pinged, |author| {
+                                author.child(Label::new("Ping").text_xs().text_color(theme.primary))
+                            }),
                     )
                     .child(
                         Button::new("message-actions")
@@ -509,8 +650,11 @@ impl Spk {
                                 let channel_id = channel.clone();
                                 let quote_channel = channel.clone();
                                 let message_id = message_id.clone();
+                                let mark_channel = channel.clone();
+                                let mark_message = message_id.clone();
                                 let reply_app = app.clone();
                                 let quote_app = app.clone();
+                                let mark_app = app.clone();
                                 let quoted = body
                                     .lines()
                                     .map(|line| format!("> {line}"))
@@ -560,7 +704,21 @@ impl Spk {
                                                     }
                                                 });
                                             }),
-                                    );
+                                    )
+                                    .item(PopupMenuItem::new("Mark as unread").on_click(
+                                        move |_, _, cx| {
+                                            let _ = mark_app.update(cx, |this, cx| {
+                                                this.send(
+                                                    Command::MarkChatUnread {
+                                                        channel_id: mark_channel.clone(),
+                                                        message_id: mark_message.clone(),
+                                                    },
+                                                    None,
+                                                    cx,
+                                                );
+                                            });
+                                        },
+                                    ));
                                 let copy_text = share_text.clone();
                                 let copy_markdown = body.clone();
                                 let menu = menu

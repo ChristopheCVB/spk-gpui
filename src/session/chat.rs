@@ -22,11 +22,14 @@ pub struct ChatView {
     pub direct_message_peer: Option<String>,
     pub messages: Arc<Vec<ChatMessage>>,
     pub has_more_before: bool,
+    pub first_unread_id: Option<String>,
     pub has_more_after: bool,
     pub draft: Draft,
     pub typing: Vec<String>,
     pub jump: Option<(String, u64)>,
     pub jump_failed: bool,
+    hold_read: bool,
+    pending_unread: Option<u64>,
     pub outgoing: Option<Outgoing>,
     history: History,
 }
@@ -42,6 +45,10 @@ impl ChatView {
 
     pub fn unavailable(&self) -> bool {
         self.history == History::Unavailable
+    }
+
+    pub fn latest_ready(&self) -> bool {
+        self.history == History::Ready && !self.has_more_after
     }
 
     pub fn can_send(&self) -> bool {
@@ -109,6 +116,7 @@ pub(super) struct ChatSession {
     socket: Option<VoiceSocket>,
     history: Option<HistoryRequest>,
     buffered: Vec<ChatMessage>,
+    unread_request: u64,
     deleted_during_load: HashSet<String>,
     pub tasks: JoinSet<Result<MessagePage, Failure>>,
 }
@@ -171,6 +179,9 @@ impl ChatSession {
                 .filter(|_| channel.kind == "dm"),
             messages: Arc::default(),
             has_more_before: false,
+            first_unread_id: None,
+            hold_read: false,
+            pending_unread: None,
             has_more_after: false,
             draft: Draft::default(),
             typing: Vec::new(),
@@ -305,6 +316,9 @@ impl ChatSession {
                 if matches!(request, HistoryRequest::Older(_)) {
                     view.merge(page.messages);
                 } else {
+                    if view.first_unread_id.is_none() {
+                        view.first_unread_id = page.first_unread_id;
+                    }
                     view.messages = Arc::new(page.messages);
                     view.has_more_after = page.has_more_after;
                     let buffered = std::mem::take(&mut self.buffered);
@@ -356,6 +370,58 @@ impl ChatSession {
                 view.history = History::Failed;
                 self.buffered.clear();
             }
+        }
+    }
+
+    pub fn should_read(&self, channel_id: &str) -> bool {
+        self.selected.as_ref().is_some_and(|view| {
+            view.channel_id == channel_id
+                && view.latest_ready()
+                && !view.hold_read
+                && view.pending_unread.is_none()
+        })
+    }
+
+    pub fn start_mark_unread(&mut self, channel_id: &str, message_id: &str) -> Option<u64> {
+        let view = self.selected.as_mut().filter(|view| {
+            view.channel_id == channel_id
+                && !view.unavailable()
+                && view.pending_unread.is_none()
+                && view.messages.iter().any(|message| message.id == message_id)
+        })?;
+        self.unread_request += 1;
+        view.pending_unread = Some(self.unread_request);
+        view.pending_unread
+    }
+
+    pub fn finish_mark_unread(
+        &mut self,
+        channel_id: &str,
+        message_id: String,
+        request: u64,
+        success: bool,
+    ) {
+        if let Some(view) = self
+            .selected
+            .as_mut()
+            .filter(|view| view.channel_id == channel_id && view.pending_unread == Some(request))
+        {
+            view.pending_unread = None;
+            if success {
+                view.hold_read = true;
+                view.first_unread_id = Some(message_id);
+            }
+        }
+    }
+
+    pub fn clear_unread_marker(&mut self, channel_id: &str) {
+        if let Some(view) = self
+            .selected
+            .as_mut()
+            .filter(|view| view.channel_id == channel_id)
+        {
+            view.hold_read = false;
+            view.first_unread_id = None;
         }
     }
 
@@ -611,6 +677,7 @@ async fn refresh_history(
     let Some(oldest) = oldest else {
         return Ok(page);
     };
+    let first_unread_id = page.first_unread_id.take();
     let mut pages = Vec::new();
     while page.has_more_before {
         let first = page.messages.first().ok_or(Failure::InvalidResponse)?;
@@ -629,5 +696,6 @@ async fn refresh_history(
         page = older;
     }
     page.messages.extend(pages.into_iter().rev().flatten());
+    page.first_unread_id = first_unread_id;
     Ok(page)
 }

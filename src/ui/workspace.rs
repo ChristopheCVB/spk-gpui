@@ -1,4 +1,9 @@
-use super::*;
+use gpui_kit::component::menu::ContextMenuExt;
+
+use super::{
+    chat::{mark_read_item, unread_badges, unread_label},
+    *,
+};
 use crate::{
     api::{Channel, Connection},
     session::{Participant, VoiceView},
@@ -84,6 +89,7 @@ impl Spk {
             status,
             sidebar.notice,
             sidebar.chat_notice,
+            sidebar.read_notice,
             sidebar.device_notice,
             self.form_error,
         ];
@@ -296,26 +302,68 @@ impl Spk {
                                                 .chat
                                                 .as_ref()
                                                 .is_some_and(|chat| chat.channel_id == id);
-                                            Button::new(SharedString::from(format!("text-{id}")))
-                                                .ghost()
-                                                .small()
-                                                .tab_stop(true)
-                                                .selected(active)
-                                                .accessibility_label(name.clone())
-                                                .w_full()
-                                                .h_8()
-                                                .when(active, |button| {
-                                                    button.bg(theme.primary.opacity(0.10))
+                                            let counts = sidebar.unread(&id);
+                                            let menu_id = id.clone();
+                                            let app = cx.weak_entity();
+                                            div()
+                                                .id(SharedString::from(format!("text-{id}")))
+                                                .child(
+                                                    Button::new("select")
+                                                        .ghost()
+                                                        .small()
+                                                        .tab_stop(true)
+                                                        .selected(active)
+                                                        .accessibility_label(unread_label(
+                                                            &name, counts,
+                                                        ))
+                                                        .w_full()
+                                                        .h_8()
+                                                        .when(
+                                                            active || counts.mentions > 0,
+                                                            |button| {
+                                                                button
+                                                                    .bg(theme.primary.opacity(0.10))
+                                                            },
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .flex()
+                                                                .items_center()
+                                                                .gap_2()
+                                                                .w_full()
+                                                                .min_w_0()
+                                                                .child(
+                                                                    Label::new(name)
+                                                                        .flex_1()
+                                                                        .truncate()
+                                                                        .when(
+                                                                            counts.unread > 0,
+                                                                            |label| {
+                                                                                label.font_bold()
+                                                                            },
+                                                                        ),
+                                                                )
+                                                                .child(unread_badges(counts, cx)),
+                                                        )
+                                                        .on_click(cx.listener(
+                                                            move |this, _, _, cx| {
+                                                                this.device_picker = None;
+                                                                this.send(
+                                                                    Command::OpenTextChannel(
+                                                                        id.clone(),
+                                                                    ),
+                                                                    None,
+                                                                    cx,
+                                                                );
+                                                            },
+                                                        )),
+                                                )
+                                                .context_menu(move |menu, _, _| {
+                                                    menu.item(mark_read_item(
+                                                        menu_id.clone(),
+                                                        app.clone(),
+                                                    ))
                                                 })
-                                                .child(Label::new(name).w_full().truncate())
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.device_picker = None;
-                                                    this.send(
-                                                        Command::OpenTextChannel(id.clone()),
-                                                        None,
-                                                        cx,
-                                                    );
-                                                }))
                                         }),
                                 ),
                         )

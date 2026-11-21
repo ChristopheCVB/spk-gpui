@@ -173,6 +173,62 @@ pub struct ChatMessage {
     pub reply_to: Option<ReplyRef>,
 }
 
+impl ChatMessage {
+    pub fn pings(&self, user_id: &str) -> bool {
+        self.user_id != user_id
+            && (self
+                .reply_to
+                .as_ref()
+                .is_some_and(|reply| reply.user_id == user_id)
+                || mentions(&self.body, user_id))
+    }
+}
+
+fn mentions(body: &str, user_id: &str) -> bool {
+    let token = format!("<@{user_id}>");
+    if !body.contains(&token)
+        || user_id.is_empty()
+        || !user_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return false;
+    }
+
+    // Match SPK mention tokens outside fenced and inline code.
+    let mut fence = None;
+    let mut lines = body.split('\n').peekable();
+    while let Some(line) = lines.next() {
+        if let Some(marker) = fence {
+            if line.strip_prefix(marker).is_some_and(|rest: &str| {
+                rest.trim_end_matches([' ', '\t', '\r'])
+                    .bytes()
+                    .all(|byte| matches!(byte, b'`' | b'~'))
+            }) {
+                fence = None;
+            }
+            continue;
+        }
+        if let Some(marker @ (b'`' | b'~')) = line.as_bytes().first().copied() {
+            let count = line.bytes().take_while(|&byte| byte == marker).count();
+            if count >= 3 && lines.peek().is_some() {
+                fence = Some(&line[..count]);
+                continue;
+            }
+        }
+        let mut spans = line.split('`');
+        if spans.next().is_some_and(|text| text.contains(&token)) {
+            return true;
+        }
+        while let Some(code) = spans.next() {
+            if spans.next().unwrap_or(code).contains(&token) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 #[derive(Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ReplyRef {
@@ -189,6 +245,14 @@ pub struct MessagePage {
     pub has_more_before: bool,
     #[serde(default)]
     pub has_more_after: bool,
+    pub first_unread_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+pub struct UnreadState {
+    pub unread: usize,
+    // SPK records direct Mentions and Replies in the same count.
+    pub mentions: usize,
 }
 
 #[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
@@ -242,6 +306,12 @@ pub enum PresenceReport {
 #[derive(Deserialize)]
 #[serde(tag = "type")]
 pub enum Frame {
+    #[serde(rename = "unread:update", rename_all = "camelCase")]
+    UnreadUpdate {
+        channel_id: String,
+        #[serde(flatten)]
+        state: UnreadState,
+    },
     #[serde(rename = "message:new")]
     MessageNew {
         message: ChatMessage,
@@ -716,6 +786,8 @@ impl SpkClient {
             .extend([channel_id, "messages"]);
         if let Some((key, id)) = cursor {
             url.query_pairs_mut().append_pair(key, id);
+        } else {
+            url.query_pairs_mut().append_pair("unread", "1");
         }
         let response = Self::send(self.http.get(url).header(header::ORIGIN, &self.origin)).await?;
         let page: MessagePage = response
@@ -730,6 +802,36 @@ impl SpkClient {
             return Err(Failure::InvalidResponse);
         }
         Ok(page)
+    }
+
+    pub async fn update_read_point(
+        &self,
+        channel_id: &str,
+        message_id: Option<&str>,
+    ) -> Result<UnreadState, Failure> {
+        let mut url = self.base.join("/api/channels/").expect("fixed SPK path");
+        let endpoint = if message_id.is_some() {
+            "unread"
+        } else {
+            "read"
+        };
+        url.path_segments_mut()
+            .expect("validated SPK URL")
+            .pop_if_empty()
+            .extend([channel_id, endpoint]);
+        let mut request = self.http.post(url).header(header::ORIGIN, &self.origin);
+        if let Some(message_id) = message_id {
+            request = request.json(&serde_json::json!({ "messageId": message_id }));
+        }
+        Self::send(request)
+            .await?
+            .json()
+            .await
+            .map_err(|_| Failure::InvalidResponse)
+    }
+
+    pub async fn unread(&self) -> Result<std::collections::HashMap<String, UnreadState>, Failure> {
+        self.get("/api/unread").await
     }
 
     pub async fn users(&self) -> Result<Vec<User>, Failure> {
