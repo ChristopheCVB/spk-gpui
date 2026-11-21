@@ -137,6 +137,7 @@ enum SidebarSnapshot {
     Initial,
     Updated,
     VoiceReplaced,
+    FailPresenceOnce,
 }
 
 async fn voice_session(
@@ -155,8 +156,10 @@ async fn voice_session(
     let (update_snapshots, updated) = watch::channel(SidebarSnapshot::Initial);
 
     let http = async move {
+        let mut presence_failed = false;
         loop {
             let (line, request) = Request::receive(&http).await;
+            let snapshot = *updated.borrow();
             let body = match line.as_str() {
                 "POST /api/auth/sign-in/email HTTP/1.1" => {
                     request
@@ -165,13 +168,18 @@ async fn voice_session(
                     continue;
                 }
                 "GET /api/profile/me HTTP/1.1" => r#"{"id":"alice","email":"alice@example.test"}"#,
-                "GET /api/channels HTTP/1.1"
-                    if matches!(*updated.borrow(), SidebarSnapshot::Updated) =>
-                {
+                "GET /api/channels HTTP/1.1" if matches!(snapshot, SidebarSnapshot::Updated) => {
                     r#"[{"id":"first","type":"voice"},{"id":"new","type":"voice"}]"#
                 }
-                "GET /api/voice HTTP/1.1" => match *updated.borrow() {
-                    SidebarSnapshot::Initial => "[]",
+                "GET /api/voice HTTP/1.1" => match snapshot {
+                    SidebarSnapshot::FailPresenceOnce if !presence_failed => {
+                        presence_failed = true;
+                        request
+                            .respond_raw("503 Service Unavailable", &[], b"")
+                            .await;
+                        continue;
+                    }
+                    SidebarSnapshot::Initial | SidebarSnapshot::FailPresenceOnce => "[]",
                     SidebarSnapshot::Updated => {
                         r#"[{"userId":"bob","channelId":"first","speaking":true}]"#
                     }
@@ -408,7 +416,10 @@ async fn spk_recovery_yields_to_another_client_in_a_different_voice_channel() {
                 .await
                 .unwrap();
             tokio::select! {
-                frame = socket.next() => panic!("the previous client sent a voice frame: {frame:?}"),
+                biased;
+                Some(Ok(Message::Text(frame))) = socket.next() => {
+                    panic!("the previous client sent a voice frame: {frame}")
+                }
                 result = closed => result.unwrap(),
             }
         },
@@ -418,7 +429,12 @@ async fn spk_recovery_yields_to_another_client_in_a_different_voice_channel() {
                 sidebar.voice.is_none() && sidebar.voice_notice == Some(VOICE_REPLACED)
             })
             .await;
-            assert!(sidebar.participants("second").iter().any(|member| member.id == "alice"));
+            assert!(
+                sidebar
+                    .participants("second")
+                    .iter()
+                    .any(|member| member.id == "alice")
+            );
             finished.send(()).unwrap();
         },
     )
@@ -427,13 +443,13 @@ async fn spk_recovery_yields_to_another_client_in_a_different_voice_channel() {
 }
 
 #[tokio::test]
-async fn spk_recovery_waits_for_livekit_before_announcing_ready() {
+async fn spk_recovery_retries_presence_and_waits_for_livekit_before_announcing_ready() {
     let (recovering, reconnect_socket) = oneshot::channel();
     let (reclaimed, restore_media) = oneshot::channel();
     let (resynced, leave) = oneshot::channel();
     let end = voice_session(
         voice::tests::start_recovery_fixture,
-        async |listener, requests, _| {
+        async |listener, requests, update_snapshots| {
             let mut socket = accept_async(listener.accept().await.unwrap().0)
                 .await
                 .unwrap();
@@ -443,6 +459,7 @@ async fn spk_recovery_waits_for_livekit_before_announcing_ready() {
             let ready = value!({"type":"voice:ready","sid":sid});
             assert_eq!(receive_voice_frame(&mut socket).await, ready);
             reconnect_socket.await.unwrap();
+            update_snapshots.send_replace(SidebarSnapshot::FailPresenceOnce);
             drop(socket);
 
             let mut socket = accept_async(listener.accept().await.unwrap().0)
@@ -489,6 +506,10 @@ async fn spk_recovery_waits_for_livekit_before_announcing_ready() {
             commands.send(Command::RefreshDevices).await.unwrap();
             wait_for_sidebar(&views, status(VoiceStatus::Reconnecting)).await;
             recovering.send(()).unwrap();
+            wait_for_sidebar(&views, |sidebar| {
+                matches!(sidebar.connection, Connection::Online) && sidebar.load_failed
+            })
+            .await;
             restore_media.await.unwrap();
 
             commands.send(Command::RefreshDevices).await.unwrap();

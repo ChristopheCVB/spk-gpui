@@ -4,12 +4,16 @@ use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
     sync::Arc,
+    time::Duration,
 };
 
 use async_channel::{Receiver, Sender};
 use cookie_store::{CookieStore, serde::json};
 use gpui_kit::RenderImage;
-use tokio::task::{JoinSet, spawn_blocking};
+use tokio::{
+    task::{JoinSet, spawn_blocking},
+    time::{Instant, sleep_until},
+};
 use url::Url;
 
 use crate::api::{
@@ -577,6 +581,12 @@ enum Resource {
 
 const SIDEBAR_RESOURCES: [Resource; 3] = [Resource::Channels, Resource::Users, Resource::Presence];
 
+enum VoiceReclaim {
+    WaitingForPresence,
+    RetryAt(Instant),
+    Retried,
+}
+
 enum Data {
     Channels(Vec<Channel>),
     Users(Vec<User>),
@@ -740,7 +750,7 @@ async fn watch_session(
     sidebar.devices = idle_devices();
     let mut voice_socket: Option<VoiceSocket> = None;
     let mut call = None;
-    let mut awaiting_reclaim = false;
+    let mut reclaim = None;
     let end = loop {
         if commands.is_closed() {
             break SessionEnd::Closed;
@@ -754,7 +764,6 @@ async fn watch_session(
             if let Some(socket) = &voice_socket
                 && (server_move || sidebar.has_voice_channel(&channel_id))
             {
-                awaiting_reclaim = false;
                 call = Some((settings.start_call)(
                     channel_id.clone(),
                     client.clone(),
@@ -779,7 +788,15 @@ async fn watch_session(
         {
             break SessionEnd::Closed;
         }
+        let retry_at = match reclaim {
+            Some(VoiceReclaim::RetryAt(deadline)) => Some(deadline),
+            _ => None,
+        };
         tokio::select! {
+            _ = sleep_until(retry_at.unwrap_or_else(Instant::now)), if retry_at.is_some() => {
+                reclaim = Some(VoiceReclaim::Retried);
+                refresh.fetch(client, Resource::Presence);
+            }
             command = commands.recv() => match command {
                 Err(_) => break SessionEnd::Closed,
                 Ok(Command::SignOut) => break SessionEnd::SignOut,
@@ -850,14 +867,14 @@ async fn watch_session(
                 }
                 Ok(SocketEvent::Online(socket)) => {
                     sidebar.connection = Connection::Online;
-                    awaiting_reclaim = call.is_some();
+                    reclaim = call.is_some().then_some(VoiceReclaim::WaitingForPresence);
                     voice_socket = Some(socket);
                     refresh.fetch_all(client);
                 }
                 Ok(SocketEvent::Connection(state)) => {
                     sidebar.connection = state;
                     voice_socket = None;
-                    awaiting_reclaim = false;
+                    reclaim = None;
                     refresh.presence_ready = false;
                     if let Some(call) = &call {
                         call.set_socket(None);
@@ -872,8 +889,8 @@ async fn watch_session(
                         if let Some(cue) = refresh.update_presence(&mut sidebar, user_id, channel_id, flags) {
                             settings.sounds.play(cue, cue == Sound::Join);
                         }
-                        if awaiting_reclaim && own_update && sidebar.voice_replaced() {
-                            awaiting_reclaim = false;
+                        if reclaim.is_some() && own_update && sidebar.voice_replaced() {
+                            reclaim = None;
                             sidebar.cancel_voice(&mut call, Some(VOICE_REPLACED));
                         }
                         if new_member {
@@ -921,7 +938,7 @@ async fn watch_session(
                 }
                 VoiceUpdate::Finished(result) => {
                     call = None;
-                    awaiting_reclaim = false;
+                    reclaim = None;
                     if matches!(result, Err(VoiceIssue::Unauthorized)) {
                         break SessionEnd::Invalidated(SESSION_EXPIRED);
                     }
@@ -944,20 +961,21 @@ async fn watch_session(
                     break SessionEnd::Invalidated(SESSION_EXPIRED);
                 }
                 // A request already in flight when the socket returned cannot establish fresh presence.
-                let fresh_presence = resource == Resource::Presence
-                    && data.is_ok()
-                    && !refresh.dirty.contains(&resource);
+                let fresh_presence = resource == Resource::Presence && !refresh.dirty.contains(&resource);
+                let presence_loaded = fresh_presence && data.is_ok();
                 let refresh_avatars = data.is_ok() && matches!(resource, Resource::Users | Resource::Presence);
                 let listed_voice_channel = matches!(resource, Resource::Channels)
                     && sidebar.voice.as_ref().is_some_and(|voice| sidebar.has_voice_channel(&voice.channel_id));
                 refresh.complete(&mut sidebar, resource, data);
-                if awaiting_reclaim && fresh_presence {
-                    awaiting_reclaim = false;
+                if reclaim.is_some() && presence_loaded {
+                    reclaim = None;
                     if sidebar.voice_replaced() {
                         sidebar.cancel_voice(&mut call, Some(VOICE_REPLACED));
                     } else if let Some(call) = &call {
                         call.set_socket(voice_socket.clone());
                     }
+                } else if fresh_presence && matches!(reclaim, Some(VoiceReclaim::WaitingForPresence)) {
+                    reclaim = Some(VoiceReclaim::RetryAt(Instant::now() + Duration::from_secs(1)));
                 }
                 if refresh_avatars {
                     if resource == Resource::Users {

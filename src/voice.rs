@@ -536,6 +536,7 @@ impl Worker {
                 deafened: intent.mute.deafened,
                 speaking: speaking.0.contains_key(me.as_str()),
             };
+            self.publish_flags(flags, !reconnecting, std::mem::take(&mut resync));
             let report = Report {
                 status: if reconnecting {
                     Status::Reconnecting
@@ -559,7 +560,6 @@ impl Worker {
                 reported = Some(report.clone());
                 self.update(Update::Media(Arc::new(report)));
             }
-            self.publish_flags(flags, !reconnecting, std::mem::take(&mut resync));
 
             tokio::select! {
                 biased;
