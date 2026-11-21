@@ -145,8 +145,8 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
             .await
             .unwrap()
             .into_iter()
-            .find(|choice| choice.id.starts_with("display:"))
-            .expect("fixture Xvfb display");
+            .find(|choice| choice.id == "display" || choice.id.starts_with("display:"))
+            .expect("fixture Linux display");
         let selected = linux::select(
             choice,
             Some(Device {

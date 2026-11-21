@@ -48,7 +48,7 @@ unsafe extern "C" {
 }
 
 pub async fn choices() -> Result<Vec<Choice>, CaptureError> {
-    if wayland() {
+    if wayland()? {
         return timeout(Duration::from_secs(3), async {
             let portal = Screencast::new()
                 .await
@@ -65,12 +65,6 @@ pub async fn choices() -> Result<Vec<Choice>, CaptureError> {
         .await
         .map_err(|_| CaptureError::Unavailable)?;
     }
-    if std::env::var_os("WAYLAND_DISPLAY").is_some()
-        && std::env::var("XDG_SESSION_TYPE").as_deref() != Ok("x11")
-    {
-        return Err(CaptureError::Unavailable);
-    }
-
     prepare_x11_window_capture()?;
     let mut choices = Vec::new();
     for (kind, id, label, _) in TYPES {
@@ -92,7 +86,7 @@ pub async fn choices() -> Result<Vec<Choice>, CaptureError> {
 }
 
 pub async fn select(choice: Choice, playback: Option<Device>) -> Result<Selection, CaptureError> {
-    let wayland = wayland();
+    let wayland = wayland()?;
     let (kind, source_id) = TYPES
         .iter()
         .find_map(|&(kind, id, _, _)| {
@@ -188,10 +182,20 @@ fn options(source_type: SourceType) -> DesktopCapturerOptions {
     }
 }
 
-fn wayland() -> bool {
-    // Match libwebrtc's backend selection so a portal request never becomes X11 capture.
-    std::env::var("XDG_SESSION_TYPE").is_ok_and(|value| value.starts_with("wayland"))
-        && std::env::var_os("WAYLAND_DISPLAY").is_some()
+fn wayland() -> Result<bool, CaptureError> {
+    let display = std::env::var_os("WAYLAND_DISPLAY");
+    match std::env::var("XDG_SESSION_TYPE").as_deref() {
+        Ok("x11") => Ok(false),
+        Ok(session) if session.starts_with("wayland") => {
+            // Without this marker libwebrtc can silently fall back to Xwayland.
+            display
+                .filter(|name| !name.is_empty())
+                .map(|_| true)
+                .ok_or(CaptureError::Unavailable)
+        }
+        _ if display.is_some() => Err(CaptureError::Unavailable),
+        _ => Ok(false),
+    }
 }
 
 fn portal_choices(display: bool, window: bool) -> Vec<Choice> {

@@ -1,4 +1,5 @@
 use super::{pulse::matching_sink, *};
+use x11rb::rust_connection::RustConnection;
 
 #[test]
 fn portal_choices_only_list_the_advertised_source_types() {
@@ -89,9 +90,7 @@ fn preselection_error_distinguishes_x11_source_loss_from_portal_failure() {
     assert_eq!(selection_error(true), CaptureError::PortalSelection);
 }
 
-#[tokio::test]
-#[ignore = "requires an isolated Xvfb display"]
-async fn x11_sources_capture_and_end_when_the_window_disappears() {
+fn fixture_window() -> (RustConnection, u32) {
     use x11rb::{
         connection::Connection,
         protocol::xproto::{AtomEnum, ConnectionExt, CreateWindowAux, WindowClass},
@@ -147,7 +146,34 @@ async fn x11_sources_capture_and_end_when_the_window_disappears() {
         .check()
         .unwrap();
     connection.map_window(window).unwrap().check().unwrap();
+    (connection, window)
+}
 
+#[tokio::test]
+#[ignore = "requires isolated Xvfb, PulseAudio and LiveKit fixtures"]
+async fn x11_screen_share_publishes_video_only_and_preserves_voice() {
+    use futures::StreamExt as _;
+    use livekit::webrtc::video_stream::native::NativeVideoStream;
+
+    assert!(!wayland().unwrap());
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let endpoint = std::env::var("SPK_TEST_LIVEKIT").unwrap();
+    let (publisher, _) = Room::connect(
+        &endpoint,
+        &std::env::var("SPK_TEST_PUBLISHER").unwrap(),
+        RoomOptions::default(),
+    )
+    .await
+    .unwrap();
+    let (receiver, mut events) = Room::connect(
+        &endpoint,
+        &std::env::var("SPK_TEST_RECEIVER").unwrap(),
+        RoomOptions::default(),
+    )
+    .await
+    .unwrap();
+
+    let (connection, window) = fixture_window();
     let choices = choices().await.unwrap();
     let display = choices
         .iter()
@@ -157,66 +183,152 @@ async fn x11_sources_capture_and_end_when_the_window_disappears() {
         id: "spk-fixture-missing".into(),
         name: "Missing fixture output".into(),
     };
-    let display = select(display.clone(), Some(missing)).await.unwrap();
-    assert_eq!(display.audio, None);
-
-    let choice = choices
-        .into_iter()
+    let window_choice = choices
+        .iter()
         .find(|choice| choice.id == format!("window:{window}"))
         .expect("fixture window must be available independently of the display");
-    let selected = select(choice.clone(), None).await.unwrap();
-    assert_eq!(selected.audio, None);
-    let (video, mut frames) = mpsc::channel(1);
-    let (audio, mut samples) = mpsc::channel(1);
-    let (audio_unavailable, _) = watch::channel(false);
-    let (_quality, quality) = watch::channel(Quality {
-        height: 720,
-        fps: 5,
-    });
-    let capture = tokio::spawn(selected.capture.start(
-        false,
-        CaptureSink {
-            video,
-            quality,
-            audio: Some(audio),
-            audio_unavailable,
-        },
-    ));
-    let (frame, _, fps) = timeout(Duration::from_secs(2), frames.recv())
+    let available = std::env::var("SPK_TEST_PULSE_OUTPUT").unwrap();
+    let available = Device {
+        name: available.clone(),
+        id: available,
+    };
+    for (choice, output, size, audio_scope, wants_audio) in [
+        (display, missing, (640, 480), None, true),
+        (
+            display,
+            available.clone(),
+            (640, 480),
+            Some(AudioScope::PlaybackMix),
+            false,
+        ),
+        (window_choice, available, (320, 240), None, true),
+    ] {
+        let destroy_window = choice.id == window_choice.id;
+        let selected = select(choice.clone(), Some(output)).await.unwrap();
+        assert_eq!(selected.audio, audio_scope);
+        let quality = Quality {
+            height: 720,
+            fps: 5,
+        };
+        let (requests, mut requested) = watch::channel(Intent::default());
+        requests.send_modify(|intent| {
+            intent.screen.quality = quality;
+            intent.screen.open();
+        });
+        let attempt = requested.borrow().screen.attempt;
+        let mut cancellation = requested.clone();
+        let report = |state| {
+            if let State::Live {
+                width,
+                height,
+                fps,
+                audio,
+                ..
+            } = state
+            {
+                assert_eq!(((width, height), fps, audio), (size, 5, None));
+            }
+        };
+        let share = super::super::select_until_cancelled(
+            &mut cancellation,
+            attempt,
+            super::super::capture_and_publish(
+                &publisher,
+                quality,
+                &mut requested,
+                selected.audio.filter(|_| wants_audio),
+                selected.capture,
+                &report,
+            ),
+        );
+        let watcher = async {
+            let (video, mut frames) = loop {
+                if let RoomEvent::TrackSubscribed {
+                    track, publication, ..
+                } = events.recv().await.unwrap()
+                {
+                    assert_eq!(publication.source(), TrackSource::Screenshare);
+                    let RemoteTrack::Video(track) = track else {
+                        unreachable!()
+                    };
+                    break (publication, NativeVideoStream::new(track.rtc_track()));
+                }
+            };
+            for _ in 0..3 {
+                let frame = frames.next().await.unwrap();
+                assert_eq!((frame.buffer.width(), frame.buffer.height()), size);
+            }
+            assert_eq!(publisher.local_participant().track_publications().len(), 1);
+            if destroy_window {
+                connection.destroy_window(window).unwrap().check().unwrap();
+            } else {
+                requests.send_modify(|intent| {
+                    assert!(intent.screen.advance(attempt, Action::Stop));
+                });
+            }
+            loop {
+                match events.recv().await.unwrap() {
+                    RoomEvent::TrackPublished { publication, .. } => {
+                        assert_eq!(publication.sid(), video.sid(), "unexpected share track");
+                    }
+                    RoomEvent::TrackUnpublished { publication, .. }
+                        if publication.sid() == video.sid() =>
+                    {
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        };
+        let (result, ()) = timeout(Duration::from_secs(15), async {
+            tokio::join!(share, watcher)
+        })
         .await
-        .unwrap()
         .unwrap();
-    assert_eq!(
-        (frame.buffer.width(), frame.buffer.height(), fps),
-        (320, 240, 5)
-    );
-    assert!(samples.try_recv().is_err());
-    connection.destroy_window(window).unwrap().check().unwrap();
-    assert_eq!(
-        timeout(Duration::from_secs(6), capture)
-            .await
-            .unwrap()
-            .unwrap(),
-        Err(CaptureError::SourceLost)
-    );
+        assert_eq!(
+            result,
+            Err(if destroy_window {
+                CaptureError::SourceLost
+            } else {
+                CaptureError::Cancelled
+            })
+        );
+        assert!(
+            publisher
+                .local_participant()
+                .track_publications()
+                .is_empty()
+        );
+        assert_eq!(publisher.connection_state(), ConnectionState::Connected);
+    }
     assert!(matches!(
-        select(choice, None).await,
+        select(window_choice.clone(), None).await,
         Err(CaptureError::SourceLost)
     ));
+    receiver.close().await.unwrap();
+    publisher.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Xvfb and a Wayland session without a compositor socket"]
+async fn wayland_without_socket_does_not_offer_x11_sources() {
+    assert!(matches!(choices().await, Err(CaptureError::Unavailable)));
 }
 
 #[tokio::test]
 #[ignore = "requires an isolated Wayland portal fixture advertising only window capture"]
-async fn wayland_portal_cancellation_ends_source_selection() {
+async fn wayland_portal_rejection_ends_source_selection() {
     let mut available = choices().await.unwrap();
     assert_eq!(available.len(), 1);
     let choice = available.pop().unwrap();
     assert_eq!(choice.id, "window");
-    assert!(matches!(
-        timeout(Duration::from_secs(3), select(choice, None))
-            .await
-            .unwrap(),
-        Err(CaptureError::PortalSelection)
-    ));
+    for _ in 0..2 {
+        assert!(matches!(
+            timeout(Duration::from_secs(3), select(choice.clone(), None))
+                .await
+                .unwrap(),
+            Err(CaptureError::PortalSelection)
+        ));
+    }
     tokio::time::sleep(Duration::from_millis(150)).await;
 }
