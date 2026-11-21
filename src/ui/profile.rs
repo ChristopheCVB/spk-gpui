@@ -5,7 +5,10 @@ use std::{
 
 use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
 
-use super::*;
+use super::{
+    chat::{mark_read_item, unread_badges, unread_label},
+    *,
+};
 
 impl Spk {
     pub(super) fn person_row(
@@ -19,6 +22,10 @@ impl Spk {
         let message_id = id.to_owned();
         let menu_id = id.to_owned();
         let conversation = sidebar.direct_message(id).map(|channel| channel.id.clone());
+        let counts = conversation
+            .as_deref()
+            .map_or_else(Default::default, |id| sidebar.unread(id));
+        let read_id = conversation.clone();
         let active = sidebar
             .chat
             .as_ref()
@@ -37,11 +44,13 @@ impl Spk {
                     .small()
                     .tab_stop(true)
                     .selected(active)
-                    .accessibility_label(format!("Direct message {name}"))
+                    .accessibility_label(unread_label(&format!("Direct message {name}"), counts))
                     .h_8()
                     .flex_1()
                     .min_w_0()
-                    .when(active, |button| button.bg(theme.primary.opacity(0.10)))
+                    .when(active || counts.mentions > 0, |button| {
+                        button.bg(theme.primary.opacity(0.10))
+                    })
                     .child(
                         div()
                             .flex()
@@ -56,7 +65,13 @@ impl Spk {
                                 false,
                                 cx,
                             ))
-                            .child(Label::new(name.to_owned()).truncate()),
+                            .child(
+                                Label::new(name.to_owned())
+                                    .flex_1()
+                                    .truncate()
+                                    .when(counts.unread > 0, |label| label.font_bold()),
+                            )
+                            .child(unread_badges(counts, cx)),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let command = match &conversation {
@@ -83,31 +98,37 @@ impl Spk {
                 let message_id = id.clone();
                 let copy_app = app.clone();
                 let copy_id = id.clone();
-                menu.item(
-                    PopupMenuItem::new("Profile").on_click(move |_, window, cx| {
-                        let _ = app.update(cx, |app, cx| {
-                            app.open_person_profile(id.clone(), window, cx)
+                let read_app = app.clone();
+                let mut menu = menu
+                    .item(
+                        PopupMenuItem::new("Profile").on_click(move |_, window, cx| {
+                            let _ = app.update(cx, |app, cx| {
+                                app.open_person_profile(id.clone(), window, cx)
+                            });
+                        }),
+                    )
+                    .item(PopupMenuItem::new("Send DM").on_click(move |_, _, cx| {
+                        let _ = message_app.update(cx, |app, cx| {
+                            app.open_direct_message(
+                                Command::StartDirectMessage(message_id.clone()),
+                                cx,
+                            );
                         });
-                    }),
-                )
-                .item(PopupMenuItem::new("Send DM").on_click(move |_, _, cx| {
-                    let _ = message_app.update(cx, |app, cx| {
-                        app.open_direct_message(
-                            Command::StartDirectMessage(message_id.clone()),
-                            cx,
-                        );
-                    });
-                }))
-                .item(PopupMenuItem::new("Copy name").on_click(move |_, _, cx| {
-                    if let Some(name) = copy_app.upgrade().and_then(|app| {
-                        let View::SignedIn(sidebar) = &app.read(cx).view else {
-                            return None;
-                        };
-                        sidebar.person(&copy_id)?.name().map(str::to_owned)
-                    }) {
-                        cx.write_to_clipboard(ClipboardItem::new_string(name));
-                    }
-                }))
+                    }))
+                    .item(PopupMenuItem::new("Copy name").on_click(move |_, _, cx| {
+                        if let Some(name) = copy_app.upgrade().and_then(|app| {
+                            let View::SignedIn(sidebar) = &app.read(cx).view else {
+                                return None;
+                            };
+                            sidebar.person(&copy_id)?.name().map(str::to_owned)
+                        }) {
+                            cx.write_to_clipboard(ClipboardItem::new_string(name));
+                        }
+                    }));
+                if let Some(channel_id) = &read_id {
+                    menu = menu.item(mark_read_item(channel_id.clone(), read_app));
+                }
+                menu
             })
     }
 

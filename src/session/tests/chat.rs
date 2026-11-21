@@ -17,6 +17,7 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
             let (line, request) = Request::receive(&http).await;
             assert_eq!(request.header("cookie"), Some("session=chat"));
             match line.as_str() {
+                "GET /api/unread HTTP/1.1" => request.respond(&[], "{}").await,
                 "GET /api/channels HTTP/1.1" => {
                     request.respond(&[], r#"[{"id":"general","type":"text","name":"general"},{"id":"quiet","type":"text","name":"quiet"}]"#).await
                 }
@@ -72,7 +73,7 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
             view.chat.as_ref().is_some_and(|chat| chat.loading())
         })
         .await;
-        history_request(&history, "")
+        history_request(&history, "?unread=1")
             .await
             .respond_raw("503 Unavailable", &[], b"")
             .await;
@@ -83,7 +84,7 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         tx.send(Command::RetryChatHistory).await.unwrap();
         let latest = message("m2", 2, "bob", "Hi from web");
         page(
-            history_request(&history, "").await,
+            history_request(&history, "?unread=1").await,
             std::slice::from_ref(&latest),
             true,
         )
@@ -136,7 +137,7 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         let mut peer = accept_async(sockets.accept().await.unwrap().0)
             .await
             .unwrap();
-        let latest_request = history_request(&history, "").await;
+        let latest_request = history_request(&history, "?unread=1").await;
         let committed_without_ack = message("m4", 4, "alice", "Closed before confirmation");
         let while_loading = message("m5", 5, "bob", "While catching up");
         live(&mut peer, &while_loading, None).await;
@@ -166,7 +167,7 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
             .await
             .unwrap();
         let (line, request) = history.recv().await.unwrap();
-        assert_eq!(line, "GET /api/channels/quiet/messages HTTP/1.1");
+        assert_eq!(line, "GET /api/channels/quiet/messages?unread=1 HTTP/1.1");
         page(request, &[], false).await;
         wait_for_sidebar(&rx, |view| {
             view.chat.as_ref().is_some_and(|chat| {
@@ -266,6 +267,7 @@ async fn direct_message_history_is_visible_only_to_a_participant() {
             let (line, request) = Request::receive(&http).await;
             let account = request.header("cookie").unwrap();
             match (line.as_str(), account) {
+                ("GET /api/unread HTTP/1.1", _) => request.respond(&[], "{}").await,
                 ("GET /api/channels HTTP/1.1", "session=alice") => {
                     request.respond(&[], r#"[{"id":"private","type":"dm","name":null,"otherUserId":"bob","lastActivityAt":2}]"#).await
                 }
@@ -286,7 +288,7 @@ async fn direct_message_history_is_visible_only_to_a_participant() {
             .await
             .unwrap();
         let (line, request) = history.recv().await.unwrap();
-        assert_eq!(line, "GET /api/channels/private/messages HTTP/1.1");
+        assert_eq!(line, "GET /api/channels/private/messages?unread=1 HTTP/1.1");
         assert_eq!(request.header("cookie"), Some("session=alice"));
         let message = value!({"id":"private-2","channelId":"private","userId":"bob","body":"Private content","createdAt":2});
         page(request, std::slice::from_ref(&message), true).await;
@@ -323,7 +325,7 @@ async fn direct_message_history_is_visible_only_to_a_participant() {
         .await;
         assert!(pending.chat.unwrap().messages.is_empty());
         live(&mut peer, &message, None).await;
-        assert_eq!(line, "GET /api/channels/private/messages HTTP/1.1");
+        assert_eq!(line, "GET /api/channels/private/messages?unread=1 HTTP/1.1");
         request.respond_raw("403 Forbidden", &[], b"").await;
         let denied = wait_for_sidebar(&views, |view| {
             view.chat.as_ref().is_some_and(ChatView::unavailable)
@@ -344,7 +346,7 @@ async fn direct_message_history_is_visible_only_to_a_participant() {
     clippy::result_large_err,
     reason = "Tungstenite defines the handshake callback type"
 )]
-async fn direct_message_session(
+pub(super) async fn direct_message_session(
     base: Url,
     account: &str,
 ) -> (
@@ -408,6 +410,7 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
             let (line, request) = Request::receive(&http).await;
             let account = request.header("cookie").unwrap();
             match line.as_str() {
+                "GET /api/unread HTTP/1.1" => request.respond(&[], "{}").await,
                 "GET /api/channels HTTP/1.1" => {
                     let other = if account == "session=alice" {
                         "bob"
@@ -494,7 +497,7 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
 
 async fn private_history(requests: &Receiver<(String, Request)>, cookie: &str) -> Request {
     let (line, request) = requests.recv().await.unwrap();
-    assert_eq!(line, "GET /api/channels/private/messages HTTP/1.1");
+    assert_eq!(line, "GET /api/channels/private/messages?unread=1 HTTP/1.1");
     assert_eq!(request.header("cookie"), Some(cookie));
     request
 }

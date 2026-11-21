@@ -4,6 +4,7 @@ mod media;
 mod profile;
 mod radio;
 mod soundboard;
+mod unread;
 
 use std::{collections::HashSet, time::Duration};
 
@@ -215,6 +216,7 @@ async fn saved_session_restores_signs_out_and_clears_expired_credentials() {
                 let (line, request) = Request::receive(&http).await;
                 assert_eq!(request.header("cookie"), Some("session=saved"));
                 match line.as_str() {
+                    "GET /api/unread HTTP/1.1" => request.respond(&[], "{}").await,
                     "GET /api/channels HTTP/1.1"
                     | "GET /api/voice HTTP/1.1"
                     | "GET /api/users HTTP/1.1" => request.respond(&[], "[]").await,
@@ -368,6 +370,7 @@ async fn voice_session(
                     r#"[{"id":"first","type":"voice"},{"id":"second","type":"voice"}]"#
                 }
                 "GET /api/users HTTP/1.1" => "[]",
+                "GET /api/unread HTTP/1.1" => "{}",
                 line if line.contains(" /api/radio/") => {
                     radio::respond(line, request, &mut radio_favorite).await;
                     continue;

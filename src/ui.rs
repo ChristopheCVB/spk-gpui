@@ -134,12 +134,19 @@ impl Spk {
         let window_id = window.window_handle().window_id();
         cx.intercept_keystrokes(move |event, window, cx| {
             if window.window_handle().window_id() == window_id {
-                let _ = app.update(cx, |this, cx| this.capture_shortcut(event, window, cx));
+                let _ = app.update(cx, |this, cx| {
+                    if event.keystroke.key == "escape" && this.shortcuts.editor.is_none() {
+                        this.dismiss_unread_marker(window, cx);
+                    }
+                    this.capture_shortcut(event, window, cx);
+                });
             }
         })
         .detach();
         cx.observe_window_activation(window, |this, window, cx| {
-            if !window.is_window_active() {
+            if window.is_window_active() {
+                this.read_visible_chat(window);
+            } else {
                 this.shortcuts.clear_focused();
                 if this
                     .shortcuts
