@@ -169,11 +169,51 @@ fn parse_options() -> ParseOptions {
 }
 
 pub(in crate::ui) fn plain_text(source: &str) -> String {
-    ::markdown::to_mdast(source, &parse_options())
-        .map_or_else(|_| source.to_owned(), |document| node_text(&document))
+    ::markdown::to_mdast(source, &parse_options()).map_or_else(
+        |_| source.to_owned(),
+        |document| node_text(&document, false),
+    )
 }
 
-fn node_text(node: &Node) -> String {
+pub(in crate::ui) fn notification_preview<'a>(
+    source: &str,
+    has_attachment: bool,
+    name_of: impl Fn(&str) -> &'a str,
+) -> String {
+    let body = message_markdown(source, name_of, |_| false, None);
+    let text = ::markdown::to_mdast(&body, &parse_options())
+        .map_or_else(|_| String::new(), |document| node_text(&document, true))
+        .replace("▒▒▒", "[spoiler]")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if text.is_empty() && has_attachment {
+        return "Sent an attachment".into();
+    }
+    if let Some((limit, _)) = text.char_indices().nth(140) {
+        let end = text[..limit].char_indices().next_back().unwrap().0;
+        format!("{}…", text[..end].trim_end())
+    } else {
+        text
+    }
+}
+
+fn node_text(node: &Node, hide_code: bool) -> String {
+    if hide_code {
+        match node {
+            Node::Code(_) => return "[code]".into(),
+            Node::InlineCode(code) => {
+                return code.value.split("||").enumerate().fold(
+                    String::new(),
+                    |mut text, (index, part)| {
+                        text.push_str(if index % 2 == 0 { part } else { "[spoiler]" });
+                        text
+                    },
+                );
+            }
+            _ => {}
+        }
+    }
     if let Some(children) = node.children() {
         let separator = match node {
             Node::Root(_) | Node::Blockquote(_) | Node::ListItem(_) => "\n\n",
@@ -183,7 +223,7 @@ fn node_text(node: &Node) -> String {
         };
         children
             .iter()
-            .map(node_text)
+            .map(|child| node_text(child, hide_code))
             .collect::<Vec<_>>()
             .join(separator)
     } else if matches!(node, Node::Break(_)) {
@@ -228,6 +268,36 @@ mod tests {
         assert_eq!(
             message_markdown("<@alice> ||truncated spoiler", name, |_| false, None),
             "@Alice *here* ▒▒▒",
+        );
+    }
+
+    #[test]
+    fn notification_preview_hides_spoilers_and_code_and_limits_unicode() {
+        let body = "> **Hi** <@alice> 👋 ||keep **this** private||\n\n```rs\nprivate_code()\n```\n\n[Public label](https://example.test/path)";
+        assert_eq!(
+            notification_preview(body, false, |_| "Alice"),
+            "Hi @Alice 👋 [spoiler] [code] Public label"
+        );
+        assert_eq!(
+            notification_preview(" ", true, |_| "Alice"),
+            "Sent an attachment"
+        );
+        let long = "é".repeat(141);
+        assert_eq!(
+            notification_preview(&long, false, |_| "Alice"),
+            format!("{}…", "é".repeat(139))
+        );
+        assert_eq!(
+            notification_preview("Visible ||unfinished spoiler", false, |_| "Alice"),
+            "Visible [spoiler]"
+        );
+        assert_eq!(
+            notification_preview("```rs\nunclosed_code()", false, |_| "Alice"),
+            "[code]"
+        );
+        assert_eq!(
+            notification_preview("`||inline spoiler||`", false, |_| "Alice"),
+            "[spoiler]"
         );
     }
 

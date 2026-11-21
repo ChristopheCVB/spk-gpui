@@ -73,6 +73,9 @@ impl Spk {
             .as_deref()
             .map_or_else(Default::default, |id| sidebar.unread(id));
         let read_id = conversation.clone();
+        let muted = read_id
+            .as_ref()
+            .is_some_and(|id| self.notification_preferences.muted.contains(id));
         let active = sidebar
             .chat
             .as_ref()
@@ -179,7 +182,13 @@ impl Spk {
                         }
                     }));
                 if let Some(channel_id) = &read_id {
-                    menu = menu.item(mark_read_item(channel_id.clone(), read_app));
+                    menu = menu
+                        .item(mark_read_item(channel_id.clone(), read_app.clone()))
+                        .item(notifications::mute_item(
+                            channel_id.clone(),
+                            muted,
+                            read_app,
+                        ));
                 }
                 menu
             })

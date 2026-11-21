@@ -1,6 +1,8 @@
+mod attachments;
 mod chat_actions;
 mod search;
 
+pub use attachments::{Attachment, AttachmentRef, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS};
 pub use chat_actions::{LinkPreview, MessageAction, MessageChange, Reaction};
 pub use search::{MessageTarget, SearchHit, SearchPage, SearchScope};
 
@@ -173,6 +175,8 @@ pub struct ChatMessage {
     pub body: String,
     pub created_at: i64,
     pub reply_to: Option<ReplyRef>,
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
     pub edited_at: Option<i64>,
     #[serde(default)]
     pub reactions: Vec<Reaction>,
@@ -323,13 +327,13 @@ pub enum Frame {
     },
     #[serde(rename = "message:new")]
     MessageNew {
-        message: ChatMessage,
+        message: Box<ChatMessage>,
         nonce: Option<String>,
     },
     #[serde(rename = "message:delete", rename_all = "camelCase")]
     MessageDelete { channel_id: String, id: String },
     #[serde(rename = "message:edit")]
-    MessageEdit { message: ChatMessage },
+    MessageEdit { message: Box<ChatMessage> },
     #[serde(rename = "message:previews", rename_all = "camelCase")]
     MessagePreviews {
         channel_id: String,
@@ -503,6 +507,7 @@ impl VoiceSocket {
         body: &str,
         nonce: &str,
         reply_to_id: Option<&str>,
+        attachments: &[AttachmentRef],
     ) -> bool {
         let frame = serde_json::json!({
             "type": "message:send",
@@ -510,6 +515,7 @@ impl VoiceSocket {
             "body": body,
             "nonce": nonce,
             "replyToId": reply_to_id,
+            "attachments": attachments,
         });
         self.0.try_send((frame.to_string(), None)).is_ok()
     }
@@ -981,7 +987,14 @@ impl SpkClient {
     }
 
     async fn storage_bytes(&self, url: Url, max_bytes: usize) -> Result<Vec<u8>, Failure> {
-        let mut response = Self::send(self.storage.get(url)).await?;
+        Self::limited_bytes(self.storage.get(url), max_bytes).await
+    }
+
+    async fn limited_bytes(
+        request: reqwest::RequestBuilder,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, Failure> {
+        let mut response = Self::send(request).await?;
         let mut bytes = Vec::new();
         if response
             .content_length()

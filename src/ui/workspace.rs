@@ -307,6 +307,8 @@ impl Spk {
                                                 .as_ref()
                                                 .is_some_and(|chat| chat.channel_id == id);
                                             let counts = sidebar.unread(&id);
+                                            let muted =
+                                                self.notification_preferences.muted.contains(&id);
                                             let menu_id = id.clone();
                                             let app = cx.weak_entity();
                                             div()
@@ -365,6 +367,11 @@ impl Spk {
                                                 .context_menu(move |menu, _, _| {
                                                     menu.item(mark_read_item(
                                                         menu_id.clone(),
+                                                        app.clone(),
+                                                    ))
+                                                    .item(notifications::mute_item(
+                                                        menu_id.clone(),
+                                                        muted,
                                                         app.clone(),
                                                     ))
                                                 })

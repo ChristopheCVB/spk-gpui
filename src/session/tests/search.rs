@@ -1,5 +1,5 @@
 use super::*;
-use crate::api::{MessageTarget, SearchScope};
+use crate::{api::SearchScope, notifications};
 
 #[tokio::test]
 async fn searches_messages_and_opens_authenticated_exact_targets() {
@@ -12,8 +12,18 @@ async fn searches_messages_and_opens_authenticated_exact_targets() {
     let http = tokio::spawn(async move {
         loop {
             let (line, request) = Request::receive(&http).await;
+            if line == "POST /api/auth/sign-in/email HTTP/1.1" {
+                assert_eq!(request.header("cookie"), None);
+                request
+                    .respond(&["session=search; Path=/; Max-Age=3600/"], "{}")
+                    .await;
+                continue;
+            }
             assert_eq!(request.header("cookie"), Some("session=search"));
             match line.as_str() {
+                "GET /api/profile/me HTTP/1.1" => {
+                    request.respond(&[], r#"{"id":"alice","email":"alice@example.test","displayName":"Alice"}"#).await
+                }
                 "GET /api/channels HTTP/1.1" => {
                     request.respond(&[], r#"[{"id":"general","type":"text","name":"general"},{"id":"dm-1","type":"dm","otherUserId":"bob"}]"#).await
                 }
@@ -25,35 +35,40 @@ async fn searches_messages_and_opens_authenticated_exact_targets() {
             }
         }
     });
-    let mut cookies = CookieStore::default();
-    cookies.parse("session=search; Path=/", &base).unwrap();
-    let client = SpkClient::new(base, cookies).unwrap();
-    let profile =
-        serde_json::from_value(value!({"id":"alice","email":"alice@example.test"})).unwrap();
     let (tx, commands) = async_channel::unbounded();
     let (views, rx) = async_channel::unbounded();
+    let (activate, activation) = watch::channel(None);
+    let launch = MessageTarget::new("general", "startup").unwrap();
+    activate.send_replace(notifications::activation_target(
+        &base,
+        &notifications::activation_tag(&base, &launch),
+    ));
     let session = tokio::spawn(async move {
-        let (mut saved, _) = SavedSession::with_test_store(None);
+        let (saved, _) = SavedSession::with_test_store(None);
         let mut settings = fixture_settings(socket_url, Call::start_for_test);
-        watch_session(
-            &client,
-            profile,
-            None,
-            &mut saved,
-            &mut settings,
-            &commands,
-            &views,
-        )
-        .await
+        settings.alert_activation = activation;
+        run_session(base, saved, settings, commands, views).await;
     });
     timeout(Duration::from_secs(10), async {
+        assert!(matches!(rx.recv().await.unwrap(), View::SignIn { .. }));
+        assert!(search.is_empty());
+        tx.send(Command::SignIn {
+            email: "alice@example.test".into(),
+            password: "test password".into(),
+        }).await.unwrap();
         let _peer = accept_async(sockets.accept().await.unwrap().0)
             .await
             .unwrap();
+        let (line, request) = search.recv().await.unwrap();
+        assert_eq!(line, "GET /api/channels/general/messages?around=startup HTTP/1.1");
+        request.respond(&[], &value!({
+            "messages":[{"id":"startup","channelId":"general","userId":"bob","body":"First alert","createdAt":12}],
+            "hasMoreBefore": false,
+            "hasMoreAfter": false
+        }).to_string()).await;
         wait_for_sidebar(&rx, |view| {
-            view.channels.is_some() && matches!(view.connection, Connection::Online)
-        })
-        .await;
+            view.chat.as_ref().is_some_and(|chat| chat.jump.as_ref().is_some_and(|(id, _)| id == "startup"))
+        }).await;
         let cases = [
             (
                 SearchScope::Conversation("general".into()),
@@ -120,8 +135,8 @@ async fn searches_messages_and_opens_authenticated_exact_targets() {
             view.chat.as_ref().is_some_and(|chat| chat.jump.as_ref().is_some_and(|(id, _)| id == "m2"))
         }).await;
 
-        // A permalink is checked again, even if the target exists in the current view.
-        tx.send(Command::OpenMessageTarget(old)).await.unwrap();
+        // An activated alert is checked again, even if the target exists in the current view.
+        activate.send_replace(Some(old));
         let (line, request) = search.recv().await.unwrap();
         assert_eq!(line, "GET /api/channels/general/messages?around=m2 HTTP/1.1");
         request.respond_raw("404 Not Found", &[], b"").await;
@@ -161,7 +176,7 @@ async fn searches_messages_and_opens_authenticated_exact_targets() {
         wait_for_sidebar(&rx, |view| view.chat_notice == Some("Message unavailable.")).await;
 
         tx.close();
-        assert!(matches!(session.await.unwrap(), SessionEnd::Closed));
+        session.await.unwrap();
     })
     .await
     .expect("loopback search timed out");

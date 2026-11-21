@@ -38,7 +38,7 @@ pub enum MessageAction {
 
 #[derive(Clone)]
 pub enum MessageChange {
-    Edit(ChatMessage),
+    Edit(Box<ChatMessage>),
     Delete,
     Reactions(Vec<Reaction>),
     Pin(bool),
@@ -96,7 +96,7 @@ impl SpkClient {
         let response = Self::send(request).await?;
         match action {
             MessageAction::Edit(_) => {
-                let message: ChatMessage = response
+                let message: Box<ChatMessage> = response
                     .json()
                     .await
                     .map_err(|_| Failure::InvalidResponse)?;
