@@ -29,6 +29,7 @@ pub struct DevicePreferences {
     pub radio_volume: u8,
     pub soundboard_enabled: bool,
     pub soundboard_volume: u8,
+    pub screen_audio: bool,
     pub output_volume: u8,
     pub participant_volumes: HashMap<String, ParticipantVolume>,
 }
@@ -42,6 +43,7 @@ impl Default for DevicePreferences {
             radio_volume: 100,
             soundboard_enabled: true,
             soundboard_volume: 70,
+            screen_audio: true,
             output_volume: 100,
             participant_volumes: HashMap::new(),
         }

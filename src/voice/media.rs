@@ -15,6 +15,7 @@ use tokio::{
 use super::{
     Device, Devices, Intent, Issue, Report, Status, Update, Worker,
     devices::{route_speakers, switch_speakers},
+    screen,
     video::Video,
     wait_until,
 };
@@ -117,7 +118,7 @@ impl Media {
             biased;
             result = Self::listen(worker, &mut backend, &speakers) => result,
             () = async {
-                media.video.run(worker, room).await;
+                tokio::join!(media.video.run(worker, room), screen::run(worker, room));
                 std::future::pending::<()>().await;
             } => unreachable!(),
         }

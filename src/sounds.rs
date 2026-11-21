@@ -11,16 +11,18 @@ pub enum Sound {
     Mute,
     Deafen,
     Camera,
+    Screen,
     Watch,
 }
 
 impl Sound {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Join,
         Self::Leave,
         Self::Mute,
         Self::Deafen,
         Self::Camera,
+        Self::Screen,
         Self::Watch,
     ];
 
@@ -31,6 +33,7 @@ impl Sound {
             Self::Mute => "Mute sound",
             Self::Deafen => "Deafen sound",
             Self::Camera => "Camera sound",
+            Self::Screen => "Screen Share sound",
             Self::Watch => "Watch sound",
         }
     }
@@ -60,6 +63,7 @@ pub struct SoundSettings {
     pub mute: SoundSetting,
     pub deafen: SoundSetting,
     pub camera: SoundSetting,
+    pub screen: SoundSetting,
     pub watch: SoundSetting,
 }
 
@@ -71,6 +75,7 @@ impl SoundSettings {
             Sound::Mute => &mut self.mute,
             Sound::Deafen => &mut self.deafen,
             Sound::Camera => &mut self.camera,
+            Sound::Screen => &mut self.screen,
             Sound::Watch => &mut self.watch,
         }
     }
@@ -172,6 +177,8 @@ impl Cue {
             (Sound::Deafen, false) => &[392.0, 294.0, 196.0],
             (Sound::Camera, true) => &[494.0, 622.0, 740.0],
             (Sound::Camera, false) => &[740.0, 622.0, 494.0],
+            (Sound::Screen, true) => &[349.0, 523.0, 698.0],
+            (Sound::Screen, false) => &[698.0, 523.0, 349.0],
             (Sound::Watch, true) => &[466.0, 622.0],
             (Sound::Watch, false) => &[622.0, 466.0],
         }
@@ -193,6 +200,8 @@ impl Cue {
                 let wave = (TAU * frequency * time).sin();
                 let wave = if triangle {
                     wave.asin() * (4.0 / TAU)
+                } else if self.sound == Sound::Screen {
+                    wave.signum()
                 } else if self.sound == Sound::Watch {
                     2.0 * (time * frequency).fract() - 1.0
                 } else {

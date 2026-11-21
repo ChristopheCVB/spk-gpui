@@ -64,7 +64,7 @@ impl VideoFrameSlot {
         self.0.lock().ok()?.clone()
     }
 
-    fn update(&self, frame: &VideoFrame<impl AsRef<dyn VideoBuffer>>, mirror: bool) {
+    pub(super) fn update(&self, frame: &VideoFrame<impl AsRef<dyn VideoBuffer>>, mirror: bool) {
         let buffer = frame.buffer.as_ref();
         let (width, height) = (buffer.width(), buffer.height());
         let Some(mut image) =
@@ -209,6 +209,12 @@ impl Video {
                         Some(RoomEvent::LocalTrackRepublished { publication, .. })
                             if publication.source() == TrackSource::Camera
                                 && self.publication.as_ref().is_none_or(|cam| cam.track.sid() != publication.sid()) =>
+                        {
+                            let _ = room.local_participant().unpublish_track(&publication.sid()).await;
+                        }
+                        Some(RoomEvent::LocalTrackRepublished { publication, track, .. })
+                            if matches!(publication.source(), TrackSource::Screenshare | TrackSource::ScreenshareAudio)
+                                && track.is_muted() =>
                         {
                             let _ = room.local_participant().unpublish_track(&publication.sid()).await;
                         }

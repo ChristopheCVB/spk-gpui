@@ -5,7 +5,10 @@ use gpui_kit::component::popover::Popover;
 use super::*;
 use crate::{
     session::{Participant, VoiceView},
-    voice::video::{CameraResolution, CameraStatus, ParticipantVideo, VideoSource},
+    voice::{
+        screen::{Quality, State as ScreenState},
+        video::{CameraResolution, CameraStatus, ParticipantVideo, VideoSource},
+    },
 };
 
 #[derive(Default)]
@@ -30,7 +33,7 @@ impl Spk {
         };
         let report = call.and_then(|call| call.video.clone());
         let report = report.as_deref();
-        let next = report
+        let mut next = report
             .into_iter()
             .flat_map(|report| report.participants.iter())
             .flat_map(|(id, video)| {
@@ -39,6 +42,23 @@ impl Spk {
                 })
             })
             .collect::<HashMap<_, _>>();
+        let screen = match &self.view {
+            View::SignedIn(sidebar) => sidebar
+                .profile
+                .id
+                .as_ref()
+                .zip(call.and_then(|call| call.screen.as_ref())),
+            _ => None,
+        }
+        .and_then(|(id, report)| match &report.state {
+            ScreenState::Live { frames, .. } => Some((id.clone(), frames.clone())),
+            _ => None,
+        });
+        if let Some((id, frames)) = &screen
+            && let Some(frame) = frames.latest()
+        {
+            next.insert((id.clone(), VideoSource::Screen), frame);
+        }
         for (key, image) in std::mem::replace(&mut self.video_stage.frames, next) {
             if self.video_stage.frames.get(&key) != Some(&image) {
                 let _ = window.drop_image(image);
@@ -47,6 +67,7 @@ impl Spk {
         if self.video_stage.theater.as_ref().is_some_and(|id| {
             report.is_none_or(|report| {
                 !report.watching.contains(id)
+                    && screen.as_ref().is_none_or(|(me, _)| me != id)
                     && report
                         .participants
                         .get(id)
@@ -58,19 +79,22 @@ impl Spk {
         }
         if self.video_stage.fullscreen
             && self.video_stage.theater.as_ref().is_none_or(|id| {
-                report
-                    .and_then(|report| report.participants.get(id))
-                    .is_none_or(|video| video.live.is_empty())
+                screen.as_ref().is_none_or(|(me, _)| me != id)
+                    && report
+                        .and_then(|report| report.participants.get(id))
+                        .is_none_or(|video| video.live.is_empty())
             })
         {
             self.exit_video_fullscreen(window);
         }
-        if report.is_some_and(|report| {
-            report
-                .participants
-                .values()
-                .any(|video| !video.frames.is_empty())
-        }) {
+        if screen.is_some()
+            || report.is_some_and(|report| {
+                report
+                    .participants
+                    .values()
+                    .any(|video| !video.frames.is_empty())
+            })
+        {
             window.request_animation_frame();
         }
     }
@@ -148,6 +172,164 @@ impl Spk {
             )
     }
 
+    pub(super) fn screen_button(&self, call: Option<&VoiceView>, cx: &Context<Self>) -> Button {
+        let report = call.and_then(|call| call.screen.as_ref());
+        let active = report.filter(|report| !matches!(report.state, ScreenState::Ended(_)));
+        let attempt = active.map(|report| report.attempt);
+        let label = match active.map(|report| &report.state) {
+            Some(ScreenState::Live { .. }) => "Stop Screen Share",
+            Some(_) => "Cancel Screen Share",
+            None => "Share Screen",
+        };
+        tool_button("screen-share", IconName::Monitor, label)
+            .selected(active.is_some())
+            .label(label)
+            .on_click(cx.listener(move |app, _, _, cx| {
+                let command = attempt.map_or(Command::OpenScreenShare, Command::StopScreenShare);
+                app.send(command, None, cx);
+            }))
+    }
+
+    pub(super) fn screen_options(
+        &self,
+        call: &VoiceView,
+        sidebar: &Sidebar,
+        cx: &Context<Self>,
+    ) -> Option<Div> {
+        let report = call.screen.as_ref()?;
+        let attempt = report.attempt;
+        let panel = div().flex().flex_col().items_center().gap_2().px_4().pb_2();
+        Some(match &report.state {
+            ScreenState::Picking => panel.child(Label::new("Choose a display or window…")),
+            ScreenState::Choices(choices) => panel.child(
+                div()
+                    .id("screen-sources")
+                    .max_h(px(140.))
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_wrap()
+                    .justify_center()
+                    .gap_1()
+                    .children(choices.iter().map(|choice| {
+                        let id = choice.id.clone();
+                        Button::new(SharedString::from(format!("screen-source-{id}")))
+                            .small()
+                            .secondary()
+                            .tab_stop(true)
+                            .label(choice.label.clone())
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                app.send(
+                                    Command::ChooseScreenSource(attempt, id.clone()),
+                                    None,
+                                    cx,
+                                );
+                            }))
+                    })),
+            ),
+            ScreenState::Confirm { label, audio } => {
+                let enabled = sidebar.voice_intent.preferred.screen_audio;
+                let audio_label = match (audio, enabled) {
+                    (Some(scope), true) => scope.label(),
+                    (None, true) => "Video only. Audio is unavailable for this source.",
+                    _ => "Video only",
+                };
+                let selected = sidebar.voice_intent.screen.quality;
+                panel
+                    .child(Label::new(label.clone()).font_semibold())
+                    .child(Label::new(audio_label).text_xs())
+                    .child(
+                        Button::new("include-screen-audio")
+                            .small()
+                            .secondary()
+                            .tab_stop(true)
+                            .label(if enabled {
+                                "Share audio on"
+                            } else {
+                                "Share audio off"
+                            })
+                            .selected(enabled)
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                app.send(Command::SetScreenAudio(!enabled), None, cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .justify_center()
+                            .gap_1()
+                            .children(Quality::HEIGHTS.into_iter().map(|height| {
+                                let label = SharedString::from(format!("{height}p"));
+                                Button::new(label.clone())
+                                    .small()
+                                    .ghost()
+                                    .tab_stop(true)
+                                    .label(label)
+                                    .selected(selected.height == height)
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        app.send(
+                                            Command::SetScreenQuality(Quality {
+                                                height,
+                                                ..selected
+                                            }),
+                                            None,
+                                            cx,
+                                        );
+                                    }))
+                            }))
+                            .children(Quality::FPS.into_iter().map(|fps| {
+                                let label = SharedString::from(format!("{fps} fps"));
+                                Button::new(label.clone())
+                                    .small()
+                                    .ghost()
+                                    .tab_stop(true)
+                                    .label(label)
+                                    .selected(selected.fps == fps)
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        app.send(
+                                            Command::SetScreenQuality(Quality { fps, ..selected }),
+                                            None,
+                                            cx,
+                                        );
+                                    }))
+                            })),
+                    )
+                    .child(
+                        Button::new("start-screen-share")
+                            .small()
+                            .primary()
+                            .tab_stop(true)
+                            .label("Start Screen Share")
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                app.send(Command::StartScreenShare(attempt), None, cx);
+                            })),
+                    )
+            }
+            ScreenState::Starting => panel.child(Label::new("Starting Screen Share…")),
+            ScreenState::Live {
+                width,
+                height,
+                fps,
+                audio,
+                audio_unavailable,
+                ..
+            } => panel
+                .child(
+                    Label::new(format!("Sharing at {width} × {height} · up to {fps} fps"))
+                        .text_xs(),
+                )
+                .child(
+                    Label::new(if *audio_unavailable {
+                        "Video only. Screen Share audio is unavailable."
+                    } else {
+                        audio.map_or("Video only", |scope| scope.label())
+                    })
+                    .text_xs(),
+                ),
+            ScreenState::Ended(message) => panel.child(Label::new(*message)),
+        })
+    }
+
     pub(super) fn video_image(&self, participant: &Participant<'_>, is_me: bool) -> Option<Img> {
         if is_me && self.video_stage.hide_preview {
             return None;
@@ -175,11 +357,15 @@ impl Spk {
     ) -> impl IntoElement {
         let is_me = sidebar.profile.id.as_deref() == Some(participant.id);
         let report = call.video.as_ref();
-        let live =
-            participant_video(report.and_then(|report| report.participants.get(participant.id)))
-                || participant
-                    .video
-                    .is_some_and(|media| !is_me && (media.cam || media.screen));
+        let live = (is_me
+            && call
+                .screen
+                .as_ref()
+                .is_some_and(|screen| screen.state.active()))
+            || participant_video(report.and_then(|report| report.participants.get(participant.id)))
+            || participant
+                .video
+                .is_some_and(|media| !is_me && (media.cam || media.screen));
         let watching = sidebar.voice_intent.watching.contains(participant.id);
         let theater = self.video_stage.theater.as_deref() == Some(participant.id);
         let fullscreen = self.video_stage.fullscreen;

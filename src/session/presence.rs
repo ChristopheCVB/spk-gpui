@@ -137,10 +137,16 @@ impl Refresh {
                     if previous.video.cam != video.cam {
                         cues.push((Sound::Camera, video.cam));
                     }
+                    if user_id != me && previous.video.screen != video.screen {
+                        cues.push((Sound::Screen, video.screen));
+                    }
                     if user_id != me
-                        && voice.video.as_ref().is_some_and(|local| {
+                        && (voice.video.as_ref().is_some_and(|local| {
                             matches!(local.camera, crate::voice::video::CameraStatus::Live(..))
-                        })
+                        }) || voice
+                            .screen
+                            .as_ref()
+                            .is_some_and(|screen| screen.state.active()))
                     {
                         let was = previous.video.watching.iter().any(|id| id == me);
                         let now = video.watching.iter().any(|id| id == me);

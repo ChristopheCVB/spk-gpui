@@ -8,6 +8,7 @@ use crate::sounds::{Sound, VoiceSounds};
 use crate::voice::{
     self, Call, DeviceKind, DevicePreferences, Devices, Intent, Issue as VoiceIssue,
     ParticipantVolumeChange, Report as VoiceReport, Status as VoiceStatus, Update as VoiceUpdate,
+    screen::{self, Action, State},
     video::{CameraStatus, VideoReport},
 };
 
@@ -26,6 +27,7 @@ pub struct VoiceView {
     pub status: VoiceStatus,
     pub media: Option<Arc<VoiceReport>>,
     pub video: Option<Arc<VideoReport>>,
+    pub screen: Option<screen::Report>,
     pub(super) play_leave: bool,
 }
 
@@ -36,6 +38,7 @@ impl VoiceView {
             status: VoiceStatus::Joining,
             media: None,
             video: None,
+            screen: None,
             play_leave: false,
         }
     }
@@ -55,6 +58,7 @@ impl VoiceView {
         self.status = VoiceStatus::Leaving;
         self.media = None;
         self.video = None;
+        self.screen = None;
         true
     }
 
@@ -110,6 +114,7 @@ impl Sidebar {
         let voice = self.voice.take();
         self.voice_intent.camera.enabled = false;
         self.voice_intent.watching.clear();
+        self.voice_intent.screen.action = Action::Stop;
         self.voice_rejoin = voice
             .as_ref()
             .filter(|voice| {
@@ -390,6 +395,7 @@ impl VoiceSession {
             call.cancel();
             sidebar.voice_intent.camera.enabled = false;
             sidebar.voice_intent.watching.clear();
+            sidebar.voice_intent.screen.action = Action::Stop;
             sidebar.voice_notice = notice;
         }
     }
@@ -438,6 +444,7 @@ impl VoiceSession {
                 | Command::SetParticipantVolume(..)
                 | Command::SetSoundboardEnabled(_)
                 | Command::SetSoundboardVolume(_)
+                | Command::SetScreenAudio(_)
         );
         match command {
             Command::ToggleMute => {
@@ -543,6 +550,83 @@ impl VoiceSession {
                     sidebar.voice_intent.camera.enabled = false;
                 }
                 sidebar.voice_intent.camera.resolution = resolution;
+            }
+            Command::OpenScreenShare => {
+                let Some(voice) = sidebar
+                    .voice
+                    .as_mut()
+                    .filter(|voice| voice.is_participating())
+                else {
+                    return;
+                };
+                if voice
+                    .screen
+                    .as_ref()
+                    .is_some_and(|report| !matches!(report.state, State::Ended(_)))
+                {
+                    return;
+                }
+                sidebar.voice_intent.screen.open();
+                voice.screen = Some(screen::Report {
+                    attempt: sidebar.voice_intent.screen.attempt,
+                    state: State::Picking,
+                });
+            }
+            Command::ChooseScreenSource(attempt, id) => {
+                let Some(voice) = sidebar
+                    .voice
+                    .as_mut()
+                    .filter(|voice| voice.is_participating())
+                else {
+                    return;
+                };
+                if !voice.screen.as_ref().is_some_and(|report| {
+                    matches!(&report.state, State::Choices(choices) if choices.iter().any(|choice| choice.id == id))
+                }) {
+                    return;
+                }
+                let playback = voice
+                    .media
+                    .as_ref()
+                    .and_then(|media| media.speakers.clone());
+                sidebar
+                    .voice_intent
+                    .screen
+                    .advance(attempt, Action::Choose(id, playback));
+            }
+            Command::StartScreenShare(attempt) => {
+                if !sidebar.voice.as_ref().is_some_and(|voice| {
+                    voice.is_participating()
+                        && voice
+                            .screen
+                            .as_ref()
+                            .is_some_and(|report| matches!(report.state, State::Confirm { .. }))
+                }) {
+                    return;
+                }
+                sidebar.voice_intent.screen.advance(
+                    attempt,
+                    Action::Start(sidebar.voice_intent.preferred.screen_audio),
+                );
+            }
+            Command::StopScreenShare(attempt) => {
+                if sidebar.voice_intent.screen.advance(attempt, Action::Stop)
+                    && let Some(voice) = &mut sidebar.voice
+                    && let Some(report) = voice.screen.take()
+                    && report.state.active()
+                {
+                    settings.sounds.play(Sound::Screen, false);
+                }
+            }
+            Command::SetScreenAudio(enabled) => {
+                sidebar.voice_intent.preferred.screen_audio = enabled;
+            }
+            Command::SetScreenQuality(quality) => {
+                if screen::Quality::HEIGHTS.contains(&quality.height)
+                    && screen::Quality::FPS.contains(&quality.fps)
+                {
+                    sidebar.voice_intent.screen.quality = quality;
+                }
             }
             Command::SetWatching(id, enabled) => {
                 let Some(voice) = sidebar
