@@ -84,8 +84,10 @@ impl RemoteAudio {
         let media_device = devices
             .media_outputs
             .resolve(intent.preferred.media_output.as_ref());
-        let system_speakers =
-            intent.preferred.speakers.is_none() || devices.speakers.default.as_ref() == speakers;
+        // Windows voice defaults resolve to a communications endpoint, while CPAL defaults to eConsole.
+        let system_speakers = !cfg!(windows)
+            && (intent.preferred.speakers.is_none()
+                || devices.speakers.default.as_ref() == speakers);
         let voice_device = if system_speakers {
             devices.media_outputs.default.as_ref().or(voice)
         } else {

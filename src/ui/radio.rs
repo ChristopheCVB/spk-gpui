@@ -1,4 +1,4 @@
-use super::{voice::device_options, *};
+use super::{voice::device_picker, *};
 use crate::{api::RadioStation, session::RadioPlayback};
 use gpui_kit::component::Disableable;
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState, SliderValue};
@@ -258,7 +258,7 @@ impl Render for RadioPanel {
                 .children(stations.into_iter().map(|station| self.station_row(station, sidebar, cx))))
             .child(
                 div().child(Label::new("Media Output").text_xs())
-                    .child(device_options(sidebar, DeviceKind::MediaOutput, &self.spk, cx)),
+                    .child(device_picker(sidebar, DeviceKind::MediaOutput, &self.spk)),
             )
     }
 }

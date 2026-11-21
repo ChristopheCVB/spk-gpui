@@ -1,10 +1,16 @@
 use super::*;
 use crate::{
-    session::View,
+    session::{View, VoiceProcessingSetting},
     shortcuts::Action,
-    voice::{Device, DeviceKind, DeviceList},
+    voice::{Device, DeviceKind, DeviceList, NoiseSuppression, VoiceProcessing},
 };
-use gpui_kit::component::popover::Popover;
+use gpui_kit::component::{
+    Disableable, IndexPath,
+    popover::Popover,
+    select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState},
+    slider::{Slider, SliderEvent, SliderState, SliderValue},
+    switch::Switch,
+};
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum VoiceControls {
@@ -124,7 +130,7 @@ impl Spk {
                             let popup_app = app.clone();
                             Popover::new("device-picker")
                                 .anchor(Anchor::BottomRight)
-                                .w(px(280.0))
+                                .w(px(300.0))
                                 .open(open)
                                 .trigger(
                                     tool_button(
@@ -150,19 +156,48 @@ impl Spk {
                                         }
                                     });
                                 })
-                                .content(move |_, _, cx| {
+                                .content(move |_, window, cx| {
                                     let Some(app) = popup_app.upgrade() else {
                                         return div();
                                     };
                                     let View::SignedIn(sidebar) = &app.read(cx).view else {
                                         return div();
                                     };
+                                    let picker = device_picker(sidebar, kind, &app);
+                                    let (label, extra) = match kind {
+                                        DeviceKind::Microphone => (
+                                            "Input device",
+                                            microphone_controls(
+                                                sidebar.voice_intent.preferred.processing,
+                                                &app,
+                                                window,
+                                                cx,
+                                            )
+                                            .into_any_element(),
+                                        ),
+                                        DeviceKind::Speakers => {
+                                            let media = device_picker(
+                                                sidebar,
+                                                DeviceKind::MediaOutput,
+                                                &app,
+                                            );
+                                            let volume =
+                                                sidebar.voice_intent.preferred.output_volume;
+                                            (
+                                                "Voice output",
+                                                speaker_controls(media, volume, &app, window, cx)
+                                                    .into_any_element(),
+                                            )
+                                        }
+                                        DeviceKind::MediaOutput => unreachable!(),
+                                    };
                                     div()
                                         .flex()
                                         .flex_col()
                                         .gap_2()
-                                        .child(Label::new(device_label(kind)).font_semibold())
-                                        .child(device_options(sidebar, kind, &app, cx))
+                                        .child(Label::new(label).font_semibold())
+                                        .child(picker)
+                                        .child(extra)
                                 })
                         })
                 }),
@@ -181,83 +216,327 @@ impl Spk {
     }
 }
 
-pub(super) fn device_options(
-    sidebar: &Sidebar,
-    kind: DeviceKind,
-    entity: &Entity<Spk>,
-    cx: &App,
-) -> impl IntoElement {
-    let theme = cx.theme();
-    let (list, active, preferred) = devices(sidebar, kind);
-    let selected = list
-        .preferred(preferred)
-        .filter(|device| Some(*device) == active);
-    let entity = entity.downgrade();
+pub(super) fn processing_switch(
+    app: &Entity<Spk>,
+    label: &'static str,
+    checked: bool,
+    disabled: bool,
+    setting: fn(bool) -> VoiceProcessingSetting,
+) -> Switch {
+    let app = app.downgrade();
+    Switch::new(label)
+        .label(label)
+        .accessibility_label(label)
+        .checked(checked)
+        .disabled(disabled)
+        .tab_stop(true)
+        .on_change(move |enabled, _, cx| {
+            let _ = app.update(cx, |app, cx| {
+                app.send(Command::SetVoiceProcessing(setting(*enabled)), None, cx);
+            });
+        })
+}
+
+const NOISE_MODES: [(NoiseSuppression, &str); 3] = [
+    (NoiseSuppression::Off, "Off"),
+    (NoiseSuppression::Standard, "Standard"),
+    (NoiseSuppression::Enhanced, "Enhanced (DeepFilterNet)"),
+];
+
+fn microphone_controls(
+    settings: VoiceProcessing,
+    app: &Entity<Spk>,
+    window: &mut Window,
+    cx: &mut App,
+) -> impl IntoElement + use<> {
+    let echo = settings.echo_cancellation;
+    let mode = if echo {
+        NoiseSuppression::Standard
+    } else {
+        settings.noise_suppression
+    };
+    let noise = window.use_keyed_state(
+        ("quick-noise-suppression", usize::from(echo)),
+        cx,
+        |window, cx| {
+            let app = app.downgrade();
+            cx.subscribe(&cx.entity(), move |_, _, event, cx| {
+                if let SelectEvent::Confirm(Some(label)) = event
+                    && let Some((mode, _)) = NOISE_MODES.iter().find(|(_, name)| name == label)
+                {
+                    let _ = app.update(cx, |app, cx| {
+                        app.send(
+                            Command::SetVoiceProcessing(VoiceProcessingSetting::NoiseSuppression(
+                                *mode,
+                            )),
+                            None,
+                            cx,
+                        );
+                    });
+                }
+            })
+            .detach();
+            let index = NOISE_MODES.iter().position(|(noise, _)| *noise == mode);
+            SelectState::new(
+                SearchableVec::new(NOISE_MODES.map(|(_, label)| label).to_vec()),
+                index.map(|index| IndexPath::default().row(index)),
+                window,
+                cx,
+            )
+        },
+    );
     div()
         .flex()
         .flex_col()
-        .gap_1()
-        .id(device_label(kind))
+        .gap_2()
+        .child(Label::new("Noise suppression").font_semibold())
         .child(
-            Label::new(device_status(active, preferred, list))
-                .text_xs()
-                .text_color(theme.muted_foreground),
+            Select::new(&noise)
+                .small()
+                .w_full()
+                .accessibility_label("Noise suppression")
+                .disabled(echo),
         )
+        .child(processing_switch(
+            app,
+            "Echo cancellation",
+            echo,
+            false,
+            VoiceProcessingSetting::EchoCancellation,
+        ))
+        .child(processing_switch(
+            app,
+            "Auto gain",
+            echo || settings.auto_gain,
+            echo,
+            VoiceProcessingSetting::AutoGain,
+        ))
+        .child(Label::new("Sensitivity").font_semibold())
+        .child(
+            Label::new("Higher picks up quieter speech.")
+                .text_xs()
+                .text_color(cx.theme().muted_foreground),
+        )
+        .child(
+            Slider::new(&quick_level(
+                "quick-sensitivity",
+                settings.sensitivity,
+                100,
+                app,
+                window,
+                cx,
+                |value| Command::SetVoiceProcessing(VoiceProcessingSetting::Sensitivity(value)),
+            ))
+            .tab_stop(true)
+            .accessibility_label("Microphone sensitivity")
+            .disabled(echo),
+        )
+}
+
+fn speaker_controls(
+    media: impl IntoElement,
+    volume: u8,
+    app: &Entity<Spk>,
+    window: &mut Window,
+    cx: &mut App,
+) -> impl IntoElement {
+    let level = quick_level(
+        "quick-output-volume",
+        volume,
+        200,
+        app,
+        window,
+        cx,
+        Command::SetOutputVolume,
+    );
+    let SliderValue::Single(volume) = level.read(cx).value() else {
+        unreachable!("single output volume slider");
+    };
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(Label::new("Media output").font_semibold())
+        .child(media)
         .child(
             div()
-                .id("choices")
                 .flex()
-                .flex_col()
-                .gap_1()
-                .max_h(px(140.0))
-                .overflow_y_scroll()
-                .children(
-                    std::iter::once(None)
-                        .chain(list.choices.iter().map(Some))
-                        .enumerate()
-                        .map(|(index, device)| {
-                            let chosen = device == selected;
-                            let name = device
-                                .map_or("System default", |device| device.name.as_str())
-                                .to_owned();
-                            let device = device.cloned();
-                            let entity = entity.clone();
-                            Button::new(index)
-                                .ghost()
-                                .small()
-                                .tab_stop(true)
-                                .selected(chosen)
-                                .accessibility_label(name.clone())
-                                .when(chosen, |button| button.bg(theme.accent))
-                                .child(
-                                    div()
-                                        .w_full()
-                                        .flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .gap_2()
-                                        .child(Label::new(name).truncate())
-                                        .when(chosen, |row| {
-                                            row.child(themed_icon(
-                                                IconName::Check,
-                                                theme.primary,
-                                                14.0,
-                                            ))
-                                        }),
-                                )
-                                .on_click(move |_, _, cx| {
-                                    let _ = entity.update(cx, |app, cx| {
-                                        app.device_picker = None;
-                                        app.send(
-                                            Command::ChooseDevice(kind, device.clone()),
-                                            None,
-                                            cx,
-                                        );
-                                    });
-                                })
-                        }),
-                ),
+                .justify_between()
+                .child(Label::new("Output volume").font_semibold())
+                .child(Label::new(format!("{volume:.0}%")).text_color(cx.theme().muted_foreground)),
         )
+        .child(
+            Slider::new(&level)
+                .tab_stop(true)
+                .accessibility_label("Output volume"),
+        )
+}
+
+fn quick_level(
+    id: &'static str,
+    value: u8,
+    max: u8,
+    app: &Entity<Spk>,
+    window: &mut Window,
+    cx: &mut App,
+    command: fn(u8) -> Command,
+) -> Entity<SliderState> {
+    window.use_keyed_state(id, cx, |_, cx| {
+        let app = app.downgrade();
+        cx.subscribe(&cx.entity(), move |_, _, event, cx| {
+            if let SliderEvent::Release(SliderValue::Single(value)) = event {
+                let _ = app.update(cx, |app, cx| app.send(command(*value as u8), None, cx));
+            }
+        })
+        .detach();
+        SliderState::new()
+            .max(f32::from(max))
+            .default_value(f32::from(value.min(max)))
+    })
+}
+
+#[derive(Clone, PartialEq)]
+struct DeviceOption(Option<Device>);
+
+impl SelectItem for DeviceOption {
+    type Value = Option<Device>;
+
+    fn title(&self) -> SharedString {
+        self.0
+            .as_ref()
+            .map_or("System default", |device| device.name.as_str())
+            .to_owned()
+            .into()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.0
+    }
+}
+
+struct DevicePickerState {
+    select: Entity<SelectState<SearchableVec<DeviceOption>>>,
+    options: Vec<DeviceOption>,
+    selected: IndexPath,
+}
+
+#[derive(IntoElement)]
+struct DevicePicker {
+    app: WeakEntity<Spk>,
+    kind: DeviceKind,
+    options: Vec<DeviceOption>,
+    selected: IndexPath,
+    status: Option<String>,
+}
+
+pub(super) fn device_picker(
+    sidebar: &Sidebar,
+    kind: DeviceKind,
+    app: &Entity<Spk>,
+) -> impl IntoElement + use<> {
+    let (list, active, preferred) = devices(sidebar, kind);
+    let selected = list
+        .preferred(preferred)
+        .and_then(|preferred| list.choices.iter().position(|device| device == preferred))
+        .map_or(0, |index| index + 1);
+    let status = device_status(active, preferred, list);
+    let selected_label = selected
+        .checked_sub(1)
+        .map_or("System default", |index| list.choices[index].name.as_str());
+    DevicePicker {
+        app: app.downgrade(),
+        kind,
+        options: std::iter::once(DeviceOption(None))
+            .chain(
+                list.choices
+                    .iter()
+                    .cloned()
+                    .map(|device| DeviceOption(Some(device))),
+            )
+            .collect(),
+        selected: IndexPath::default().row(selected),
+        status: (status != selected_label).then_some(status),
+    }
+}
+
+impl RenderOnce for DevicePicker {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let label = device_label(self.kind);
+        let key = ("audio-device-select", self.kind as usize);
+        let picker = window.use_keyed_state(key, cx, |window, cx| {
+            let select = cx.new(|cx| {
+                SelectState::new(
+                    SearchableVec::new(self.options.clone()),
+                    Some(self.selected),
+                    window,
+                    cx,
+                )
+            });
+            let app = self.app.clone();
+            let kind = self.kind;
+            cx.subscribe(&select, move |_, _, event, cx| {
+                if let SelectEvent::Confirm(Some(device)) = event {
+                    let _ = app.update(cx, |app, cx| {
+                        app.send(Command::ChooseDevice(kind, device.clone()), None, cx);
+                    });
+                }
+            })
+            .detach();
+            DevicePickerState {
+                select,
+                options: self.options.clone(),
+                selected: self.selected,
+            }
+        });
+        let state = picker.read(cx);
+        let select = state.select.clone();
+        if state.options != self.options || state.selected != self.selected {
+            picker.update(cx, |state, cx| {
+                select.update(cx, |select, cx| {
+                    if state.options != self.options {
+                        select.set_items(SearchableVec::new(self.options.clone()), window, cx);
+                    }
+                    select.set_selected_index(Some(self.selected), window, cx);
+                });
+                state.options = self.options;
+                state.selected = self.selected;
+            });
+        }
+
+        let refresh = move |cx: &mut App| {
+            let _ = self.app.update(cx, |app, cx| {
+                app.send(Command::RefreshDevices, None, cx);
+            });
+        };
+        let refresh_key = refresh.clone();
+        div()
+            .id(("audio-device-picker", self.kind as usize))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .on_mouse_down(MouseButton::Left, move |_, _, cx| refresh(cx))
+            .capture_key_down(move |event, _, cx| {
+                if matches!(
+                    event.keystroke.key.as_str(),
+                    "enter" | "space" | "down" | "up"
+                ) {
+                    refresh_key(cx);
+                }
+            })
+            .child(
+                Select::new(&select)
+                    .small()
+                    .accessibility_label(label)
+                    .w_full(),
+            )
+            .when_some(self.status, |body, status| {
+                body.child(
+                    Label::new(status)
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground),
+                )
+            })
+    }
 }
 
 fn devices(sidebar: &Sidebar, kind: DeviceKind) -> (&DeviceList, Option<&Device>, Option<&Device>) {

@@ -371,6 +371,25 @@ pub(super) fn select_microphone(audio: &PlatformAudio, device: &Device) -> bool 
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires active Windows communications input and output devices"]
+    fn windows_system_default_survives_media_device_enumeration() {
+        let devices = Devices::enumerate();
+        assert!(
+            devices.microphones.default.is_some(),
+            "missing communications microphone"
+        );
+        assert!(
+            devices.speakers.default.is_some(),
+            "missing communications speakers"
+        );
+        assert!(
+            !devices.media_outputs.choices.is_empty(),
+            "missing media outputs"
+        );
+    }
+
     #[test]
     fn microphone_processing_preserves_old_defaults_and_round_trips_saved_settings() {
         let mut preferences: DevicePreferences =

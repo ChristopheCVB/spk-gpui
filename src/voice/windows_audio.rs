@@ -3,6 +3,7 @@ use std::time::Duration;
 use livekit::{prelude::LocalAudioTrack, webrtc::stats::RtcStats};
 use tokio::time::{sleep, timeout};
 use windows::Win32::{
+    Foundation::RPC_E_CHANGED_MODE,
     Media::Audio::{
         EDataFlow, IMMDeviceEnumerator, MMDeviceEnumerator, eCapture, eCommunications, eRender,
     },
@@ -42,7 +43,9 @@ pub(super) async fn wait_for_capture(track: &LocalAudioTrack) -> bool {
 fn communications_endpoint(flow: EDataFlow) -> Option<String> {
     // Keep the COM interfaces and the endpoint ID on the calling thread.
     unsafe {
-        if CoInitializeEx(None, COINIT_MULTITHREADED).is_err() {
+        let initialized = CoInitializeEx(None, COINIT_MULTITHREADED);
+        // CPAL can already have initialized this thread as STA.
+        if initialized.is_err() && initialized != RPC_E_CHANGED_MODE {
             return None;
         }
         let result = (|| {
@@ -56,7 +59,9 @@ fn communications_endpoint(flow: EDataFlow) -> Option<String> {
             CoTaskMemFree(Some(id.0.cast()));
             result
         })();
-        CoUninitialize();
+        if initialized.is_ok() {
+            CoUninitialize();
+        }
         result
     }
 }

@@ -1,4 +1,4 @@
-use super::{voice::device_options, *};
+use super::{voice::device_picker, *};
 use crate::api::{Connection, SoundboardClip};
 use gpui_kit::component::{
     Disableable,
@@ -226,12 +226,7 @@ impl Render for SoundboardPanel {
             .child(
                 div()
                     .child(Label::new("Media Output").text_xs())
-                    .child(device_options(
-                        sidebar,
-                        DeviceKind::MediaOutput,
-                        &self.app,
-                        cx,
-                    )),
+                    .child(device_picker(sidebar, DeviceKind::MediaOutput, &self.app)),
             )
     }
 }

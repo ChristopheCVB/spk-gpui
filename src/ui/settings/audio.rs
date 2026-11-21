@@ -1,10 +1,10 @@
 use gpui_kit::base::Disableable;
 use std::time::Duration;
 
-use gpui_kit::component::{progress::Progress, radio::RadioGroup, slider::Slider, switch::Switch};
+use gpui_kit::component::{progress::Progress, radio::RadioGroup, slider::Slider};
 
 use super::*;
-use crate::ui::voice::device_options;
+use crate::ui::voice::{device_picker, processing_switch};
 use crate::voice::{
     Device, DeviceKind, NoiseSuppression,
     audio_preview::{MicrophoneTest, test_playback},
@@ -126,23 +126,6 @@ impl Settings {
         let SliderValue::Single(sensitivity) = self.sensitivity.read(cx).value() else {
             unreachable!("single microphone sensitivity slider");
         };
-        let switch = |label: &'static str,
-                      checked,
-                      disabled,
-                      setting: fn(bool) -> VoiceProcessingSetting| {
-            let spk = self.spk.downgrade();
-            Switch::new(label)
-                .label(label)
-                .accessibility_label(label)
-                .checked(checked)
-                .disabled(disabled)
-                .tab_stop(true)
-                .on_change(move |enabled, _, cx| {
-                    let _ = spk.update(cx, |app, cx| {
-                        app.send(Command::SetVoiceProcessing(setting(*enabled)), None, cx);
-                    });
-                })
-        };
         let modes = [
             (NoiseSuppression::Off, "Off"),
             (NoiseSuppression::Standard, "Standard"),
@@ -170,7 +153,7 @@ impl Settings {
                 .flex()
                 .flex_col()
                 .gap_3()
-                .child(switch("Echo cancellation", echo, false, VoiceProcessingSetting::EchoCancellation))
+                .child(processing_switch(&self.spk, "Echo cancellation", echo, false, VoiceProcessingSetting::EchoCancellation))
                 .when(echo, |body| body.child(
                     Label::new("Turn off echo cancellation to adjust noise suppression, automatic gain, and sensitivity.")
                         .text_color(cx.theme().muted_foreground),
@@ -195,7 +178,7 @@ impl Settings {
                             });
                         }),
                 )
-                .child(switch("Automatic gain control", echo || settings.auto_gain, echo, VoiceProcessingSetting::AutoGain))
+                .child(processing_switch(&self.spk, "Automatic gain control", echo || settings.auto_gain, echo, VoiceProcessingSetting::AutoGain))
                 .child(Label::new(format!("Sensitivity {sensitivity:.0}%")))
                 .child(
                     Slider::new(&self.sensitivity)
@@ -223,12 +206,7 @@ impl Settings {
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .child(device_options(
-                        sidebar,
-                        DeviceKind::Microphone,
-                        &self.spk,
-                        cx,
-                    ))
+                    .child(device_picker(sidebar, DeviceKind::Microphone, &self.spk))
                     .child(
                         Button::new("test-microphone")
                             .small()
@@ -264,7 +242,7 @@ impl Settings {
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .child(device_options(sidebar, DeviceKind::Speakers, &self.spk, cx))
+                    .child(device_picker(sidebar, DeviceKind::Speakers, &self.spk))
                     .child(Label::new(format!("Output volume {volume:.0}%")))
                     .child(
                         Slider::new(&self.output_volume)
@@ -289,7 +267,7 @@ impl Settings {
             ))
             .child(card(
                 "Media Output",
-                device_options(sidebar, DeviceKind::MediaOutput, &self.spk, cx),
+                device_picker(sidebar, DeviceKind::MediaOutput, &self.spk),
                 cx,
             ))
             .child(self.processing(sidebar, cx))
