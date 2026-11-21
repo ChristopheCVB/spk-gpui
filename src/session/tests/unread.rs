@@ -16,6 +16,7 @@ async fn sidebar_shows_shared_unread_counts_and_pings() {
                     r#"[{"id":"general","type":"text","name":"general"},{"id":"private","type":"dm","otherUserId":"bob","lastActivityAt":1}]"#
                 }
                 "GET /api/users HTTP/1.1" | "GET /api/voice HTTP/1.1" => "[]",
+                "GET /api/users/presence HTTP/1.1" => "{}",
                 "GET /api/unread HTTP/1.1" if *paused.borrow() => {
                     held_snapshots.send(request).await.unwrap();
                     continue;
@@ -86,6 +87,7 @@ async fn marking_read_and_unread_changes_the_shared_read_point() {
                     value!([{"id":"general","type":"text","name":"general"}])
                 }
                 "GET /api/users HTTP/1.1" | "GET /api/voice HTTP/1.1" => value!([]),
+                "GET /api/users/presence HTTP/1.1" => value!({}),
                 "GET /api/unread HTTP/1.1" => {
                     value!({"general":{"unread":count,"mentions":count.min(1)}})
                 }
@@ -154,6 +156,14 @@ async fn marking_read_and_unread_changes_the_shared_read_point() {
         broadcast_count(&mut other_peer, &result).await;
         wait_for_sidebar(&views, |view| view.unread("general").mentions == 1).await;
         wait_for_sidebar(&other_views, |view| view.unread("general").mentions == 1).await;
+
+        commands
+            .send(Command::SetUserStatus(UserStatus::Busy))
+            .await
+            .unwrap();
+        let busy = wait_for_sidebar(&views, |view| view.user_status == UserStatus::Busy).await;
+        assert_eq!(busy.unread("general").unread, 1);
+        assert_eq!(busy.unread("general").mentions, 1);
 
         // An ordinary focus event cannot immediately undo the explicit mark.
         commands

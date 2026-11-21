@@ -1,13 +1,110 @@
 use std::{
     collections::{HashMap, HashSet},
+    fs,
+    future::pending,
+    io::{self, Write},
+    path::PathBuf,
     sync::Arc,
 };
 
-use tokio::task::JoinSet;
+use tokio::{
+    sync::watch,
+    task::{JoinSet, spawn_blocking},
+};
 
 use super::Sidebar;
-use crate::api::{Channel, Failure, Member, SpkClient, User, VideoPresence, VoiceFlags};
+use crate::api::{
+    Channel, Failure, Member, PresenceReport, SpkClient, User, UserPresence, UserStatus,
+    VideoPresence, VoiceFlags, VoiceSocket,
+};
 use crate::sounds::Sound;
+
+pub(super) struct PresenceSettings {
+    pub(super) path: Option<PathBuf>,
+    pub(super) status: UserStatus,
+    pub(super) activity: watch::Receiver<bool>,
+}
+
+impl PresenceSettings {
+    pub(super) fn load(activity: watch::Receiver<bool>) -> Self {
+        let path = dirs::config_dir().map(|dir| dir.join("spk-gpui").join("user-status.json"));
+        let status = path
+            .as_ref()
+            .and_then(|path| fs::read(path).ok())
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        Self {
+            path,
+            status,
+            activity,
+        }
+    }
+
+    pub(super) async fn save(&mut self, status: UserStatus) -> Result<(), &'static str> {
+        self.status = status;
+        let path = self.path.clone();
+        let saved = spawn_blocking(move || -> io::Result<()> {
+            let path = path.ok_or_else(|| io::Error::other("Missing config directory"))?;
+            let directory = path.parent().expect("status file has a parent");
+            fs::create_dir_all(directory)?;
+            let mut file = tempfile::NamedTempFile::new_in(directory)?;
+            serde_json::to_writer(&mut file, &status)?;
+            file.flush()?;
+            file.persist(path)?;
+            Ok(())
+        })
+        .await;
+        match saved {
+            Ok(Ok(())) => Ok(()),
+            _ => Err("Could not save your status for the next launch."),
+        }
+    }
+}
+
+#[derive(Default)]
+pub(super) struct PresenceReporter {
+    socket: Option<VoiceSocket>,
+    status: Option<UserStatus>,
+    active: Option<bool>,
+}
+
+impl PresenceReporter {
+    pub(super) fn connected(&mut self, socket: VoiceSocket) {
+        *self = Self {
+            socket: Some(socket),
+            ..Self::default()
+        };
+    }
+
+    pub(super) async fn report(&mut self, status: UserStatus, active: bool) {
+        let Some(socket) = &self.socket else {
+            return pending().await;
+        };
+        if self.status != Some(status) {
+            if socket
+                .send_presence(PresenceReport::Status(status))
+                .await
+                .is_ok()
+            {
+                self.status = Some(status);
+            } else {
+                self.socket = None;
+            }
+        } else if self.active != Some(active) {
+            if socket
+                .send_presence(PresenceReport::Activity(active))
+                .await
+                .is_ok()
+            {
+                self.active = Some(active);
+            } else {
+                self.socket = None;
+            }
+        } else {
+            pending().await
+        }
+    }
+}
 
 #[derive(Clone)]
 pub(super) struct VoiceMembership {
@@ -67,6 +164,7 @@ pub(super) enum Resource {
     Channels,
     Users,
     Presence,
+    UserPresence,
 }
 
 const SIDEBAR_RESOURCES: [Resource; 3] = [Resource::Channels, Resource::Users, Resource::Presence];
@@ -75,6 +173,7 @@ pub(super) enum Data {
     Channels(Vec<Channel>),
     Users(Vec<User>),
     Presence(Vec<Member>),
+    UserPresence(HashMap<String, UserPresence>),
 }
 
 #[derive(Default)]
@@ -85,6 +184,7 @@ pub(super) struct Refresh {
     failed: HashSet<Resource>,
     pub(super) presence_updates: Option<HashMap<String, Option<VoiceMembership>>>,
     pub(super) presence_ready: bool,
+    user_presence_updates: Option<HashMap<String, UserPresence>>,
 }
 
 impl Refresh {
@@ -93,8 +193,10 @@ impl Refresh {
             self.dirty.insert(resource);
             return;
         }
-        if resource == Resource::Presence {
-            self.presence_updates = Some(HashMap::new());
+        match resource {
+            Resource::Presence => self.presence_updates = Some(HashMap::new()),
+            Resource::UserPresence => self.user_presence_updates = Some(HashMap::new()),
+            _ => {}
         }
         let client = client.clone();
         self.tasks.spawn(async move {
@@ -102,6 +204,7 @@ impl Refresh {
                 Resource::Channels => client.channels().await.map(Data::Channels),
                 Resource::Users => client.users().await.map(Data::Users),
                 Resource::Presence => client.voice_presence().await.map(Data::Presence),
+                Resource::UserPresence => client.user_presence().await.map(Data::UserPresence),
             };
             (resource, data)
         });
@@ -111,6 +214,18 @@ impl Refresh {
         for resource in SIDEBAR_RESOURCES {
             self.fetch(client, resource);
         }
+    }
+
+    pub(super) fn update_user_presence(
+        &mut self,
+        sidebar: &mut Sidebar,
+        user_id: String,
+        status: UserPresence,
+    ) {
+        if let Some(updates) = &mut self.user_presence_updates {
+            updates.insert(user_id.clone(), status);
+        }
+        apply_user_presence(Arc::make_mut(&mut sidebar.user_presence), user_id, status);
     }
 
     pub(super) fn update_presence(
@@ -203,6 +318,13 @@ impl Refresh {
                                 .collect(),
                         );
                     }
+                    Data::UserPresence(mut snapshot) => {
+                        for (id, status) in self.user_presence_updates.take().into_iter().flatten()
+                        {
+                            apply_user_presence(&mut snapshot, id, status);
+                        }
+                        sidebar.user_presence = Arc::new(snapshot);
+                    }
                     Data::Presence(members) => {
                         self.presence_ready = true;
                         sidebar.voice_presence = members
@@ -226,8 +348,10 @@ impl Refresh {
             }
             Err(_) => {
                 self.failed.insert(resource);
-                if resource == Resource::Presence {
-                    self.presence_updates = None;
+                match resource {
+                    Resource::Presence => self.presence_updates = None,
+                    Resource::UserPresence => self.user_presence_updates = None,
+                    _ => {}
                 }
             }
         }
@@ -244,5 +368,17 @@ fn apply_presence(
         voice_presence.insert(user_id, member);
     } else {
         voice_presence.remove(&user_id);
+    }
+}
+
+fn apply_user_presence(
+    statuses: &mut HashMap<String, UserPresence>,
+    user_id: String,
+    status: UserPresence,
+) {
+    if status == UserPresence::Offline {
+        statuses.remove(&user_id);
+    } else {
+        statuses.insert(user_id, status);
     }
 }

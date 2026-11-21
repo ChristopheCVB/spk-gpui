@@ -24,6 +24,7 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
                 "GET /api/voice HTTP/1.1" | "GET /api/users HTTP/1.1" => {
                     request.respond(&[], "[]").await
                 }
+                "GET /api/users/presence HTTP/1.1" => request.respond(&[], "{}").await,
                 _ => history_tx.send((line, request)).await.unwrap(),
             }
         }
@@ -247,8 +248,15 @@ async fn receive_chat_send(
     conversation: &str,
     body: &str,
 ) -> Value {
-    let frame: Value =
-        serde_json::from_str(peer.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+    let frame: Value = serde_json::from_str(
+        receive_non_presence_message(peer)
+            .await
+            .unwrap()
+            .unwrap()
+            .to_text()
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(frame["type"], "message:send");
     assert_eq!(frame["channelId"], conversation);
     assert_eq!(frame["body"], body);
@@ -275,6 +283,7 @@ async fn direct_message_history_is_visible_only_to_a_participant() {
                 | ("GET /api/users HTTP/1.1" | "GET /api/voice HTTP/1.1", _) => {
                     request.respond(&[], "[]").await
                 }
+                ("GET /api/users/presence HTTP/1.1", _) => request.respond(&[], "{}").await,
                 _ => history_tx.send((line, request)).await.unwrap(),
             }
         }
@@ -427,6 +436,7 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
                 "GET /api/users HTTP/1.1" | "GET /api/voice HTTP/1.1" => {
                     request.respond(&[], "[]").await;
                 }
+                "GET /api/users/presence HTTP/1.1" => request.respond(&[], "{}").await,
                 "POST /api/dms HTTP/1.1" => {
                     assert!(!created, "an existing DM should open without a second POST");
                     assert_eq!(account, "session=alice");

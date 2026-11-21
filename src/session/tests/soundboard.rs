@@ -83,9 +83,12 @@ async fn soundboard_previews_privately_and_plays_only_the_channels_relay() {
             assert!(preview.header("cookie").is_none());
             preview.respond_raw("404 Not Found", &[], b"").await;
             assert!(
-                timeout(Duration::from_millis(75), desktop.next())
-                    .await
-                    .is_err()
+                timeout(
+                    Duration::from_millis(75),
+                    receive_non_presence_message(&mut desktop)
+                )
+                .await
+                .is_err()
             );
 
             advance.send(()).await.unwrap();

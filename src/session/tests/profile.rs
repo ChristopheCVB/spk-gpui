@@ -30,6 +30,7 @@ async fn profile_changes_reach_another_session_and_failed_edits_keep_the_profile
                     request.respond(&[], "[]").await;
                 }
                 "GET /api/users HTTP/1.1" => request.respond(&[], &directory.to_string()).await,
+                "GET /api/users/presence HTTP/1.1" => request.respond(&[], "{}").await,
                 "GET /api/admin/users HTTP/1.1" => {
                     assert_eq!(cookie, Some("session=bob"));
                     request
