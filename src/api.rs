@@ -5,6 +5,7 @@ mod chat_actions;
 mod gifs;
 mod public_media;
 mod search;
+mod soundboard_admin;
 
 pub use account_admin::{
     AccountRole, AdminDirectory, AdminUser, Invite, InviteStatus, IssuedAccountLink,
@@ -15,6 +16,7 @@ pub use chat_actions::{LinkPreview, MessageAction, MessageChange, Reaction};
 pub use gifs::{GifItem, GifPage, gif_message_url};
 pub(crate) use public_media::{PublicDns, public_media_url};
 pub use search::{MessageTarget, SearchHit, SearchPage, SearchScope};
+pub use soundboard_admin::MAX_SOUND_BYTES;
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
@@ -997,7 +999,7 @@ impl SpkClient {
             .filter(signed_storage_url)
             .ok_or(Failure::InvalidResponse)?;
         // A storage response cannot expire the authenticated SPK session.
-        self.storage_bytes(url, 3 * 1024 * 1024)
+        self.storage_bytes(url, MAX_SOUND_BYTES)
             .await
             .map_err(|_| Failure::InvalidResponse)
     }

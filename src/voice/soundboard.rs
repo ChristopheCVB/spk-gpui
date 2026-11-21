@@ -1,11 +1,211 @@
-use std::{num::NonZero, time::Duration};
+use std::{
+    fs::{self, File},
+    io::{Cursor, Read},
+    num::NonZero,
+    ops::Range,
+    path::Path,
+    time::Duration,
+};
 
 use rodio::{Player, Source, buffer::SamplesBuffer};
+use symphonia::core::{
+    formats::{TrackType, probe::Hint},
+    io::MediaSourceStream,
+};
 use tokio::{sync::watch, task::spawn_blocking, time};
 
 use super::devices::{MediaOutput, open_media_output};
 
 const MAX_SECONDS: u32 = 10;
+
+use crate::api::MAX_SOUND_BYTES;
+const MAX_SOURCE_BYTES: usize = 20 * 1024 * 1024;
+const BAD_AUDIO: &str = "Choose a supported mono or stereo audio file.";
+const BAD_CROP: &str = "Choose a selection within the file from 1 ms to 10 seconds.";
+
+#[derive(Clone, Copy)]
+pub struct Crop {
+    pub start: f64,
+    pub end: f64,
+    pub gain: u16,
+}
+
+pub(crate) struct PreparedSound {
+    pub wav: Vec<u8>,
+    pub duration_ms: u32,
+}
+
+pub(crate) struct SoundSource {
+    source: Vec<u8>,
+    rate: u32,
+    channels: u16,
+    frames: usize,
+}
+
+impl SoundSource {
+    pub fn open(path: &Path) -> Result<Self, &'static str> {
+        let metadata = fs::metadata(path).map_err(|_| "Could not open the audio file.")?;
+        if !metadata.is_file() {
+            return Err("Choose an audio file.");
+        }
+        if metadata.len() > MAX_SOURCE_BYTES as u64 {
+            return Err("Source audio must be 20 MB or smaller.");
+        }
+        let file = File::open(path).map_err(|_| "Could not open the audio file.")?;
+        let mut source = Vec::new();
+        file.take(MAX_SOURCE_BYTES as u64 + 1)
+            .read_to_end(&mut source)
+            .map_err(|_| "Could not read the audio file.")?;
+        Self::decode(source)
+    }
+
+    fn decode(source: Vec<u8>) -> Result<Self, &'static str> {
+        if source.len() > MAX_SOURCE_BYTES {
+            return Err("Source audio must be 20 MB or smaller.");
+        }
+        let (rate, channels, frames) = read_audio(&source, None)?;
+        Ok(Self {
+            source,
+            rate,
+            channels,
+            frames,
+        })
+    }
+
+    pub fn duration(&self) -> f64 {
+        self.frames as f64 / f64::from(self.rate)
+    }
+
+    pub fn crop(&self, crop: Crop) -> Result<PreparedSound, &'static str> {
+        if !crop.start.is_finite()
+            || !crop.end.is_finite()
+            || crop.start < 0.0
+            || crop.end > self.duration()
+            || crop.end <= crop.start
+            || crop.end - crop.start > f64::from(MAX_SECONDS)
+        {
+            return Err(BAD_CROP);
+        }
+        if crop.gain > 200 {
+            return Err("Upload gain must be between 0% and 200%.");
+        }
+        let rate = f64::from(self.rate);
+        let start = (crop.start * rate).round() as usize;
+        let end = (crop.end * rate).round() as usize;
+        let frames = end - start;
+        let duration_ms = (frames as f64 * 1000.0 / rate).round() as u32;
+        if frames * 1000 < self.rate as usize || frames > self.rate as usize * MAX_SECONDS as usize
+        {
+            return Err(BAD_CROP);
+        }
+        let block = self.channels * 3;
+        let size = frames * usize::from(block);
+        let padded = size + size % 2;
+        if 44 + padded > MAX_SOUND_BYTES {
+            return Err("The cropped sound must be 3 MB or smaller.");
+        }
+        let mut wav = Vec::with_capacity(44 + padded);
+        wav.extend(b"RIFF");
+        wav.extend((36 + padded as u32).to_le_bytes());
+        wav.extend(b"WAVEfmt \x10\0\0\0\x01\0");
+        wav.extend(self.channels.to_le_bytes());
+        wav.extend(self.rate.to_le_bytes());
+        wav.extend((self.rate * u32::from(block)).to_le_bytes());
+        wav.extend(block.to_le_bytes());
+        wav.extend(b"\x18\0data");
+        wav.extend((size as u32).to_le_bytes());
+        let mut selection = Selection {
+            frames: start..end,
+            gain: f32::from(crop.gain) / 100.0,
+            wav: &mut wav,
+        };
+        read_audio(&self.source, Some(&mut selection))?;
+        if wav.len() != 44 + size {
+            return Err(BAD_AUDIO);
+        }
+        wav.resize(44 + padded, 0);
+        Ok(PreparedSound { wav, duration_ms })
+    }
+}
+
+struct Selection<'a> {
+    frames: Range<usize>,
+    gain: f32,
+    wav: &'a mut Vec<u8>,
+}
+
+fn read_audio(
+    source: &[u8],
+    mut selection: Option<&mut Selection<'_>>,
+) -> Result<(u32, u16, usize), &'static str> {
+    let mut format = symphonia::default::get_probe()
+        .probe(
+            &Hint::new(),
+            MediaSourceStream::new(Box::new(Cursor::new(source)), Default::default()),
+            Default::default(),
+            Default::default(),
+        )
+        .map_err(|_| BAD_AUDIO)?;
+    let track = format.default_track(TrackType::Audio).ok_or(BAD_AUDIO)?;
+    let track_id = track.id;
+    let params = track
+        .codec_params
+        .as_ref()
+        .and_then(|params| params.audio())
+        .ok_or(BAD_AUDIO)?;
+    let mut decoder = symphonia::default::get_codecs()
+        .make_audio_decoder(params, &Default::default())
+        .map_err(|_| BAD_AUDIO)?;
+    let mut spec = None;
+    let mut frames = 0;
+    let mut samples = Vec::new();
+    while let Some(packet) = format.next_packet().map_err(|_| BAD_AUDIO)? {
+        if packet.track_id != track_id {
+            continue;
+        }
+        let audio = decoder.decode(&packet).map_err(|_| BAD_AUDIO)?;
+        let rate = audio.spec().rate();
+        let channels = audio.spec().channels().count();
+        if !(8_000..=192_000).contains(&rate)
+            || !(1..=2).contains(&channels)
+            || spec.is_some_and(|spec| spec != (rate, channels))
+        {
+            return Err(BAD_AUDIO);
+        }
+        spec = Some((rate, channels));
+        let next = frames + audio.frames();
+        if let Some(selection) = selection.as_deref_mut() {
+            let from = frames.max(selection.frames.start);
+            let to = next.min(selection.frames.end);
+            if from < to {
+                samples.resize(audio.samples_interleaved(), 0.0_f32);
+                audio.copy_to_slice_interleaved(&mut samples);
+                for sample in &samples[(from - frames) * channels..(to - frames) * channels] {
+                    let sample = sample * selection.gain;
+                    if !(-1.0..=1.0).contains(&sample) {
+                        return Err("Lower the upload gain to avoid clipping.");
+                    }
+                    let scale = if sample < 0.0 {
+                        8_388_608.0
+                    } else {
+                        8_388_607.0
+                    };
+                    let pcm = (f64::from(sample) * scale).round() as i32;
+                    selection.wav.extend(&pcm.to_le_bytes()[..3]);
+                }
+            }
+            if next >= selection.frames.end {
+                break;
+            }
+        }
+        frames = next;
+    }
+    let (rate, channels) = spec.ok_or(BAD_AUDIO)?;
+    if frames == 0 && selection.is_none() {
+        return Err(BAD_AUDIO);
+    }
+    Ok((rate, channels as u16, frames))
+}
 
 fn decode(bytes: &[u8]) -> Option<SamplesBuffer> {
     // shortcut: decode the web uploaders' fixed PCM layout, extend the decoder if the server adds other layouts.
@@ -142,5 +342,47 @@ mod tests {
 
         wav[24..28].fill(0);
         assert!(decode(&wav).is_none());
+    }
+}
+
+#[cfg(test)]
+mod crop_tests {
+    use super::*;
+
+    #[test]
+    fn prepares_only_the_selected_audio_with_baked_gain() {
+        let source = b"RIFF\x34\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0\x40\x1f\0\0\x80\x3e\0\0\x02\0\x10\0data\x10\0\0\0\0\x80\0\x80\0\x80\0\x80\0\x40\0\x40\0\x40\0\x40";
+        let source = SoundSource::decode(source.to_vec()).unwrap();
+        let clip = source
+            .crop(Crop {
+                start: 0.0,
+                end: 0.001,
+                gain: 50,
+            })
+            .unwrap();
+        assert_eq!(clip.duration_ms, 1);
+        assert_eq!(
+            decode(&clip.wav).unwrap().collect::<Vec<_>>(),
+            [-0.5, -0.5, -0.5, -0.5, 0.25, 0.25, 0.25, 0.25]
+        );
+        assert!(
+            source
+                .crop(Crop {
+                    start: 0.0,
+                    end: 0.002,
+                    gain: 100
+                })
+                .is_err()
+        );
+        assert!(
+            source
+                .crop(Crop {
+                    start: 0.0,
+                    end: 0.001,
+                    gain: 200
+                })
+                .is_err()
+        );
+        assert!(SoundSource::decode(b"not audio".to_vec()).is_err());
     }
 }

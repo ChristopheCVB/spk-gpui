@@ -12,6 +12,7 @@ mod channels;
 mod notifications;
 mod profile;
 mod shortcuts;
+mod soundboard_admin;
 
 use gpui_kit::component::{
     Theme, ThemeMode, ThemeRegistry, WindowExt,
@@ -155,11 +156,15 @@ enum Tab {
     Invites,
     Users,
     Channels,
+    Soundboard,
 }
 
 impl Tab {
     fn requires_admin(self) -> bool {
-        matches!(self, Self::Invites | Self::Users | Self::Channels)
+        matches!(
+            self,
+            Self::Invites | Self::Users | Self::Channels | Self::Soundboard
+        )
     }
 }
 
@@ -202,6 +207,7 @@ impl Spk {
             cx.observe(&spk, |settings, _, cx| {
                 settings.sync_account_admin(cx);
                 settings.sync_channel_form(cx);
+                settings.sync_soundboard_form(cx);
                 settings.sync_mic_test(cx);
                 settings.sync_camera_preview(cx);
                 cx.notify();
@@ -295,6 +301,7 @@ impl Spk {
                 playback_pending: false,
                 audio_test_error: None,
                 camera: camera::Preview::default(),
+                soundboard: soundboard_admin::SoundboardForm::new(window, cx),
             }
         });
         cx.observe_release_in(&content, window, |this, settings, window, cx| {
@@ -302,6 +309,13 @@ impl Spk {
             if settings.tab.admin_page().is_some() && matches!(this.view, View::SignedIn(_)) {
                 this.send(
                     Command::AdminAccounts(AdminAccountAction::Show(None)),
+                    None,
+                    cx,
+                );
+            }
+            if settings.tab == Tab::Soundboard && matches!(this.view, View::SignedIn(_)) {
+                this.send(
+                    Command::AdminSoundboard(crate::session::SoundboardAdminAction::Close),
                     None,
                     cx,
                 );
@@ -348,6 +362,7 @@ struct Settings {
     playback_pending: bool,
     audio_test_error: Option<&'static str>,
     camera: camera::Preview,
+    soundboard: soundboard_admin::SoundboardForm,
 }
 
 impl Render for Settings {
@@ -376,6 +391,7 @@ impl Render for Settings {
                 )
                 .into_any_element(),
             Tab::Channels => self.channels(sidebar, cx).into_any_element(),
+            Tab::Soundboard => self.soundboard_admin(sidebar, cx).into_any_element(),
         };
         div()
             .size_full()
@@ -442,6 +458,7 @@ impl Render for Settings {
                                     (Tab::Invites, "Invites", IconName::Link),
                                     (Tab::Users, "Users", IconName::Users),
                                     (Tab::Channels, "Channels", IconName::Hash),
+                                    (Tab::Soundboard, "Soundboard", IconName::Megaphone),
                                 ]
                                 .into_iter()
                                 .filter(|(tab, _, _)| !tab.requires_admin() || sidebar.is_admin())
@@ -487,6 +504,20 @@ impl Render for Settings {
                                                     AdminAccountAction::Show(admin_page),
                                                     cx,
                                                 );
+                                            }
+                                            if this.tab != tab {
+                                                use crate::session::SoundboardAdminAction;
+                                                if this.tab == Tab::Soundboard {
+                                                    this.soundboard_action(
+                                                        SoundboardAdminAction::Close,
+                                                        cx,
+                                                    );
+                                                } else if tab == Tab::Soundboard {
+                                                    this.soundboard_action(
+                                                        SoundboardAdminAction::Show,
+                                                        cx,
+                                                    );
+                                                }
                                             }
                                             this.tab = tab;
                                             if tab == Tab::Changelog && this.changelog.initial() {
