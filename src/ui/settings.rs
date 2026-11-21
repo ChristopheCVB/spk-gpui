@@ -4,6 +4,7 @@ use std::{
     path::PathBuf,
 };
 
+mod account_admin;
 mod audio;
 mod camera;
 mod changelog;
@@ -19,7 +20,7 @@ use gpui_kit::component::{
 
 use super::*;
 use crate::{
-    session::{View, VoiceProcessingSetting},
+    session::{AdminAccountAction, View, VoiceProcessingSetting},
     sounds::Sound,
 };
 
@@ -151,7 +152,15 @@ enum Tab {
     Notifications,
     Shortcuts,
     Changelog,
+    Invites,
+    Users,
     Channels,
+}
+
+impl Tab {
+    fn requires_admin(self) -> bool {
+        matches!(self, Self::Invites | Self::Users | Self::Channels)
+    }
 }
 
 impl Spk {
@@ -175,6 +184,14 @@ impl Spk {
                 }
             })
             .detach();
+            let invite_note = cx.new(|cx| InputState::new(window, cx));
+            let ban_reason = cx.new(|cx| InputState::new(window, cx));
+            cx.subscribe_in(&invite_note, window, |settings, _, event, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    settings.create_invite(window, cx);
+                }
+            })
+            .detach();
             let channel_name = cx.new(|cx| InputState::new(window, cx).placeholder("Channel name"));
             cx.subscribe_in(&channel_name, window, |settings, _, event, _, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
@@ -183,6 +200,7 @@ impl Spk {
             })
             .detach();
             cx.observe(&spk, |settings, _, cx| {
+                settings.sync_account_admin(cx);
                 settings.sync_channel_form(cx);
                 settings.sync_mic_test(cx);
                 settings.sync_camera_preview(cx);
@@ -259,6 +277,9 @@ impl Spk {
                 tab: Tab::Profile,
                 changelog: Default::default(),
                 nickname,
+                invite_note,
+                ban_reason,
+                ban_target: None,
                 channel_name,
                 channel_form: None,
                 channel_submitted_at: None,
@@ -278,6 +299,13 @@ impl Spk {
         });
         cx.observe_release_in(&content, window, |this, settings, window, cx| {
             this.cancel_shortcut_editor(cx);
+            if settings.tab.admin_page().is_some() && matches!(this.view, View::SignedIn(_)) {
+                this.send(
+                    Command::AdminAccounts(AdminAccountAction::Show(None)),
+                    None,
+                    cx,
+                );
+            }
             settings.camera.release(window);
         })
         .detach();
@@ -302,6 +330,9 @@ struct Settings {
     tab: Tab,
     changelog: changelog::History,
     nickname: Entity<InputState>,
+    invite_note: Entity<InputState>,
+    ban_reason: Entity<InputState>,
+    ban_target: Option<String>,
     channel_name: Entity<InputState>,
     channel_form: Option<channels::ChannelForm>,
     channel_submitted_at: Option<u64>,
@@ -327,7 +358,7 @@ impl Render for Settings {
         let View::SignedIn(sidebar) = &app.view else {
             return div();
         };
-        if self.tab == Tab::Channels && !sidebar.is_admin() {
+        if self.tab.requires_admin() && !sidebar.is_admin() {
             self.tab = Tab::Profile;
         }
         let body = match self.tab {
@@ -337,6 +368,13 @@ impl Render for Settings {
             Tab::Notifications => self.notifications(cx).into_any_element(),
             Tab::Shortcuts => self.shortcuts(cx).into_any_element(),
             Tab::Changelog => self.changelog(cx).into_any_element(),
+            Tab::Invites | Tab::Users => self
+                .manage_accounts(
+                    self.tab.admin_page().expect("admin account tab"),
+                    sidebar,
+                    cx,
+                )
+                .into_any_element(),
             Tab::Channels => self.channels(sidebar, cx).into_any_element(),
         };
         div()
@@ -401,10 +439,12 @@ impl Render for Settings {
                                     (Tab::Notifications, "Notifications", IconName::Bell),
                                     (Tab::Shortcuts, "Shortcuts", IconName::Settings2),
                                     (Tab::Changelog, "Changelog", IconName::FileText),
+                                    (Tab::Invites, "Invites", IconName::Link),
+                                    (Tab::Users, "Users", IconName::Users),
                                     (Tab::Channels, "Channels", IconName::Hash),
                                 ]
                                 .into_iter()
-                                .filter(|(tab, _, _)| *tab != Tab::Channels || sidebar.is_admin())
+                                .filter(|(tab, _, _)| !tab.requires_admin() || sidebar.is_admin())
                                 .map(|(tab, label, icon)| {
                                     let active = self.tab == tab;
                                     let color = if active {
@@ -438,6 +478,15 @@ impl Render for Settings {
                                                 this.spk.update(cx, |app, cx| {
                                                     app.cancel_shortcut_editor(cx)
                                                 });
+                                            }
+                                            let old_admin_page = this.tab.admin_page();
+                                            let admin_page = tab.admin_page();
+                                            if old_admin_page != admin_page {
+                                                this.ban_target = None;
+                                                this.account_action(
+                                                    AdminAccountAction::Show(admin_page),
+                                                    cx,
+                                                );
                                             }
                                             this.tab = tab;
                                             if tab == Tab::Changelog && this.changelog.initial() {

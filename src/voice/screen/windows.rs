@@ -297,6 +297,14 @@ impl Selected {
         if stop.load(Ordering::Acquire) {
             return Err(CaptureError::Cancelled);
         }
+        let source_lost = || {
+            self.window
+                .as_ref()
+                .is_some_and(|(window, pid)| window.process_id().ok() != Some(*pid))
+        };
+        if source_lost() {
+            return Err(CaptureError::SourceLost);
+        }
         let _apartment = Apartment::new()?;
         // Keep the selection MTA alive until the capture worker has entered it.
         let SelectedItem(item, apartment) = self.item;
@@ -389,11 +397,7 @@ impl Selected {
         let mut next_frame = started;
         let mut previous = None;
         while !stop.load(Ordering::Acquire) && !ended.load(Ordering::Acquire) {
-            if self
-                .window
-                .as_ref()
-                .is_some_and(|(window, pid)| window.process_id().ok() != Some(*pid))
-            {
+            if source_lost() {
                 return Err(CaptureError::SourceLost);
             }
             let now = Instant::now();

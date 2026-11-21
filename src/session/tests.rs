@@ -1,3 +1,4 @@
+mod account_admin;
 mod accounts;
 #[cfg(debug_assertions)]
 mod attachments;
@@ -311,6 +312,11 @@ async fn saved_session_restores_signs_out_and_clears_expired_credentials() {
 #[derive(Clone, Copy)]
 enum SidebarSnapshot {
     Initial,
+    AccountAdmin {
+        role: &'static str,
+        target_role: &'static str,
+        banned: bool,
+    },
     Updated,
     VoiceReplaced,
     FailPresenceOnce,
@@ -375,6 +381,7 @@ async fn voice_session_with_activity(
                         continue;
                     }
                     SidebarSnapshot::Initial
+                    | SidebarSnapshot::AccountAdmin { .. }
                     | SidebarSnapshot::FailPresenceOnce
                     | SidebarSnapshot::DelayUserPresence => "[]",
                     SidebarSnapshot::VoiceModeration {
@@ -412,7 +419,53 @@ async fn voice_session_with_activity(
                         .await;
                     continue;
                 }
+                "GET /api/users HTTP/1.1"
+                    if let SidebarSnapshot::AccountAdmin {
+                        role,
+                        target_role,
+                        banned,
+                    } = snapshot =>
+                {
+                    request
+                        .respond(
+                            &[],
+                            &value!([
+                                {"id":"alice","role":role},
+                                {"id":"bob","displayName":"Bob","role":target_role,"banned":banned},
+                            ])
+                            .to_string(),
+                        )
+                        .await;
+                    continue;
+                }
                 "GET /api/users HTTP/1.1" => "[]",
+                "GET /api/admin/users HTTP/1.1"
+                    if let SidebarSnapshot::AccountAdmin {
+                        target_role,
+                        banned,
+                        ..
+                    } = snapshot =>
+                {
+                    assert_eq!(request.header("cookie"), Some("session=fixture"));
+                    request
+                        .respond(
+                            &[],
+                            &value!({
+                                "users":[{"id":"bob","email":"bob@example.test","displayName":"Bob",
+                                    "role":target_role,"banned":banned,"bytes":512}],
+                                "totalBytes":4096,
+                            })
+                            .to_string(),
+                        )
+                        .await;
+                    continue;
+                }
+                line if line.contains(" /api/invites") || line.contains(" /api/admin/users") => {
+                    assert_eq!(request.header("cookie"), Some("session=fixture"));
+                    token_requests.send(request).await.unwrap();
+                    continue;
+                }
+
                 "GET /api/unread HTTP/1.1" => "{}",
                 "GET /api/users/presence HTTP/1.1"
                     if matches!(snapshot, SidebarSnapshot::DelayUserPresence) =>
@@ -1257,6 +1310,7 @@ pub(crate) struct Request {
     stream: BufReader<TcpStream>,
     headers: String,
     pub(crate) body: Vec<u8>,
+    line: String,
 }
 
 impl Request {
@@ -1281,6 +1335,7 @@ impl Request {
             stream,
             headers: String::new(),
             body: Vec::new(),
+            line: request_line.clone(),
         };
         loop {
             line.clear();
