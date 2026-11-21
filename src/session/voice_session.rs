@@ -578,7 +578,7 @@ impl VoiceSession {
                     .screen
                     .advance(attempt, Action::Choose(id, playback));
             }
-            Command::StartScreenShare(attempt) => {
+            Command::StartScreenShare(attempt, confirmed_audio) => {
                 if !sidebar.voice.as_ref().is_some_and(|voice| {
                     voice.is_participating()
                         && voice
@@ -588,10 +588,10 @@ impl VoiceSession {
                 }) {
                     return;
                 }
-                sidebar.voice_intent.screen.advance(
-                    attempt,
-                    Action::Start(sidebar.voice_intent.preferred.screen_audio),
-                );
+                sidebar
+                    .voice_intent
+                    .screen
+                    .advance(attempt, Action::Start(confirmed_audio));
             }
             Command::StopScreenShare(attempt) => {
                 if sidebar.voice_intent.screen.advance(attempt, Action::Stop)

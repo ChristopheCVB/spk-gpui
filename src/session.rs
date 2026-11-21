@@ -58,7 +58,7 @@ pub enum Command {
     SetWatching(String, bool),
     OpenScreenShare,
     ChooseScreenSource(u64, String),
-    StartScreenShare(u64),
+    StartScreenShare(u64, bool),
     StopScreenShare(u64),
     SetScreenAudio(bool),
     SetScreenQuality(screen::Quality),
