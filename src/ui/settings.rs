@@ -7,6 +7,7 @@ use std::{
 mod account_admin;
 mod audio;
 mod camera;
+mod channels;
 mod notifications;
 mod profile;
 mod shortcuts;
@@ -95,6 +96,13 @@ enum Tab {
     Shortcuts,
     Invites,
     Users,
+    Channels,
+}
+
+impl Tab {
+    fn requires_admin(self) -> bool {
+        matches!(self, Self::Invites | Self::Users | Self::Channels)
+    }
 }
 
 impl Spk {
@@ -126,11 +134,16 @@ impl Spk {
                 }
             })
             .detach();
-            cx.observe(&spk, |settings, _, cx| {
-                if matches!(&settings.spk.read(cx).view, View::SignedIn(sidebar) if !sidebar.is_admin()) && settings.tab.admin_page().is_some() {
-                    settings.tab = Tab::Profile;
-                    settings.ban_target = None;
+            let channel_name = cx.new(|cx| InputState::new(window, cx).placeholder("Channel name"));
+            cx.subscribe_in(&channel_name, window, |settings, _, event, _, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    settings.submit_channel_form(false, cx);
                 }
+            })
+            .detach();
+            cx.observe(&spk, |settings, _, cx| {
+                settings.sync_account_admin(cx);
+                settings.sync_channel_form(cx);
                 settings.sync_mic_test(cx);
                 settings.sync_camera_preview(cx);
                 cx.notify();
@@ -208,6 +221,9 @@ impl Spk {
                 invite_note,
                 ban_reason,
                 ban_target: None,
+                channel_name,
+                channel_form: None,
+                channel_submitted_at: None,
                 avatar_picker_open: false,
                 avatar_picker_error: None,
                 volumes,
@@ -257,6 +273,9 @@ struct Settings {
     invite_note: Entity<InputState>,
     ban_reason: Entity<InputState>,
     ban_target: Option<String>,
+    channel_name: Entity<InputState>,
+    channel_form: Option<channels::ChannelForm>,
+    channel_submitted_at: Option<u64>,
     avatar_picker_open: bool,
     avatar_picker_error: Option<&'static str>,
     volumes: [Entity<SliderState>; Sound::ALL.len()],
@@ -279,15 +298,15 @@ impl Render for Settings {
         let View::SignedIn(sidebar) = &app.view else {
             return div();
         };
+        if self.tab.requires_admin() && !sidebar.is_admin() {
+            self.tab = Tab::Profile;
+        }
         let body = match self.tab {
             Tab::Profile => self.profile(sidebar, cx).into_any_element(),
             Tab::Appearance => self.appearance(app, cx).into_any_element(),
             Tab::Voice => self.audio(sidebar, cx).into_any_element(),
             Tab::Notifications => self.notifications(cx).into_any_element(),
             Tab::Shortcuts => self.shortcuts(cx).into_any_element(),
-            Tab::Invites | Tab::Users if !sidebar.is_admin() => {
-                self.profile(sidebar, cx).into_any_element()
-            }
             Tab::Invites | Tab::Users => self
                 .manage_accounts(
                     self.tab.admin_page().expect("admin account tab"),
@@ -295,6 +314,7 @@ impl Render for Settings {
                     cx,
                 )
                 .into_any_element(),
+            Tab::Channels => self.channels(sidebar, cx).into_any_element(),
         };
         div()
             .size_full()
@@ -359,11 +379,10 @@ impl Render for Settings {
                                     (Tab::Shortcuts, "Shortcuts", IconName::Settings2),
                                     (Tab::Invites, "Invites", IconName::Link),
                                     (Tab::Users, "Users", IconName::Users),
+                                    (Tab::Channels, "Channels", IconName::Hash),
                                 ]
                                 .into_iter()
-                                .filter(|(tab, _, _)| {
-                                    tab.admin_page().is_none() || sidebar.is_admin()
-                                })
+                                .filter(|(tab, _, _)| !tab.requires_admin() || sidebar.is_admin())
                                 .map(|(tab, label, icon)| {
                                     let active = self.tab == tab;
                                     let color = if active {
@@ -423,14 +442,40 @@ impl Render for Settings {
                     )
                     .child(
                         div()
-                            .id("settings-body")
                             .flex()
                             .flex_col()
                             .flex_1()
                             .min_w_0()
-                            .overflow_y_scroll()
-                            .p_6()
-                            .child(body),
+                            .children(
+                                self.channel_form
+                                    .as_ref()
+                                    .filter(|_| self.tab == Tab::Channels)
+                                    .map(|form| {
+                                        div()
+                                            .px_6()
+                                            .pt_6()
+                                            .gap_2()
+                                            .flex()
+                                            .flex_col()
+                                            .children(self.channel_status(sidebar, cx))
+                                            .child(self.channel_editor(
+                                                form,
+                                                sidebar.channel_admin.pending,
+                                                cx,
+                                            ))
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .id("settings-body")
+                                    .flex()
+                                    .flex_col()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .overflow_y_scroll()
+                                    .p_6()
+                                    .child(body),
+                            ),
                     ),
             )
     }

@@ -208,6 +208,7 @@ impl Spk {
     ) -> Option<Div> {
         let report = call.screen.as_ref()?;
         let attempt = report.attempt;
+        let selected = sidebar.voice_intent.screen.quality;
         let panel = div().flex().flex_col().items_center().gap_2().px_4().pb_2();
         Some(match &report.state {
             ScreenState::Picking => panel.child(Label::new("Choose a display or window…")),
@@ -248,7 +249,6 @@ impl Spk {
                     (None, true) => "Video only. Audio is unavailable for this source.",
                     _ => "Video only",
                 };
-                let selected = sidebar.voice_intent.screen.quality;
                 let confirmed_audio = enabled && audio.is_some();
                 panel
                     .child(Label::new(label.clone()).font_semibold())
@@ -268,37 +268,7 @@ impl Spk {
                                 app.send(Command::SetScreenAudio(!enabled), None, cx);
                             })),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .justify_center()
-                            .gap_1()
-                            .children(Quality::HEIGHTS.into_iter().map(|height| {
-                                let label = SharedString::from(format!("{height}p"));
-                                Button::new(label.clone())
-                                    .small()
-                                    .ghost()
-                                    .tab_stop(true)
-                                    .label(label)
-                                    .selected(selected.height == height)
-                                    .on_click(cx.listener(move |app, _, _, cx| {
-                                        app.send(Command::SetScreenHeight(height), None, cx);
-                                    }))
-                            }))
-                            .children(Quality::FPS.into_iter().map(|fps| {
-                                let label = SharedString::from(format!("{fps} fps"));
-                                Button::new(label.clone())
-                                    .small()
-                                    .ghost()
-                                    .tab_stop(true)
-                                    .label(label)
-                                    .selected(selected.fps == fps)
-                                    .on_click(cx.listener(move |app, _, _, cx| {
-                                        app.send(Command::SetScreenFps(fps), None, cx);
-                                    }))
-                            })),
-                    )
+                    .child(Self::screen_quality_options(selected, cx))
                     .child(
                         Button::new("start-screen-share")
                             .small()
@@ -321,12 +291,21 @@ impl Spk {
                 fps,
                 audio,
                 audio_unavailable,
+                quality,
+                quality_failed,
                 ..
             } => panel
+                .child(Self::screen_quality_options(selected, cx))
                 .child(
                     Label::new(format!("Sharing at {width} × {height} · up to {fps} fps"))
                         .text_xs(),
                 )
+                .when(selected != *quality, |panel| {
+                    panel.child(Label::new("Changing Screen Share quality…").text_xs())
+                })
+                .when(selected == *quality && quality_failed.is_some(), |panel| {
+                    panel.child(Label::new("Could not change Screen Share quality.").text_xs())
+                })
                 .child(
                     Label::new(if *audio_unavailable {
                         "Video only. Screen Share audio is unavailable."
@@ -337,6 +316,38 @@ impl Spk {
                 ),
             ScreenState::Ended(message) => panel.child(Label::new(*message)),
         })
+    }
+
+    fn screen_quality_options(selected: Quality, cx: &Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_wrap()
+            .justify_center()
+            .gap_1()
+            .children(Quality::HEIGHTS.into_iter().map(|height| {
+                let label = SharedString::from(format!("{height}p"));
+                Button::new(label.clone())
+                    .small()
+                    .ghost()
+                    .tab_stop(true)
+                    .label(label)
+                    .selected(selected.height == height)
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.send(Command::SetScreenHeight(height), None, cx);
+                    }))
+            }))
+            .children(Quality::FPS.into_iter().map(|fps| {
+                let label = SharedString::from(format!("{fps} fps"));
+                Button::new(label.clone())
+                    .small()
+                    .ghost()
+                    .tab_stop(true)
+                    .label(label)
+                    .selected(selected.fps == fps)
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.send(Command::SetScreenFps(fps), None, cx);
+                    }))
+            }))
     }
 
     #[cfg(windows)]

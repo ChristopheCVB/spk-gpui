@@ -94,6 +94,11 @@ async fn manages_invites_only_as_admin_and_retains_server_rejections() {
             .await;
             let link = active.admin_accounts.link.as_ref().unwrap();
             assert!(link.url.ends_with("/signup?invite=fixture"));
+            let rows = active.admin_accounts.invites.as_ref().unwrap();
+            assert_eq!(rows[0].note.as_deref(), Some("For Bob"));
+            assert!(rows[1].status == InviteStatus::Used);
+            assert_eq!(rows[1].used_by.as_ref().unwrap().name, "Bob");
+            assert!(rows[2].status == InviteStatus::Expired);
             dispatch(AdminAccountAction::RevokeInvite("invite-1".into())).await;
             wait_for_sidebar(&views, |view| {
                 view.admin_accounts.invites.as_ref().is_some_and(|rows| {
@@ -113,10 +118,20 @@ async fn manages_invites_only_as_admin_and_retains_server_rejections() {
 }
 
 fn invite(status: &str) -> String {
-    value!([{
-        "id":"invite-1","note":"For Bob","createdAt":1900000000000_i64,
-        "expiresAt":1900000300000_i64,"status":status,"usedBy":null,
-    }])
+    value!([
+        {
+            "id":"invite-1","note":"For Bob","createdAt":1900000000000_i64,
+            "expiresAt":1900000300000_i64,"status":status,"usedBy":null,
+        },
+        {
+            "id":"invite-2","note":null,"createdAt":1800000000000_i64,
+            "expiresAt":1800000300000_i64,"status":"used","usedBy":{"id":"bob","name":"Bob"},
+        },
+        {
+            "id":"invite-3","note":null,"createdAt":1700000000000_i64,
+            "expiresAt":1700000300000_i64,"status":"expired","usedBy":null,
+        },
+    ])
     .to_string()
 }
 

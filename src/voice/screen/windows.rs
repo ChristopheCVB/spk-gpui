@@ -274,14 +274,13 @@ impl Drop for StopCapture {
 impl Capture for Selected {
     fn start(
         self: Box<Self>,
-        quality: Quality,
         audio: bool,
         sink: CaptureSink,
     ) -> BoxFuture<'static, Result<(), CaptureError>> {
         Box::pin(async move {
             let stop = Arc::new(AtomicBool::new(false));
             let _owner = StopCapture(stop.clone());
-            tokio::task::spawn_blocking(move || self.run(quality, audio, sink, stop))
+            tokio::task::spawn_blocking(move || self.run(audio, sink, stop))
                 .await
                 .map_err(|_| CaptureError::Unavailable)?
         })
@@ -291,7 +290,6 @@ impl Capture for Selected {
 impl Selected {
     fn run(
         self,
-        quality: Quality,
         with_audio: bool,
         sink: CaptureSink,
         stop: Arc<AtomicBool>,
@@ -299,10 +297,6 @@ impl Selected {
         if stop.load(Ordering::Acquire) {
             return Err(CaptureError::Cancelled);
         }
-        let fps = self
-            .fps
-            .filter(|fps| *fps > 0)
-            .map_or(quality.fps, |fps| quality.fps.min(fps));
         let _apartment = Apartment::new()?;
         // Keep the selection MTA alive until the capture worker has entered it.
         let SelectedItem(item, apartment) = self.item;
@@ -392,8 +386,8 @@ impl Selected {
         }
 
         let started = Instant::now();
-        let interval = Duration::from_nanos(1_000_000_000 / u64::from(fps));
         let mut next_frame = started;
+        let mut previous = None;
         while !stop.load(Ordering::Acquire) && !ended.load(Ordering::Acquire) {
             if self
                 .window
@@ -403,6 +397,15 @@ impl Selected {
                 return Err(CaptureError::SourceLost);
             }
             let now = Instant::now();
+            let quality = *sink.quality.borrow();
+            let fps = self
+                .fps
+                .filter(|fps| *fps > 0)
+                .map_or(quality.fps, |limit| quality.fps.min(limit));
+            if previous != Some(quality) {
+                previous = Some(quality);
+                next_frame = now;
+            }
             if now < next_frame {
                 thread::park_timeout((next_frame - now).min(Duration::from_millis(50)));
                 continue;
@@ -411,6 +414,7 @@ impl Selected {
                 thread::park_timeout(Duration::from_millis(50));
                 continue;
             }
+            let interval = Duration::from_nanos(1_000_000_000 / u64::from(fps));
             next_frame = (next_frame + interval).max(now + interval / 2);
             let frame = match capture.pool.TryGetNextFrame() {
                 Ok(frame) => frame,
@@ -433,7 +437,7 @@ impl Selected {
             frame.Close().map_err(|_| CaptureError::SourceLost)?;
             let mut output = output?;
             output.timestamp_us = now.duration_since(started).as_micros() as i64;
-            sink.video(output, fps);
+            sink.video(output, quality, fps);
         }
         if ended.load(Ordering::Acquire) {
             Err(CaptureError::SourceLost)

@@ -383,6 +383,13 @@ impl Spk {
             }
         }
         if let View::SignedIn(sidebar) = &mut view {
+            if let (Some(id), Some(channels)) = (&self.selected_voice_channel, &sidebar.channels)
+                && !channels
+                    .iter()
+                    .any(|channel| channel.id == *id && channel.kind == "voice")
+            {
+                self.selected_voice_channel = None;
+            }
             for alert in std::mem::take(&mut sidebar.alerts) {
                 self.show_alert(alert, sidebar, window, cx);
             }

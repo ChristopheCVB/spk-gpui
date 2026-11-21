@@ -2,6 +2,7 @@ mod account_admin;
 mod accounts;
 mod authentication;
 mod avatars;
+mod channel_admin;
 mod chat;
 mod presence;
 mod profiles;
@@ -29,9 +30,11 @@ use crate::api::{
 };
 use crate::notifications::{Alert, LiveAlerts};
 use crate::sounds::{Sound, VoiceSounds};
+#[cfg(any(test, windows))]
+use crate::voice::screen;
 use crate::voice::{
     Call, Device, DeviceKind, Devices, Intent, Issue as VoiceIssue, NoiseSuppression,
-    ParticipantVolumeChange, Status as VoiceStatus, Update as VoiceUpdate, screen,
+    ParticipantVolumeChange, Status as VoiceStatus, Update as VoiceUpdate,
     video::{CameraResolution, preview_camera},
 };
 use account_admin::AccountAdmin;
@@ -53,6 +56,7 @@ pub use {
     account_admin::{AdminAccountAction, AdminAccountsView, AdminPage},
     accounts::AccountLinkForm,
     avatars::AvatarPhoto,
+    channel_admin::{ChannelAction, ChannelAdmin, ChannelKind},
     chat::{
         AttachmentInput, ChatView, Delivery, GifPickerView, Pins, UploadStatus, image_preview,
         message_gif_line,
@@ -83,6 +87,7 @@ pub enum Command {
     SignOut,
     SetUserStatus(UserStatus),
     Refresh,
+    ManageChannel(ChannelAction),
     OpenTextChannel(String),
     OpenDirectMessage(String),
     StartDirectMessage(String),
@@ -246,6 +251,7 @@ pub struct Sidebar {
     pub user_status: UserStatus,
     pub user_status_notice: Option<&'static str>,
     pub channels: Option<Vec<Channel>>,
+    pub channel_admin: ChannelAdmin,
     pub connection: Connection,
     pub notice: Option<&'static str>,
     pub load_failed: bool,
@@ -282,6 +288,7 @@ impl Sidebar {
             user_status: UserStatus::default(),
             user_status_notice: None,
             channels: None,
+            channel_admin: ChannelAdmin::default(),
             connection: Connection::Connecting,
             notice,
             load_failed: false,
@@ -370,6 +377,18 @@ impl Sidebar {
         self.users
             .get(id)
             .filter(|user| self.is_admin() || !user.banned)
+            .or_else(|| {
+                if !self.is_admin() {
+                    return None;
+                }
+                self.admin_accounts
+                    .users
+                    .as_ref()?
+                    .users
+                    .iter()
+                    .find(|entry| entry.user.id == id)
+                    .map(|entry| &entry.user)
+            })
     }
 
     pub fn is_admin(&self) -> bool {
@@ -553,6 +572,8 @@ async fn watch_session(
     let mut soundboard = SoundboardSession::default();
     let mut camera_previews = JoinSet::new();
     let mut voice_moderation = JoinSet::new();
+    let mut channel_mutations = JoinSet::new();
+    let mut channel_mutation_result = None;
     let mut profiles = JoinSet::new();
     let mut account_admin = AccountAdmin::default();
     let end = loop {
@@ -678,6 +699,22 @@ async fn watch_session(
                     unread.refresh(client);
                     if matches!(sidebar.connection, Connection::Online) {
                         refresh.fetch(client, Resource::UserPresence);
+                    }
+                }
+                Ok(Command::ManageChannel(action)) => {
+                    if !sidebar.channel_admin.pending {
+                        sidebar.channel_admin.revision += 1;
+                        sidebar.channel_admin.result = None;
+                        match sidebar.channel_mutation(action) {
+                            Ok((mutation, notice)) => {
+                                sidebar.channel_admin.pending = true;
+                                let client = client.clone();
+                                channel_mutations.spawn(async move {
+                                    client.mutate_channel(mutation).await.map(|()| notice)
+                                });
+                            }
+                            Err(notice) => sidebar.channel_admin.result = Some(Err(notice)),
+                        }
                     }
                 }
                 Ok(Command::OpenTextChannel(id)) => {
@@ -814,6 +851,23 @@ async fn watch_session(
                 }
             },
             Some(_) = camera_previews.join_next() => {}
+            Some(result) = channel_mutations.join_next() => {
+                let result = result.unwrap_or(Err(Failure::Connection));
+                if result.as_ref().is_err_and(Failure::unauthorized) {
+                    break SessionEnd::Invalidated(SESSION_EXPIRED);
+                }
+                let notice = result.as_ref().copied().map_err(channel_admin::failure_notice);
+                match result {
+                    Ok(_) | Err(Failure::Http(reqwest::StatusCode::CONFLICT | reqwest::StatusCode::NOT_FOUND)) => {
+                        channel_mutation_result = Some(notice);
+                        refresh.fetch(client, Resource::Channels);
+                    }
+                    _ => {
+                        sidebar.channel_admin.pending = false;
+                        sidebar.channel_admin.result = Some(notice);
+                    }
+                }
+            }
             Some(result) = voice_moderation.join_next() => {
                 let result = result.unwrap_or(Err(Failure::Connection));
                 if result.as_ref().is_err_and(Failure::unauthorized) {
@@ -985,18 +1039,7 @@ async fn watch_session(
                     voice.video_participant_left(&mut sidebar, &id);
                 }
                 VoiceUpdate::Screen(report) => {
-                    let request = &sidebar.voice_intent.screen;
-                    if let Some(voice) = &mut sidebar.voice
-                        && voice.is_participating()
-                        && report.attempt == request.attempt
-                        && request.action != screen::Action::Stop
-                    {
-                        let was_live = voice.screen.as_ref().is_some_and(|screen| screen.state.active());
-                        if was_live != report.state.active() {
-                            settings.sounds.play(Sound::Screen, report.state.active());
-                        }
-                        voice.screen = Some(report);
-                    }
+                    voice.screen_report(&mut sidebar, &settings, report);
                 }
                 VoiceUpdate::Finished(result) => {
                     voice.finished();
@@ -1078,6 +1121,25 @@ async fn watch_session(
                     && sidebar.voice.as_ref().is_some_and(|voice| sidebar.has_voice_channel(&voice.channel_id));
                 refresh.complete(&mut sidebar, resource, data);
                 account_admin.clear_if_demoted(&mut sidebar);
+                if resource == Resource::Channels && !refresh.dirty.contains(&resource) {
+                    if let Some(result) = channel_mutation_result.take() {
+                        sidebar.channel_admin.pending = false;
+                        sidebar.channel_admin.result = Some(match (result, presence_loaded) {
+                            (Ok(_), false) => Ok("Channel updated. Refresh to reload the channel list."),
+                            _ => result,
+                        });
+                    }
+                }
+                if resource == Resource::Channels
+                    && presence_loaded
+                    && let Some(id) = chat.selected_text_channel()
+                    && !sidebar.channels_of_kind(ChannelKind::Text).any(|channel| channel.id == id)
+                {
+                    chat.close();
+                    if pending_message_target.is_none() {
+                        sidebar.chat_notice = Some("That channel no longer exists.");
+                    }
+                }
                 if resource == Resource::Channels
                     && !refresh.dirty.contains(&resource)
                     && let Some(target) = pending_message_target.take()

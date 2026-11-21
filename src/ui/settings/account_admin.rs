@@ -20,6 +20,28 @@ impl Tab {
 }
 
 impl Settings {
+    pub(super) fn sync_account_admin(&mut self, cx: &Context<Self>) {
+        let View::SignedIn(sidebar) = &self.spk.read(cx).view else {
+            return;
+        };
+        if !sidebar.is_admin()
+            || self.ban_target.as_ref().is_some_and(|id| {
+                sidebar
+                    .admin_accounts
+                    .users
+                    .as_ref()
+                    .is_some_and(|directory| {
+                        !directory
+                            .users
+                            .iter()
+                            .any(|entry| &entry.user.id == id && !entry.user.banned)
+                    })
+            })
+        {
+            self.ban_target = None;
+        }
+    }
+
     pub(super) fn account_action(&self, action: AdminAccountAction, cx: &mut Context<Self>) {
         self.spk.update(cx, |app, cx| {
             app.send(Command::AdminAccounts(action), None, cx);

@@ -222,7 +222,6 @@ struct Selected {
 impl Capture for Selected {
     fn start(
         self: Box<Self>,
-        quality: Quality,
         audio: bool,
         sink: CaptureSink,
     ) -> BoxFuture<'static, Result<(), CaptureError>> {
@@ -230,7 +229,7 @@ impl Capture for Selected {
             let Self { mut video, monitor } = *self;
             let monitor = monitor.filter(|_| audio);
             tokio::select! {
-                result = video.capture(quality, sink.clone()) => result,
+                result = video.capture(sink.clone()) => result,
                 () = async {
                     if let Some(monitor) = monitor {
                         monitor.capture(&sink).await;
@@ -279,16 +278,29 @@ impl VideoCapture {
         }
     }
 
-    async fn capture(&mut self, quality: Quality, sink: CaptureSink) -> Result<(), CaptureError> {
+    async fn capture(&mut self, mut sink: CaptureSink) -> Result<(), CaptureError> {
+        let quality = *sink.quality.borrow_and_update();
         {
             let mut frames = self.frames.lock().unwrap();
             frames.last = Some(Instant::now());
-            frames.output = Some((quality, sink));
+            frames.output = Some((quality, sink.clone()));
         }
-        let mut ticks = interval(Duration::from_secs_f64(1.0 / f64::from(quality.fps)));
+        let period = |quality: Quality| Duration::from_secs_f64(1.0 / f64::from(quality.fps));
+        let mut ticks = interval(period(quality));
         ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
-            ticks.tick().await;
+            tokio::select! {
+                biased;
+                result = sink.quality.changed() => {
+                    result.map_err(|_| CaptureError::Cancelled)?;
+                    let quality = *sink.quality.borrow_and_update();
+                    self.frames.lock().unwrap().output = Some((quality, sink.clone()));
+                    ticks = interval(period(quality));
+                    ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
+                    continue;
+                }
+                _ = ticks.tick() => {}
+            }
             self.request_frame();
             let frames = self.frames.lock().unwrap();
             if frames.ended
@@ -361,7 +373,7 @@ impl DesktopCapturerCallback for Frames {
             // WebRTC's DesktopFrame owns stride × height bytes of BGRA pixels.
             let bytes = unsafe { std::slice::from_raw_parts(frame.data(), size) };
             if let Some(frame) = video_frame(bytes, width, height, stride, *quality) {
-                sink.video(frame, quality.fps);
+                sink.video(frame, *quality, quality.fps);
             }
         }
     }

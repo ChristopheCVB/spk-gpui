@@ -15,6 +15,8 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use super::{Device, Intent, Update, Worker, video::VideoFrameSlot};
 
+const QUALITY_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
@@ -153,7 +155,6 @@ pub struct Selection {
 pub trait Capture: Send {
     fn start(
         self: Box<Self>,
-        quality: Quality,
         audio: bool,
         sink: CaptureSink,
     ) -> BoxFuture<'static, Result<(), CaptureError>>;
@@ -162,15 +163,17 @@ pub trait Capture: Send {
 #[derive(Clone)]
 #[allow(dead_code)] // Native adapters send frames through these bounded queues.
 pub struct CaptureSink {
-    video: mpsc::Sender<(VideoFrame<I420Buffer>, u32)>,
+    video: mpsc::Sender<(VideoFrame<I420Buffer>, Quality, u32)>,
+    quality: watch::Receiver<Quality>,
     audio: Option<mpsc::Sender<Vec<i16>>>,
     audio_unavailable: watch::Sender<bool>,
 }
 
 #[allow(dead_code)]
 impl CaptureSink {
-    pub fn video(&self, frame: VideoFrame<I420Buffer>, fps: u32) {
-        let _ = self.video.try_send((frame, fps));
+    pub fn video(&self, frame: VideoFrame<I420Buffer>, quality: Quality, fps: u32) {
+        // Callbacks can arrive after a preset change, so carry the settings that produced the frame.
+        let _ = self.video.try_send((frame, quality, fps));
     }
 
     pub fn audio(&self, samples: Vec<i16>) {
@@ -193,6 +196,7 @@ impl CaptureSink {
         (
             Self {
                 video,
+                quality: watch::channel(Quality::default()).1,
                 audio: with_audio.then_some(audio),
                 audio_unavailable: watch::Sender::new(false),
             },
@@ -262,6 +266,8 @@ pub enum State {
         width: u32,
         height: u32,
         fps: u32,
+        quality: Quality,
+        quality_failed: Option<Quality>,
         audio: Option<AudioScope>,
         audio_unavailable: bool,
         frames: VideoFrameSlot,
@@ -333,7 +339,15 @@ pub(super) async fn run(worker: &Worker, room: &Room) {
             };
             let scope = selection.audio.filter(|_| wants_audio);
             report(State::Starting);
-            capture_and_publish(room, request.quality, scope, selection.capture, &report).await
+            capture_and_publish(
+                room,
+                request.quality,
+                &mut requested,
+                scope,
+                selection.capture,
+                &report,
+            )
+            .await
         })
         .await;
         let error = result.err().unwrap_or(CaptureError::SourceLost);
@@ -380,6 +394,7 @@ async fn wait_for_action(
 async fn capture_and_publish(
     room: &Room,
     quality: Quality,
+    requested: &mut watch::Receiver<Intent>,
     scope: Option<AudioScope>,
     capture: Box<dyn Capture>,
     report: &impl Fn(State),
@@ -387,11 +402,12 @@ async fn capture_and_publish(
     let (video, mut video_frames) = mpsc::channel(1);
     let (audio, mut audio_samples) = mpsc::channel(4);
     let (audio_unavailable, mut audio_status) = watch::channel(false);
+    let (capture_quality, target) = watch::channel(quality);
     let capture = capture.start(
-        quality,
         scope.is_some(),
         CaptureSink {
             video,
+            quality: target,
             audio: scope.is_some().then_some(audio),
             audio_unavailable,
         },
@@ -400,56 +416,109 @@ async fn capture_and_publish(
         biased;
         result = capture => result,
         result = async {
-            let (frame, mut fps) = tokio::time::timeout(Duration::from_secs(15), video_frames.recv()).await
+            let (frame, mut applied, fps) = tokio::time::timeout(Duration::from_secs(15), video_frames.recv()).await
                 .ok().flatten().ok_or(CaptureError::Unavailable)?;
-            let (mut width, mut height) = (frame.buffer.width(), frame.buffer.height());
-            let source = NativeVideoSource::new(VideoResolution { width, height }, true);
-            let name = Quality::publication_name(width, height, fps);
-            let video = LocalVideoTrack::create_video_track(&name, RtcVideoSource::Native(source.clone()));
-            let (video, started) = Publication::new(room, LocalTrack::Video(video), TrackPublishOptions {
-                video_encoding: Some(VideoEncoding {
-                    max_bitrate: (f64::from(width * height) * 0.458 * f64::from(fps).powf(0.674) / 100_000.0).round() as u64 * 100_000,
-                    max_framerate: f64::from(fps),
-                }),
-                source: TrackSource::Screenshare,
-                stream: "screen".into(),
-                simulcast: false,
-                degradation_preference: Some(if fps == 5 { DegradationPreference::MaintainResolution } else { DegradationPreference::MaintainFramerate }),
-                ..Default::default()
-            });
+            let mut format = VideoFormat::new(&frame, fps);
+            let (mut video, started) = VideoPublication::new(room, format);
             if !started.await.unwrap_or(false) {
                 return Err(CaptureError::Publication);
             }
             let frames = VideoFrameSlot::default();
-            source.capture_frame(&frame);
+            video.source.capture_frame(&frame);
             frames.update(&frame, false);
             let mut audio_available = scope.is_some() && !*audio_status.borrow_and_update();
-            report(State::Live {
-                width, height, fps, audio: scope.filter(|_| audio_available),
-                audio_unavailable: scope.is_some() && !audio_available, frames: frames.clone(),
-            });
+            let report_live = |format: VideoFormat, quality, quality_failed, available| {
+                report(State::Live {
+                    width: format.width,
+                    height: format.height,
+                    fps: format.fps,
+                    quality,
+                    quality_failed,
+                    audio: scope.filter(|_| available),
+                    audio_unavailable: scope.is_some() && !available,
+                    frames: frames.clone(),
+                });
+            };
+            let mut quality_failed = None;
+            report_live(format, applied, quality_failed, audio_available);
 
             let mut audio: Option<(Publication, NativeAudioSource)> = None;
             let mut events = room.subscribe();
+            let mut target = applied;
+            let mut last_requested = quality;
+            let mut deadline = None;
+            let mut replacement: Option<(VideoPublication, VideoFormat, oneshot::Receiver<bool>)> = None;
             loop {
-                tokio::select! {
+                let changed = tokio::select! {
                     biased;
+                    result = requested.changed() => {
+                        result.map_err(|_| CaptureError::Cancelled)?;
+                        let next = requested.borrow_and_update().screen.quality;
+                        if next == last_requested {
+                            continue;
+                        }
+                        last_requested = next;
+                        if next == target {
+                            continue;
+                        }
+                        target = next;
+                        capture_quality.send_replace(target);
+                        deadline = (target != applied).then(|| tokio::time::Instant::now() + QUALITY_TIMEOUT);
+                        replacement = None;
+                        quality_failed = None;
+                        true
+                    }
+                    () = async {
+                        tokio::time::sleep_until(deadline.expect("quality deadline")).await;
+                    }, if deadline.is_some() => {
+                        if target == applied {
+                            return Err(CaptureError::Publication);
+                        }
+                        quality_failed = Some(target);
+                        target = applied;
+                        capture_quality.send_replace(applied);
+                        deadline = replacement.is_some().then(|| tokio::time::Instant::now() + QUALITY_TIMEOUT);
+                        replacement = None;
+                        true
+                    }
+                    ready = async {
+                        (&mut replacement.as_mut().expect("replacement publication").2).await.unwrap_or(false)
+                    }, if replacement.is_some() => {
+                        let (new, new_format, _) = replacement.take().expect("replacement publication");
+                        deadline = None;
+                        if ready {
+                            // Keep the old video until LiveKit accepts its replacement.
+                            video = new;
+                            format = new_format;
+                            applied = target;
+                        } else if target != applied {
+                            quality_failed = Some(target);
+                            target = applied;
+                            capture_quality.send_replace(applied);
+                            deadline = Some(tokio::time::Instant::now() + QUALITY_TIMEOUT);
+                        } else {
+                            return Err(CaptureError::Publication);
+                        }
+                        true
+                    }
                     result = audio_status.changed(), if audio_available => {
                         if result.is_err() || *audio_status.borrow_and_update() {
                             audio_available = false;
                             audio = None;
-                            report(State::Live { width, height, fps, audio: None, audio_unavailable: true, frames: frames.clone() });
+                            true
+                        } else {
+                            false
                         }
                     }
                     event = events.recv() => match event {
-                        Some(RoomEvent::Reconnected) if !video.in_room(room) => return Err(CaptureError::Publication),
+                        Some(RoomEvent::Reconnected) if !video.publication.in_room(room) => return Err(CaptureError::Publication),
                         Some(RoomEvent::Reconnected) if audio.as_ref().is_some_and(|(track, _)| !track.in_room(room)) => {
                             audio_available = false;
                             audio = None;
-                            report(State::Live { width, height, fps, audio: None, audio_unavailable: true, frames: frames.clone() });
+                            true
                         }
                         Some(RoomEvent::Disconnected { .. }) | None => return Err(CaptureError::Publication),
-                        _ => {}
+                        _ => false,
                     },
                     Some(samples) = audio_samples.recv(), if audio_available => {
                         if audio.is_none() {
@@ -470,7 +539,7 @@ async fn capture_and_publish(
                             });
                             if !started.await.unwrap_or(false) {
                                 audio_available = false;
-                                report(State::Live { width, height, fps, audio: None, audio_unavailable: true, frames: frames.clone() });
+                                report_live(format, applied, quality_failed, audio_available);
                                 continue;
                             }
                             audio = Some((publication, source));
@@ -483,22 +552,109 @@ async fn capture_and_publish(
                                 num_channels: 2,
                             }).await;
                         }
+                        false
                     }
-                    Some((frame, active_fps)) = video_frames.recv() => {
-                        source.capture_frame(&frame);
-                        frames.update(&frame, false);
-                        let (active_width, active_height) = (frame.buffer.width(), frame.buffer.height());
-                        if (width, height, fps) != (active_width, active_height, active_fps) {
-                            (width, height, fps) = (active_width, active_height, active_fps);
-                            report(State::Live {
-                                width, height, fps, audio: scope.filter(|_| audio_available),
-                                audio_unavailable: scope.is_some() && !audio_available, frames: frames.clone(),
-                            });
+                    Some((frame, captured, fps)) = video_frames.recv() => {
+                        let captured_format = VideoFormat::new(&frame, fps);
+                        if captured != target {
+                            if captured == applied && captured_format == format {
+                                video.source.capture_frame(&frame);
+                                frames.update(&frame, false);
+                            }
+                            false
+                        } else if let Some((next, expected, _)) = &replacement {
+                            if *expected == captured_format {
+                                next.source.capture_frame(&frame);
+                            }
+                            false
+                        } else if format != captured_format
+                            && (target != applied || format.fps != fps || format.name() != captured_format.name())
+                        {
+                            let (next, started) = VideoPublication::new(room, captured_format);
+                            next.source.capture_frame(&frame);
+                            replacement = Some((next, captured_format, started));
+                            false
+                        } else {
+                            video.source.capture_frame(&frame);
+                            frames.update(&frame, false);
+                            let changed = (format, applied) != (captured_format, target);
+                            (format, applied) = (captured_format, target);
+                            deadline = None;
+                            changed
                         }
                     }
+                };
+                if changed {
+                    report_live(format, applied, quality_failed, audio_available);
                 }
             }
         } => result,
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct VideoFormat {
+    width: u32,
+    height: u32,
+    fps: u32,
+}
+
+impl VideoFormat {
+    fn new(frame: &VideoFrame<I420Buffer>, fps: u32) -> Self {
+        Self {
+            width: frame.buffer.width(),
+            height: frame.buffer.height(),
+            fps,
+        }
+    }
+
+    fn name(self) -> String {
+        Quality::publication_name(self.width, self.height, self.fps)
+    }
+}
+
+struct VideoPublication {
+    publication: Publication,
+    source: NativeVideoSource,
+}
+
+impl VideoPublication {
+    fn new(room: &Room, format: VideoFormat) -> (Self, oneshot::Receiver<bool>) {
+        let VideoFormat { width, height, fps } = format;
+        let source = NativeVideoSource::new(VideoResolution { width, height }, true);
+        let video = LocalVideoTrack::create_video_track(
+            &format.name(),
+            RtcVideoSource::Native(source.clone()),
+        );
+        let (publication, started) = Publication::new(
+            room,
+            LocalTrack::Video(video),
+            TrackPublishOptions {
+                video_encoding: Some(VideoEncoding {
+                    max_bitrate: (f64::from(width * height) * 0.458 * f64::from(fps).powf(0.674)
+                        / 100_000.0)
+                        .round() as u64
+                        * 100_000,
+                    max_framerate: f64::from(fps),
+                }),
+                source: TrackSource::Screenshare,
+                stream: "screen".into(),
+                simulcast: false,
+                degradation_preference: Some(if fps == 5 {
+                    DegradationPreference::MaintainResolution
+                } else {
+                    DegradationPreference::MaintainFramerate
+                }),
+                ..Default::default()
+            },
+        );
+        (
+            Self {
+                publication,
+                source,
+            },
+            started,
+        )
     }
 }
 
