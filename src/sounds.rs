@@ -10,10 +10,19 @@ pub enum Sound {
     Leave,
     Mute,
     Deafen,
+    Camera,
+    Watch,
 }
 
 impl Sound {
-    pub const ALL: [Self; 4] = [Self::Join, Self::Leave, Self::Mute, Self::Deafen];
+    pub const ALL: [Self; 6] = [
+        Self::Join,
+        Self::Leave,
+        Self::Mute,
+        Self::Deafen,
+        Self::Camera,
+        Self::Watch,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -21,6 +30,8 @@ impl Sound {
             Self::Leave => "Leave sound",
             Self::Mute => "Mute sound",
             Self::Deafen => "Deafen sound",
+            Self::Camera => "Camera sound",
+            Self::Watch => "Watch sound",
         }
     }
 }
@@ -48,6 +59,8 @@ pub struct SoundSettings {
     pub leave: SoundSetting,
     pub mute: SoundSetting,
     pub deafen: SoundSetting,
+    pub camera: SoundSetting,
+    pub watch: SoundSetting,
 }
 
 impl SoundSettings {
@@ -57,6 +70,8 @@ impl SoundSettings {
             Sound::Leave => &mut self.leave,
             Sound::Mute => &mut self.mute,
             Sound::Deafen => &mut self.deafen,
+            Sound::Camera => &mut self.camera,
+            Sound::Watch => &mut self.watch,
         }
     }
 
@@ -141,6 +156,10 @@ impl Cue {
             (Sound::Mute, false) => &[415.0, 262.0],
             (Sound::Deafen, true) => &[262.0, 330.0, 392.0],
             (Sound::Deafen, false) => &[392.0, 294.0, 196.0],
+            (Sound::Camera, true) => &[494.0, 622.0, 740.0],
+            (Sound::Camera, false) => &[740.0, 622.0, 494.0],
+            (Sound::Watch, true) => &[466.0, 622.0],
+            (Sound::Watch, false) => &[622.0, 466.0],
         }
     }
 
@@ -160,6 +179,8 @@ impl Cue {
                 let wave = (TAU * frequency * time).sin();
                 let wave = if triangle {
                     wave.asin() * (4.0 / TAU)
+                } else if self.sound == Sound::Watch {
+                    2.0 * (time * frequency).fract() - 1.0
                 } else {
                     wave
                 };

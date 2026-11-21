@@ -519,7 +519,7 @@ async fn serve_active_media_presence(
     .await;
     assert_eq!(
         receive_voice_frame(socket).await,
-        value!({"type":"voice:state","sid":sid,"muted":false,"deafened":false,"speaking":false}),
+        value!({"type":"voice:state","sid":sid,"muted":false,"deafened":false,"speaking":false,"cam":false,"screen":false,"watching":[]}),
     );
     publish_media_presence(socket, snapshots, "first", VoiceFlags::default()).await;
 }

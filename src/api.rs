@@ -97,6 +97,14 @@ pub struct VoiceFlags {
     pub speaking: bool,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct VideoPresence {
+    pub cam: bool,
+    pub screen: bool,
+    pub watching: Vec<String>,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Member {
@@ -104,6 +112,8 @@ pub struct Member {
     pub channel_id: String,
     #[serde(flatten)]
     pub flags: VoiceFlags,
+    #[serde(flatten)]
+    pub video: VideoPresence,
 }
 
 #[derive(Deserialize)]
@@ -118,6 +128,8 @@ pub enum Frame {
         channel_id: Option<String>,
         #[serde(flatten)]
         flags: VoiceFlags,
+        #[serde(flatten)]
+        video: VideoPresence,
     },
     #[serde(rename = "voice:joined", rename_all = "camelCase")]
     VoiceJoined {
@@ -175,7 +187,7 @@ pub enum VoiceFrame<'a> {
         mode: VoiceJoin<'a>,
         muted: bool,
         deafened: bool,
-        watching: [&'a str; 0],
+        watching: &'a [String],
     },
     #[serde(rename = "voice:ready")]
     Ready { sid: &'a str },
@@ -184,6 +196,8 @@ pub enum VoiceFrame<'a> {
         sid: &'a str,
         #[serde(flatten)]
         flags: VoiceFlags,
+        #[serde(flatten)]
+        video: &'a VideoPresence,
     },
     #[serde(rename = "voice:leave")]
     Leave { sid: &'a str },

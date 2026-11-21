@@ -15,6 +15,7 @@ use tokio::{
 use super::{
     Device, Devices, Issue, Report, Status, Update, Worker,
     devices::{route_speakers, switch_speakers},
+    video::Video,
     wait_until,
 };
 use crate::api::VoiceFlags;
@@ -35,6 +36,7 @@ type RoomEvents = tokio::sync::mpsc::UnboundedReceiver<RoomEvent>;
 pub(super) struct Media {
     audio: Option<PlatformAudio>,
     capture: Capture,
+    video: Video,
     connecting: Option<JoinHandle<Result<(Room, RoomEvents), Issue>>>,
     room: Option<Room>,
     #[cfg(test)]
@@ -47,6 +49,7 @@ impl Media {
         if let Some(fixture) = &mut self.fixture {
             fixture.stop_audio();
         }
+        self.video.stop_camera().await;
         self.capture.shutdown().await;
         if let Some(audio) = self.audio.take() {
             stop_recording(&audio);
@@ -96,13 +99,21 @@ impl Media {
         let connected = connection.await.map_err(|_| Issue::Media)?;
         media.connecting.take();
         let (room, events) = connected?;
+        let room = media.room.insert(room);
         let mut backend = LiveKitAudio {
-            room: media.room.insert(room),
+            room,
             audio,
             events,
             capture: &mut media.capture,
         };
-        Self::listen(worker, &mut backend, &speakers).await
+        tokio::select! {
+            biased;
+            result = Self::listen(worker, &mut backend, &speakers) => result,
+            () = async {
+                media.video.run(worker, room).await;
+                std::future::pending::<()>().await;
+            } => unreachable!(),
+        }
     }
 
     async fn listen(

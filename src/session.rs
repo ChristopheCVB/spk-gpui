@@ -17,7 +17,7 @@ use crate::api::{Channel, Connection, Failure, Frame, Profile, SocketEvent, SpkC
 use crate::sounds::{Sound, SoundSettings, VoiceSounds};
 use crate::voice::{
     Call, Device, DeviceKind, Devices, Intent, Issue as VoiceIssue, Status as VoiceStatus,
-    Update as VoiceUpdate,
+    Update as VoiceUpdate, video::CameraResolution,
 };
 use authentication::{
     SESSION_EXPIRED, SavedSession, login, restore, sign_in, sign_in_message, sign_out,
@@ -42,6 +42,10 @@ pub enum Command {
     RetryMicrophone,
     RefreshDevices,
     ChooseDevice(DeviceKind, Option<Device>),
+    SetCameraEnabled(bool),
+    ChooseCamera(Option<String>),
+    ChooseCameraResolution(CameraResolution),
+    SetWatching(String, bool),
 }
 
 pub enum View {
@@ -282,11 +286,12 @@ async fn watch_session(
                 Ok(SocketEvent::Frame(frame)) => match frame {
                     Frame::ChannelsChanged => refresh.fetch(client, Resource::Channels),
                     Frame::UsersChanged => refresh.fetch(client, Resource::Users),
-                    Frame::Presence { user_id, channel_id, flags } => {
+                    Frame::Presence { user_id, channel_id, flags, video } => {
                         let new_participant = channel_id.is_some() && !sidebar.voice_presence.contains_key(&user_id);
                         let own_update = sidebar.profile.id.as_ref() == Some(&user_id);
-                        if let Some(cue) = refresh.update_presence(&mut sidebar, user_id, channel_id, flags) {
-                            settings.sounds.play(cue, cue == Sound::Join);
+                        voice.participant_changed(&mut sidebar, &user_id, channel_id.as_deref());
+                        for (cue, rising) in refresh.update_presence(&mut sidebar, user_id, channel_id, flags, video) {
+                            settings.sounds.play(cue, rising);
                         }
                         if own_update {
                             voice.own_presence_updated(&mut sidebar);
@@ -319,6 +324,13 @@ async fn watch_session(
                         if voice.update_media(report) {
                             settings.sounds.play(Sound::Join, true);
                         }
+                    }
+                }
+                VoiceUpdate::Video(report) => {
+                    if let Some(voice) = &mut sidebar.voice
+                        && voice.status != VoiceStatus::Leaving
+                    {
+                        voice.video = Some(report);
                     }
                 }
                 VoiceUpdate::Finished(result) => {

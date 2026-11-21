@@ -19,7 +19,7 @@ use tokio_tungstenite::{
 
 use super::{presence::Data, voice_session::VOICE_REPLACED, *};
 use crate::{
-    api::{Member, VoiceFlags, VoiceSocket},
+    api::{Member, VideoPresence, VoiceFlags, VoiceSocket},
     voice::{self, DevicePreferences, Report as VoiceReport},
 };
 
@@ -851,7 +851,7 @@ fn shows_alice_speaking(sidebar: &Sidebar) -> bool {
 }
 
 fn voice_state(sid: &Value, muted: bool, deafened: bool) -> Value {
-    value!({"type":"voice:state","sid":sid,"muted":muted,"deafened":deafened,"speaking":!muted})
+    value!({"type":"voice:state","sid":sid,"muted":muted,"deafened":deafened,"speaking":!muted,"cam":false,"screen":false,"watching":[]})
 }
 
 #[test]
@@ -911,16 +911,23 @@ fn live_membership_and_flags_win_over_an_in_flight_snapshot() {
     );
     assert_eq!(sidebar.people(), [("alice", "Alice")]);
 
-    let Frame::Presence { user_id, channel_id, flags } = serde_json::from_str(
+    let Frame::Presence { user_id, channel_id, flags, video } = serde_json::from_str(
         r#"{"type":"voice:presence","userId":"alice","channelId":"second","muted":true,"deafened":true,"speaking":false}"#,
     ).unwrap() else { panic!("expected voice presence") };
-    refresh.update_presence(&mut sidebar, user_id, channel_id, flags);
-    refresh.update_presence(&mut sidebar, "bob".into(), None, VoiceFlags::default());
+    refresh.update_presence(&mut sidebar, user_id, channel_id, flags, video);
+    refresh.update_presence(
+        &mut sidebar,
+        "bob".into(),
+        None,
+        VoiceFlags::default(),
+        VideoPresence::default(),
+    );
     refresh.update_presence(
         &mut sidebar,
         "new".into(),
         Some("first".into()),
         VoiceFlags::default(),
+        VideoPresence::default(),
     );
     refresh.complete(
         &mut sidebar,
@@ -933,11 +940,13 @@ fn live_membership_and_flags_win_over_an_in_flight_snapshot() {
                     speaking: true,
                     ..VoiceFlags::default()
                 },
+                video: VideoPresence::default(),
             },
             Member {
                 user_id: "bob".into(),
                 channel_id: "first".into(),
                 flags: VoiceFlags::default(),
+                video: VideoPresence::default(),
             },
         ])),
     );
@@ -1041,6 +1050,7 @@ async fn avatar_loads_share_a_photo_and_discard_an_older_response() {
             "alice".into(),
             Some("voice".into()),
             VoiceFlags::default(),
+            VideoPresence::default(),
         );
         let update = |sidebar: &mut Sidebar,
                       avatars: &mut AvatarLoads,
@@ -1192,12 +1202,13 @@ fn voice_cues_follow_live_membership_of_other_users() {
                 user.into(),
                 channel.map(str::to_owned),
                 VoiceFlags::default(),
+                VideoPresence::default(),
             )
         };
 
     assert_eq!(
         present(&mut refresh, &mut sidebar, "already-here", Some("here")),
-        None
+        vec![]
     );
     let members =
         serde_json::from_str(r#"[{"userId":"already-here","channelId":"here"}]"#).unwrap();
@@ -1208,19 +1219,19 @@ fn voice_cues_follow_live_membership_of_other_users() {
     );
     assert_eq!(
         present(&mut refresh, &mut sidebar, "already-here", Some("here")),
-        None
+        vec![]
     );
     assert_eq!(
         present(&mut refresh, &mut sidebar, "me", Some("here")),
-        None
+        vec![]
     );
     assert_eq!(
         present(&mut refresh, &mut sidebar, "peer", Some("other")),
-        None
+        vec![]
     );
     assert_eq!(
         present(&mut refresh, &mut sidebar, "peer", Some("here")),
-        Some(Sound::Join)
+        vec![(Sound::Join, true)]
     );
     assert_eq!(
         refresh.update_presence(
@@ -1231,23 +1242,24 @@ fn voice_cues_follow_live_membership_of_other_users() {
                 muted: true,
                 ..VoiceFlags::default()
             },
+            VideoPresence::default(),
         ),
-        None,
+        vec![],
     );
     assert_eq!(
         present(&mut refresh, &mut sidebar, "peer", Some("other")),
-        Some(Sound::Leave)
+        vec![(Sound::Leave, false)]
     );
-    assert_eq!(present(&mut refresh, &mut sidebar, "peer", None), None);
+    assert_eq!(present(&mut refresh, &mut sidebar, "peer", None), vec![]);
     assert_eq!(
         present(&mut refresh, &mut sidebar, "already-here", None),
-        Some(Sound::Leave)
+        vec![(Sound::Leave, false)]
     );
 
     sidebar.voice.as_mut().unwrap().begin_leave(true);
     assert_eq!(
         present(&mut refresh, &mut sidebar, "peer", Some("here")),
-        None
+        vec![]
     );
 }
 
@@ -1566,7 +1578,7 @@ async fn livekit_recovery_and_rejoin_use_the_signed_in_voice_flow() {
             assert_eq!(receive_voice_frame(&mut socket).await, ready);
             assert_eq!(
                 receive_voice_frame(&mut socket).await,
-                value!({"type":"voice:state","sid":sid,"muted":true,"deafened":false,"speaking":false})
+                value!({"type":"voice:state","sid":sid,"muted":true,"deafened":false,"speaking":false,"cam":false,"screen":false,"watching":[]})
             );
             resynced.send(()).unwrap();
             assert_eq!(receive_voice_frame(&mut socket).await, value!({"type":"voice:leave","sid":sid}));
@@ -1605,5 +1617,125 @@ async fn livekit_recovery_and_rejoin_use_the_signed_in_voice_flow() {
             wait_for_sidebar(&views, |sidebar| sidebar.voice.is_none()).await;
         },
     ).await;
+    assert!(matches!(end, SessionEnd::Closed));
+}
+
+#[tokio::test]
+async fn camera_and_watch_choices_are_scoped_to_the_current_voice_session() {
+    let (observed, observations) = async_channel::bounded(1);
+    let end =
+        voice_session(
+            Call::start_for_test,
+            async |listener, requests, _| {
+                let mut socket = accept_async(listener.accept().await.unwrap().0)
+                    .await
+                    .unwrap();
+                let join = establish_voice(&requests, &mut socket).await;
+                let sid = &join["sid"];
+                socket.send(Message::text(value!({
+                "type":"voice:presence", "userId":"bob", "channelId":"first", "cam":true,
+                "watching":["alice"],
+            }).to_string())).await.unwrap();
+
+                let watch = receive_voice_frame(&mut socket).await;
+                assert_eq!(watch["sid"], *sid);
+                assert_eq!(watch["watching"], value!(["bob"]));
+                observed.send(()).await.unwrap();
+                let publish = receive_voice_frame(&mut socket).await;
+                assert_eq!(publish["cam"], true);
+                assert_eq!(publish["watching"], value!(["bob"]));
+
+                socket
+                    .send(Message::text(
+                        value!({
+                            "type":"voice:presence", "userId":"bob", "channelId":null,
+                        })
+                        .to_string(),
+                    ))
+                    .await
+                    .unwrap();
+                let departed = receive_voice_frame(&mut socket).await;
+                assert_eq!(departed["cam"], true);
+                assert_eq!(departed["watching"], value!([]));
+                observed.send(()).await.unwrap();
+
+                let stop = receive_voice_frame(&mut socket).await;
+                assert_eq!(stop["cam"], false);
+                assert_eq!(stop["watching"], value!([]));
+                observed.send(()).await.unwrap();
+                assert_eq!(
+                    receive_voice_frame(&mut socket).await,
+                    value!({"type":"voice:leave","sid":sid})
+                );
+            },
+            async |commands, views| {
+                join_test_voice(&commands, &views).await;
+                wait_for_sidebar(&views, |sidebar| {
+                    sidebar.participants("first").iter().any(|participant| {
+                        participant.id == "bob" && participant.video.is_some_and(|video| video.cam)
+                    })
+                })
+                .await;
+                let view = wait_for_sidebar(&views, |sidebar| {
+                    sidebar.viewers("first", "alice").len() == 1
+                })
+                .await;
+                assert_eq!(
+                    view.participants("first")
+                        .iter()
+                        .filter(|p| p.id == "bob")
+                        .count(),
+                    1
+                );
+                commands
+                    .send(Command::SetWatching("alice".into(), true))
+                    .await
+                    .unwrap();
+                commands
+                    .send(Command::SetWatching("bob".into(), true))
+                    .await
+                    .unwrap();
+                let view = wait_for_sidebar(&views, |sidebar| {
+                    sidebar.voice_intent.watching.contains("bob")
+                })
+                .await;
+                assert!(!view.voice_intent.watching.contains("alice"));
+                observations.recv().await.unwrap();
+                commands
+                    .send(Command::ChooseCameraResolution(CameraResolution::P720))
+                    .await
+                    .unwrap();
+                commands
+                    .send(Command::SetCameraEnabled(true))
+                    .await
+                    .unwrap();
+                wait_for_sidebar(&views, |sidebar| {
+                    sidebar.voice_intent.camera.enabled && sidebar.voice_intent.watching.is_empty()
+                })
+                .await;
+                assert!(
+                    wait_for_sidebar(&views, |sidebar| sidebar
+                        .viewers("first", "alice")
+                        .is_empty())
+                    .await
+                    .voice_intent
+                    .camera
+                    .enabled
+                );
+                observations.recv().await.unwrap();
+                commands
+                    .send(Command::SetCameraEnabled(false))
+                    .await
+                    .unwrap();
+                wait_for_sidebar(&views, |sidebar| !sidebar.voice_intent.camera.enabled).await;
+                observations.recv().await.unwrap();
+                commands.send(Command::LeaveVoice).await.unwrap();
+                let view = wait_for_sidebar(&views, |sidebar| sidebar.voice.is_none()).await;
+                assert!(!view.voice_intent.camera.enabled);
+                assert!(view.voice_intent.watching.is_empty());
+                assert_eq!(view.voice_intent.camera.resolution, CameraResolution::P720);
+            },
+        )
+        .await;
     assert!(matches!(end, SessionEnd::Closed));
 }

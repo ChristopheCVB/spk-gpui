@@ -11,7 +11,10 @@ use gpui_kit::{component::ThemeRegistry, *};
 
 use ui::Spk;
 
-fn main() {
+fn main() -> std::process::ExitCode {
+    if let Some(exit) = voice::video::run_camera_command() {
+        return exit;
+    }
     application().with_assets(assets::AllAssets).run(|cx| {
         init(cx);
         gpui_kit::base::Root::register_plugin(cx, |_, _| ui::ShortcutKeys);
@@ -33,6 +36,7 @@ fn main() {
         cx.on_window_closed(|cx, _| cx.quit()).detach();
         cx.activate(true);
     });
+    std::process::ExitCode::SUCCESS
 }
 
 #[cfg(test)]

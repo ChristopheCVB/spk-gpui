@@ -8,6 +8,7 @@ use crate::sounds::{Sound, VoiceSounds};
 use crate::voice::{
     self, Call, DeviceKind, DevicePreferences, Devices, Intent, Issue as VoiceIssue,
     Report as VoiceReport, Status as VoiceStatus, Update as VoiceUpdate,
+    video::{CameraStatus, VideoReport},
 };
 
 pub(super) const VOICE_REPLACED: &str = "You joined voice from another tab or device.";
@@ -24,6 +25,7 @@ pub struct VoiceView {
     pub channel_id: String,
     pub status: VoiceStatus,
     pub media: Option<Arc<VoiceReport>>,
+    pub video: Option<Arc<VideoReport>>,
     pub(super) play_leave: bool,
 }
 
@@ -33,6 +35,7 @@ impl VoiceView {
             channel_id,
             status: VoiceStatus::Joining,
             media: None,
+            video: None,
             play_leave: false,
         }
     }
@@ -51,6 +54,7 @@ impl VoiceView {
         self.play_leave = explicit && self.is_participating();
         self.status = VoiceStatus::Leaving;
         self.media = None;
+        self.video = None;
         true
     }
 
@@ -104,6 +108,8 @@ impl Sidebar {
 
     pub(super) fn finish_voice(&mut self, result: Result<(), VoiceIssue>) -> bool {
         let voice = self.voice.take();
+        self.voice_intent.camera.enabled = false;
+        self.voice_intent.watching.clear();
         self.voice_rejoin = voice
             .as_ref()
             .filter(|voice| {
@@ -345,6 +351,8 @@ impl VoiceSession {
             && voice.begin_leave(notice.is_none())
         {
             call.cancel();
+            sidebar.voice_intent.camera.enabled = false;
+            sidebar.voice_intent.watching.clear();
             sidebar.voice_notice = notice;
         }
     }
@@ -361,6 +369,23 @@ impl VoiceSession {
     pub(super) async fn stop(self) {
         if let Some(call) = self.call {
             call.stop().await;
+        }
+    }
+
+    pub(super) fn participant_changed(
+        &self,
+        sidebar: &mut Sidebar,
+        id: &str,
+        channel: Option<&str>,
+    ) {
+        if let Some(call) = &self.call
+            && sidebar
+                .voice
+                .as_ref()
+                .is_some_and(|voice| channel != Some(&voice.channel_id))
+            && sidebar.voice_intent.watching.remove(id)
+        {
+            call.apply(&sidebar.voice_intent);
         }
     }
 
@@ -408,10 +433,63 @@ impl VoiceSession {
                 }
                 return;
             }
+            Command::SetCameraEnabled(enabled) => {
+                if !sidebar
+                    .voice
+                    .as_ref()
+                    .is_some_and(VoiceView::is_participating)
+                {
+                    return;
+                }
+                sidebar.voice_intent.camera.enabled = enabled;
+                sidebar.voice_intent.camera.revision += 1;
+            }
+            Command::ChooseCamera(device) => {
+                if camera_failed(sidebar) {
+                    sidebar.voice_intent.camera.enabled = false;
+                }
+                sidebar.voice_intent.camera.device = device;
+            }
+            Command::ChooseCameraResolution(resolution) => {
+                if camera_failed(sidebar) {
+                    sidebar.voice_intent.camera.enabled = false;
+                }
+                sidebar.voice_intent.camera.resolution = resolution;
+            }
+            Command::SetWatching(id, enabled) => {
+                let Some(voice) = sidebar
+                    .voice
+                    .as_ref()
+                    .filter(|voice| voice.is_participating())
+                else {
+                    return;
+                };
+                if enabled {
+                    if sidebar.profile.id.as_ref() == Some(&id)
+                        || !sidebar
+                            .voice_presence
+                            .get(&id)
+                            .is_some_and(|member| member.channel_id == voice.channel_id)
+                    {
+                        return;
+                    }
+                    sidebar.voice_intent.watching.insert(id);
+                } else {
+                    sidebar.voice_intent.watching.remove(&id);
+                }
+            }
             _ => return,
         }
         if let Some(call) = &self.call {
             call.apply(&sidebar.voice_intent);
         }
     }
+}
+
+fn camera_failed(sidebar: &Sidebar) -> bool {
+    sidebar
+        .voice
+        .as_ref()
+        .and_then(|voice| voice.video.as_ref())
+        .is_some_and(|video| matches!(video.camera, CameraStatus::Failed(_)))
 }

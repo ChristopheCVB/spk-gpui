@@ -133,7 +133,7 @@ impl Spk {
 struct Settings {
     spk: Entity<Spk>,
     tab: Tab,
-    volumes: [Entity<SliderState>; 4],
+    volumes: [Entity<SliderState>; Sound::ALL.len()],
     recorder_focus: FocusHandle,
 }
 

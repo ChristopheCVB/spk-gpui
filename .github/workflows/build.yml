@@ -41,7 +41,7 @@ jobs:
           curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /usr/share/keyrings/apt.llvm.org.asc >/dev/null
           printf 'deb [signed-by=/usr/share/keyrings/apt.llvm.org.asc] https://apt.llvm.org/noble/ llvm-toolchain-noble-%s main\n' "$clang_major" | sudo tee /etc/apt/sources.list.d/spk-llvm.list
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libfontconfig-dev libwayland-dev libxkbcommon-x11-dev libx11-xcb-dev libglib2.0-dev libjpeg-turbo8-dev libasound2-dev "clang-$clang_major"
+          sudo apt-get install -y build-essential pkg-config libfontconfig-dev libwayland-dev libxkbcommon-x11-dev libx11-xcb-dev libglib2.0-dev libjpeg-turbo8-dev libasound2-dev "clang-$clang_major" "libclang-$clang_major-dev"
           printf 'CC=clang-%s\nCXX=clang++-%s\n' "$clang_major" "$clang_major" >> "$GITHUB_ENV"
       - run: mise exec -- cargo fmt --all --check
       - run: mise exec -- cargo test --locked
