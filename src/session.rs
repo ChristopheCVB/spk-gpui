@@ -572,7 +572,7 @@ async fn watch_session(
                 Ok(Command::LoadOlderMessages) => chat.older(client),
                 Ok(Command::RetryChatHistory) => chat.retry_history(client),
                 Ok(Command::ReadVisibleChat(channel_id)) => {
-                    if chat.should_read(&channel_id) {
+                    if matches!(sidebar.connection, Connection::Online) && chat.should_read(&channel_id) {
                         unread.mark(&mut sidebar, channel_id, Mark::Visible);
                     }
                 }
@@ -640,6 +640,7 @@ async fn watch_session(
                     sidebar.channel_radio.clear();
                     refresh.presence_ready = false;
                     chat.disconnected();
+                    unread.disconnected();
                     presence = PresenceReporter::default();
                     voice.disconnected();
                 }

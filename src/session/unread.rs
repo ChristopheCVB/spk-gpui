@@ -74,6 +74,10 @@ impl UnreadSession {
         }
     }
 
+    pub fn disconnected(&mut self) {
+        self.pending.retain(|write| write.mark != Mark::Visible);
+    }
+
     pub fn write_next(&mut self, client: &SpkClient) {
         if self.writing.is_some() {
             return;
