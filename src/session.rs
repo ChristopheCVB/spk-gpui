@@ -63,7 +63,7 @@ pub struct Sidebar {
     pub notice: Option<&'static str>,
     pub load_failed: bool,
     pub voice: Option<VoiceView>,
-    pub switching_to: Option<String>,
+    switching_to: Option<VoiceDestination>,
     pub voice_notice: Option<&'static str>,
     voice_rejoin: Option<String>,
     pub voice_intent: Intent,
@@ -72,6 +72,12 @@ pub struct Sidebar {
     pub avatars: Arc<HashMap<String, Arc<RenderImage>>>,
     users: Arc<HashMap<String, User>>,
     rooms: HashMap<String, RoomMember>,
+}
+
+#[derive(Clone)]
+struct VoiceDestination {
+    channel_id: String,
+    server_move: bool,
 }
 
 #[derive(Clone)]
@@ -160,14 +166,23 @@ impl Sidebar {
             .any(|channel| channel.kind == "voice" && channel.id == channel_id)
     }
 
-    fn request_voice(&mut self, call: &mut Option<Call>, channel_id: String) {
-        if self.has_voice_channel(&channel_id)
+    pub fn switching_to(&self) -> Option<&str> {
+        self.switching_to
+            .as_ref()
+            .map(|destination| destination.channel_id.as_str())
+    }
+
+    fn request_voice(&mut self, call: &mut Option<Call>, channel_id: String, server_move: bool) {
+        if (server_move || self.has_voice_channel(&channel_id))
             && self
                 .voice
                 .as_ref()
                 .is_none_or(|voice| voice.channel_id != channel_id)
         {
-            self.switching_to = Some(channel_id);
+            self.switching_to = Some(VoiceDestination {
+                channel_id,
+                server_move,
+            });
             self.cancel_voice(call, None);
         }
     }
@@ -713,10 +728,13 @@ async fn watch_session(
             break SessionEnd::Closed;
         }
         if call.is_none()
-            && let Some(channel_id) = sidebar.switching_to.take()
+            && let Some(VoiceDestination {
+                channel_id,
+                server_move,
+            }) = sidebar.switching_to.take()
         {
             if let Some(socket) = &voice_socket
-                && sidebar.has_voice_channel(&channel_id)
+                && (server_move || sidebar.has_voice_channel(&channel_id))
             {
                 call = Some((settings.start_call)(
                     channel_id.clone(),
@@ -748,7 +766,7 @@ async fn watch_session(
                 Ok(Command::SignOut) => break SessionEnd::SignOut,
                 Ok(Command::Refresh) => refresh.fetch_all(client),
                 Ok(Command::JoinVoice(channel_id)) if voice_socket.is_some() => {
-                    sidebar.request_voice(&mut call, channel_id);
+                    sidebar.request_voice(&mut call, channel_id, false);
                 }
                 Ok(Command::LeaveVoice) => {
                     sidebar.switching_to = None;
@@ -840,6 +858,17 @@ async fn watch_session(
                             call.acknowledge(&sid, &channel_id, &nonce);
                         }
                     }
+                    Frame::VoiceMove { sid, channel_id }
+                        if !channel_id.is_empty()
+                            && call.as_ref().is_some_and(|call| call.owns(&sid))
+                            && sidebar.voice.as_ref().is_some_and(|voice| voice.status != VoiceStatus::Leaving) =>
+                    {
+                        // The token endpoint checks destinations that are missing from a stale channel list.
+                        if !sidebar.has_voice_channel(&channel_id) {
+                            refresh.fetch(client, Resource::Channels);
+                        }
+                        sidebar.request_voice(&mut call, channel_id, true);
+                    }
                     Frame::VoiceKicked { sid } if call.as_ref().is_some_and(|call| !call.owns(&sid)) => {
                         sidebar.cancel_voice(&mut call, Some("You joined voice from another tab or device."));
                     }
@@ -884,6 +913,8 @@ async fn watch_session(
                     break SessionEnd::Invalidated(SESSION_EXPIRED);
                 }
                 let refresh_avatars = data.is_ok() && matches!(resource, Resource::Users | Resource::Presence);
+                let listed_voice_channel = matches!(resource, Resource::Channels)
+                    && sidebar.voice.as_ref().is_some_and(|voice| sidebar.has_voice_channel(&voice.channel_id));
                 refresh.complete(&mut sidebar, resource, data);
                 if refresh_avatars {
                     if resource == Resource::Users {
@@ -892,7 +923,7 @@ async fn watch_session(
                     avatars.fill(client, &sidebar);
                 }
                 if let Some(voice) = &sidebar.voice
-                    && sidebar.channels.is_some() && !sidebar.has_voice_channel(&voice.channel_id)
+                    && listed_voice_channel && !sidebar.has_voice_channel(&voice.channel_id)
                 {
                     sidebar.cancel_voice(&mut call, Some("This voice channel is no longer available."));
                 }
