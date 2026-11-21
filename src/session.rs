@@ -879,6 +879,7 @@ async fn watch_session(
             }
         }
     };
+    drop(chat);
     camera_previews.shutdown().await;
     drop(soundboard);
     drop(radio);

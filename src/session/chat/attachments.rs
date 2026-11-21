@@ -115,15 +115,15 @@ impl Default for AttachmentWork {
 
 impl Draft {
     pub fn attachments_ready(&self) -> bool {
-        !self.uploads.is_empty()
-            && self
-                .uploads
-                .iter()
-                .all(|upload| matches!(upload.status, UploadStatus::Ready(_)))
+        self.uploads
+            .iter()
+            .any(|upload| matches!(upload.status, UploadStatus::Ready(_)))
     }
 
     pub fn attachments_block_send(&self) -> bool {
-        !self.uploads.is_empty() && !self.attachments_ready()
+        self.uploads
+            .iter()
+            .any(|upload| matches!(upload.status, UploadStatus::Uploading(_)))
     }
 
     pub(super) fn attachment_refs(&self) -> Vec<AttachmentRef> {

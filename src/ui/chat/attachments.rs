@@ -19,7 +19,7 @@ pub(in crate::ui) struct AttachmentUi {
     picker: Option<Uuid>,
     picker_error: Option<&'static str>,
     cards: HashMap<String, AttachmentCard>,
-    opened_files: Vec<TempPath>,
+    opened_files: HashMap<String, TempPath>,
 }
 
 #[derive(Default)]
@@ -58,7 +58,10 @@ impl AttachmentUi {
         if previous.map(|chat| &chat.channel_id) != next.map(|chat| &chat.channel_id) {
             self.picker_error = None;
             self.cards.clear();
-        } else {
+        } else if !previous
+            .zip(next)
+            .is_some_and(|(previous, next)| Arc::ptr_eq(&previous.messages, &next.messages))
+        {
             self.cards.retain(|id, _| {
                 next.is_some_and(|chat| {
                     chat.messages
@@ -526,7 +529,9 @@ impl Spk {
                         Ok(Some(AccessResult::Preview(preview))) => state.preview = Some(preview),
                         Ok(Some(AccessResult::Open(path))) => {
                             cx.open_with_system(&path);
-                            app.chat_attachments.opened_files.push(path);
+                            app.chat_attachments
+                                .opened_files
+                                .insert(file_id.clone(), path);
                         }
                         Ok(Some(AccessResult::Downloaded) | None) => {}
                         Err(error) => state.error = Some(error),

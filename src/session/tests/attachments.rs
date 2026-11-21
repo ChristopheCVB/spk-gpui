@@ -179,17 +179,16 @@ async fn attachment_queue_cancels_in_flight_uploads_and_sends_only_ready_files()
         request("POST /api/attachments/cancel/cancel").await.respond(&[], "{}").await;
         drop(in_flight);
 
-        tx.send(queue("general", "fail.txt")).await.unwrap();
+        tx.send(Command::OpenDirectMessage("private".into())).await.unwrap();
+        wait_for_sidebar(&rx, |s| s.chat.as_ref().is_some_and(|chat| chat.channel_id == "private" && chat.latest_ready())).await;
+
+        tx.send(queue("private", "fail.txt")).await.unwrap();
         request("POST /api/attachments/presign").await.respond(&[], &signed("fail")).await;
         request("PUT /upload").await.respond_raw("401 Unauthorized", &[], b"").await;
         request("POST /api/attachments/fail/cancel").await.respond(&[], "{}").await;
-        let failed = wait_for_sidebar(&rx, |s| s.chat.as_ref().is_some_and(|chat|
+        wait_for_sidebar(&rx, |s| s.chat.as_ref().is_some_and(|chat|
             chat.draft.uploads.iter().any(|upload| matches!(upload.status, crate::session::UploadStatus::Failed(_))))).await;
-        let key = failed.chat.unwrap().draft.uploads[0].key;
-        tx.send(Command::CancelChatAttachment { channel_id: "general".into(), key }).await.unwrap();
 
-        tx.send(Command::OpenDirectMessage("private".into())).await.unwrap();
-        wait_for_sidebar(&rx, |s| s.chat.as_ref().is_some_and(|chat| chat.channel_id == "private" && chat.latest_ready())).await;
         let directory = tempfile::tempdir().unwrap();
         let file = directory.path().join("ready.txt");
         std::fs::write(&file, b"hello").unwrap();
@@ -200,7 +199,8 @@ async fn attachment_queue_cancels_in_flight_uploads_and_sends_only_ready_files()
         request("POST /api/attachments/presign").await.respond(&[], &signed("ready")).await;
         request("PUT /upload").await.respond(&[], "").await;
         let ready = wait_for_sidebar(&rx, |s| s.chat.as_ref().is_some_and(|chat| chat.draft.attachments_ready())).await;
-        let key = ready.chat.unwrap().draft.uploads[0].key;
+        let key = ready.chat.unwrap().draft.uploads.into_iter()
+            .find(|upload| matches!(upload.status, crate::session::UploadStatus::Ready(_))).unwrap().key;
         tx.send(Command::ToggleChatAttachmentSpoiler { channel_id: "private".into(), key }).await.unwrap();
         tx.send(Command::SendChatMessage { channel_id: "private".into(), body: String::new() }).await.unwrap();
         let frame = loop {

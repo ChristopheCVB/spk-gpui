@@ -573,8 +573,7 @@ impl ChatSession {
         {
             let outgoing = self.outgoing.remove(&message.channel_id).unwrap();
             if let Some(draft) = self.drafts.get_mut(&message.channel_id) {
-                draft.uploads.retain(|upload| !matches!(&upload.status,
-                    UploadStatus::Ready(id) if outgoing.attachments.iter().any(|sent| sent.id == *id)));
+                draft.uploads.clear();
                 if draft.body == outgoing.body && draft.reply == outgoing.reply {
                     draft.body.clear();
                     draft.reply = None;
