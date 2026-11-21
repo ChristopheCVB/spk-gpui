@@ -180,7 +180,10 @@ impl Spk {
                 .h(window.viewport_size().height * 0.85)
                 .p_0()
                 .close_button(false)
-                .child(content.clone())
+                .content({
+                    let content = content.clone();
+                    move |body, _, _| body.min_h_0().child(content.clone())
+                })
         });
         cx.notify();
     }
