@@ -13,6 +13,7 @@ pub enum Sound {
     Camera,
     Screen,
     Watch,
+    Message,
 }
 
 impl Sound {
@@ -35,6 +36,7 @@ impl Sound {
             Self::Camera => "Camera sound",
             Self::Screen => "Screen Share sound",
             Self::Watch => "Watch sound",
+            Self::Message => "Message sound",
         }
     }
 }
@@ -65,6 +67,7 @@ pub struct SoundSettings {
     pub camera: SoundSetting,
     pub screen: SoundSetting,
     pub watch: SoundSetting,
+    pub message: SoundSetting,
 }
 
 impl SoundSettings {
@@ -77,6 +80,7 @@ impl SoundSettings {
             Sound::Camera => &mut self.camera,
             Sound::Screen => &mut self.screen,
             Sound::Watch => &mut self.watch,
+            Sound::Message => &mut self.message,
         }
     }
 
@@ -85,6 +89,7 @@ impl SoundSettings {
     }
 }
 
+#[derive(Clone)]
 pub struct VoiceSounds {
     settings: watch::Receiver<SoundSettings>,
     playback: std::sync::mpsc::SyncSender<Cue>,
@@ -133,11 +138,17 @@ impl VoiceSounds {
 
     pub fn play(&self, sound: Sound, rising: bool) {
         let setting = self.settings.borrow().get(sound);
+        self.play_setting(sound, rising, setting);
+    }
+
+    pub fn play_setting(&self, sound: Sound, rising: bool, setting: SoundSetting) {
         if setting.enabled && setting.volume > 0 {
             let _ = self.playback.try_send(Cue {
                 sound,
                 rising,
-                volume: setting.volume.min(100),
+                volume: setting
+                    .volume
+                    .min(if sound == Sound::Message { 200 } else { 100 }),
             });
         }
     }
@@ -181,14 +192,16 @@ impl Cue {
             (Sound::Screen, false) => &[698.0, 523.0, 349.0],
             (Sound::Watch, true) => &[466.0, 622.0],
             (Sound::Watch, false) => &[622.0, 466.0],
+            (Sound::Message, _) => &[660.0, 880.0],
         }
     }
 
     fn samples(&self) -> Vec<f32> {
-        const SPACING: usize = SAMPLE_RATE as usize * 80 / 1000;
+        let spacing =
+            SAMPLE_RATE as usize * if self.sound == Sound::Message { 90 } else { 80 } / 1000;
         const NOTE_LENGTH: usize = SAMPLE_RATE as usize * 130 / 1000;
         let notes = self.notes();
-        let mut samples = vec![0.0; (notes.len() - 1) * SPACING + NOTE_LENGTH];
+        let mut samples = vec![0.0; (notes.len() - 1) * spacing + NOTE_LENGTH];
         let scale = if matches!(self.sound, Sound::Screen | Sound::Watch) {
             0.12
         } else {
@@ -197,7 +210,7 @@ impl Cue {
         let gain = scale * f32::from(self.volume) / 100.0;
         let triangle = matches!(self.sound, Sound::Mute | Sound::Deafen);
         for (note, frequency) in notes.iter().enumerate() {
-            for (frame, sample) in samples[note * SPACING..][..NOTE_LENGTH]
+            for (frame, sample) in samples[note * spacing..][..NOTE_LENGTH]
                 .iter_mut()
                 .enumerate()
             {

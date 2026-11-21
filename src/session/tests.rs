@@ -28,6 +28,7 @@ use tokio_tungstenite::{
 use super::{presence::Data, voice_session::VOICE_REPLACED, *};
 use crate::{
     api::{Member, VideoPresence, VoiceFlags, VoiceSocket},
+    sounds::SoundSettings,
     voice::{self, DevicePreferences, Report as VoiceReport},
 };
 
@@ -459,6 +460,7 @@ fn fixture_settings(
             notice: None,
         },
         sounds: VoiceSounds::new(watch::channel(sounds).1),
+        alert_activation: watch::channel(None).1,
         presence: PresenceSettings {
             path: None,
             status: UserStatus::default(),

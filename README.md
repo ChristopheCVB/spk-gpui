@@ -18,6 +18,12 @@ On Linux, use an X11 or Wayland session with Vulkan and working PulseAudio or AL
 
 To enable downloads for your deployment, set the `SPK_URL` HTTPS origin and `LIVEKIT_URL` WSS endpoint in **Settings → Secrets and variables → Actions → Variables**. Use credential-free URLs because the binaries embed them. The next push to `main` builds for that deployment and uploads each successful platform build. If either variable is missing, CI warns and runs its checks with example URLs. [GitHub repository variables](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-variables#creating-configuration-variables-for-a-repository)
 
+## Message alerts
+
+Settings → Notifications controls Direct Messages, Mentions and replies, sound, and system preview text. Mute Notifications is available from a Text Channel or DM Conversation's sidebar menu. Your operating system controls permission to show system notifications. On macOS, open `SPK.app` to use system notifications. On Linux, the desktop notification service must support actions, and Wayland compositors can limit whether an action raises or restores the window.
+
+Quitting SPK ends desktop delivery. Browser Web Push can still deliver messages if your instance supports it and you have subscribed in the browser. A click on a previously delivered macOS notification can reopen the app through its bundle. The portable Windows and Linux builds support notification activation while SPK is running. Relaunch from a retained alert on those platforms requires OS app activation registration.
+
 ## Build prerequisites
 
 - **macOS 15 or later, Apple Silicon.** Install Xcode 26.2 and select its developer directory for the ScreenCaptureKit build.

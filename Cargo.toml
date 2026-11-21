@@ -49,6 +49,7 @@ screencapturekit = { version = "=11.1.2", features = ["macos_15_0"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { version = "0.13.13", default-features = false, features = ["screencast"] }
 cpal = { version = "0.18.2", features = ["pulseaudio"] }
+notify-rust = "=4.19.0"
 cxx = "1.0"
 pulseaudio = "0.3.2"
 raw-window-handle = "0.6"

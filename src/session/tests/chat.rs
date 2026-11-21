@@ -83,14 +83,20 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         })
         .await;
         tx.send(Command::RetryChatHistory).await.unwrap();
-        let latest = message("m2", 2, "bob", "Hi from web");
+        let latest = message("m2", 2, "bob", "Hi from web <@alice>");
         page(
             history_request(&history, "?unread=1").await,
             std::slice::from_ref(&latest),
             true,
         )
         .await;
-        wait_for_messages(&rx, &["m2"]).await;
+        wait_for_sidebar(&rx, |view| {
+            assert!(view.alerts.is_empty(), "history must never produce a message alert");
+            view.chat.as_ref().is_some_and(|chat| {
+                chat.messages.iter().any(|message| message.id == "m2")
+            })
+        }).await;
+        live(&mut peer, &latest, None).await;
         tx.send(Command::LoadOlderMessages).await.unwrap();
         let older = message("m1", 1, "bob", "Earlier message");
         page(
@@ -121,10 +127,13 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         tx.send(Command::RetryChatSend).await.unwrap();
         let retry = receive_chat_send(&mut peer, "general", "Hi from desktop").await;
         assert_ne!(first["nonce"], retry["nonce"]);
-        let sent = message("m3", 3, "alice", "Hi from desktop");
+        let sent = message("m3", 3, "alice", "Hi from desktop <@alice>");
         live(&mut peer, &sent, retry["nonce"].as_str()).await;
         live(&mut peer, &sent, retry["nonce"].as_str()).await;
-        wait_for_messages(&rx, &["m1", "m2", "m3"]).await;
+        wait_for_sidebar(&rx, |view| {
+            assert!(view.alerts.is_empty(), "loaded and self-authored frames must stay silent");
+            view.chat.as_ref().is_some_and(|chat| chat.messages.iter().any(|message| message.id == "m3"))
+        }).await;
         tx.send(Command::RetryChatSend).await.unwrap();
         tx.send(Command::SendChatMessage {
             channel_id: "general".into(),
@@ -149,8 +158,22 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         )
         .await;
         let overlap_request = history_request(&history, "?before=m4").await;
-        let later = message("m6", 6, "bob", "After history was read");
+        let later = message("m6", 6, "bob", "After history was read <@alice>");
         live(&mut peer, &later, None).await;
+        wait_for_sidebar(&rx, |view| {
+            view.alerts.iter().any(|alert| {
+                alert.target.channel_id() == "general" && alert.target.message_id() == "m6"
+            })
+        }).await;
+        live(&mut peer, &later, None).await;
+        peer.send(Message::text(value!({
+            "type": "unread:update", "channelId": "general", "unread": 2, "mentions": 1
+        }).to_string())).await.unwrap();
+        wait_for_sidebar(&rx, |view| {
+            assert!(view.alerts.is_empty(), "a duplicate live frame must stay silent");
+            let state = view.unread("general");
+            state.unread == 2 && state.mentions == 1
+        }).await;
         page(overlap_request, &[older, latest, sent], false).await;
         wait_for_messages(&rx, &["m1", "m2", "m3", "m4", "m5", "m6"]).await;
 
