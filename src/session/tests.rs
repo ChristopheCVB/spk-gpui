@@ -145,18 +145,24 @@ async fn restored_http_session_authenticates_websocket_and_sign_out() {
     reason = "Tungstenite defines the handshake callback type"
 )]
 async fn saved_session_restores_signs_out_and_clears_expired_credentials() {
-    let http = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = Url::parse(&format!("http://{}", http.local_addr().unwrap())).unwrap();
-    let sockets = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let endpoint = format!("ws://{}/_ws", sockets.local_addr().unwrap());
-    let mut cookies = CookieStore::default();
-    cookies
-        .parse("session=saved; Path=/; HttpOnly; Max-Age=3600", &base)
-        .unwrap();
-    let mut bytes = Vec::new();
-    json::save(&cookies, &mut bytes).unwrap();
-
     for expired in [false, true] {
+        let http = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = Url::parse(&format!("http://{}", http.local_addr().unwrap())).unwrap();
+        let sockets = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("ws://{}/_ws", sockets.local_addr().unwrap());
+        let mut cookies = CookieStore::default();
+        cookies
+            .parse("session=saved; Path=/; HttpOnly; Max-Age=3600", &base)
+            .unwrap();
+        let mut bytes = Vec::new();
+        json::save(&cookies, &mut bytes).unwrap();
+
+        if !expired {
+            let mut abandoned = TcpStream::connect(http.local_addr().unwrap())
+                .await
+                .unwrap();
+            abandoned.shutdown().await.unwrap();
+        }
         let (tx, commands) = async_channel::unbounded();
         let (views, rx) = async_channel::unbounded();
         let (saved, storage) = SavedSession::with_test_store(bytes.clone());
@@ -1119,15 +1125,21 @@ impl Request {
     }
 
     async fn receive(listener: &TcpListener) -> (String, Self) {
-        let (stream, _) = listener.accept().await.unwrap();
+        let mut line = String::new();
+        let stream = loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+            // Cancelled requests can close the connection before sending any bytes.
+            if stream.read_line(&mut line).await.unwrap() != 0 {
+                break stream;
+            }
+        };
+        let request_line = line.trim_end().to_owned();
         let mut request = Self {
-            stream: BufReader::new(stream),
+            stream,
             headers: String::new(),
             body: Vec::new(),
         };
-        let mut line = String::new();
-        request.stream.read_line(&mut line).await.unwrap();
-        let request_line = line.trim_end().to_owned();
         loop {
             line.clear();
             assert_ne!(request.stream.read_line(&mut line).await.unwrap(), 0);
