@@ -371,6 +371,10 @@ async fn upload_attachment(
 
 // shortcut: previews are still raster thumbnails, add animation when the chat renderer supports it.
 pub fn image_preview(bytes: &[u8]) -> Option<Arc<RenderImage>> {
+    raster_thumbnail(bytes, 768, 512)
+}
+
+pub(super) fn raster_thumbnail(bytes: &[u8], width: u32, height: u32) -> Option<Arc<RenderImage>> {
     let mut reader = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .ok()?;
@@ -379,7 +383,7 @@ pub fn image_preview(bytes: &[u8]) -> Option<Arc<RenderImage>> {
     limits.max_image_height = Some(8192);
     limits.max_alloc = Some(64 * 1024 * 1024);
     reader.limits(limits);
-    let mut preview = reader.decode().ok()?.thumbnail(768, 512).into_rgba8();
+    let mut preview = reader.decode().ok()?.thumbnail(width, height).into_rgba8();
     for pixel in preview.pixels_mut() {
         pixel.0.swap(0, 2);
     }

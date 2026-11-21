@@ -52,7 +52,10 @@ pub use {
     accounts::AccountLinkForm,
     avatars::AvatarPhoto,
     channel_admin::{ChannelAction, ChannelAdmin, ChannelKind},
-    chat::{AttachmentInput, ChatView, Delivery, Pins, UploadStatus, image_preview},
+    chat::{
+        AttachmentInput, ChatView, Delivery, GifPickerView, Pins, UploadStatus, image_preview,
+        message_gif_line,
+    },
     presence::Participant,
     profiles::ProfileEdit,
     radio::RadioPlayback,
@@ -108,6 +111,19 @@ pub enum Command {
     SendChatMessage {
         channel_id: String,
         body: String,
+    },
+    ShowGifs(bool),
+    SearchGifs(String),
+    ShowGifFavorites(bool),
+    MoreGifs,
+    RetryGifs,
+    RetryGifFavorites,
+    ToggleGifFavorite(String),
+    PickGif(String),
+    RemoveDraftGif(String),
+    PreviewMessageGif {
+        message_id: String,
+        url: String,
     },
     AddChatAttachments {
         channel_id: String,
@@ -539,6 +555,7 @@ async fn watch_session(
         }
         unread.write_next(client);
         chat.fill_previews(client);
+        chat.gifs.fill_previews(client);
         sidebar.chat = chat.view();
         sidebar.voice_moderation_pending = !voice_moderation.is_empty();
         radio.sync(&mut sidebar, &voice);
@@ -586,6 +603,22 @@ async fn watch_session(
                 chat.action_complete(client, result);
             }
             Some(Ok(result)) = chat.preview_tasks.join_next() => chat.preview_complete(result),
+            Some(result) = chat.gifs.browsing.join_next() => {
+                let result = result.unwrap_or(Err(Failure::Connection));
+                if result.as_ref().is_err_and(Failure::unauthorized) {
+                    break SessionEnd::Invalidated(SESSION_EXPIRED);
+                }
+                chat.gifs.browse_complete(result);
+            }
+            Some(result) = chat.gifs.favorites.join_next() => {
+                let result = result.unwrap_or(Err(Failure::Connection));
+                if result.as_ref().is_err_and(Failure::unauthorized) {
+                    break SessionEnd::Invalidated(SESSION_EXPIRED);
+                }
+                chat.gifs.favorites_complete(client, result);
+            }
+            Some(Ok(result)) = chat.gifs.previews.join_next() => chat.gifs.preview_complete(result),
+            Some(Ok(result)) = chat.gifs.message_preview.join_next() => chat.message_gif_complete(result),
             Some(result) = chat.pin_tasks.join_next() => {
                 let result = result.unwrap_or(Err(Failure::Connection));
                 if result.as_ref().is_err_and(Failure::unauthorized) {
@@ -723,6 +756,19 @@ async fn watch_session(
                 Ok(Command::UpdateChatDraft { channel_id, body }) => chat.update_draft(channel_id, body),
                 Ok(Command::SetChatReply { channel_id, message_id }) => chat.set_reply(&channel_id, message_id.as_deref()),
                 Ok(Command::SendChatMessage { channel_id, body }) => chat.send(channel_id, body),
+                Ok(Command::ShowGifs(true)) => chat.open_gifs(client),
+                Ok(Command::ShowGifs(false)) => chat.gifs.close(),
+                Ok(Command::SearchGifs(query)) => chat.gifs.search(client, query),
+                Ok(Command::ShowGifFavorites(show)) => chat.gifs.show_favorites(client, show),
+                Ok(Command::MoreGifs) => chat.gifs.more(client),
+                Ok(Command::RetryGifs) => chat.gifs.retry_browse(client),
+                Ok(Command::RetryGifFavorites) => chat.gifs.load_favorites(client),
+                Ok(Command::ToggleGifFavorite(id)) => chat.gifs.toggle_favorite(client, &id),
+                Ok(Command::PickGif(id)) => chat.set_gif(Some(&id), None),
+                Ok(Command::RemoveDraftGif(channel)) => chat.set_gif(None, Some(&channel)),
+                Ok(Command::PreviewMessageGif { message_id, url }) => {
+                    chat.preview_message_gif(client, message_id, url);
+                }
                 Ok(Command::AddChatAttachments { channel_id, files }) => chat.add_attachments(client, channel_id, files),
                 Ok(Command::CancelChatAttachment { channel_id, key }) => chat.cancel_attachment(client, &channel_id, key),
                 Ok(Command::ToggleChatAttachmentSpoiler { channel_id, key }) => chat.toggle_attachment_spoiler(&channel_id, key),

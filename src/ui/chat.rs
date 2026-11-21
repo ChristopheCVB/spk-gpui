@@ -1,5 +1,6 @@
 mod actions;
 mod attachments;
+mod gifs;
 pub(super) mod markdown;
 
 pub(super) use actions::MessageActionForm;
@@ -106,6 +107,7 @@ impl Spk {
         let signed_in = matches!(next, View::SignedIn(_));
         let next = chat(next);
         self.chat_attachments.sync(previous, next, signed_in);
+        self.update_gif_input(previous, next, window, cx);
         Self::update_message_actions(&mut self.message_action_form, previous, next);
         if let Some(next) = next.filter(|chat| chat.latest_ready())
             && previous.is_none_or(|previous| {
@@ -201,7 +203,9 @@ impl Spk {
         };
         let body = self.chat_input.read(cx).value().to_string();
         if chat.draft.attachments_block_send()
-            || (body.trim().is_empty() && !chat.draft.attachments_ready())
+            || (body.trim().is_empty()
+                && chat.draft.gif.is_none()
+                && !chat.draft.attachments_ready())
         {
             return;
         }
@@ -501,6 +505,10 @@ impl Spk {
                                 ),
                         )
                     })
+                    .when_some(chat.gifs.as_ref(), |composer, gifs| {
+                        composer.child(self.gif_picker(gifs, cx))
+                    })
+                    .child(self.staged_gif(chat, cx))
                     .child(self.attachment_queue(chat, cx))
                     .child(
                         div()
@@ -508,6 +516,7 @@ impl Spk {
                             .items_end()
                             .gap_2()
                             .child(self.attachment_picker(chat, cx))
+                            .child(self.gif_toggle(chat, cx))
                             .child(
                                 div().flex_1().min_w_0().child(
                                     Textarea::new(&self.chat_input)
@@ -578,6 +587,7 @@ impl Spk {
         let link_app = app.clone();
         let link_filter = self.chat_spoiler_link.clone();
         let link_prefix = self.chat_spoiler_link.clone();
+        let gif = self.message_gif(chat, &message_id, &body, &rendered, cx);
         let share_text = SharedString::from(rendered);
         let target = MessageTarget::new(&message.channel_id, &message.id);
         let text = TextView::markdown("message-body", share_text.clone())
@@ -839,6 +849,7 @@ impl Spk {
                     ),
             )
             .when(!message.body.is_empty(), |row| row.child(text))
+            .children(gif)
             .when(!message.attachments.is_empty(), |row| {
                 row.child(self.attachment_cards(message, cx))
             })

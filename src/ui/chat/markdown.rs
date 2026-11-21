@@ -152,6 +152,14 @@ fn escape_markdown(text: &str) -> String {
     result
 }
 
+pub(super) fn has_final_gif_link(rendered: &str, url: &str) -> bool {
+    let Ok(Node::Root(root)) = ::markdown::to_mdast(rendered, &parse_options()) else {
+        return false;
+    };
+    matches!(root.children.last(), Some(Node::Paragraph(paragraph))
+        if matches!(paragraph.children.last(), Some(Node::Link(link)) if link.url == url))
+}
+
 pub(super) fn safe_link(raw: &str) -> Option<url::Url> {
     if raw.trim_start().starts_with("//") {
         return None;
@@ -236,6 +244,20 @@ fn node_text(node: &Node, hide_code: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gif_preview_follows_visible_markdown() {
+        let url = "https://media.klipy.com/cat.gif";
+        let render = |body: &str| {
+            message_markdown(body, |_| "", |_| false, Some("spk-spoiler:test:")).into_owned()
+        };
+        assert!(has_final_gif_link(&render(&format!("A cat\n{url}")), url));
+        assert!(!has_final_gif_link(&render(&format!("```\n{url}")), url));
+        assert!(!has_final_gif_link(
+            &render(&format!("||hidden\n{url}||")),
+            url
+        ));
+    }
 
     #[test]
     fn presentation_keeps_newlines_and_displays_images_as_links() {

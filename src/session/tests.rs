@@ -3,6 +3,7 @@ mod accounts;
 mod attachments;
 mod channel_admin;
 mod chat;
+mod gifs;
 mod media;
 mod moderation;
 mod profile;
