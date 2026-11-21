@@ -84,6 +84,7 @@ pub(super) struct ChatSession {
 impl ChatSession {
     pub fn view(&self) -> Option<ChatView> {
         let mut view = self.selected.clone()?;
+        // Hide cached DM content until SPK confirms access during a refresh.
         if view.direct_message_peer.is_some()
             && view.history != History::Ready
             && matches!(self.history, Some(HistoryRequest::Refresh))
@@ -221,7 +222,7 @@ impl ChatSession {
         if self
             .selected
             .as_ref()
-            .is_none_or(|view| view.channel_id != channel_id || !view.can_send())
+            .is_none_or(|view| view.channel_id != channel_id || view.unavailable())
             || self.outgoing.contains_key(&channel_id)
             || body.trim().is_empty()
         {
@@ -249,7 +250,7 @@ impl ChatSession {
 
     pub fn retry_send(&mut self) {
         if let Some(view) = &self.selected
-            && view.can_send()
+            && !view.unavailable()
             && self
                 .outgoing
                 .get(&view.channel_id)

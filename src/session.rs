@@ -481,8 +481,8 @@ async fn watch_session(
                     if user_id.is_empty() || sidebar.profile.id.as_deref() == Some(&user_id) {
                         sidebar.chat_notice = Some("Direct message unavailable.");
                     } else if let Some(channel) = sidebar.direct_message(&user_id) {
-                        sidebar.chat_notice = None;
                         chat.open(client, channel);
+                        sidebar.chat_notice = None;
                     } else {
                         sidebar.chat_notice = Some("Opening direct message…");
                         let client = client.clone();

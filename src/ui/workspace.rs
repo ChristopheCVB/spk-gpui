@@ -51,13 +51,28 @@ impl Spk {
             .chat
             .as_ref()
             .filter(|_| !self.video_stage.fullscreen);
-        let chat_channel = chat.and_then(|chat| {
-            sidebar
-                .channels
-                .iter()
-                .flatten()
-                .find(|channel| channel.id == chat.channel_id)
-        });
+        let (stage_icon, stage_name) = match chat {
+            Some(chat) if chat.direct_message_peer.is_some() => (
+                IconName::MessageCircle,
+                chat.direct_message_peer
+                    .as_deref()
+                    .filter(|_| !chat.unavailable())
+                    .map_or("Direct message", |peer| sidebar.message_author(peer)),
+            ),
+            Some(chat) => (
+                IconName::Hash,
+                sidebar
+                    .channels
+                    .iter()
+                    .flatten()
+                    .find(|channel| channel.id == chat.channel_id)
+                    .map_or("Text channel", channel_name),
+            ),
+            None => (
+                IconName::Volume2,
+                selected_channel.map_or("Voice channels", channel_name),
+            ),
+        };
         let theme = cx.theme();
         let status = match sidebar.connection {
             Connection::Connecting => Some("Connecting to live updates…"),
@@ -68,6 +83,7 @@ impl Spk {
         let notices = [
             status,
             sidebar.notice,
+            sidebar.chat_notice,
             sidebar.device_notice,
             self.form_error,
         ];
@@ -119,26 +135,8 @@ impl Spk {
                                         },
                                     )),
                                 )
-                                .child(themed_icon(
-                                    if chat.is_some() {
-                                        IconName::Hash
-                                    } else {
-                                        IconName::Volume2
-                                    },
-                                    theme.muted_foreground,
-                                    16.0,
-                                ))
-                                .child(
-                                    Label::new(
-                                        if chat.is_some() {
-                                            chat_channel.map_or("Text channel", channel_name)
-                                        } else {
-                                            selected_channel.map_or("Voice channels", channel_name)
-                                        }
-                                        .to_owned(),
-                                    )
-                                    .font_semibold(),
-                                ),
+                                .child(themed_icon(stage_icon, theme.muted_foreground, 16.0))
+                                .child(Label::new(stage_name.to_owned()).font_semibold()),
                         )
                     })
                     .when(sidebar.load_failed, |area| {

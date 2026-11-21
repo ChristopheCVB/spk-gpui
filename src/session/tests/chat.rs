@@ -316,6 +316,12 @@ async fn direct_message_history_is_visible_only_to_a_participant() {
             .await
             .unwrap();
         let (line, request) = history.recv().await.unwrap();
+        let pending = wait_for_sidebar(&views, |view| {
+            matches!(view.connection, Connection::Online)
+                && view.chat.as_ref().is_some_and(ChatView::loading)
+        })
+        .await;
+        assert!(pending.chat.unwrap().messages.is_empty());
         live(&mut peer, &message, None).await;
         assert_eq!(line, "GET /api/channels/private/messages HTTP/1.1");
         request.respond_raw("403 Forbidden", &[], b"").await;
@@ -360,7 +366,7 @@ async fn direct_message_session(
     let (tx, commands) = async_channel::unbounded();
     let (views, rx) = async_channel::unbounded();
     let session = tokio::spawn(async move {
-        let (mut saved, _) = SavedSession::with_test_store(Vec::new());
+        let (mut saved, _) = SavedSession::with_test_store(None);
         let mut settings = fixture_settings(socket_url, Call::start_for_test);
         watch_session(
             &client,
