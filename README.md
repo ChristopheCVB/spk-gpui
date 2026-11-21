@@ -20,7 +20,7 @@ To enable downloads for your deployment, set the `SPK_URL` HTTPS origin and `LIV
 
 ## Build prerequisites
 
-- **macOS 15 or later, Apple Silicon.** Install the Xcode Command Line Tools with `xcode-select --install`.
+- **macOS 15 or later, Apple Silicon.** Install Xcode 26.2 and select its developer directory for the ScreenCaptureKit build.
 - **Windows x64.** Install Visual Studio 2022 Build Tools with the **Desktop development with C++** workload and a Windows SDK. Use an x64 Developer PowerShell and the MSVC Rust toolchain. Use a short checkout path for WebRTC’s generated files.
 - **Ubuntu 24.04 x64.** Install the packages below and Clang 21 from the LLVM Noble repository for the LiveKit build. To launch the app, use an X11 or Wayland session with Vulkan and working PulseAudio or ALSA audio. For session restore, run a Secret Service provider such as GNOME Keyring. [LLVM Ubuntu packages](https://apt.llvm.org/)
 
