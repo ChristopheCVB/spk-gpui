@@ -150,9 +150,36 @@ pub struct RadioSummary {
     pub station: Option<RadioStationName>,
 }
 
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatMessage {
+    pub id: String,
+    pub channel_id: String,
+    pub user_id: String,
+    pub body: String,
+    pub created_at: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessagePage {
+    pub messages: Vec<ChatMessage>,
+    pub has_more_before: bool,
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "type")]
 pub enum Frame {
+    #[serde(rename = "message:new")]
+    MessageNew {
+        message: ChatMessage,
+        nonce: Option<String>,
+    },
+    #[serde(rename = "message:error")]
+    MessageError {
+        nonce: Option<String>,
+        error: String,
+    },
     #[serde(rename = "ping")]
     Ping,
     #[serde(rename = "voice:presence", rename_all = "camelCase")]
@@ -278,12 +305,22 @@ pub enum VoiceJoin<'a> {
     Reclaim { ready: bool },
 }
 
-type SocketWrite = (String, oneshot::Sender<()>);
+type SocketWrite = (String, Option<oneshot::Sender<()>>);
 
 #[derive(Clone)]
 pub struct VoiceSocket(async_channel::Sender<SocketWrite>);
 
 impl VoiceSocket {
+    pub fn send_message(&self, channel_id: &str, body: &str, nonce: &str) -> bool {
+        let frame = serde_json::json!({
+            "type": "message:send",
+            "channelId": channel_id,
+            "body": body,
+            "nonce": nonce,
+        });
+        self.0.try_send((frame.to_string(), None)).is_ok()
+    }
+
     pub fn same_connection(&self, other: &Self) -> bool {
         self.0.same_channel(&other.0)
     }
@@ -292,7 +329,7 @@ impl VoiceSocket {
         let text = serde_json::to_string(&frame).expect("voice frames are serializable");
         let (written, receipt) = oneshot::channel();
         self.0
-            .try_send((text, written))
+            .try_send((text, Some(written)))
             .map_err(|_| Failure::Connection)?;
         timeout(REQUEST_TIMEOUT, receipt)
             .await
@@ -447,6 +484,34 @@ impl SpkClient {
 
     pub async fn channels(&self) -> Result<Vec<Channel>, Failure> {
         self.get("/api/channels").await
+    }
+
+    pub async fn messages(
+        &self,
+        channel_id: &str,
+        before: Option<&str>,
+    ) -> Result<MessagePage, Failure> {
+        let mut url = self.base.join("/api/channels/").expect("fixed SPK path");
+        url.path_segments_mut()
+            .expect("validated SPK URL")
+            .pop_if_empty()
+            .extend([channel_id, "messages"]);
+        if let Some(before) = before {
+            url.query_pairs_mut().append_pair("before", before);
+        }
+        let response = Self::send(self.http.get(url).header(header::ORIGIN, &self.origin)).await?;
+        let page: MessagePage = response
+            .json()
+            .await
+            .map_err(|_| Failure::InvalidResponse)?;
+        if page
+            .messages
+            .iter()
+            .any(|message| message.channel_id != channel_id)
+        {
+            return Err(Failure::InvalidResponse);
+        }
+        Ok(page)
     }
 
     pub async fn users(&self) -> Result<Vec<User>, Failure> {
@@ -615,7 +680,7 @@ impl SpkClient {
                                 _ => break,
                             },
                             Ok((text, written)) = outgoing.recv() => {
-                                if written.is_closed() {
+                                if written.as_ref().is_some_and(oneshot::Sender::is_closed) {
                                     continue;
                                 }
                                 if !matches!(
@@ -624,7 +689,9 @@ impl SpkClient {
                                 ) {
                                     break;
                                 }
-                                let _ = written.send(());
+                                if let Some(written) = written {
+                                    let _ = written.send(());
+                                }
                                 continue;
                             }
                         };

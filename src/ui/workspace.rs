@@ -47,6 +47,17 @@ impl Spk {
         let selected_channel = voice_channels(sidebar)
             .find(|channel| Some(channel.id.as_str()) == self.selected_voice_channel.as_deref())
             .or_else(|| voice_channels(sidebar).next());
+        let chat = sidebar
+            .chat
+            .as_ref()
+            .filter(|_| !self.video_stage.fullscreen);
+        let chat_channel = chat.and_then(|chat| {
+            sidebar
+                .channels
+                .iter()
+                .flatten()
+                .find(|channel| channel.id == chat.channel_id)
+        });
         let theme = cx.theme();
         let status = match sidebar.connection {
             Connection::Connecting => Some("Connecting to live updates…"),
@@ -108,12 +119,23 @@ impl Spk {
                                         },
                                     )),
                                 )
-                                .child(themed_icon(IconName::Volume2, theme.muted_foreground, 16.0))
+                                .child(themed_icon(
+                                    if chat.is_some() {
+                                        IconName::Hash
+                                    } else {
+                                        IconName::Volume2
+                                    },
+                                    theme.muted_foreground,
+                                    16.0,
+                                ))
                                 .child(
                                     Label::new(
-                                        selected_channel
-                                            .map_or("Voice channels", channel_name)
-                                            .to_owned(),
+                                        if chat.is_some() {
+                                            chat_channel.map_or("Text channel", channel_name)
+                                        } else {
+                                            selected_channel.map_or("Voice channels", channel_name)
+                                        }
+                                        .to_owned(),
                                     )
                                     .font_semibold(),
                                 ),
@@ -165,7 +187,12 @@ impl Spk {
                                 }),
                         )
                     })
-                    .child(self.voice_channel_stage(sidebar, selected_channel, cx)),
+                    .child(match chat {
+                        Some(chat) => self.chat_stage(sidebar, chat, cx).into_any_element(),
+                        None => self
+                            .voice_channel_stage(sidebar, selected_channel, cx)
+                            .into_any_element(),
+                    }),
             )
     }
 
@@ -176,7 +203,11 @@ impl Spk {
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
-        let selected = selected_channel.map(|channel| channel.id.as_str());
+        let selected = if sidebar.chat.is_none() {
+            selected_channel.map(|channel| channel.id.as_str())
+        } else {
+            None
+        };
         let people = sidebar.people();
         let has_text = sidebar
             .channels
@@ -261,19 +292,32 @@ impl Spk {
                                         .flatten()
                                         .filter(|channel| channel.kind == "text")
                                         .map(|channel| {
-                                            div()
-                                                .id(SharedString::from(format!(
-                                                    "text-{}",
-                                                    channel.id
-                                                )))
-                                                .flex()
-                                                .items_center()
+                                            let id = channel.id.clone();
+                                            let name = channel_name(channel).to_owned();
+                                            let active = sidebar
+                                                .chat
+                                                .as_ref()
+                                                .is_some_and(|chat| chat.channel_id == id);
+                                            Button::new(SharedString::from(format!("text-{id}")))
+                                                .ghost()
+                                                .small()
+                                                .tab_stop(true)
+                                                .selected(active)
+                                                .accessibility_label(name.clone())
+                                                .w_full()
                                                 .h_8()
-                                                .px_2()
-                                                .child(
-                                                    Label::new(channel_name(channel).to_owned())
-                                                        .truncate(),
-                                                )
+                                                .when(active, |button| {
+                                                    button.bg(theme.primary.opacity(0.10))
+                                                })
+                                                .child(Label::new(name).w_full().truncate())
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.device_picker = None;
+                                                    this.send(
+                                                        Command::OpenTextChannel(id.clone()),
+                                                        None,
+                                                        cx,
+                                                    );
+                                                }))
                                         }),
                                 ),
                         )
@@ -509,6 +553,7 @@ impl Spk {
 
     fn select_voice_channel(&mut self, id: &str, cx: &mut Context<Self>) {
         self.selected_voice_channel = Some(id.to_owned());
+        self.send(Command::CloseChat, None, cx);
         self.device_picker = None;
         cx.notify();
     }
