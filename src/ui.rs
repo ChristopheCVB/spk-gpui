@@ -1,5 +1,6 @@
 mod settings;
 mod voice;
+mod workspace;
 
 use std::sync::{Arc, LazyLock};
 
@@ -7,9 +8,10 @@ use gpui_kit::{
     assets::IconName,
     base::StyledExt,
     component::{
-        ActiveTheme, Icon, Selectable, Sizable,
+        ActiveTheme, Icon, Selectable, Sizable, WindowExt,
         avatar::Avatar,
         button::{Button, ButtonVariants},
+        input::{Input, InputContentType, InputEvent, InputState},
         label::Label,
     },
     prelude::FluentBuilder,
@@ -17,16 +19,440 @@ use gpui_kit::{
 };
 
 use crate::{
-    Spk,
-    api::{Channel, Connection},
-    session::{Command, Participant, Sidebar, VoiceView},
-    voice::Status,
+    session::{self, Command, Sidebar, View},
+    shortcuts::{Chord, Shortcuts},
+    sounds::{Sound, SoundSetting, SoundSettings},
+    voice::{DeviceKind, Status},
 };
 
-pub use settings::{Appearance, ShortcutKeys};
-pub use voice::VoiceControls;
+use settings::Appearance;
+pub(super) use settings::ShortcutKeys;
+use voice::VoiceControls;
 
-pub fn logo(size: f32) -> Img {
+pub(super) struct Spk {
+    email: Entity<InputState>,
+    password: Entity<InputState>,
+    commands: async_channel::Sender<Command>,
+    view: View,
+    form_error: Option<&'static str>,
+    device_picker: Option<(VoiceControls, DeviceKind)>,
+    selected_voice_channel: Option<String>,
+    sidebar_open: bool,
+    workspace_focus: FocusHandle,
+    appearance: Appearance,
+    appearance_error: bool,
+    shortcuts: Shortcuts,
+    sound_settings: tokio::sync::watch::Sender<SoundSettings>,
+    signing_out: bool,
+}
+
+impl Spk {
+    pub(super) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let appearance = Appearance::load();
+        appearance.apply(window, cx);
+        cx.observe_window_appearance(window, |this, window, cx| {
+            if this.appearance == Appearance::System {
+                this.appearance.apply(window, cx);
+            }
+        })
+        .detach();
+        let email = cx.new(|cx| InputState::new(window, cx));
+        let password = cx.new(|cx| {
+            let mut input = InputState::new(window, cx);
+            input.set_masked(true, window, cx);
+            input
+        });
+        let workspace_focus = cx.focus_handle().tab_stop(false);
+        cx.on_focus_lost(window, |this, window, cx| {
+            if matches!(this.view, View::SignedIn(_)) && !window.has_active_dialog(cx) {
+                this.workspace_focus.focus(window, cx);
+            }
+        })
+        .detach();
+        for input in [&email, &password] {
+            cx.subscribe_in(input, window, |this, _, event, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    this.submit(window, cx);
+                }
+            })
+            .detach();
+        }
+
+        let (commands, requests) = async_channel::bounded(8);
+        let (updates, views) = async_channel::bounded(16);
+        let shortcuts = Shortcuts::new(window);
+        let (sound_settings, sounds) = tokio::sync::watch::channel(shortcuts.sound_settings());
+        let global_events = shortcuts.watch_events();
+        cx.spawn_in(window, async move |this, cx| {
+            while let Ok((generation, event)) = global_events.recv().await {
+                if this
+                    .update_in(cx, |this, _, cx| {
+                        if let Some(action) = this.shortcuts.global_action(generation, event) {
+                            if let Some(editor) = &this.shortcuts.editor {
+                                if editor.recording
+                                    && let Some(binding) = this.shortcuts.binding(action)
+                                {
+                                    this.record_chord(Some(binding.chord.clone()), cx);
+                                }
+                            } else {
+                                this.voice_action(action, cx);
+                            }
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+
+        let app = cx.weak_entity();
+        let window_id = window.window_handle().window_id();
+        cx.intercept_keystrokes(move |event, window, cx| {
+            if window.window_handle().window_id() == window_id {
+                let _ = app.update(cx, |this, cx| this.capture_shortcut(event, window, cx));
+            }
+        })
+        .detach();
+        cx.observe_window_activation(window, |this, window, cx| {
+            if !window.is_window_active() {
+                this.shortcuts.clear_focused();
+                if this
+                    .shortcuts
+                    .editor
+                    .as_ref()
+                    .is_some_and(|editor| editor.recording)
+                {
+                    this.cancel_shortcut_editor(cx);
+                }
+            }
+        })
+        .detach();
+
+        let (finished, stopped) = tokio::sync::oneshot::channel();
+        let shutdown = commands.clone();
+        let app = cx.weak_entity();
+        let mut stopped = Some(stopped);
+        App::on_app_quit(cx, move |cx| {
+            shutdown.close();
+            let _ = app.update(cx, |this, _| this.shortcuts.signed_in(false));
+            let stopped = stopped.take();
+            async move {
+                if let Some(stopped) = stopped {
+                    let _ = stopped.await;
+                }
+            }
+        })
+        .detach();
+        std::thread::spawn(move || {
+            if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                runtime.block_on(session::run(requests, updates, sounds));
+            }
+            let _ = finished.send(());
+        });
+
+        cx.spawn_in(window, async move |this, cx| {
+            while let Ok(view) = views.recv().await {
+                if this
+                    .update_in(cx, |this, window, cx| {
+                        if this.signing_out && matches!(view, View::SignedIn(_)) {
+                            return;
+                        }
+                        this.signing_out = false;
+                        let signed_in = matches!(view, View::SignedIn(_));
+                        this.shortcuts.signed_in(signed_in);
+                        if signed_in && !matches!(this.view, View::SignedIn(_)) {
+                            this.workspace_focus.focus(window, cx);
+                        } else if !signed_in {
+                            this.selected_voice_channel = None;
+                            this.device_picker = None;
+                            window.close_all_dialogs(cx);
+                        }
+                        if matches!(view, View::SignIn { .. }) {
+                            let input = if this.email.read(cx).value().is_empty() {
+                                &this.email
+                            } else {
+                                &this.password
+                            };
+                            let handle = input.focus_handle(cx);
+                            window.focus(&handle, cx);
+                        }
+                        this.set_session_view(view, window);
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.shortcuts.signed_in(false);
+                window.close_all_dialogs(cx);
+                this.set_session_view(
+                    View::SignIn {
+                        message: Some("The SPK connection stopped. Close and reopen the app."),
+                        retry_restore: false,
+                    },
+                    window,
+                );
+                cx.notify();
+            });
+        })
+        .detach();
+
+        Self {
+            email,
+            password,
+            commands,
+            view: View::Busy("Checking saved session…"),
+            form_error: None,
+            device_picker: None,
+            selected_voice_channel: None,
+            sidebar_open: true,
+            workspace_focus,
+            appearance,
+            appearance_error: false,
+            shortcuts,
+            sound_settings,
+            signing_out: false,
+        }
+    }
+
+    fn set_session_view(&mut self, view: View, window: &mut Window) {
+        if let View::SignedIn(previous) = &self.view {
+            let next = match &view {
+                View::SignedIn(sidebar) => Some(&sidebar.avatars),
+                _ => None,
+            };
+            if !next.is_some_and(|next| std::sync::Arc::ptr_eq(&previous.avatars, next)) {
+                for (id, image) in previous.avatars.iter() {
+                    if next.and_then(|images| images.get(id)) != Some(image) {
+                        let _ = window.drop_image(image.clone());
+                    }
+                }
+            }
+        }
+        self.view = view;
+    }
+
+    fn send(&mut self, command: Command, busy: Option<&'static str>, cx: &mut Context<Self>) {
+        self.form_error = None;
+        let signing_out = matches!(command, Command::SignOut);
+        if self.commands.try_send(command).is_err() {
+            self.form_error = Some("Could not reach the SPK connection. Try again.");
+        } else {
+            if signing_out {
+                self.signing_out = true;
+                self.shortcuts.signed_in(false);
+            }
+            if let Some(label) = busy {
+                self.view = View::Busy(label);
+            }
+        }
+        cx.notify();
+    }
+
+    fn cancel_shortcut_editor(&mut self, cx: &mut Context<Self>) {
+        if self.shortcuts.editor.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn capture_shortcut(
+        &mut self,
+        event: &KeystrokeEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = &self.shortcuts.editor else {
+            return;
+        };
+        let key = event.keystroke.key.as_str();
+        if key == "escape" {
+            self.cancel_shortcut_editor(cx);
+        } else if !editor.recording {
+            return;
+        } else if key == "tab" {
+            self.cancel_shortcut_editor(cx);
+            return;
+        } else if !event.keystroke.is_modifier_key() {
+            let chord = if event.input_preference == InputPreference::CharacterInput {
+                None
+            } else {
+                Chord::capture(&event.keystroke, window)
+            };
+            self.record_chord(chord, cx);
+        }
+        cx.stop_propagation();
+        window.prevent_default();
+    }
+
+    fn record_chord(&mut self, chord: Option<Chord>, cx: &mut Context<Self>) {
+        if let Some(editor) = &mut self.shortcuts.editor {
+            editor.recording = chord.is_none();
+            editor.error = chord.is_none().then_some(
+                "Use F1–F24 or add Ctrl, Alt, or your platform modifier to a letter or digit.",
+            );
+            if chord.is_some() {
+                editor.chord = chord;
+            }
+            cx.notify();
+        }
+    }
+
+    fn change_sound(
+        &mut self,
+        sound: Sound,
+        change: impl FnOnce(&mut SoundSetting),
+        cx: &mut Context<Self>,
+    ) {
+        let mut sounds = self.shortcuts.sound_settings();
+        change(sounds.get_mut(sound));
+        self.shortcuts.set_sound_settings(sounds);
+        self.sound_settings.send_replace(sounds);
+        cx.notify();
+    }
+
+    fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(self.view, View::SignIn { .. }) {
+            return;
+        }
+        let email = self.email.read(cx).value().trim().to_owned();
+        let password = self.password.read(cx).value().to_string();
+        if email.is_empty() || password.is_empty() {
+            self.form_error = Some("Enter your email and password.");
+            cx.notify();
+            return;
+        }
+        self.password
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.send(Command::SignIn { email, password }, Some("Signing in…"), cx);
+    }
+
+    fn login(
+        &self,
+        message: Option<&'static str>,
+        retry_restore: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .w_full()
+            .max_w(px(360.0))
+            .mx_auto()
+            .p_6()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(logo(32.0))
+                    .child(Label::new("Sign in to SPK").text_xl().font_semibold()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(Label::new("Email"))
+                    .child(
+                        Input::new(&self.email)
+                            .aria_label("Email")
+                            .content_type(InputContentType::EmailAddress)
+                            .tab_index(0),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(Label::new("Password"))
+                    .child(
+                        Input::new(&self.password)
+                            .aria_label("Password")
+                            .content_type(InputContentType::Password)
+                            .tab_index(1),
+                    ),
+            )
+            .children(
+                self.form_error
+                    .or(message)
+                    .map(|message| Label::new(message).text_sm().text_color(cx.theme().danger)),
+            )
+            .child(
+                Button::new("sign-in")
+                    .primary()
+                    .label("Sign in")
+                    .tab_index(2)
+                    .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx))),
+            )
+            .when(retry_restore, |card| {
+                card.child(
+                    Button::new("restore")
+                        .label("Retry saved session")
+                        .tab_index(3)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.send(Command::Restore, Some("Checking saved session…"), cx);
+                        })),
+                )
+            })
+    }
+}
+
+impl Render for Spk {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let content = match &self.view {
+            View::Busy(label) => Label::new(*label).into_any_element(),
+            View::SignIn {
+                message,
+                retry_restore,
+            } => self.login(*message, *retry_restore, cx).into_any_element(),
+            View::SignedIn(sidebar) => self.workspace(sidebar, cx).into_any_element(),
+            View::RetrySignOut => div()
+                .flex()
+                .flex_col()
+                .items_start()
+                .gap_3()
+                .child(Label::new(
+                    "Could not sign out on SPK or clear the saved session.",
+                ))
+                .child(
+                    Button::new("retry-sign-out")
+                        .label("Retry sign-out")
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.send(Command::SignOut, None, cx)),
+                        ),
+                )
+                .into_any_element(),
+        };
+        div()
+            .id("spk-window")
+            .track_focus(&self.workspace_focus)
+            .size_full()
+            .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
+            .font_family(cx.theme().font_family.clone())
+            .text_sm()
+            .flex()
+            .flex_col()
+            .when(!matches!(self.view, View::SignedIn(_)), |page| {
+                page.justify_center().items_center().p_6()
+            })
+            .child(content)
+    }
+}
+
+fn logo(size: f32) -> Img {
     static LOGO: LazyLock<Arc<Image>> = LazyLock::new(|| {
         Arc::new(Image::from_bytes(
             ImageFormat::Svg,
@@ -91,753 +517,4 @@ fn tool_button(
 
 fn themed_icon(icon: IconName, color: Hsla, size: f32) -> Icon {
     Icon::new(icon).size(px(size)).text_color(color)
-}
-
-fn section_title(title: &'static str, icon: IconName, cx: &App) -> Div {
-    let color = cx.theme().muted_foreground;
-    div()
-        .flex()
-        .items_center()
-        .gap_2()
-        .h_8()
-        .px_2()
-        .text_color(color)
-        .font_semibold()
-        .child(themed_icon(icon, color, 16.0))
-        .child(title)
-}
-
-fn call_status(call: &VoiceView, switching: bool) -> &'static str {
-    match call.status {
-        Status::Joining => "Joining…",
-        Status::Connected => "Connected",
-        Status::ListenOnly => "Listen only",
-        Status::Leaving if switching => "Switching…",
-        Status::Reconnecting => "Reconnecting voice…",
-        Status::Leaving => "Leaving…",
-    }
-}
-
-fn channel_name(channel: &Channel) -> &str {
-    channel.name.as_deref().unwrap_or("Unnamed channel")
-}
-
-fn voice_channels(sidebar: &Sidebar) -> impl Iterator<Item = &Channel> {
-    sidebar
-        .channels
-        .iter()
-        .flatten()
-        .filter(|channel| channel.kind == "voice")
-}
-
-impl Spk {
-    pub fn workspace(&self, sidebar: &Sidebar, cx: &mut Context<Self>) -> impl IntoElement {
-        let room = voice_channels(sidebar)
-            .find(|channel| Some(channel.id.as_str()) == self.selected_voice_channel.as_deref())
-            .or_else(|| voice_channels(sidebar).next());
-        let theme = cx.theme();
-        let status = match sidebar.connection {
-            Connection::Connecting => Some("Connecting to live updates…"),
-            Connection::Online => None,
-            Connection::Reconnecting => Some("Reconnecting to live updates…"),
-            Connection::Forbidden => Some("SPK denied the live connection."),
-        };
-        let notices = [
-            status,
-            sidebar.notice,
-            sidebar.device_notice,
-            self.form_error,
-        ];
-        let rejoin = sidebar.rejoin_channel().map(str::to_owned);
-
-        div()
-            .size_full()
-            .flex()
-            .when(self.sidebar_open, |page| {
-                page.child(self.navigation(sidebar, room, cx))
-            })
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .h_12()
-                            .flex_shrink_0()
-                            .px_3()
-                            .border_b_1()
-                            .border_color(theme.border)
-                            .child(
-                                tool_button(
-                                    "toggle-sidebar",
-                                    if self.sidebar_open {
-                                        IconName::PanelLeftClose
-                                    } else {
-                                        IconName::PanelLeftOpen
-                                    },
-                                    if self.sidebar_open {
-                                        "Hide sidebar"
-                                    } else {
-                                        "Show sidebar"
-                                    },
-                                )
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        this.sidebar_open = !this.sidebar_open;
-                                        this.device_picker = None;
-                                        cx.notify();
-                                    },
-                                )),
-                            )
-                            .child(themed_icon(IconName::Volume2, theme.muted_foreground, 16.0))
-                            .child(
-                                Label::new(room.map_or("Voice channels", channel_name).to_owned())
-                                    .font_semibold(),
-                            ),
-                    )
-                    .when(sidebar.load_failed, |area| {
-                        area.child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .px_4()
-                                .py_1()
-                                .child("Could not load all channel data.")
-                                .child(Button::new("refresh").small().label("Retry").on_click(
-                                    cx.listener(|this, _, _, cx| {
-                                        this.send(Command::Refresh, None, cx)
-                                    }),
-                                )),
-                        )
-                    })
-                    .children(notices.into_iter().flatten().map(|notice| {
-                        div()
-                            .px_4()
-                            .py_1()
-                            .text_color(theme.muted_foreground)
-                            .child(notice)
-                    }))
-                    .when_some(sidebar.voice_notice, |area, notice| {
-                        area.child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .px_4()
-                                .py_1()
-                                .text_color(theme.muted_foreground)
-                                .child(notice)
-                                .when_some(rejoin, |row, id| {
-                                    row.child(
-                                        Button::new("voice-rejoin")
-                                            .small()
-                                            .tab_stop(true)
-                                            .label("Rejoin voice")
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.join_voice_channel(&id, cx)
-                                            })),
-                                    )
-                                }),
-                        )
-                    })
-                    .child(self.voice_channel_stage(sidebar, room, cx)),
-            )
-    }
-
-    fn navigation(
-        &self,
-        sidebar: &Sidebar,
-        room: Option<&Channel>,
-        cx: &Context<Self>,
-    ) -> impl IntoElement {
-        let theme = cx.theme();
-        let selected = room.map(|room| room.id.as_str());
-        let people = sidebar.people();
-        let has_text = sidebar
-            .channels
-            .iter()
-            .flatten()
-            .any(|channel| channel.kind == "text");
-        let name = sidebar.profile.name();
-        let online = matches!(sidebar.connection, Connection::Online);
-
-        div()
-            .flex()
-            .flex_col()
-            .w(relative(0.20))
-            .min_w(px(270.0))
-            .max_w(px(378.0))
-            .flex_shrink_0()
-            .border_r_1()
-            .border_color(theme.border)
-            .px_2()
-            .pb_2()
-            .gap_2()
-            .child(
-                div()
-                    .id("channel-navigation")
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .gap_3()
-                    .child(
-                        div()
-                            .flex()
-                            .h_16()
-                            .items_center()
-                            .justify_center()
-                            .flex_shrink_0()
-                            .gap_1()
-                            .text_2xl()
-                            .font_bold()
-                            .text_color(theme.primary)
-                            .child(logo(26.0))
-                            .child("spk"),
-                    )
-                    .when(!people.is_empty(), |nav| {
-                        nav.child(
-                            div()
-                                .flex_shrink_0()
-                                .child(section_title(
-                                    "Direct messages",
-                                    IconName::MessageCircle,
-                                    cx,
-                                ))
-                                .children(people.into_iter().map(|(id, name)| {
-                                    div()
-                                        .id(SharedString::from(format!("person-{id}")))
-                                        .flex()
-                                        .items_center()
-                                        .h_8()
-                                        .gap_2()
-                                        .px_2()
-                                        .child(profile_avatar(
-                                            Avatar::new().name(name.to_owned()).small(),
-                                            sidebar.avatar(Some(id)),
-                                            20.0,
-                                            false,
-                                            cx,
-                                        ))
-                                        .child(Label::new(name.to_owned()).truncate())
-                                })),
-                        )
-                    })
-                    .when(has_text, |nav| {
-                        nav.child(
-                            div()
-                                .flex_shrink_0()
-                                .child(section_title("Text channels", IconName::Hash, cx))
-                                .children(
-                                    sidebar
-                                        .channels
-                                        .iter()
-                                        .flatten()
-                                        .filter(|channel| channel.kind == "text")
-                                        .map(|channel| {
-                                            div()
-                                                .id(SharedString::from(format!(
-                                                    "text-{}",
-                                                    channel.id
-                                                )))
-                                                .flex()
-                                                .items_center()
-                                                .h_8()
-                                                .px_2()
-                                                .child(
-                                                    Label::new(channel_name(channel).to_owned())
-                                                        .truncate(),
-                                                )
-                                        }),
-                                ),
-                        )
-                    })
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .child(section_title("Voice channels", IconName::Volume2, cx))
-                            .children(
-                                voice_channels(sidebar).map(|channel| {
-                                    self.channel_row(sidebar, channel, selected, cx)
-                                }),
-                            ),
-                    ),
-            )
-            .children(sidebar.voice.as_ref().map(|call| {
-                let switching = sidebar.switching_to().is_some();
-                let id = sidebar
-                    .switching_to()
-                    .unwrap_or(&call.channel_id)
-                    .to_owned();
-                let voice_channel_name = voice_channels(sidebar)
-                    .find(|channel| channel.id == id)
-                    .map_or("Voice", channel_name);
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .p_2()
-                    .rounded_lg()
-                    .bg(theme.secondary)
-                    .child(
-                        tool_button(
-                            "current-call",
-                            IconName::Volume2,
-                            "Show current voice channel",
-                        )
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| this.select_voice_channel(&id, cx)),
-                        ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                Label::new(voice_channel_name.to_owned())
-                                    .font_semibold()
-                                    .truncate(),
-                            )
-                            .child(
-                                Label::new(call_status(call, switching))
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground),
-                            ),
-                    )
-                    .children(self.leave_voice("sidebar-leave", call, switching, false, cx))
-            }))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .px_2()
-                    .py_2()
-                    .rounded_lg()
-                    .bg(theme.secondary)
-                    .child(
-                        div()
-                            .id("footer-avatar")
-                            .relative()
-                            .flex_shrink_0()
-                            .child(profile_avatar(
-                                Avatar::new().name(name.to_owned()).small(),
-                                sidebar.avatar(sidebar.profile.id.as_deref()),
-                                28.0,
-                                false,
-                                cx,
-                            ))
-                            .child(
-                                div()
-                                    .absolute()
-                                    .top_0()
-                                    .right_0()
-                                    .size_2()
-                                    .rounded_full()
-                                    .border_1()
-                                    .border_color(theme.background)
-                                    .bg(if online {
-                                        theme.success
-                                    } else {
-                                        theme.muted_foreground
-                                    }),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_w_0()
-                            .ml_1()
-                            .child(Label::new(name.to_owned()).font_semibold().truncate())
-                            .child(
-                                Label::new(if online { "Online" } else { "Offline" })
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground),
-                            ),
-                    )
-                    .child(self.voice_controls(sidebar, VoiceControls::Profile, cx))
-                    .child(
-                        tool_button("settings", IconName::Settings, "Settings").on_click(
-                            cx.listener(|this, _, window, cx| this.open_settings(window, cx)),
-                        ),
-                    ),
-            )
-    }
-
-    fn channel_row(
-        &self,
-        sidebar: &Sidebar,
-        channel: &Channel,
-        selected: Option<&str>,
-        cx: &Context<Self>,
-    ) -> impl IntoElement {
-        let theme = cx.theme();
-        let switching_here = sidebar.switching_to() == Some(channel.id.as_str());
-        let call = sidebar
-            .voice
-            .as_ref()
-            .filter(|call| switching_here || call.channel_id == channel.id);
-        let active = selected == Some(channel.id.as_str());
-        let id = channel.id.clone();
-        let join_id = channel.id.clone();
-        let name = channel_name(channel).to_owned();
-        let can_join = sidebar.can_join_voice(&id);
-        let join_label = if sidebar.voice.is_some() {
-            format!("Switch to {name}")
-        } else {
-            format!("Join {name}")
-        };
-        div()
-            .id(SharedString::from(format!("voice-{id}")))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .h_8()
-                    .rounded_md()
-                    .pr_1()
-                    .when(active, |row| row.bg(theme.primary.opacity(0.10)))
-                    .child(
-                        Button::new("select")
-                            .ghost()
-                            .small()
-                            .tab_stop(true)
-                            .selected(active)
-                            .accessibility_label(name.clone())
-                            .flex_1()
-                            .min_w_0()
-                            .h_8()
-                            .when(active, |button| button.bg(theme.transparent))
-                            .child(Label::new(name.clone()).w_full().truncate().text_color(
-                                if active {
-                                    theme.primary
-                                } else {
-                                    theme.foreground
-                                },
-                            ))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.select_voice_channel(&id, cx)
-                            })),
-                    )
-                    .children(call.and_then(|call| {
-                        self.leave_voice("leave", call, switching_here, false, cx)
-                    }))
-                    .when(can_join, |row| {
-                        row.child(tool_button("join", IconName::Phone, join_label).on_click(
-                            cx.listener(move |this, _, _, cx| {
-                                this.join_voice_channel(&join_id, cx)
-                            }),
-                        ))
-                    }),
-            )
-            .children(sidebar.participants(&channel.id).into_iter().map(|person| {
-                let flags = person.flags;
-                div()
-                    .id(SharedString::from(format!("member-{}", person.id)))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .pl_6()
-                    .pr_2()
-                    .h_6()
-                    .child(profile_avatar(
-                        Avatar::new().name(person.name.to_owned()).xsmall(),
-                        sidebar.avatar(Some(person.id)),
-                        16.0,
-                        flags.speaking && !flags.muted && !flags.deafened,
-                        cx,
-                    ))
-                    .child(
-                        Label::new(person.name.to_owned())
-                            .truncate()
-                            .text_color(theme.muted_foreground),
-                    )
-                    .children(participant_status(flags.muted, flags.deafened, cx))
-            }))
-    }
-
-    fn select_voice_channel(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.selected_voice_channel = Some(id.to_owned());
-        self.device_picker = None;
-        cx.notify();
-    }
-
-    fn join_voice_channel(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.select_voice_channel(id, cx);
-        self.send(Command::JoinVoice(id.to_owned()), None, cx);
-    }
-
-    fn voice_channel_stage(
-        &self,
-        sidebar: &Sidebar,
-        room: Option<&Channel>,
-        cx: &Context<Self>,
-    ) -> impl IntoElement {
-        let theme = cx.theme();
-        let call = room.and_then(|room| {
-            sidebar
-                .voice
-                .as_ref()
-                .filter(|call| call.channel_id == room.id)
-        });
-        let in_voice = call.is_some_and(VoiceView::is_participating);
-        let mut participants = room.map_or_else(Vec::new, |room| sidebar.participants(&room.id));
-        if let Some(id) = sidebar.profile.id.as_deref().filter(|_| in_voice)
-            && !participants.iter().any(|person| person.id == id)
-        {
-            // The local media can connect before SPK echoes our voice presence.
-            participants.insert(
-                0,
-                Participant {
-                    id,
-                    name: sidebar.profile.name(),
-                    flags: Default::default(),
-                },
-            );
-        }
-        let message = match (room, sidebar.channels.is_some()) {
-            (None, false) if !sidebar.load_failed => Some("Loading voice channels…"),
-            (None, true) => Some("No voice channels"),
-            (Some(_), _) if participants.is_empty() => Some("Nobody is here yet."),
-            _ => None,
-        };
-        div()
-            .id("voice-stage")
-            .relative()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .child(
-                div()
-                    .id("voice-tiles")
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .justify_center()
-                            .gap_3()
-                            .p_4()
-                            .my_auto()
-                            .children(message.map(|message| {
-                                Label::new(message).text_color(theme.muted_foreground)
-                            }))
-                            .children(
-                                participants
-                                    .into_iter()
-                                    .map(|person| self.voice_tile(person, call, sidebar, cx)),
-                            ),
-                    ),
-            )
-            .when_some(room, |stage, room| {
-                let id = room.id.clone();
-                let switching_here = sidebar.switching_to() == Some(id.as_str());
-                let departing = if switching_here {
-                    sidebar.voice.as_ref()
-                } else {
-                    call
-                };
-                stage.child(
-                    div()
-                        .relative()
-                        .flex()
-                        .justify_center()
-                        .px_2()
-                        .pb_2()
-                        .flex_shrink_0()
-                        .child(
-                            div()
-                                .flex()
-                                .flex_wrap()
-                                .items_center()
-                                .justify_center()
-                                .gap_1()
-                                .rounded_lg()
-                                .when(in_voice, |bar| {
-                                    bar.bg(theme.secondary).p_2().child(self.voice_controls(
-                                        sidebar,
-                                        VoiceControls::Room,
-                                        cx,
-                                    ))
-                                })
-                                .children(departing.and_then(|call| {
-                                    self.leave_voice(
-                                        "voice-channel-leave",
-                                        call,
-                                        switching_here,
-                                        true,
-                                        cx,
-                                    )
-                                }))
-                                .children(
-                                    departing
-                                        .filter(|call| {
-                                            matches!(
-                                                call.status,
-                                                Status::Reconnecting | Status::Leaving
-                                            )
-                                        })
-                                        .map(|call| call_status(call, switching_here)),
-                                )
-                                .when(sidebar.can_join_voice(&id), |bar| {
-                                    bar.child(
-                                        Button::new("voice-channel-join")
-                                            .primary()
-                                            .small()
-                                            .tab_stop(true)
-                                            .icon(IconName::Phone)
-                                            .label(if sidebar.voice.is_some() {
-                                                "Switch voice channel"
-                                            } else {
-                                                "Join voice"
-                                            })
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.join_voice_channel(&id, cx)
-                                            })),
-                                    )
-                                }),
-                        ),
-                )
-            })
-    }
-
-    fn leave_voice(
-        &self,
-        id: &'static str,
-        call: &VoiceView,
-        switching: bool,
-        labeled: bool,
-        cx: &Context<Self>,
-    ) -> Option<Button> {
-        let (icon, label) = match call.status {
-            Status::Joining => (IconName::X, "Cancel join"),
-            Status::Leaving if switching => (IconName::X, "Cancel switch"),
-            Status::Leaving => return None,
-            _ => (IconName::PhoneOff, "Leave voice"),
-        };
-        Some(
-            tool_button(id, themed_icon(icon, cx.theme().danger, 16.0), label)
-                .when(labeled, |button| {
-                    button.label(label).text_color(cx.theme().danger)
-                })
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.device_picker = None;
-                    this.send(Command::LeaveVoice, None, cx);
-                })),
-        )
-    }
-
-    fn voice_tile(
-        &self,
-        participant: Participant<'_>,
-        call: Option<&VoiceView>,
-        sidebar: &Sidebar,
-        cx: &App,
-    ) -> impl IntoElement {
-        let theme = cx.theme();
-        let is_me = sidebar.profile.id.as_deref() == Some(participant.id);
-        let media = call.and_then(|call| call.media.as_ref());
-        let flags = if is_me && call.is_some() {
-            crate::api::VoiceFlags {
-                muted: sidebar.voice_intent.mute.effective_muted()
-                    || call.is_some_and(|call| {
-                        matches!(call.status, Status::ListenOnly | Status::Reconnecting)
-                    }),
-                deafened: sidebar.voice_intent.mute.deafened,
-                ..participant.flags
-            }
-        } else {
-            participant.flags
-        };
-        let speaking = !flags.muted
-            && !flags.deafened
-            && media.map_or(flags.speaking, |media| {
-                media.speaking.contains(participant.id)
-            });
-        div()
-            .id(SharedString::from(participant.id.to_owned()))
-            .relative()
-            .flex()
-            .items_center()
-            .justify_center()
-            .role(Role::Group)
-            .when(speaking, |tile| tile.aria_description("Speaking"))
-            .w(px(320.0))
-            .max_w_full()
-            .h(px(180.0))
-            .border_1()
-            .border_color(if speaking {
-                theme.success
-            } else {
-                theme.border
-            })
-            .rounded_lg()
-            .bg(theme.secondary)
-            .child(profile_avatar(
-                Avatar::new().name(participant.name.to_owned()),
-                sidebar.avatar(Some(participant.id)),
-                48.0,
-                false,
-                cx,
-            ))
-            .child(
-                div()
-                    .absolute()
-                    .top_2()
-                    .left_2()
-                    .right_2()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .max_w(relative(0.84))
-                            .rounded_md()
-                            .px_2()
-                            .py_0p5()
-                            .bg(theme.background)
-                            .child(
-                                Label::new(if is_me { "You" } else { participant.name }.to_owned())
-                                    .text_xs()
-                                    .truncate(),
-                            ),
-                    )
-                    .children(participant_status(flags.muted, flags.deafened, cx)),
-            )
-    }
-}
-
-fn participant_status(muted: bool, deafened: bool, cx: &App) -> Option<impl IntoElement> {
-    let (icon, label) = if deafened {
-        (IconName::HeadphoneOff, "Deafened")
-    } else if muted {
-        (IconName::MicOff, "Muted")
-    } else {
-        return None;
-    };
-    Some(
-        div()
-            .id("voice-state")
-            .role(Role::Image)
-            .aria_label(label)
-            .child(themed_icon(icon, cx.theme().danger, 14.0)),
-    )
 }
