@@ -124,6 +124,7 @@ impl Media {
         let mut retry_speakers = intent.retry_speakers;
         let mut reconnecting = false;
         let mut resync = false;
+        let mut recording = false;
 
         loop {
             if reconnecting && intent.mute.effective_muted() && capture.selected_device().is_some()
@@ -145,12 +146,6 @@ impl Media {
                     speaking.remove(me.as_str());
                     retry_mic = intent.retry_mic;
                 }
-                if let Some(device) = wanted
-                    && capture.can_start()
-                {
-                    capture.start(room, audio, device.clone());
-                }
-
                 if intent.mute.deafened {
                     runtime.pc_factory().set_adm_playout_enabled(false);
                 }
@@ -166,9 +161,21 @@ impl Media {
                         output.as_ref(),
                     );
                 }
-                runtime
-                    .pc_factory()
-                    .set_adm_playout_enabled(output.is_some() && !intent.mute.deafened);
+                // shortcut: track capture start/stop, use CoreAudio format notifications if Bluetooth switches later.
+                let capturing = cfg!(target_os = "macos") && audio.is_recording_initialized();
+                sync_playout(
+                    output.is_some() && !intent.mute.deafened,
+                    &mut recording,
+                    capturing,
+                    |enabled| {
+                        runtime.pc_factory().set_adm_playout_enabled(enabled);
+                    },
+                );
+                if let Some(device) = wanted
+                    && capture.can_start()
+                {
+                    capture.start(room, audio, device.clone());
+                }
                 if resync && !intent.mute.effective_muted() {
                     capture.resume();
                 }
@@ -262,6 +269,20 @@ impl Media {
     }
 }
 
+fn sync_playout(
+    enabled: bool,
+    previous_recording: &mut bool,
+    recording: bool,
+    mut set_enabled: impl FnMut(bool),
+) {
+    let recording_changed = std::mem::replace(previous_recording, recording) != recording;
+    if enabled && recording_changed {
+        // CoreAudio can change the speaker format while the selected device stays the same.
+        set_enabled(false);
+    }
+    set_enabled(enabled);
+}
+
 #[derive(Default)]
 struct Speaking(HashMap<String, Option<Instant>>);
 
@@ -327,6 +348,33 @@ fn subscribe_to_microphone(publication: &RemoteTrackPublication) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_format_changes_reopen_the_same_playout_stream() {
+        let stereo = (48_000, 2);
+        let mono = (24_000, 1);
+        let mut recording = false;
+        let mut open_format = Some(stereo);
+        let mut update = |play, capturing, hardware_format| {
+            let mut stopped = false;
+            sync_playout(play, &mut recording, capturing, |enabled| {
+                assert!(play || !enabled);
+                if enabled {
+                    open_format.get_or_insert(hardware_format);
+                } else {
+                    stopped = open_format.take().is_some();
+                }
+            });
+            (open_format, stopped)
+        };
+
+        assert_eq!(update(true, true, mono), (Some(mono), true));
+        assert_eq!(update(true, true, mono), (Some(mono), false));
+        assert_eq!(update(true, false, stereo), (Some(stereo), true));
+        assert_eq!(update(false, false, stereo), (None, true));
+        assert_eq!(update(false, true, mono), (None, false));
+        assert_eq!(update(true, true, mono), (Some(mono), false));
+    }
 
     #[test]
     fn media_failure_is_retryable_and_session_replacement_is_authoritative() {
