@@ -385,7 +385,7 @@ impl VoiceSession {
             Command::RetryMicrophone => sidebar.voice_intent.retry_mic += 1,
             Command::RefreshDevices => {
                 if self.call.is_none() {
-                    sidebar.devices = idle_devices();
+                    sidebar.devices = Arc::new(Devices::enumerate());
                 } else {
                     sidebar.voice_intent.refresh_devices += 1;
                 }
@@ -413,11 +413,4 @@ impl VoiceSession {
             call.apply(&sidebar.voice_intent);
         }
     }
-}
-
-pub(super) fn idle_devices() -> Arc<Devices> {
-    Arc::new(
-        livekit::PlatformAudio::new()
-            .map_or_else(|_| Devices::default(), |audio| Devices::read(&audio)),
-    )
 }

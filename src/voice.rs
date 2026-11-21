@@ -1,18 +1,10 @@
-use std::{
-    collections::{HashMap, HashSet},
-    future::pending,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashSet, future::pending, sync::Arc, time::Duration};
 
 use async_channel::{Receiver, Sender};
-use livekit::rtc_engine::lk_runtime::LkRuntime;
-use livekit::webrtc::peer_connection_factory::native::PeerConnectionFactoryExt;
-use livekit::{DisconnectReason, prelude::*};
 use tokio::{
     sync::{oneshot, watch},
-    task::{JoinHandle, JoinSet},
-    time::{Instant, MissedTickBehavior, interval, sleep_until, timeout},
+    task::JoinHandle,
+    time::{Instant, sleep_until, timeout},
 };
 use url::Url;
 use uuid::Uuid;
@@ -20,7 +12,10 @@ use uuid::Uuid;
 use crate::api::{Failure, SpkClient, VoiceFlags, VoiceFrame, VoiceJoin, VoiceSocket};
 
 mod devices;
+mod media;
+
 pub use devices::{Device, DeviceKind, DeviceList, DevicePreferences, Devices};
+use media::Media;
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -142,7 +137,7 @@ impl Call {
         intent: Intent,
     ) -> Self {
         Self::spawn(channel_id, socket, intent, |worker, ack, cancelled| {
-            tokio::spawn(worker.run(client, ack, cancelled, Worker::connect_and_listen))
+            tokio::spawn(worker.run(client, ack, cancelled, Media::connect_and_listen))
         })
     }
 
@@ -288,44 +283,11 @@ struct Worker {
     requested: watch::Receiver<Intent>,
 }
 
-type RoomEvents = tokio::sync::mpsc::UnboundedReceiver<RoomEvent>;
-
 #[derive(Clone, Copy, PartialEq)]
 struct PublishedPresence {
     flags: VoiceFlags,
     ready: bool,
     revision: u64,
-}
-
-#[derive(Default)]
-struct Media {
-    audio: Option<PlatformAudio>,
-    capture: Capture,
-    connecting: Option<JoinHandle<Result<(Room, RoomEvents), Issue>>>,
-    room: Option<Room>,
-}
-
-impl Media {
-    async fn stop_audio(&mut self) {
-        self.capture.silence();
-        self.capture.jobs.shutdown().await;
-        if let Some(audio) = self.audio.take() {
-            stop_recording(&audio);
-            LkRuntime::instance()
-                .pc_factory()
-                .set_adm_playout_enabled(false);
-        }
-    }
-
-    async fn close(self) {
-        if let Some(room) = self.room {
-            let _ = room.close().await;
-        } else if let Some(connecting) = self.connecting
-            && let Ok(Ok((room, _))) = connecting.await
-        {
-            let _ = room.close().await;
-        }
-    }
 }
 
 impl Worker {
@@ -418,205 +380,6 @@ impl Worker {
             .map_err(|_| Issue::Acknowledgment)?
             .map_err(|_| Issue::Acknowledgment)?;
         Ok((token.token, deafened))
-    }
-
-    async fn connect_and_listen(&self, media: &mut Media, token: String) -> Result<(), Issue> {
-        let audio = media
-            .audio
-            .insert(PlatformAudio::new().map_err(|_| Issue::Playback)?);
-        stop_recording(audio);
-        let requested = self.requested.borrow().clone();
-        let devices = Devices::read(audio);
-        let speakers =
-            route_speakers(audio, &devices.speakers, &requested, None).ok_or(Issue::Playback)?;
-        LkRuntime::instance()
-            .pc_factory()
-            .set_adm_playout_enabled(false);
-        // Drive the SDK's join to completion so cancellation can close any room it returns.
-        let connection = media.connecting.insert(tokio::spawn(connect(token)));
-        let connected = connection.await.map_err(|_| Issue::Media)?;
-        media.connecting.take();
-        let (room, events) = connected?;
-        self.listen(
-            media.room.insert(room),
-            audio,
-            events,
-            speakers,
-            &mut media.capture,
-        )
-        .await
-    }
-
-    async fn listen(
-        &self,
-        room: &Room,
-        audio: &PlatformAudio,
-        mut events: RoomEvents,
-        speakers: Device,
-        capture: &mut Capture,
-    ) -> Result<(), Issue> {
-        let mut requested = self.requested.clone();
-        let mut intent = requested.borrow_and_update().clone();
-        let runtime = LkRuntime::instance();
-        let mut devices = Arc::new(Devices::read(audio));
-        // LiveKit can initialize WebRTC with the default route while connecting.
-        let mut output = route_speakers(audio, &devices.speakers, &intent, Some(&speakers));
-        runtime
-            .pc_factory()
-            .set_adm_playout_enabled(output.is_some() && !intent.mute.deafened);
-        subscribe_to_microphones(room);
-        let me = room.local_participant().identity();
-        let mut speaking = Speaking::default();
-        let mut reported = None;
-        // shortcut: a remove and return between scans can be missed, use backend notifications when available.
-        let mut scan = interval(Duration::from_secs(1));
-        scan.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        scan.tick().await;
-        let mut check_routes = true;
-        let mut retry_mic = intent.retry_mic;
-        let mut retry_speakers = intent.retry_speakers;
-        let mut reconnecting = false;
-        let mut resync = false;
-
-        loop {
-            if reconnecting && intent.mute.effective_muted() && capture.device.is_some() {
-                capture.stop(room, audio).await;
-            }
-            if check_routes && !reconnecting {
-                check_routes = false;
-                let input = devices
-                    .microphones
-                    .resolve(intent.preferred.microphone.as_ref());
-                let wanted = if intent.mute.effective_muted() {
-                    None
-                } else {
-                    input
-                };
-                if capture.device.as_ref() != wanted || retry_mic != intent.retry_mic {
-                    capture.stop(room, audio).await;
-                    speaking.remove(me.as_str());
-                    retry_mic = intent.retry_mic;
-                }
-                if let Some(device) = wanted
-                    && capture.device.is_none()
-                    && capture.jobs.is_empty()
-                {
-                    capture.start(room, audio, device.clone());
-                }
-
-                if intent.mute.deafened {
-                    runtime.pc_factory().set_adm_playout_enabled(false);
-                }
-                if devices.speakers.resolve(intent.preferred.speakers.as_ref()) != output.as_ref()
-                    || retry_speakers != intent.retry_speakers
-                    || resync
-                {
-                    retry_speakers = intent.retry_speakers;
-                    output = route_speakers(audio, &devices.speakers, &intent, output.as_ref());
-                }
-                runtime
-                    .pc_factory()
-                    .set_adm_playout_enabled(output.is_some() && !intent.mute.deafened);
-                if resync
-                    && !intent.mute.effective_muted()
-                    && capture.published.is_some()
-                    && let Some(track) = &capture.track
-                {
-                    track.unmute();
-                }
-            }
-
-            speaking.expire(Instant::now());
-            let muted = reconnecting || capture.published.is_none();
-            if muted {
-                speaking.remove(me.as_str());
-            }
-            let flags = VoiceFlags {
-                muted,
-                deafened: intent.mute.deafened,
-                speaking: speaking.0.contains_key(me.as_str()),
-            };
-            self.publish_flags(flags, !reconnecting, std::mem::take(&mut resync));
-            let report = Report {
-                status: if reconnecting {
-                    Status::Reconnecting
-                } else if !intent.mute.effective_muted()
-                    && (capture.failed || (capture.device.is_none() && capture.jobs.is_empty()))
-                {
-                    Status::ListenOnly
-                } else {
-                    Status::Connected
-                },
-                devices: devices.clone(),
-                microphone: capture
-                    .published
-                    .as_ref()
-                    .and(capture.device.as_ref())
-                    .cloned(),
-                speakers: output.clone(),
-                speaking: speaking.0.keys().cloned().collect(),
-            };
-            if reported.as_ref() != Some(&report) {
-                reported = Some(report.clone());
-                self.update(Update::Media(Arc::new(report)));
-            }
-
-            tokio::select! {
-                biased;
-                result = requested.changed() => {
-                    result.map_err(|_| Issue::Disconnected)?;
-                    let next = requested.borrow_and_update().clone();
-                    if next.refresh_devices != intent.refresh_devices || next.preferred != intent.preferred
-                        || next.retry_mic != intent.retry_mic || next.retry_speakers != intent.retry_speakers
-                    {
-                        devices = Arc::new(Devices::read(audio));
-                    }
-                    intent = next;
-                    check_routes = true;
-                }
-                event = events.recv() => match event {
-                    Some(RoomEvent::TrackPublished { publication, .. }) => subscribe_to_microphone(&publication),
-                    Some(RoomEvent::ActiveSpeakersChanged { speakers }) if !reconnecting => speaking.update(
-                        speakers.into_iter().map(|speaker| speaker.identity().to_string()).collect(),
-                        Instant::now(),
-                    ),
-                    Some(RoomEvent::ParticipantDisconnected(participant)) => speaking.remove(participant.identity().as_str()),
-                    Some(RoomEvent::LocalTrackRepublished { publication, .. })
-                        if capture.track.as_ref().is_none_or(|track| track.sid() != publication.sid()) =>
-                    {
-                        // The SDK can be republishing while mute or deafen removes the old track.
-                        let _ = room.local_participant().unpublish_track(&publication.sid()).await;
-                    }
-                    Some(RoomEvent::Reconnecting) => {
-                        reconnecting = true;
-                        capture.silence();
-                        runtime.pc_factory().set_adm_playout_enabled(false);
-                        speaking.0.clear();
-                    }
-                    Some(RoomEvent::Reconnected) if reconnecting => {
-                        reconnecting = false;
-                        resync = true;
-                        check_routes = true;
-                        intent = requested.borrow_and_update().clone();
-                        devices = Arc::new(Devices::read(audio));
-                        capture.reconcile_publication(room, audio).await;
-                        subscribe_to_microphones(room);
-                    }
-                    Some(RoomEvent::Disconnected { reason }) => return Err(disconnect_issue(reason)),
-                    None => return Err(Issue::LiveKitDisconnected),
-                    _ => {}
-                },
-                result = capture.jobs.join_next(), if !reconnecting && !capture.jobs.is_empty() => {
-                    capture.complete(room, audio, result.and_then(Result::ok).flatten()).await;
-                    check_routes = true;
-                }
-                _ = scan.tick() => {
-                    devices = Arc::new(Devices::read(audio));
-                    check_routes = true;
-                }
-                _ = wait_until(speaking.deadline()) => {},
-            }
-        }
     }
 
     fn publish_flags(&self, flags: VoiceFlags, ready: bool, resync: bool) {
@@ -718,31 +481,6 @@ impl Worker {
     }
 }
 
-fn route_speakers(
-    audio: &PlatformAudio,
-    list: &DeviceList,
-    intent: &Intent,
-    previous: Option<&Device>,
-) -> Option<Device> {
-    let preferred = list.resolve(intent.preferred.speakers.as_ref());
-    let previous = previous.and_then(|device| {
-        list.choices
-            .iter()
-            .chain(list.default.iter())
-            .find(|choice| *choice == device)
-    });
-    preferred
-        .into_iter()
-        .chain(previous.filter(|device| Some(*device) != preferred))
-        .chain(
-            list.default
-                .as_ref()
-                .filter(|device| Some(*device) != preferred && Some(*device) != previous),
-        )
-        .find(|device| devices::switch_speakers(audio, device))
-        .cloned()
-}
-
 async fn wait_until(deadline: Option<Instant>) {
     if let Some(deadline) = deadline {
         sleep_until(deadline).await;
@@ -781,238 +519,4 @@ impl Presence {
         self.flags = None;
         self.next = Instant::now();
     }
-}
-
-#[derive(Default)]
-struct Speaking(HashMap<String, Option<Instant>>);
-
-impl Speaking {
-    fn update(&mut self, active: HashSet<String>, now: Instant) {
-        for (id, off) in &mut self.0 {
-            if !active.contains(id) {
-                off.get_or_insert(now + Duration::from_millis(500));
-            }
-        }
-        self.0.extend(active.into_iter().map(|id| (id, None)));
-    }
-
-    fn remove(&mut self, id: &str) {
-        self.0.remove(id);
-    }
-
-    fn deadline(&self) -> Option<Instant> {
-        self.0.values().filter_map(|off| *off).min()
-    }
-
-    fn expire(&mut self, now: Instant) {
-        self.0.retain(|_, off| off.is_none_or(|off| off > now));
-    }
-}
-
-async fn connect(token: String) -> Result<(Room, RoomEvents), Issue> {
-    let mut options = RoomOptions::default();
-    options.auto_subscribe = false;
-    options.join_retries = 0;
-    Room::connect(env!("LIVEKIT_URL"), &token, options)
-        .await
-        .map_err(|_| Issue::Media)
-}
-
-fn disconnect_issue(reason: DisconnectReason) -> Issue {
-    match reason {
-        DisconnectReason::UnknownReason
-        | DisconnectReason::SignalClose
-        | DisconnectReason::StateMismatch
-        | DisconnectReason::ConnectionTimeout
-        | DisconnectReason::ServerShutdown
-        | DisconnectReason::MediaFailure
-        | DisconnectReason::JoinFailure => Issue::LiveKitDisconnected,
-        _ => Issue::Disconnected,
-    }
-}
-
-fn subscribe_to_microphones(room: &Room) {
-    for participant in room.remote_participants().into_values() {
-        for publication in participant.track_publications().into_values() {
-            subscribe_to_microphone(&publication);
-        }
-    }
-}
-
-fn subscribe_to_microphone(publication: &RemoteTrackPublication) {
-    if publication.kind() == TrackKind::Audio && publication.source() == TrackSource::Microphone {
-        publication.set_subscribed(true);
-    }
-}
-
-#[derive(Default)]
-struct Capture {
-    device: Option<Device>,
-    track: Option<LocalAudioTrack>,
-    published: Option<TrackSid>,
-    starting: Option<oneshot::Sender<()>>,
-    jobs: JoinSet<Option<TrackSid>>,
-    failed: bool,
-}
-
-impl Capture {
-    fn silence(&self) {
-        if let Some(track) = &self.track {
-            track.mute();
-        }
-    }
-
-    fn current_publication(&self, room: &Room) -> Option<TrackSid> {
-        // A full LiveKit reconnect can republish the same track with a new SID.
-        let sid = self.track.as_ref()?.sid();
-        room.local_participant()
-            .track_publications()
-            .contains_key(&sid)
-            .then_some(sid)
-    }
-
-    async fn reconcile_publication(&mut self, room: &Room, audio: &PlatformAudio) {
-        if self.published.is_some() {
-            if let Some(sid) = self.current_publication(room) {
-                self.published = Some(sid);
-            } else {
-                self.stop(room, audio).await;
-            }
-        }
-    }
-
-    fn start(&mut self, room: &Room, audio: &PlatformAudio, device: Device) {
-        let (starting, cancelled) = oneshot::channel();
-        let track = LocalAudioTrack::create_audio_track("microphone", audio.rtc_source());
-        track.mute();
-        self.track = Some(track.clone());
-        self.device = Some(device.clone());
-        self.starting = Some(starting);
-        self.jobs.spawn(publish_microphone(
-            room.local_participant(),
-            audio.clone(),
-            device,
-            track,
-            cancelled,
-        ));
-    }
-
-    async fn stop(&mut self, room: &Room, audio: &PlatformAudio) {
-        self.device = None;
-        self.failed = false;
-        self.starting.take();
-        let published = self.published.take();
-        let sid = self.current_publication(room).or(published);
-        if let Some(track) = self.track.take() {
-            track.mute();
-            stop_recording(audio);
-        }
-        if let Some(sid) = sid {
-            let _ = room.local_participant().unpublish_track(&sid).await;
-        }
-    }
-
-    async fn complete(&mut self, room: &Room, audio: &PlatformAudio, published: Option<TrackSid>) {
-        if self.starting.take().is_none() {
-            if let Some(sid) = published {
-                let _ = room.local_participant().unpublish_track(&sid).await;
-            }
-            return;
-        }
-        self.published = published.and_then(|_| self.current_publication(room));
-        if self.published.is_some() {
-            if let Some(track) = &self.track {
-                track.unmute();
-            }
-        } else {
-            self.track = None;
-            self.failed = true;
-            stop_recording(audio);
-        }
-    }
-}
-
-fn stop_recording(audio: &PlatformAudio) {
-    let _ = audio.stop_recording();
-    LkRuntime::instance()
-        .pc_factory()
-        .set_adm_recording_enabled(false);
-}
-
-async fn publish_microphone(
-    participant: LocalParticipant,
-    audio: PlatformAudio,
-    device: Device,
-    track: LocalAudioTrack,
-    mut cancelled: oneshot::Receiver<()>,
-) -> Option<TrackSid> {
-    #[cfg(target_os = "macos")]
-    tokio::select! {
-        biased;
-        _ = &mut cancelled => return None,
-        granted = microphone_permission() => if !granted { return None; },
-    }
-    if !matches!(
-        cancelled.try_recv(),
-        Err(oneshot::error::TryRecvError::Empty)
-    ) || !devices::select_microphone(&audio, &device)
-    {
-        return None;
-    }
-    LkRuntime::instance()
-        .pc_factory()
-        .set_adm_recording_enabled(true);
-    #[cfg(not(windows))]
-    audio.start_recording().ok()?;
-
-    let publication = participant
-        .publish_track(
-            LocalTrack::Audio(track.clone()),
-            TrackPublishOptions {
-                source: TrackSource::Microphone,
-                ..Default::default()
-            },
-        )
-        .await
-        .ok()?;
-
-    // WASAPI capture starts through LiveKit's track negotiation on Windows.
-    #[cfg(windows)]
-    if !tokio::select! {
-        biased;
-        _ = &mut cancelled => false,
-        captured = windows_audio::wait_for_capture(&track) => captured,
-    } {
-        stop_recording(&audio);
-        let _ = participant.unpublish_track(&publication.sid()).await;
-        return None;
-    }
-    Some(publication.sid())
-}
-
-#[cfg(target_os = "macos")]
-async fn microphone_permission() -> bool {
-    use block2::RcBlock;
-    use objc2::runtime::Bool;
-    use objc2_av_foundation::{AVCaptureDevice, AVMediaTypeAudio};
-
-    let (send, receive) = oneshot::channel();
-    {
-        let Some(audio) = (unsafe { AVMediaTypeAudio }) else {
-            return false;
-        };
-        let send = std::sync::Mutex::new(Some(send));
-        let completion = RcBlock::new(move |granted: Bool| {
-            if let Some(send) = send
-                .lock()
-                .expect("microphone permission callback mutex")
-                .take()
-            {
-                let _ = send.send(granted.as_bool());
-            }
-        });
-        // AVFoundation copies the block and invokes it once with the user's permission.
-        unsafe { AVCaptureDevice::requestAccessForMediaType_completionHandler(audio, &completion) };
-    }
-    receive.await.unwrap_or(false)
 }

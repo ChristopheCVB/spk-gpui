@@ -1,5 +1,6 @@
 use cookie_store::CookieStore;
 use futures::{SinkExt, StreamExt};
+use livekit::DisconnectReason;
 use serde_json::{Value, json};
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -12,7 +13,7 @@ use crate::{
     session::tests::Request,
 };
 
-use super::*;
+use super::{media::disconnect_issue, *};
 
 pub(crate) fn start_recovery_fixture(
     channel: String,
@@ -367,32 +368,8 @@ fn deafen_restores_mute_and_unmuting_undeafens() {
 }
 
 #[test]
-fn media_failure_is_retryable_and_session_replacement_is_authoritative() {
-    assert!(matches!(
-        disconnect_issue(DisconnectReason::MediaFailure),
-        Issue::LiveKitDisconnected
-    ));
-    assert!(matches!(
-        disconnect_issue(DisconnectReason::JoinFailure),
-        Issue::LiveKitDisconnected
-    ));
-    assert!(matches!(
-        disconnect_issue(DisconnectReason::DuplicateIdentity),
-        Issue::Disconnected
-    ));
-}
-
-#[test]
-fn holds_speaking_and_sends_only_the_latest_changed_state() {
+fn sends_only_the_latest_changed_state() {
     let now = Instant::now();
-    let mut speaking = Speaking::default();
-    speaking.update(HashSet::from(["alice".into()]), now);
-    speaking.update(HashSet::new(), now);
-    speaking.expire(now + Duration::from_millis(499));
-    assert!(speaking.0.contains_key("alice"));
-    speaking.expire(now + Duration::from_millis(500));
-    assert!(speaking.0.is_empty());
-
     let mut presence = Presence::new(false);
     let talking = VoiceFlags {
         speaking: true,

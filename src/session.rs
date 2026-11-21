@@ -24,7 +24,7 @@ use authentication::{
 };
 use avatars::AvatarLoads;
 use presence::{Refresh, Resource, RoomMember};
-use voice_session::{DeviceSettings, VoiceDestination, VoiceSession, VoiceSettings, idle_devices};
+use voice_session::{DeviceSettings, VoiceDestination, VoiceSession, VoiceSettings};
 pub use {presence::Participant, voice_session::VoiceView};
 
 #[cfg(test)]
@@ -223,7 +223,7 @@ async fn watch_session(
     avatars.fill(client, &sidebar);
     sidebar.voice_intent.preferred = settings.devices.preferred.clone();
     sidebar.device_notice = settings.devices.notice;
-    sidebar.devices = idle_devices();
+    sidebar.devices = Arc::new(Devices::enumerate());
     let mut voice = VoiceSession::default();
     let end = loop {
         if commands.is_closed() {
