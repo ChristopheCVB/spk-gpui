@@ -79,6 +79,19 @@ pub enum Command {
     CloseChat,
     LoadOlderMessages,
     RetryChatHistory,
+    JumpToChatMessage {
+        channel_id: String,
+        message_id: String,
+    },
+    LoadLatestMessages,
+    UpdateChatDraft {
+        channel_id: String,
+        body: String,
+    },
+    SetChatReply {
+        channel_id: String,
+        message_id: Option<String>,
+    },
     SendChatMessage {
         channel_id: String,
         body: String,
@@ -546,6 +559,10 @@ async fn watch_session(
                 }
                 Ok(Command::LoadOlderMessages) => chat.older(client),
                 Ok(Command::RetryChatHistory) => chat.retry_history(client),
+                Ok(Command::JumpToChatMessage { channel_id, message_id }) => chat.jump(client, &channel_id, message_id),
+                Ok(Command::LoadLatestMessages) => chat.latest(client),
+                Ok(Command::UpdateChatDraft { channel_id, body }) => chat.update_draft(channel_id, body),
+                Ok(Command::SetChatReply { channel_id, message_id }) => chat.set_reply(&channel_id, message_id.as_deref()),
                 Ok(Command::SendChatMessage { channel_id, body }) => chat.send(channel_id, body),
                 Ok(Command::SearchMessages { query, scope }) => search.start(&mut sidebar.search, client, query, scope),
                 Ok(Command::MoreSearchResults) => search.more(&mut sidebar.search, client),
@@ -611,7 +628,11 @@ async fn watch_session(
                         }
                         chat.message(message, nonce.as_deref(), sidebar.profile.id.as_deref());
                     }
+                    Frame::MessageDelete { channel_id, id } => chat.delete_message(&channel_id, &id),
                     Frame::MessageError { nonce: Some(nonce), error } => chat.error(&nonce, error),
+                    Frame::Typing { channel_id, user_id } if sidebar.profile.id.as_ref() != Some(&user_id) => {
+                        chat.receive_typing(&channel_id, user_id);
+                    }
                     Frame::ChannelsChanged => refresh.fetch(client, Resource::Channels),
                     Frame::UsersChanged => refresh.fetch(client, Resource::Users),
                     Frame::UserPresence { user_id, status } => {

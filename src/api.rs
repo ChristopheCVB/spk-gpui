@@ -170,6 +170,16 @@ pub struct ChatMessage {
     pub user_id: String,
     pub body: String,
     pub created_at: i64,
+    pub reply_to: Option<ReplyRef>,
+}
+
+#[derive(Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplyRef {
+    pub id: String,
+    pub user_id: String,
+    pub preview: String,
+    pub deleted: bool,
 }
 
 #[derive(Deserialize)]
@@ -177,6 +187,8 @@ pub struct ChatMessage {
 pub struct MessagePage {
     pub messages: Vec<ChatMessage>,
     pub has_more_before: bool,
+    #[serde(default)]
+    pub has_more_after: bool,
 }
 
 #[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
@@ -235,11 +247,15 @@ pub enum Frame {
         message: ChatMessage,
         nonce: Option<String>,
     },
+    #[serde(rename = "message:delete", rename_all = "camelCase")]
+    MessageDelete { channel_id: String, id: String },
     #[serde(rename = "message:error")]
     MessageError {
         nonce: Option<String>,
         error: String,
     },
+    #[serde(rename = "typing", rename_all = "camelCase")]
+    Typing { channel_id: String, user_id: String },
     #[serde(rename = "ping")]
     Ping,
     #[serde(rename = "presence:update", rename_all = "camelCase")]
@@ -376,13 +392,25 @@ type SocketWrite = (String, Option<oneshot::Sender<()>>);
 pub struct VoiceSocket(async_channel::Sender<SocketWrite>);
 
 impl VoiceSocket {
-    pub fn send_message(&self, channel_id: &str, body: &str, nonce: &str) -> bool {
+    pub fn send_message(
+        &self,
+        channel_id: &str,
+        body: &str,
+        nonce: &str,
+        reply_to_id: Option<&str>,
+    ) -> bool {
         let frame = serde_json::json!({
             "type": "message:send",
             "channelId": channel_id,
             "body": body,
             "nonce": nonce,
+            "replyToId": reply_to_id,
         });
+        self.0.try_send((frame.to_string(), None)).is_ok()
+    }
+
+    pub fn typing(&self, channel_id: &str) -> bool {
+        let frame = serde_json::json!({"type": "typing", "channelId": channel_id});
         self.0.try_send((frame.to_string(), None)).is_ok()
     }
 
@@ -663,13 +691,31 @@ impl SpkClient {
         channel_id: &str,
         before: Option<&str>,
     ) -> Result<MessagePage, Failure> {
+        self.message_page(channel_id, before.map(|id| ("before", id)))
+            .await
+    }
+
+    pub async fn messages_around(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+    ) -> Result<MessagePage, Failure> {
+        self.message_page(channel_id, Some(("around", message_id)))
+            .await
+    }
+
+    async fn message_page(
+        &self,
+        channel_id: &str,
+        cursor: Option<(&str, &str)>,
+    ) -> Result<MessagePage, Failure> {
         let mut url = self.base.join("/api/channels/").expect("fixed SPK path");
         url.path_segments_mut()
             .expect("validated SPK URL")
             .pop_if_empty()
             .extend([channel_id, "messages"]);
-        if let Some(before) = before {
-            url.query_pairs_mut().append_pair("before", before);
+        if let Some((key, id)) = cursor {
+            url.query_pairs_mut().append_pair(key, id);
         }
         let response = Self::send(self.http.get(url).header(header::ORIGIN, &self.origin)).await?;
         let page: MessagePage = response
