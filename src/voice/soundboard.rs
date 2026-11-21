@@ -28,8 +28,9 @@ fn decode(bytes: &[u8]) -> Option<SamplesBuffer> {
         return None;
     }
     let pcm = bytes.get(44..)?.get(..size)?;
-    let samples = pcm
-        .chunks_exact(3)
+    let (frames, _) = pcm.as_chunks::<3>();
+    let samples = frames
+        .iter()
         .take((rate.get() * MAX_SECONDS) as usize * usize::from(channels.get()))
         .map(|sample| {
             i32::from_le_bytes([0, sample[0], sample[1], sample[2]]) as f32 / 2_147_483_648.0

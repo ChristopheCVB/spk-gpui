@@ -156,8 +156,10 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
     let (video, audio) = timeout(Duration::from_secs(8), async {
         let mut video = None;
         let mut audio = None;
-        loop {
-            if let Some(RoomEvent::TrackPublished { publication, .. }) = events.recv().await {
+        while video.is_none() || audio.is_none() {
+            if let RoomEvent::TrackPublished { publication, .. } =
+                events.recv().await.expect("peer disconnected")
+            {
                 match publication.source() {
                     TrackSource::Screenshare => {
                         assert_eq!(publication.name(), "spk:screen:1080:30");
@@ -167,10 +169,8 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
                     _ => unreachable!("share may only publish Screen Share tracks"),
                 }
             }
-            if video.is_some() && audio.is_some() {
-                return (video.unwrap(), audio.unwrap());
-            }
         }
+        (video.unwrap(), audio.unwrap())
     })
     .await
     .unwrap();
@@ -180,8 +180,10 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
     let (mut frames, mut samples) = timeout(Duration::from_secs(8), async {
         let mut frames = None;
         let mut samples = None;
-        loop {
-            if let Some(RoomEvent::TrackSubscribed { track, .. }) = events.recv().await {
+        while frames.is_none() || samples.is_none() {
+            if let RoomEvent::TrackSubscribed { track, .. } =
+                events.recv().await.expect("peer disconnected")
+            {
                 match track {
                     RemoteTrack::Video(track) => {
                         frames = Some(NativeVideoStream::new(track.rtc_track()))
@@ -192,10 +194,8 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
                     }
                 }
             }
-            if frames.is_some() && samples.is_some() {
-                return (frames.unwrap(), samples.unwrap());
-            }
         }
+        (frames.unwrap(), samples.unwrap())
     })
     .await
     .unwrap();
