@@ -1,3 +1,4 @@
+mod radio;
 mod settings;
 mod voice;
 mod workspace;

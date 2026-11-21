@@ -16,6 +16,7 @@ fn device_label(kind: DeviceKind) -> &'static str {
     match kind {
         DeviceKind::Microphone => "Microphone",
         DeviceKind::Speakers => "Speakers",
+        DeviceKind::MediaOutput => "Media Output",
     }
 }
 
@@ -166,6 +167,21 @@ impl Spk {
                         })
                 }),
             )
+            .when(
+                sidebar
+                    .voice
+                    .as_ref()
+                    .is_some_and(|voice| voice.is_participating()),
+                |bar| {
+                    bar.child(
+                        tool_button("radio", IconName::Radio, "Channel Radio")
+                            .when(!compact, |button| button.label("Radio"))
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.open_radio(window, cx)),
+                            ),
+                    )
+                },
+            )
     }
 }
 
@@ -275,6 +291,11 @@ fn devices(sidebar: &Sidebar, kind: DeviceKind) -> (&DeviceList, Option<&Device>
             let active =
                 media.map_or_else(|| list.resolve(preferred), |media| media.speakers.as_ref());
             (list, active, preferred)
+        }
+        DeviceKind::MediaOutput => {
+            let list = &sidebar.devices.media_outputs;
+            let preferred = preferred.media_output.as_ref();
+            (list, list.resolve(preferred), preferred)
         }
     }
 }

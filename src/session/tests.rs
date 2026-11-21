@@ -1,4 +1,5 @@
 mod media;
+mod radio;
 
 use std::{collections::HashSet, time::Duration};
 
@@ -297,6 +298,7 @@ async fn voice_session(
     let (update_snapshots, updated) = watch::channel(SidebarSnapshot::Initial);
 
     let http = async move {
+        let mut radio_favorite = false;
         let mut presence_failed = false;
         loop {
             let (line, request) = Request::receive(&http).await;
@@ -340,6 +342,10 @@ async fn voice_session(
                     r#"[{"id":"first","type":"voice"},{"id":"second","type":"voice"}]"#
                 }
                 "GET /api/users HTTP/1.1" => "[]",
+                line if line.contains(" /api/radio/") => {
+                    radio::respond(line, request, &mut radio_favorite).await;
+                    continue;
+                }
                 "POST /api/voice/token HTTP/1.1" => {
                     token_requests.send(request).await.unwrap();
                     continue;
@@ -953,7 +959,8 @@ fn live_membership_and_flags_win_over_an_in_flight_snapshot() {
         VoiceFlags {
             muted: true,
             deafened: true,
-            speaking: false
+            speaking: false,
+            radio_listening: None,
         }
     );
     assert!(refresh.presence_updates.is_none());

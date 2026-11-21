@@ -237,6 +237,35 @@ impl VoiceSession {
         }
     }
 
+    pub(super) fn radio_scope<'a>(&'a self, sidebar: &'a Sidebar) -> Option<(&'a str, &'a str)> {
+        let voice = sidebar.voice.as_ref()?;
+        (self.socket.is_some() && voice.status != VoiceStatus::Leaving)
+            .then_some((self.call.as_ref()?.sid(), voice.channel_id.as_str()))
+    }
+
+    pub(super) fn radio_socket(&self, sidebar: &Sidebar) -> Option<(VoiceSocket, String)> {
+        let (sid, _) = self.radio_scope(sidebar)?;
+        sidebar.voice.as_ref()?.is_participating().then(|| {
+            (
+                self.socket
+                    .as_ref()
+                    .expect("scope has a voice socket")
+                    .clone(),
+                sid.to_owned(),
+            )
+        })
+    }
+
+    pub(super) fn set_radio_listening(&self, sidebar: &mut Sidebar, listening: bool) {
+        let current = &mut sidebar.voice_intent.radio_listening;
+        if listening != current.unwrap_or(false) {
+            *current = Some(listening);
+            if let Some(call) = &self.call {
+                call.apply(&sidebar.voice_intent);
+            }
+        }
+    }
+
     pub(super) fn retry_at(&self) -> Option<Instant> {
         match self.reclaim {
             Some(VoiceReclaim::RetryAt(deadline)) => Some(deadline),
@@ -398,11 +427,21 @@ impl VoiceSession {
                 match kind {
                     DeviceKind::Microphone => sidebar.voice_intent.retry_mic += 1,
                     DeviceKind::Speakers => sidebar.voice_intent.retry_speakers += 1,
+                    DeviceKind::MediaOutput => {}
                 }
                 if let Some(call) = &self.call {
                     call.apply(&sidebar.voice_intent);
                 }
                 if changed || settings.devices.notice.is_some() {
+                    settings.devices.save(&sidebar.voice_intent.preferred).await;
+                    sidebar.device_notice = settings.devices.notice;
+                }
+                return;
+            }
+            Command::SetRadioVolume(volume) => {
+                let volume = Some(volume.min(200));
+                if sidebar.voice_intent.preferred.radio_volume != volume {
+                    sidebar.voice_intent.preferred.radio_volume = volume;
                     settings.devices.save(&sidebar.voice_intent.preferred).await;
                     sidebar.device_notice = settings.devices.notice;
                 }

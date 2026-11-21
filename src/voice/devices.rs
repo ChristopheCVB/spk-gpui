@@ -1,5 +1,6 @@
 use std::{fs, io, path::Path};
 
+use cpal::traits::{DeviceTrait, HostTrait};
 use livekit::{PlatformAudio, PlayoutDeviceId, RecordingDeviceId};
 use serde::{Deserialize, Serialize};
 
@@ -7,6 +8,7 @@ use serde::{Deserialize, Serialize};
 pub enum DeviceKind {
     Microphone,
     Speakers,
+    MediaOutput,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -20,6 +22,8 @@ pub struct Device {
 pub struct DevicePreferences {
     pub microphone: Option<Device>,
     pub speakers: Option<Device>,
+    pub media_output: Option<Device>,
+    pub radio_volume: Option<u8>,
 }
 
 impl DevicePreferences {
@@ -27,6 +31,7 @@ impl DevicePreferences {
         match kind {
             DeviceKind::Microphone => &mut self.microphone,
             DeviceKind::Speakers => &mut self.speakers,
+            DeviceKind::MediaOutput => &mut self.media_output,
         }
     }
 
@@ -88,11 +93,18 @@ impl DeviceList {
 pub struct Devices {
     pub microphones: DeviceList,
     pub speakers: DeviceList,
+    pub media_outputs: DeviceList,
 }
 
 impl Devices {
     pub fn enumerate() -> Self {
-        PlatformAudio::new().map_or_else(|_| Self::default(), |audio| Self::read(&audio))
+        PlatformAudio::new().map_or_else(
+            |_| Self {
+                media_outputs: media_outputs(),
+                ..Self::default()
+            },
+            |audio| Self::read(&audio),
+        )
     }
 
     pub(super) fn read(audio: &PlatformAudio) -> Self {
@@ -109,6 +121,7 @@ impl Devices {
                     )
                 }),
             ),
+            media_outputs: media_outputs(),
             speakers: list(
                 DeviceKind::Speakers,
                 audio.playout_devices().map(|device| {
@@ -123,6 +136,53 @@ impl Devices {
             ),
         }
     }
+}
+
+fn media_outputs() -> DeviceList {
+    fn describe(device: cpal::Device) -> Option<Device> {
+        Some(Device {
+            id: device.id().ok()?.to_string(),
+            name: device.description().ok()?.name().to_owned(),
+        })
+    }
+
+    let host = cpal::default_host();
+    DeviceList {
+        default: host.default_output_device().and_then(describe),
+        choices: host
+            .output_devices()
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(describe)
+            .collect(),
+    }
+}
+
+pub(crate) fn open_media_output(
+    device: Option<&Device>,
+    on_error: impl FnMut(cpal::Error) + Clone + Send + 'static,
+) -> Result<rodio::MixerDeviceSink, rodio::DeviceSinkError> {
+    use rodio::DeviceSinkBuilder;
+
+    let open = |device| {
+        DeviceSinkBuilder::from_device(device)?
+            .with_error_callback(on_error.clone())
+            .open_stream()
+    };
+    let host = cpal::default_host();
+    let sink = device
+        .and_then(|device| device.id.parse().ok())
+        .and_then(|id| host.device_by_id(&id))
+        .and_then(|device| open(device).ok());
+    let mut sink = match sink {
+        Some(sink) => sink,
+        None => DeviceSinkBuilder::from_default_device()?
+            .with_error_callback(on_error)
+            .open_stream()?,
+    };
+    sink.log_on_drop(false);
+    Ok(sink)
 }
 
 fn list(kind: DeviceKind, devices: impl Iterator<Item = (usize, Device)>) -> DeviceList {
@@ -213,6 +273,7 @@ mod tests {
         let saved = DevicePreferences {
             microphone: Some(mic.clone()),
             speakers: Some(speakers.clone()),
+            ..DevicePreferences::default()
         };
         saved.save(&path).unwrap();
         assert_eq!(DevicePreferences::load(&path).unwrap(), saved);

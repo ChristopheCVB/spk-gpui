@@ -480,6 +480,9 @@ impl Spk {
                             .text_color(theme.muted_foreground),
                     )
                     .children(participant_status(flags.muted, flags.deafened, cx))
+                    .when(flags.radio_listening == Some(true), |row| {
+                        row.child(radio_badge(cx))
+                    })
             }))
     }
 
@@ -678,6 +681,7 @@ impl Spk {
                         matches!(call.status, Status::ListenOnly | Status::Reconnecting)
                     }),
                 deafened: sidebar.voice_intent.mute.deafened,
+                radio_listening: sidebar.voice_intent.radio_listening,
                 ..participant.flags
             }
         } else {
@@ -736,9 +740,20 @@ impl Spk {
                                     .truncate(),
                             ),
                     )
-                    .children(participant_status(flags.muted, flags.deafened, cx)),
+                    .children(participant_status(flags.muted, flags.deafened, cx))
+                    .when(flags.radio_listening == Some(true), |row| {
+                        row.child(radio_badge(cx))
+                    }),
             )
     }
+}
+
+fn radio_badge(cx: &App) -> impl IntoElement {
+    div()
+        .id("radio-listening")
+        .role(Role::Image)
+        .aria_label("Listening to Radio")
+        .child(themed_icon(IconName::Radio, cx.theme().primary, 14.0))
 }
 
 fn participant_status(muted: bool, deafened: bool, cx: &App) -> Option<impl IntoElement> {

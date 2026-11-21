@@ -95,6 +95,12 @@ pub struct VoiceFlags {
     pub deafened: bool,
     #[serde(default)]
     pub speaking: bool,
+    #[serde(
+        rename = "radioListening",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub radio_listening: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -104,6 +110,16 @@ pub struct Member {
     pub channel_id: String,
     #[serde(flatten)]
     pub flags: VoiceFlags,
+}
+
+#[derive(Clone, Deserialize)]
+pub struct RadioStation {
+    pub id: String,
+    pub name: String,
+    pub country: String,
+    pub codec: String,
+    pub url: Option<String>,
+    pub available: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -131,6 +147,19 @@ pub enum Frame {
     VoiceMove { sid: String, channel_id: String },
     #[serde(rename = "voice:disconnect")]
     VoiceDisconnected { sid: String },
+    #[serde(rename = "voice:radio:state", rename_all = "camelCase")]
+    RadioState {
+        sid: String,
+        channel_id: String,
+        revision: u64,
+        station: Option<RadioStation>,
+    },
+    #[serde(rename = "voice:radio:error", rename_all = "camelCase")]
+    RadioError {
+        sid: String,
+        channel_id: Option<String>,
+        error: String,
+    },
     #[serde(rename = "channels:changed")]
     ChannelsChanged,
     #[serde(rename = "users:changed")]
@@ -185,6 +214,10 @@ pub enum VoiceFrame<'a> {
         #[serde(flatten)]
         flags: VoiceFlags,
     },
+    #[serde(rename = "voice:radio:set", rename_all = "camelCase")]
+    RadioSet { sid: &'a str, station_id: &'a str },
+    #[serde(rename = "voice:radio:stop")]
+    RadioStop { sid: &'a str },
     #[serde(rename = "voice:leave")]
     Leave { sid: &'a str },
 }
@@ -312,6 +345,37 @@ impl SpkClient {
 
     pub async fn voice_presence(&self) -> Result<Vec<Member>, Failure> {
         self.get("/api/voice").await
+    }
+
+    pub async fn radio_stations(&self, query: &str) -> Result<Vec<RadioStation>, Failure> {
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("q", query)
+            .finish();
+        self.get(&format!("/api/radio/stations?{query}")).await
+    }
+
+    pub async fn radio_favorites(&self) -> Result<Vec<RadioStation>, Failure> {
+        self.get("/api/radio/favorites").await
+    }
+
+    pub async fn set_radio_favorite(
+        &self,
+        id: &str,
+        saved: bool,
+    ) -> Result<Option<RadioStation>, Failure> {
+        let id = uuid::Uuid::parse_str(id).map_err(|_| Failure::InvalidResponse)?;
+        let path = format!("/api/radio/favorites/{id}");
+        if saved {
+            Self::send(self.request(Method::PUT, &path))
+                .await?
+                .json()
+                .await
+                .map(Some)
+                .map_err(|_| Failure::InvalidResponse)
+        } else {
+            Self::send(self.request(Method::DELETE, &path)).await?;
+            Ok(None)
+        }
     }
 
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, Failure> {

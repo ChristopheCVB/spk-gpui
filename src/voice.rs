@@ -13,6 +13,7 @@ use crate::api::{Failure, SpkClient, VoiceFlags, VoiceFrame, VoiceJoin, VoiceSoc
 
 mod devices;
 mod media;
+pub(crate) mod radio;
 
 pub use devices::{Device, DeviceKind, DeviceList, DevicePreferences, Devices};
 use media::Media;
@@ -97,6 +98,7 @@ pub struct Intent {
     pub retry_mic: u64,
     pub retry_speakers: u64,
     pub refresh_devices: u64,
+    pub radio_listening: Option<bool>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -165,6 +167,7 @@ impl Call {
                                 muted,
                                 deafened: intent.mute.deafened,
                                 speaking: !muted,
+                                radio_listening: None,
                             },
                             true,
                             false,
@@ -248,6 +251,10 @@ impl Call {
         {
             let _ = acknowledgment.send(());
         }
+    }
+
+    pub fn sid(&self) -> &str {
+        &self.join.sid
     }
 
     pub fn owns(&self, sid: &str) -> bool {
@@ -457,6 +464,7 @@ impl Worker {
                 presence.resync();
             }
         }
+        let mut requested = self.requested.clone();
         loop {
             let latest = published.borrow_and_update().expect("presence is ready");
             if latest.ready && latest.revision != revision {
@@ -464,10 +472,16 @@ impl Worker {
                 revision = latest.revision;
                 presence.resync();
             }
-            let flags = latest.flags;
+            let flags = VoiceFlags {
+                radio_listening: requested.borrow_and_update().radio_listening,
+                ..latest.flags
+            };
             tokio::select! {
                 biased;
                 changed = published.changed() => {
+                    changed.map_err(|_| Failure::Connection)?;
+                }
+                changed = requested.changed() => {
                     changed.map_err(|_| Failure::Connection)?;
                 }
                 _ = wait_until(presence.due(flags)) => {
@@ -503,6 +517,7 @@ impl Presence {
                 muted: true,
                 deafened,
                 speaking: false,
+                radio_listening: None,
             }),
             next: Instant::now(),
         }

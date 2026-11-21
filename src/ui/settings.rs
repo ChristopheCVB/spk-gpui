@@ -416,6 +416,11 @@ impl Settings {
                 device_options(sidebar, DeviceKind::Speakers, &self.spk, cx),
                 cx,
             ))
+            .child(card(
+                "Media Output",
+                device_options(sidebar, DeviceKind::MediaOutput, &self.spk, cx),
+                cx,
+            ))
             .child(self.voice_sounds(cx))
             .children(
                 sidebar

@@ -207,6 +207,7 @@ impl Media {
                 muted,
                 deafened: intent.mute.deafened,
                 speaking: speaking.0.contains_key(me.as_str()),
+                radio_listening: None,
             };
             worker.publish_flags(flags, !reconnecting, std::mem::take(&mut resync));
             let report = Report {

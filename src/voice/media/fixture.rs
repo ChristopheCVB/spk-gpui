@@ -179,6 +179,7 @@ impl TestRoom {
                     default: Some(device("default-speakers")),
                     choices: vec![Peer::preferred_speakers()],
                 },
+                ..Devices::default()
             },
             capture: None,
             muted: true,
