@@ -11,6 +11,8 @@ mod profile;
 mod radio;
 mod search;
 mod soundboard;
+#[cfg(debug_assertions)]
+mod soundboard_admin;
 mod unread;
 mod user_presence;
 
