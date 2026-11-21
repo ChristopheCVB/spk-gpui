@@ -7256,6 +7256,7 @@ dependencies = [
  "reqwest 0.13.5",
  "reqwest_cookie_store",
  "rodio",
+ "rust-embed",
  "rustls",
  "serde",
  "serde_json",
