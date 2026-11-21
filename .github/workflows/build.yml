@@ -53,6 +53,11 @@ jobs:
           printf 'CC=clang-%s\nCXX=clang++-%s\n' "$clang_major" "$clang_major" >> "$GITHUB_ENV"
       - run: mise exec -- cargo fmt --all --check
       - run: mise exec -- cargo test --locked
+      - name: Install the LiveKit peer fixture server
+        if: runner.os == 'macOS'
+        run: brew install livekit
+      - name: Test LiveKit media with a controlled peer
+        run: python tests/fixtures/livekit-peers.py mise exec -- cargo test --locked --bin spk-gpui livekit_ -- --ignored --test-threads=1
       - name: Test native X11 Screen Share
         if: runner.os == 'Linux'
         run: env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 xvfb-run -a -s "-screen 0 640x480x24" mise exec -- cargo test --locked --bin spk-gpui x11_sources_capture_and_end_when_the_window_disappears -- --ignored
