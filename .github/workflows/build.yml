@@ -51,6 +51,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config libfontconfig-dev libwayland-dev libxkbcommon-x11-dev libx11-xcb-dev libglib2.0-dev libjpeg-turbo8-dev libasound2-dev libpipewire-0.3-0t64 python3-gi xvfb "clang-$clang_major" "libclang-$clang_major-dev"
           printf 'CC=clang-%s\nCXX=clang++-%s\n' "$clang_major" "$clang_major" >> "$GITHUB_ENV"
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cmd-format: mise exec -- {0}
+          cache-bin: "false"
+          env-vars: DEVELOPER_DIR
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - run: mise exec -- cargo fmt --all --check
       - run: mise exec -- cargo test --locked
       - name: Install the LiveKit peer fixture server
