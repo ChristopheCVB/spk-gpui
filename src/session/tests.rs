@@ -4,6 +4,7 @@ mod media;
 mod profile;
 mod radio;
 mod soundboard;
+mod user_presence;
 
 use std::{collections::HashSet, time::Duration};
 
@@ -218,6 +219,7 @@ async fn saved_session_restores_signs_out_and_clears_expired_credentials() {
                     "GET /api/channels HTTP/1.1"
                     | "GET /api/voice HTTP/1.1"
                     | "GET /api/users HTTP/1.1" => request.respond(&[], "[]").await,
+                    "GET /api/users/presence HTTP/1.1" => request.respond(&[], "{}").await,
                     "POST /api/auth/sign-out HTTP/1.1" => {
                         request
                             .respond(&["session=; Path=/; HttpOnly; Max-Age=0"], "{}")
@@ -302,6 +304,7 @@ enum SidebarSnapshot {
     Updated,
     VoiceReplaced,
     FailPresenceOnce,
+    DelayUserPresence,
     MediaPresence {
         channel: &'static str,
         flags: VoiceFlags,
@@ -309,6 +312,15 @@ enum SidebarSnapshot {
 }
 
 async fn voice_session(
+    start_call: impl Fn(String, SpkClient, VoiceSocket, Intent) -> Call + Send + Sync + 'static,
+    server: impl AsyncFnOnce(TcpListener, Receiver<Request>, watch::Sender<SidebarSnapshot>),
+    desktop: impl AsyncFnOnce(Sender<Command>, Receiver<View>),
+) -> SessionEnd {
+    voice_session_with_activity(watch::channel(true).1, start_call, server, desktop).await
+}
+
+async fn voice_session_with_activity(
+    activity: watch::Receiver<bool>,
     start_call: impl Fn(String, SpkClient, VoiceSocket, Intent) -> Call + Send + Sync + 'static,
     server: impl AsyncFnOnce(TcpListener, Receiver<Request>, watch::Sender<SidebarSnapshot>),
     desktop: impl AsyncFnOnce(Sender<Command>, Receiver<View>),
@@ -348,7 +360,9 @@ async fn voice_session(
                             .await;
                         continue;
                     }
-                    SidebarSnapshot::Initial | SidebarSnapshot::FailPresenceOnce => "[]",
+                    SidebarSnapshot::Initial
+                    | SidebarSnapshot::FailPresenceOnce
+                    | SidebarSnapshot::DelayUserPresence => "[]",
                     SidebarSnapshot::Updated => {
                         r#"[{"userId":"bob","channelId":"first","speaking":true}]"#
                     }
@@ -368,6 +382,13 @@ async fn voice_session(
                     r#"[{"id":"first","type":"voice"},{"id":"second","type":"voice"}]"#
                 }
                 "GET /api/users HTTP/1.1" => "[]",
+                "GET /api/users/presence HTTP/1.1"
+                    if matches!(snapshot, SidebarSnapshot::DelayUserPresence) =>
+                {
+                    token_requests.send(request).await.unwrap();
+                    continue;
+                }
+                "GET /api/users/presence HTTP/1.1" => "{}",
                 line if line.contains(" /api/radio/") => {
                     radio::respond(line, request, &mut radio_favorite).await;
                     continue;
@@ -395,6 +416,7 @@ async fn voice_session(
         json::save(&client.cookies().lock().unwrap(), &mut persisted).unwrap();
         let (mut saved, _) = SavedSession::with_test_store(Some(persisted));
         let mut settings = fixture_settings(socket_endpoint, start_call);
+        settings.presence.activity = activity;
         watch_session(
             &client,
             profile,
@@ -418,12 +440,12 @@ async fn voice_session(
 fn fixture_settings(
     socket_endpoint: String,
     start_call: impl Fn(String, SpkClient, VoiceSocket, Intent) -> Call + Send + Sync + 'static,
-) -> VoiceSettings {
+) -> SessionSettings {
     let mut sounds = SoundSettings::default();
     for sound in Sound::ALL {
         sounds.get_mut(sound).enabled = false;
     }
-    VoiceSettings {
+    SessionSettings {
         socket_endpoint,
         start_call: Box::new(start_call),
         enumerate_devices: Devices::default,
@@ -432,7 +454,12 @@ fn fixture_settings(
             preferred: DevicePreferences::default(),
             notice: None,
         },
-        sounds: VoiceSounds::new(tokio::sync::watch::channel(sounds).1),
+        sounds: VoiceSounds::new(watch::channel(sounds).1),
+        presence: PresenceSettings {
+            path: None,
+            status: UserStatus::default(),
+            activity: watch::channel(true).1,
+        },
     }
 }
 
@@ -483,8 +510,25 @@ async fn request_voice_token(requests: &Receiver<Request>, channel: &str) -> Req
     request
 }
 
+async fn receive_non_presence_message(
+    socket: &mut WebSocketStream<TcpStream>,
+) -> Option<Result<Message, tokio_tungstenite::tungstenite::Error>> {
+    loop {
+        let message = socket.next().await;
+        if let Some(Ok(Message::Text(text))) = &message
+            && let Ok(frame) = serde_json::from_str::<Value>(text.as_str())
+            && frame["type"]
+                .as_str()
+                .is_some_and(|kind| kind.starts_with("presence:"))
+        {
+            continue;
+        }
+        return message;
+    }
+}
+
 async fn receive_voice_frame(socket: &mut WebSocketStream<TcpStream>) -> Value {
-    let frame = socket.next().await.unwrap().unwrap();
+    let frame = receive_non_presence_message(socket).await.unwrap().unwrap();
     serde_json::from_str(frame.to_text().unwrap()).unwrap()
 }
 
@@ -612,7 +656,7 @@ async fn spk_recovery_yields_to_another_client_in_a_different_voice_channel() {
                 .unwrap();
             tokio::select! {
                 biased;
-                Some(Ok(Message::Text(frame))) = socket.next() => {
+                Some(Ok(Message::Text(frame))) = receive_non_presence_message(&mut socket) => {
                     panic!("the previous client sent a voice frame: {frame}")
                 }
                 result = closed => result.unwrap(),
@@ -740,6 +784,7 @@ async fn spk_recovery_yields_to_voice_teardown_and_invalidation() {
     ] {
         let (established, voice_started) = oneshot::channel();
         let (left_offline, reconnect_after_leaving) = oneshot::channel();
+        let (reconnected, presence_seen) = oneshot::channel();
         let end = voice_session(
             Call::start_for_test,
             async |listener, requests, _| {
@@ -761,13 +806,20 @@ async fn spk_recovery_yields_to_voice_teardown_and_invalidation() {
                             .send(Message::text(r#"{"type":"ping"}"#))
                             .await
                             .unwrap();
-                        assert_eq!(socket.next().await.unwrap().unwrap(), Message::text("ping"));
+                        assert_eq!(
+                            receive_non_presence_message(&mut socket)
+                                .await
+                                .unwrap()
+                                .unwrap(),
+                            Message::text("ping")
+                        );
                         socket
                             .send(Message::text(
                                 r#"{"type":"voice:presence","userId":"bob","channelId":"first"}"#,
                             ))
                             .await
                             .unwrap();
+                        presence_seen.await.unwrap();
                     }
                     VoiceEnding::Unauthorized => {
                         drop(socket);
@@ -820,6 +872,7 @@ async fn spk_recovery_yields_to_voice_teardown_and_invalidation() {
                     })
                     .await;
                     assert!(sidebar.voice.is_none());
+                    reconnected.send(()).unwrap();
                 } else if matches!(ending, VoiceEnding::Unauthorized) {
                     while views.recv().await.is_ok() {}
                 } else {
@@ -1567,7 +1620,10 @@ async fn server_move_releases_the_original_call_when_the_destination_fails() {
                 .await
                 .respond_raw("404 Not Found", &[], b"")
                 .await;
-            assert!(!matches!(socket.next().await, Some(Ok(Message::Text(_)))));
+            assert!(!matches!(
+                receive_non_presence_message(&mut socket).await,
+                Some(Ok(Message::Text(_)))
+            ));
         },
         async |commands, views| {
             join_test_voice(&commands, &views).await;
@@ -1599,7 +1655,10 @@ async fn leave_cancels_a_voice_channel_switch() {
             );
             acknowledge_voice(&mut socket, &old).await;
             acknowledged.send(()).unwrap();
-            assert!(!matches!(socket.next().await, Some(Ok(Message::Text(_)))));
+            assert!(!matches!(
+                receive_non_presence_message(&mut socket).await,
+                Some(Ok(Message::Text(_)))
+            ));
         },
         async |commands, views| {
             request_first_voice(&commands, &views).await;

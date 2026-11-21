@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use futures::{SinkExt, StreamExt};
 use reqwest::{Client, Method, StatusCode, cookie::CookieStore as _, header, redirect::Policy};
@@ -172,6 +172,54 @@ pub struct MessagePage {
     pub has_more_before: bool,
 }
 
+#[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum UserPresence {
+    Online,
+    Idle,
+    Busy,
+    #[default]
+    Offline,
+}
+
+impl UserPresence {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Online => "Online",
+            Self::Idle => "Away",
+            Self::Busy => "Busy",
+            Self::Offline => "Offline",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum UserStatus {
+    #[default]
+    Online,
+    Away,
+    Busy,
+    #[serde(rename = "offline")]
+    Invisible,
+}
+
+impl UserStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Online => "Online",
+            Self::Away => "Away",
+            Self::Busy => "Busy",
+            Self::Invisible => "Invisible",
+        }
+    }
+}
+
+pub enum PresenceReport {
+    Status(UserStatus),
+    Activity(bool),
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "type")]
 pub enum Frame {
@@ -187,6 +235,11 @@ pub enum Frame {
     },
     #[serde(rename = "ping")]
     Ping,
+    #[serde(rename = "presence:update", rename_all = "camelCase")]
+    UserPresence {
+        user_id: String,
+        status: UserPresence,
+    },
     #[serde(rename = "voice:presence", rename_all = "camelCase")]
     Presence {
         user_id: String,
@@ -324,6 +377,22 @@ impl VoiceSocket {
             "nonce": nonce,
         });
         self.0.try_send((frame.to_string(), None)).is_ok()
+    }
+
+    pub async fn send_presence(&self, report: PresenceReport) -> Result<(), Failure> {
+        let frame = match report {
+            PresenceReport::Status(status) => serde_json::json!({
+                "type": "presence:set",
+                "status": status,
+            }),
+            PresenceReport::Activity(active) => serde_json::json!({
+                "type": if active { "presence:active" } else { "presence:idle" },
+            }),
+        };
+        self.0
+            .send((frame.to_string(), None))
+            .await
+            .map_err(|_| Failure::Connection)
     }
 
     pub fn same_connection(&self, other: &Self) -> bool {
@@ -593,6 +662,10 @@ impl SpkClient {
 
     pub async fn users(&self) -> Result<Vec<User>, Failure> {
         self.get("/api/users").await
+    }
+
+    pub async fn user_presence(&self) -> Result<HashMap<String, UserPresence>, Failure> {
+        self.get("/api/users/presence").await
     }
 
     pub async fn voice_presence(&self) -> Result<Vec<Member>, Failure> {

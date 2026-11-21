@@ -3,9 +3,56 @@ use std::{
     hash::{Hash, Hasher},
 };
 
-use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
+
+use crate::{api::UserPresence, session::UserStatus};
 
 use super::*;
+
+pub(super) fn user_status_picker(
+    id: &'static str,
+    selected: UserStatus,
+    app: WeakEntity<Spk>,
+) -> impl IntoElement {
+    Button::new(id)
+        .small()
+        .tab_stop(true)
+        .ghost()
+        .label(selected.label())
+        .icon(IconName::ChevronDown)
+        .accessibility_label(format!("Status, {}", selected.label()))
+        .dropdown_menu(move |mut menu, _, _| {
+            for status in [
+                UserStatus::Online,
+                UserStatus::Away,
+                UserStatus::Busy,
+                UserStatus::Invisible,
+            ] {
+                let app = app.clone();
+                menu = menu.item(
+                    PopupMenuItem::new(status.label())
+                        .checked(status == selected)
+                        .on_click(move |_, _, cx| {
+                            let _ = app.update(cx, |app, cx| {
+                                app.send(Command::SetUserStatus(status), None, cx);
+                            });
+                        }),
+                );
+            }
+            menu
+        })
+}
+
+fn user_presence_label(status: UserPresence, cx: &App) -> Label {
+    let theme = cx.theme();
+    let color = match status {
+        UserPresence::Online => theme.success,
+        UserPresence::Idle => theme.warning,
+        UserPresence::Busy => theme.danger,
+        UserPresence::Offline => theme.muted_foreground,
+    };
+    Label::new(status.label()).text_xs().text_color(color)
+}
 
 impl Spk {
     pub(super) fn person_row(
@@ -34,6 +81,7 @@ impl Spk {
                 cx,
             ))
             .child(Label::new(name.to_owned()).flex_1().min_w_0().truncate())
+            .child(user_presence_label(sidebar.user_presence(id), cx))
             .child(
                 tool_button(
                     "inspect-person",
@@ -154,6 +202,7 @@ impl Render for PersonProfile {
                     .min_w_0()
                     .gap_1()
                     .child(Label::new(name.to_owned()).text_lg().font_bold())
+                    .child(user_presence_label(sidebar.user_presence(&self.id), cx))
                     .child(Label::new(role).text_color(cx.theme().muted_foreground))
                     .children(
                         self.email

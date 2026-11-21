@@ -14,12 +14,15 @@ use async_channel::{Receiver, Sender};
 use gpui_kit::RenderImage;
 use tokio::{
     sync::oneshot,
+    sync::watch,
     task::JoinSet,
     time::{Instant, sleep_until},
 };
 use url::Url;
 
-use crate::api::{Channel, Connection, Failure, Frame, Profile, SocketEvent, SpkClient, User};
+use crate::api::{
+    Channel, Connection, Failure, Frame, Profile, SocketEvent, SpkClient, User, UserPresence,
+};
 use crate::sounds::{Sound, SoundSettings, VoiceSounds};
 use crate::voice::{
     Call, Device, DeviceKind, Devices, Intent, Issue as VoiceIssue, NoiseSuppression,
@@ -32,12 +35,13 @@ use authentication::{
 };
 use avatars::AvatarLoads;
 use chat::ChatSession;
-use presence::{Refresh, Resource, VoiceMembership};
+use presence::{PresenceReporter, PresenceSettings, Refresh, Resource, VoiceMembership};
 use profiles::Work as ProfileWork;
 use radio::{RadioSession, RadioView};
 use soundboard::{SoundboardSession, SoundboardView};
-use voice_session::{DeviceSettings, VoiceDestination, VoiceSession, VoiceSettings};
+use voice_session::{DeviceSettings, StartCall, VoiceDestination, VoiceSession};
 pub use {
+    crate::api::UserStatus,
     accounts::AccountLinkForm,
     avatars::AvatarPhoto,
     chat::{ChatView, Delivery},
@@ -65,6 +69,7 @@ pub enum Command {
     SetInitialNickname(String),
     Restore,
     SignOut,
+    SetUserStatus(UserStatus),
     Refresh,
     OpenTextChannel(String),
     CloseChat,
@@ -153,6 +158,8 @@ pub enum View {
 pub struct Sidebar {
     pub profile: Profile,
     pub profile_edit: ProfileEdit,
+    pub user_status: UserStatus,
+    pub user_status_notice: Option<&'static str>,
     pub channels: Option<Vec<Channel>>,
     pub connection: Connection,
     pub notice: Option<&'static str>,
@@ -171,6 +178,7 @@ pub struct Sidebar {
     pub avatars: Arc<HashMap<String, Arc<AvatarPhoto>>>,
     users: Arc<HashMap<String, User>>,
     voice_presence: HashMap<String, VoiceMembership>,
+    user_presence: Arc<HashMap<String, UserPresence>>,
 }
 
 impl Sidebar {
@@ -178,6 +186,8 @@ impl Sidebar {
         Self {
             profile,
             profile_edit: ProfileEdit::Idle,
+            user_status: UserStatus::default(),
+            user_status_notice: None,
             channels: None,
             connection: Connection::Connecting,
             notice,
@@ -196,7 +206,12 @@ impl Sidebar {
             avatars: Arc::default(),
             users: Arc::default(),
             voice_presence: HashMap::new(),
+            user_presence: Arc::default(),
         }
+    }
+
+    pub fn user_presence(&self, id: &str) -> UserPresence {
+        self.user_presence.get(id).copied().unwrap_or_default()
     }
 
     pub fn people(&self) -> Vec<(&str, &str)> {
@@ -245,19 +260,30 @@ impl Sidebar {
     }
 }
 
+struct SessionSettings {
+    socket_endpoint: String,
+    start_call: Box<StartCall>,
+    enumerate_devices: fn() -> Devices,
+    devices: DeviceSettings,
+    sounds: VoiceSounds,
+    presence: PresenceSettings,
+}
+
 pub async fn run(
     commands: Receiver<Command>,
     views: Sender<View>,
-    sound_settings: tokio::sync::watch::Receiver<SoundSettings>,
+    sound_settings: watch::Receiver<SoundSettings>,
+    activity: watch::Receiver<bool>,
 ) {
     let base = Url::parse(env!("SPK_URL")).expect("validated SPK URL");
     let saved = SavedSession::new(&base);
-    let settings = VoiceSettings {
+    let settings = SessionSettings {
         socket_endpoint: env!("SPK_WS_URL").to_owned(),
         start_call: Box::new(Call::start),
         enumerate_devices: Devices::enumerate,
         devices: DeviceSettings::load(),
         sounds: VoiceSounds::new(sound_settings),
+        presence: PresenceSettings::load(activity),
     };
     run_session(base, saved, settings, commands, views).await;
 }
@@ -265,7 +291,7 @@ pub async fn run(
 async fn run_session(
     base: Url,
     mut saved: SavedSession,
-    mut settings: VoiceSettings,
+    mut settings: SessionSettings,
     commands: Receiver<Command>,
     views: Sender<View>,
 ) {
@@ -362,7 +388,7 @@ async fn watch_session(
     profile: Profile,
     notice: Option<&'static str>,
     saved: &mut SavedSession,
-    settings: &mut VoiceSettings,
+    settings: &mut SessionSettings,
     commands: &Receiver<Command>,
     views: &Sender<View>,
 ) -> SessionEnd {
@@ -375,6 +401,8 @@ async fn watch_session(
     let mut refresh = Refresh::default();
     refresh.fetch_all(client);
     let mut sidebar = Sidebar::new(profile, notice);
+    sidebar.user_status = settings.presence.status;
+    let mut presence = PresenceReporter::default();
     let mut avatars = AvatarLoads::default();
     avatars.fill(client, &sidebar);
     sidebar.voice_intent.preferred = settings.devices.preferred.clone();
@@ -403,7 +431,10 @@ async fn watch_session(
         }
         let retry_at = voice.retry_at();
         let chat_timeout = chat.next_timeout();
+        let active = *settings.presence.activity.borrow_and_update();
         tokio::select! {
+            () = presence.report(sidebar.user_status, active) => {}
+            Ok(()) = settings.presence.activity.changed() => {}
             _ = sleep_until(chat_timeout.unwrap_or_else(Instant::now)), if chat_timeout.is_some() => chat.expire(),
             Some(result) = chat.tasks.join_next() => {
                 let result = result.unwrap_or(Err(Failure::Connection));
@@ -419,7 +450,16 @@ async fn watch_session(
             command = commands.recv() => match command {
                 Err(_) => break SessionEnd::Closed,
                 Ok(Command::SignOut) => break SessionEnd::SignOut,
-                Ok(Command::Refresh) => refresh.fetch_all(client),
+                Ok(Command::SetUserStatus(status)) => {
+                    sidebar.user_status = status;
+                    sidebar.user_status_notice = settings.presence.save(status).await.err();
+                }
+                Ok(Command::Refresh) => {
+                    refresh.fetch_all(client);
+                    if matches!(sidebar.connection, Connection::Online) {
+                        refresh.fetch(client, Resource::UserPresence);
+                    }
+                }
                 Ok(Command::OpenTextChannel(id)) => {
                     if sidebar.channels.iter().flatten().any(|channel| channel.id == id && channel.kind == "text") {
                         chat.open(client, id);
@@ -469,14 +509,17 @@ async fn watch_session(
                 Ok(SocketEvent::Online(socket)) => {
                     sidebar.connection = Connection::Online;
                     chat.connected(client, socket.clone());
+                    presence.connected(socket.clone());
                     voice.connected(socket);
                     refresh.fetch_all(client);
+                    refresh.fetch(client, Resource::UserPresence);
                 }
                 Ok(SocketEvent::Connection(state)) => {
                     sidebar.connection = state;
                     sidebar.channel_radio.clear();
                     refresh.presence_ready = false;
                     chat.disconnected();
+                    presence = PresenceReporter::default();
                     voice.disconnected();
                 }
                 Ok(SocketEvent::Frame(frame)) => match frame {
@@ -486,6 +529,9 @@ async fn watch_session(
                     Frame::MessageError { nonce: Some(nonce), error } => chat.error(&nonce, error),
                     Frame::ChannelsChanged => refresh.fetch(client, Resource::Channels),
                     Frame::UsersChanged => refresh.fetch(client, Resource::Users),
+                    Frame::UserPresence { user_id, status } => {
+                        refresh.update_user_presence(&mut sidebar, user_id, status);
+                    }
                     Frame::Presence { user_id, channel_id, flags, video } => {
                         let new_participant = channel_id.is_some() && !sidebar.voice_presence.contains_key(&user_id);
                         let own_update = sidebar.profile.id.as_ref() == Some(&user_id);

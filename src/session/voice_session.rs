@@ -4,9 +4,9 @@ use tokio::{task::spawn_blocking, time::Instant};
 
 use super::{Command, Sidebar, VoiceProcessingSetting};
 use crate::api::{Connection, SpkClient, VoiceSocket};
-use crate::sounds::{Sound, VoiceSounds};
+use crate::sounds::Sound;
 use crate::voice::{
-    self, Call, DeviceKind, DevicePreferences, Devices, Intent, Issue as VoiceIssue,
+    self, Call, DeviceKind, DevicePreferences, Intent, Issue as VoiceIssue,
     ParticipantVolumeChange, Report as VoiceReport, Status as VoiceStatus, Update as VoiceUpdate,
     screen::{self, Action, State},
     video::{CameraStatus, VideoReport},
@@ -194,14 +194,6 @@ impl DeviceSettings {
 }
 
 pub(super) type StartCall = dyn Fn(String, SpkClient, VoiceSocket, Intent) -> Call + Send + Sync;
-
-pub(super) struct VoiceSettings {
-    pub(super) socket_endpoint: String,
-    pub(super) start_call: Box<StartCall>,
-    pub(super) enumerate_devices: fn() -> Devices,
-    pub(super) devices: DeviceSettings,
-    pub(super) sounds: VoiceSounds,
-}
 
 #[derive(Default)]
 pub(super) struct VoiceSession {
@@ -478,7 +470,7 @@ impl VoiceSession {
     pub(super) async fn apply_controls(
         &self,
         sidebar: &mut Sidebar,
-        settings: &mut VoiceSettings,
+        settings: &mut super::SessionSettings,
         command: Command,
     ) {
         let save_preferences = matches!(

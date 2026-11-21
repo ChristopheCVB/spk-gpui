@@ -23,6 +23,7 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
                 "GET /api/voice HTTP/1.1" | "GET /api/users HTTP/1.1" => {
                     request.respond(&[], "[]").await
                 }
+                "GET /api/users/presence HTTP/1.1" => request.respond(&[], "{}").await,
                 _ => history_tx.send((line, request)).await.unwrap(),
             }
         }
@@ -242,8 +243,15 @@ async fn wait_for_delivery(views: &Receiver<View>, predicate: impl Fn(&Delivery)
 }
 
 async fn receive_send(peer: &mut WebSocketStream<TcpStream>, body: &str) -> Value {
-    let frame: Value =
-        serde_json::from_str(peer.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+    let frame: Value = serde_json::from_str(
+        receive_non_presence_message(peer)
+            .await
+            .unwrap()
+            .unwrap()
+            .to_text()
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(frame["type"], "message:send");
     assert_eq!(frame["channelId"], "general");
     assert_eq!(frame["body"], body);
