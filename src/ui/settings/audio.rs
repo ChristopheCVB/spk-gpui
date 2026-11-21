@@ -15,15 +15,7 @@ impl Settings {
         sidebar
             .devices
             .microphones
-            .preferred(sidebar.voice_intent.preferred.microphone.as_ref())
-            .or_else(|| {
-                sidebar
-                    .devices
-                    .microphones
-                    .default
-                    .as_ref()
-                    .filter(|_| cfg!(windows))
-            })
+            .resolve(sidebar.voice_intent.preferred.microphone.as_ref())
             .cloned()
     }
 
@@ -52,7 +44,12 @@ impl Settings {
             return;
         }
         let selected = Self::preview_microphone(sidebar);
-        let device = selected.clone();
+        let device = selected
+            .as_ref()
+            .filter(|device| {
+                cfg!(windows) || Some(*device) != sidebar.devices.microphones.default.as_ref()
+            })
+            .cloned();
         let executor = cx.background_executor().clone();
         let task = cx.spawn(async move |settings, cx| {
             if let Some(test) = MicrophoneTest::start(device.as_ref()).await {
@@ -88,15 +85,12 @@ impl Settings {
             return;
         };
         let speakers = &sidebar.devices.speakers;
-        let preferred = speakers.preferred(sidebar.voice_intent.preferred.speakers.as_ref());
         let active = sidebar
             .voice
             .as_ref()
             .and_then(|call| call.media.as_ref())
-            .map_or_else(
-                || preferred.or(speakers.default.as_ref()),
-                |media| media.speakers.as_ref(),
-            );
+            .and_then(|media| media.speakers.as_ref())
+            .or_else(|| speakers.resolve(sidebar.voice_intent.preferred.speakers.as_ref()));
         let output = active
             .filter(|device| cfg!(windows) || Some(*device) != speakers.default.as_ref())
             .cloned();

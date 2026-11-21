@@ -313,9 +313,13 @@ fn microphone_controls(
         ))
         .child(Label::new("Sensitivity").font_semibold())
         .child(
-            Label::new("Higher picks up quieter speech.")
-                .text_xs()
-                .text_color(cx.theme().muted_foreground),
+            Label::new(if echo {
+                "Turn off echo cancellation to adjust processing."
+            } else {
+                "Higher picks up quieter speech."
+            })
+            .text_xs()
+            .text_color(cx.theme().muted_foreground),
         )
         .child(
             Slider::new(&quick_level(
@@ -652,6 +656,8 @@ pub(super) fn connection_diagnostics(cx: &Context<Spk>) -> Popover {
                             "Incoming audio packet loss",
                             metric(diagnostics.loss_percent, "%"),
                         ),
+                        ("Audio upload", metric(diagnostics.upload_kbps, "kbps")),
+                        ("Audio download", metric(diagnostics.download_kbps, "kbps")),
                     ]
                     .into_iter()
                     .map(|(label, value)| {
