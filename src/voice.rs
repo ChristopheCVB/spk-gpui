@@ -24,6 +24,7 @@ pub(crate) mod video;
 pub(crate) use devices::MediaOutput;
 pub use devices::{
     Device, DeviceKind, DeviceList, DevicePreferences, Devices, ParticipantVolumeChange,
+    VoiceProcessing,
 };
 pub use media::Diagnostics;
 use media::Media;

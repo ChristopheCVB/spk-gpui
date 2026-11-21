@@ -2,7 +2,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use tokio::{task::spawn_blocking, time::Instant};
 
-use super::{Command, Sidebar};
+use super::{Command, Sidebar, VoiceProcessingSetting};
 use crate::api::{Connection, SpkClient, VoiceSocket};
 use crate::sounds::{Sound, VoiceSounds};
 use crate::voice::{
@@ -466,6 +466,30 @@ impl VoiceSession {
                 } else {
                     sidebar.voice_intent.refresh_devices += 1;
                 }
+            }
+            Command::SetVoiceProcessing(setting) => {
+                let processing = &mut sidebar.voice_intent.preferred.processing;
+                match setting {
+                    VoiceProcessingSetting::EchoCancellation(enabled) => {
+                        if processing.echo_cancellation != enabled {
+                            sidebar.voice_intent.retry_mic += 1;
+                        }
+                        processing.echo_cancellation = enabled;
+                    }
+                    VoiceProcessingSetting::NoiseSuppression(enabled) => {
+                        processing.noise_suppression = enabled;
+                    }
+                    VoiceProcessingSetting::AutoGain(enabled) => processing.auto_gain = enabled,
+                    VoiceProcessingSetting::Sensitivity(value) => {
+                        processing.sensitivity = value.min(100)
+                    }
+                }
+                if let Some(call) = &self.call {
+                    call.apply(&sidebar.voice_intent);
+                }
+                settings.devices.save(&sidebar.voice_intent.preferred).await;
+                sidebar.device_notice = settings.devices.notice;
+                return;
             }
             Command::SetOutputVolume(volume) => {
                 sidebar.voice_intent.preferred.output_volume = volume.min(200);

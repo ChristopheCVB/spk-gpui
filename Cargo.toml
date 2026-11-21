@@ -56,3 +56,7 @@ windows = { version = "0.62", features = ["Win32_Media_Audio", "Win32_System_Com
 embed-resource = "3.0"
 url = "2.5"
 
+
+[profile.dev.package.pulseaudio]
+# Keep the protocol reactor responsive to teardown during continuous capture.
+opt-level = 2

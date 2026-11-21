@@ -71,6 +71,14 @@ pub enum Command {
     SetScreenQuality(screen::Quality),
     SetOutputVolume(u8),
     SetParticipantVolume(String, ParticipantVolumeChange),
+    SetVoiceProcessing(VoiceProcessingSetting),
+}
+
+pub enum VoiceProcessingSetting {
+    EchoCancellation(bool),
+    NoiseSuppression(bool),
+    AutoGain(bool),
+    Sensitivity(u8),
 }
 
 pub enum View {
