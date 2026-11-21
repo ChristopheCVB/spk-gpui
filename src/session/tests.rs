@@ -1,5 +1,6 @@
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
+use cookie_store::{CookieStore, serde::json};
 use futures::{SinkExt, StreamExt};
 use reqwest::cookie::CookieStore as _;
 use serde_json::{Value, json as value};
@@ -14,7 +15,11 @@ use tokio_tungstenite::{
     tungstenite::{Message, handshake::server},
 };
 
-use super::*;
+use super::{presence::Data, voice_session::StartCall, *};
+use crate::{
+    api::{Member, VoiceFlags},
+    voice::{self, DevicePreferences, Report as VoiceReport},
+};
 
 #[tokio::test]
 #[allow(
@@ -426,7 +431,8 @@ async fn spk_recovery_yields_to_another_client_in_a_different_voice_channel() {
         async |commands, views| {
             join_test_voice(&commands, &views).await;
             let sidebar = wait_for_sidebar(&views, |sidebar| {
-                sidebar.voice.is_none() && sidebar.voice_notice == Some(VOICE_REPLACED)
+                sidebar.voice.is_none()
+                    && sidebar.voice_notice == Some("You joined voice from another tab or device.")
             })
             .await;
             assert!(
@@ -717,10 +723,8 @@ fn live_membership_and_flags_win_over_an_in_flight_snapshot() {
         },
         None,
     );
-    let mut refresh = Refresh {
-        presence_updates: Some(HashMap::new()),
-        ..Default::default()
-    };
+    let mut refresh = Refresh::default();
+    refresh.presence_updates = Some(HashMap::new());
     refresh.complete(
         &mut sidebar,
         Resource::Channels,

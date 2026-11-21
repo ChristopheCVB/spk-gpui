@@ -43,20 +43,6 @@ impl Failure {
     pub fn unauthorized(&self) -> bool {
         matches!(self, Self::Http(StatusCode::UNAUTHORIZED))
     }
-
-    pub fn sign_in_message(&self) -> &'static str {
-        match self {
-            Self::Http(StatusCode::UNAUTHORIZED | StatusCode::BAD_REQUEST) => {
-                "Check your email and password and try again."
-            }
-            Self::Http(StatusCode::FORBIDDEN) => "SPK denied sign-in for this account.",
-            Self::Http(StatusCode::TOO_MANY_REQUESTS) => {
-                "Too many sign-in attempts. Wait a minute and try again."
-            }
-            Self::Connection => "Could not reach SPK. Check your connection and try again.",
-            _ => "SPK could not complete sign-in. Try again.",
-        }
-    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -312,7 +298,23 @@ impl SpkClient {
         Ok(())
     }
 
-    pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, Failure> {
+    pub async fn profile(&self) -> Result<Profile, Failure> {
+        self.get("/api/profile/me").await
+    }
+
+    pub async fn channels(&self) -> Result<Vec<Channel>, Failure> {
+        self.get("/api/channels").await
+    }
+
+    pub async fn users(&self) -> Result<Vec<User>, Failure> {
+        self.get("/api/users").await
+    }
+
+    pub async fn voice_presence(&self) -> Result<Vec<Member>, Failure> {
+        self.get("/api/voice").await
+    }
+
+    async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, Failure> {
         Self::send(self.request(Method::GET, path))
             .await?
             .json()
