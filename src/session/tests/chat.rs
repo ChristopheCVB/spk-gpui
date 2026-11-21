@@ -154,6 +154,25 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         page(overlap_request, &[older, latest, sent], false).await;
         wait_for_messages(&rx, &["m1", "m2", "m3", "m4", "m5", "m6"]).await;
 
+        tx.send(Command::JumpToChatMessage {
+            channel_id: "general".into(),
+            message_id: "m0".into(),
+        }).await.unwrap();
+        let request = history_request(&history, "?around=m0").await;
+        request.respond(&[], &value!({"messages":[message("m0", 0, "bob", "Original reply target"), message("m1", 1, "bob", "Earlier message")],"hasMoreBefore":false,"hasMoreAfter":true}).to_string()).await;
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
+            chat.jump.as_ref().is_some_and(|(id, _)| id == "m0") && chat.has_more_after && chat.messages[0].id == "m0"
+        })).await;
+        tx.send(Command::JumpToChatMessage {
+            channel_id: "general".into(),
+            message_id: "removed".into(),
+        }).await.unwrap();
+        history_request(&history, "?around=removed").await.respond_raw("404 Not Found", &[], b"").await;
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| chat.jump_failed)).await;
+        tx.send(Command::LoadLatestMessages).await.unwrap();
+        page(history_request(&history, "?unread=1").await, &[message("m6", 6, "bob", "After history was read")], true).await;
+        wait_for_messages(&rx, &["m6"]).await;
+
         tx.send(Command::RetryChatSend).await.unwrap();
         tx.send(Command::DismissChatSend).await.unwrap();
         tx.send(Command::SendChatMessage {
@@ -179,6 +198,21 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
             })
         })
         .await;
+
+        tx.send(Command::UpdateChatDraft { channel_id: "quiet".into(), body: "Quiet draft".into() }).await.unwrap();
+        receive_typing(&mut peer, "quiet").await;
+        tx.send(Command::OpenTextChannel("general".into())).await.unwrap();
+        page(history_request(&history, "?unread=1").await, &[], false).await;
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
+            chat.channel_id == "general" && !chat.loading() && chat.draft.body == "Still here"
+        })).await;
+        tx.send(Command::OpenTextChannel("quiet".into())).await.unwrap();
+        let (line, request) = history.recv().await.unwrap();
+        assert_eq!(line, "GET /api/channels/quiet/messages?unread=1 HTTP/1.1");
+        page(request, &[], false).await;
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
+            chat.channel_id == "quiet" && !chat.loading() && chat.draft.body == "Quiet draft"
+        })).await;
 
         tx.close();
         assert!(matches!(session.await.unwrap(), SessionEnd::Closed));
@@ -262,6 +296,12 @@ async fn receive_chat_send(
     assert_eq!(frame["body"], body);
     assert!(frame["nonce"].is_string());
     frame
+}
+
+async fn receive_typing(peer: &mut WebSocketStream<TcpStream>, channel_id: &str) {
+    let frame = receive_non_presence_message(peer).await.unwrap().unwrap();
+    let typing: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+    assert_eq!(typing, value!({"type":"typing","channelId":channel_id}));
 }
 
 #[tokio::test]
@@ -472,13 +512,36 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
         page(private_history(&requests, "session=bob").await, std::slice::from_ref(&first), false).await;
         wait_for_messages(&bob_views, &["private-1"]).await;
 
-        bob.send(Command::SendChatMessage { channel_id: "private".into(), body: "Hello Alice".into() }).await.unwrap();
-        let reply = receive_chat_send(&mut bob_peer, "private", "Hello Alice").await;
-        let second = value!({"id":"private-2","channelId":"private","userId":"bob","body":"Hello Alice","createdAt":2});
+        let body = "> Hello Bob\n\n**Hi** <@alice> 👋 ||a secret||";
+        bob.send(Command::UpdateChatDraft { channel_id: "private".into(), body: body.into() }).await.unwrap();
+        receive_typing(&mut bob_peer, "private").await;
+        alice_peer.send(Message::text(value!({"type":"typing","channelId":"private","userId":"bob"}).to_string())).await.unwrap();
+        wait_for_sidebar(&alice_views, |view| view.chat.as_ref().is_some_and(|chat| chat.typing == ["bob"])).await;
+        bob.send(Command::SetChatReply { channel_id: "private".into(), message_id: Some("private-1".into()) }).await.unwrap();
+        bob.send(Command::CloseChat).await.unwrap();
+        wait_for_sidebar(&bob_views, |view| view.chat.is_none()).await;
+        bob.send(Command::OpenDirectMessage("private".into())).await.unwrap();
+        page(private_history(&requests, "session=bob").await, std::slice::from_ref(&first), false).await;
+        wait_for_sidebar(&bob_views, |view| view.chat.as_ref().is_some_and(|chat| {
+            !chat.loading() && chat.draft.body == body && chat.draft.reply.as_ref().is_some_and(|reply| reply.id == "private-1")
+        })).await;
+
+        bob.send(Command::SendChatMessage { channel_id: "private".into(), body: body.into() }).await.unwrap();
+        let reply = receive_chat_send(&mut bob_peer, "private", body).await;
+        assert_eq!(reply["replyToId"], "private-1");
+        wait_for_sidebar(&bob_views, |view| view.chat.as_ref().is_some_and(|chat| chat.outgoing.is_some() && chat.draft.body == body)).await;
+        let second = value!({"id":"private-2","channelId":"private","userId":"bob","body":body,"createdAt":2,
+            "replyTo":{"id":"private-1","userId":"alice","preview":"Hello Bob","deleted":false}});
         live(&mut bob_peer, &second, reply["nonce"].as_str()).await;
         live(&mut alice_peer, &second, reply["nonce"].as_str()).await;
-        wait_for_messages(&alice_views, &["private-1", "private-2"]).await;
-        wait_for_messages(&bob_views, &["private-1", "private-2"]).await;
+        wait_for_sidebar(&alice_views, |view| view.chat.as_ref().is_some_and(|chat| {
+            chat.messages.last().is_some_and(|message| {
+                message.body == body && message.reply_to.as_ref().is_some_and(|reply| reply.id == "private-1" && reply.user_id == "alice")
+            })
+        })).await;
+        wait_for_sidebar(&bob_views, |view| view.chat.as_ref().is_some_and(|chat| {
+            chat.messages.len() == 2 && chat.draft.body.is_empty() && chat.draft.reply.is_none() && chat.outgoing.is_none()
+        })).await;
 
         alice_peer.close(None).await.unwrap();
         let mut alice_peer = accept_async(sockets.accept().await.unwrap().0).await.unwrap();
@@ -495,6 +558,12 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
         alice.send(Command::StartDirectMessage("bob".into())).await.unwrap();
         page(private_history(&requests, "session=alice").await, &latest, false).await;
         wait_for_messages(&alice_views, &["private-1", "private-2", "private-3", "private-4"]).await;
+        alice_peer.send(Message::text(value!({"type":"message:delete","channelId":"private","id":"private-1"}).to_string())).await.unwrap();
+        wait_for_sidebar(&alice_views, |view| view.chat.as_ref().is_some_and(|chat| {
+            chat.messages.len() == 3 && chat.messages.first().is_some_and(|message| {
+                message.id == "private-2" && message.reply_to.as_ref().is_some_and(|reply| reply.deleted && reply.preview.is_empty())
+            })
+        })).await;
         alice.close();
         bob.close();
         assert!(matches!(alice_session.await.unwrap(), SessionEnd::Closed));

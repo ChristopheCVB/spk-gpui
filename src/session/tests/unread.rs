@@ -78,7 +78,7 @@ async fn marking_read_and_unread_changes_the_shared_read_point() {
     let base = Url::parse(&format!("http://{}", http.local_addr().unwrap())).unwrap();
     let (read_changes, changes) = async_channel::unbounded();
     let http = tokio::spawn(async move {
-        let mut count = 3;
+        let mut count = 3_usize;
         loop {
             let (line, request) = Request::receive(&http).await;
             assert_eq!(request.header("cookie"), Some("session=alice"));
@@ -89,10 +89,15 @@ async fn marking_read_and_unread_changes_the_shared_read_point() {
                 "GET /api/users HTTP/1.1" | "GET /api/voice HTTP/1.1" => value!([]),
                 "GET /api/users/presence HTTP/1.1" => value!({}),
                 "GET /api/unread HTTP/1.1" => {
-                    value!({"general":{"unread":count,"mentions":count.min(1)}})
+                    value!({"general":{"unread":count,"mentions":count.saturating_sub(1)}})
                 }
                 "GET /api/channels/general/messages?unread=1 HTTP/1.1" => value!({
-                    "messages":[{"id":"first","channelId":"general","userId":"bob","createdAt":1,"body":"Hi <@alice>"}],
+                    "messages":[
+                        {"id":"first","channelId":"general","userId":"bob","createdAt":1,"body":"Hi <@alice>"},
+                        {"id":"reply","channelId":"general","userId":"bob","createdAt":2,"body":"I agree",
+                         "replyTo":{"id":"original","userId":"alice","preview":"Hello","deleted":false}},
+                        {"id":"code","channelId":"general","userId":"bob","createdAt":3,"body":"`<@alice>`\n\n~~~txt\n<@alice>\n~~~"}
+                    ],
                     "firstUnreadId":"first","hasMoreBefore":false,"hasMoreAfter":false
                 }),
                 "POST /api/channels/general/read HTTP/1.1" => {
@@ -104,10 +109,10 @@ async fn marking_read_and_unread_changes_the_shared_read_point() {
                 "POST /api/channels/general/unread HTTP/1.1" => {
                     assert_eq!(
                         serde_json::from_slice::<Value>(&request.body).unwrap(),
-                        value!({"messageId":"first"})
+                        value!({"messageId":"reply"})
                     );
-                    count = 1;
-                    let result = value!({"unread":1,"mentions":1});
+                    count = 2;
+                    let result = value!({"unread":2,"mentions":1});
                     read_changes.send(result.clone()).await.unwrap();
                     result
                 }
@@ -129,13 +134,17 @@ async fn marking_read_and_unread_changes_the_shared_read_point() {
             .send(Command::OpenTextChannel("general".into()))
             .await
             .unwrap();
-        wait_for_sidebar(&views, |view| {
+        let opened = wait_for_sidebar(&views, |view| {
             view.chat
                 .as_ref()
                 .and_then(|chat| chat.first_unread_id.as_deref())
                 == Some("first")
         })
         .await;
+        let chat = opened.chat.unwrap();
+        assert!(chat.messages[0].pings("alice"));
+        assert!(chat.messages[1].pings("alice"));
+        assert!(!chat.messages[2].pings("alice"));
         commands
             .send(Command::ReadVisibleChat("general".into()))
             .await
@@ -148,7 +157,7 @@ async fn marking_read_and_unread_changes_the_shared_read_point() {
         commands
             .send(Command::MarkChatUnread {
                 channel_id: "general".into(),
-                message_id: "first".into(),
+                message_id: "reply".into(),
             })
             .await
             .unwrap();
@@ -162,7 +171,7 @@ async fn marking_read_and_unread_changes_the_shared_read_point() {
             .await
             .unwrap();
         let busy = wait_for_sidebar(&views, |view| view.user_status == UserStatus::Busy).await;
-        assert_eq!(busy.unread("general").unread, 1);
+        assert_eq!(busy.unread("general").unread, 2);
         assert_eq!(busy.unread("general").mentions, 1);
 
         // An ordinary focus event cannot immediately undo the explicit mark.

@@ -86,6 +86,19 @@ pub enum Command {
         channel_id: String,
         message_id: String,
     },
+    JumpToChatMessage {
+        channel_id: String,
+        message_id: String,
+    },
+    LoadLatestMessages,
+    UpdateChatDraft {
+        channel_id: String,
+        body: String,
+    },
+    SetChatReply {
+        channel_id: String,
+        message_id: Option<String>,
+    },
     SendChatMessage {
         channel_id: String,
         body: String,
@@ -588,6 +601,10 @@ async fn watch_session(
                         unread.mark(&mut sidebar, channel_id, Mark::Unread(message_id, request));
                     }
                 },
+                Ok(Command::JumpToChatMessage { channel_id, message_id }) => chat.jump(client, &channel_id, message_id),
+                Ok(Command::LoadLatestMessages) => chat.latest(client),
+                Ok(Command::UpdateChatDraft { channel_id, body }) => chat.update_draft(channel_id, body),
+                Ok(Command::SetChatReply { channel_id, message_id }) => chat.set_reply(&channel_id, message_id.as_deref()),
                 Ok(Command::SendChatMessage { channel_id, body }) => chat.send(channel_id, body),
                 Ok(Command::RetryChatSend) => chat.retry_send(),
                 Ok(Command::DismissChatSend) => chat.dismiss_send(),
@@ -656,7 +673,11 @@ async fn watch_session(
                     Frame::UnreadUpdate { channel_id, state } => {
                         unread.update(&mut sidebar, channel_id, state);
                     }
+                    Frame::MessageDelete { channel_id, id } => chat.delete_message(&channel_id, &id),
                     Frame::MessageError { nonce: Some(nonce), error } => chat.error(&nonce, error),
+                    Frame::Typing { channel_id, user_id } if sidebar.profile.id.as_ref() != Some(&user_id) => {
+                        chat.receive_typing(&channel_id, user_id);
+                    }
                     Frame::ChannelsChanged => refresh.fetch(client, Resource::Channels),
                     Frame::UsersChanged => refresh.fetch(client, Resource::Users),
                     Frame::UserPresence { user_id, status } => {
