@@ -439,6 +439,12 @@ pub struct SoundboardClip {
     pub duration_ms: u32,
 }
 
+#[derive(Clone)]
+pub enum VoiceModeration {
+    Move(String),
+    Disconnect,
+}
+
 #[derive(Deserialize)]
 pub struct VoiceToken {
     pub token: String,
@@ -990,6 +996,25 @@ impl SpkClient {
             bytes.extend_from_slice(&chunk);
         }
         Ok(bytes)
+    }
+
+    pub async fn moderate_voice(
+        &self,
+        user_id: &str,
+        action: &VoiceModeration,
+    ) -> Result<(), Failure> {
+        let (path, body) = match action {
+            VoiceModeration::Move(channel_id) => (
+                "/api/admin/voice/move",
+                serde_json::json!({ "userId": user_id, "channelId": channel_id }),
+            ),
+            VoiceModeration::Disconnect => (
+                "/api/admin/voice/disconnect",
+                serde_json::json!({ "userId": user_id }),
+            ),
+        };
+        Self::send(self.request(Method::POST, path).json(&body)).await?;
+        Ok(())
     }
 
     pub async fn voice_token(&self, channel_id: &str) -> Result<VoiceToken, Failure> {
