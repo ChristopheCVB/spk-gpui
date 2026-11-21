@@ -2,7 +2,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use tokio::{task::spawn_blocking, time::Instant};
 
-use super::{Command, Sidebar};
+use super::{Command, Sidebar, VoiceProcessingSetting};
 use crate::api::{Connection, SpkClient, VoiceSocket};
 use crate::sounds::{Sound, VoiceSounds};
 use crate::voice::{
@@ -248,13 +248,21 @@ impl VoiceSession {
         }
     }
 
+    pub(super) fn active_call_sid<'a>(&'a self, sidebar: &Sidebar) -> Option<&'a str> {
+        sidebar
+            .voice
+            .as_ref()
+            .filter(|voice| voice.is_participating())?;
+        self.call.as_ref().map(Call::sid)
+    }
+
     pub(super) fn radio_scope<'a>(&'a self, sidebar: &'a Sidebar) -> Option<(&'a str, &'a str)> {
         let voice = sidebar.voice.as_ref()?;
         (self.socket.is_some() && voice.status != VoiceStatus::Leaving)
             .then_some((self.call.as_ref()?.sid(), voice.channel_id.as_str()))
     }
 
-    pub(super) fn radio_socket(&self, sidebar: &Sidebar) -> Option<(VoiceSocket, String)> {
+    pub(super) fn active_socket(&self, sidebar: &Sidebar) -> Option<(VoiceSocket, String)> {
         let (sid, _) = self.radio_scope(sidebar)?;
         sidebar.voice.as_ref()?.is_participating().then(|| {
             (
@@ -434,6 +442,8 @@ impl VoiceSession {
             &command,
             Command::SetOutputVolume(_)
                 | Command::SetParticipantVolume(..)
+                | Command::SetSoundboardEnabled(_)
+                | Command::SetSoundboardVolume(_)
                 | Command::SetScreenAudio(_)
         );
         match command {
@@ -456,6 +466,30 @@ impl VoiceSession {
                 } else {
                     sidebar.voice_intent.refresh_devices += 1;
                 }
+            }
+            Command::SetVoiceProcessing(setting) => {
+                let processing = &mut sidebar.voice_intent.preferred.processing;
+                match setting {
+                    VoiceProcessingSetting::EchoCancellation(enabled) => {
+                        if processing.echo_cancellation != enabled {
+                            sidebar.voice_intent.retry_mic += 1;
+                        }
+                        processing.echo_cancellation = enabled;
+                    }
+                    VoiceProcessingSetting::NoiseSuppression(mode) => {
+                        processing.noise_suppression = mode;
+                    }
+                    VoiceProcessingSetting::AutoGain(enabled) => processing.auto_gain = enabled,
+                    VoiceProcessingSetting::Sensitivity(value) => {
+                        processing.sensitivity = value.min(100)
+                    }
+                }
+                if let Some(call) = &self.call {
+                    call.apply(&sidebar.voice_intent);
+                }
+                settings.devices.save(&sidebar.voice_intent.preferred).await;
+                sidebar.device_notice = settings.devices.notice;
+                return;
             }
             Command::SetOutputVolume(volume) => {
                 sidebar.voice_intent.preferred.output_volume = volume.min(200);
@@ -511,6 +545,12 @@ impl VoiceSession {
                     sidebar.device_notice = settings.devices.notice;
                 }
                 return;
+            }
+            Command::SetSoundboardEnabled(enabled) => {
+                sidebar.voice_intent.preferred.soundboard_enabled = enabled;
+            }
+            Command::SetSoundboardVolume(volume) => {
+                sidebar.voice_intent.preferred.soundboard_volume = volume.min(100);
             }
             Command::SetCameraEnabled(enabled) => {
                 if !sidebar
@@ -578,7 +618,7 @@ impl VoiceSession {
                     .screen
                     .advance(attempt, Action::Choose(id, playback));
             }
-            Command::StartScreenShare(attempt) => {
+            Command::StartScreenShare(attempt, confirmed_audio) => {
                 if !sidebar.voice.as_ref().is_some_and(|voice| {
                     voice.is_participating()
                         && voice
@@ -588,10 +628,10 @@ impl VoiceSession {
                 }) {
                     return;
                 }
-                sidebar.voice_intent.screen.advance(
-                    attempt,
-                    Action::Start(sidebar.voice_intent.preferred.screen_audio),
-                );
+                sidebar
+                    .voice_intent
+                    .screen
+                    .advance(attempt, Action::Start(confirmed_audio));
             }
             Command::StopScreenShare(attempt) => {
                 if sidebar.voice_intent.screen.advance(attempt, Action::Stop)

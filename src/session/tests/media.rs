@@ -169,6 +169,29 @@ async fn desktop_voice_routes_samples_and_synchronizes_presence() {
             commands.send(Command::ToggleMute).await.unwrap();
             wait_for_flags(&views, true, false, false).await;
             assert_eq!(peer.exchange(74, -31), (None, Some(-31)));
+            for setting in [
+                VoiceProcessingSetting::EchoCancellation(false),
+                VoiceProcessingSetting::NoiseSuppression(NoiseSuppression::Enhanced),
+                VoiceProcessingSetting::AutoGain(false),
+                VoiceProcessingSetting::Sensitivity(80),
+            ] {
+                commands
+                    .send(Command::SetVoiceProcessing(setting))
+                    .await
+                    .unwrap();
+            }
+            let tuned = wait_for_sidebar(&views, |sidebar| {
+                sidebar.voice_intent.preferred.processing.sensitivity == 80
+            })
+            .await;
+            let processing = tuned.voice_intent.preferred.processing;
+            assert!(
+                !processing.echo_cancellation
+                    && processing.noise_suppression == NoiseSuppression::Enhanced
+                    && !processing.auto_gain
+            );
+            assert!(tuned.voice_intent.mute.effective_muted());
+            assert_eq!(peer.exchange(74, -31), (None, Some(-31)));
             for was_muted in [true, false] {
                 commands.send(Command::ToggleDeafen).await.unwrap();
                 wait_for_flags(&views, true, true, false).await;

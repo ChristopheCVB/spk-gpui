@@ -234,6 +234,7 @@ impl Spk {
                     _ => "Video only",
                 };
                 let selected = sidebar.voice_intent.screen.quality;
+                let confirmed_audio = enabled && audio.is_some();
                 panel
                     .child(Label::new(label.clone()).font_semibold())
                     .child(Label::new(audio_label).text_xs())
@@ -301,7 +302,11 @@ impl Spk {
                             .tab_stop(true)
                             .label("Start Screen Share")
                             .on_click(cx.listener(move |app, _, _, cx| {
-                                app.send(Command::StartScreenShare(attempt), None, cx);
+                                app.send(
+                                    Command::StartScreenShare(attempt, confirmed_audio),
+                                    None,
+                                    cx,
+                                );
                             })),
                     )
             }

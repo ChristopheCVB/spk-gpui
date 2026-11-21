@@ -180,6 +180,13 @@ impl Spk {
                                 cx.listener(|this, _, window, cx| this.open_radio(window, cx)),
                             ),
                     )
+                    .child(
+                        tool_button("soundboard", IconName::Megaphone, "Soundboard")
+                            .when(!compact, |button| button.label("Soundboard"))
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.open_soundboard(window, cx)),
+                            ),
+                    )
                 },
             )
     }

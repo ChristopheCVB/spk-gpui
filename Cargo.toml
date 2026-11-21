@@ -8,6 +8,7 @@ publish = false
 async-channel = "2.5"
 bytes = "1"
 cookie_store = "0.22"
+dfn3_rs = "=0.1.2"
 dirs = "6"
 futures = "0.3"
 global-hotkey = "=0.10.0"
@@ -41,7 +42,7 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["NSAppl
 objc2-av-foundation = { version = "0.3", default-features = false, features = ["AVCaptureDevice", "AVMediaFormat", "block2"] }
 objc2-core-audio = { version = "0.3", default-features = false, features = ["AudioHardware", "AudioHardwareDeprecated"] }
 objc2-core-audio-types = { version = "0.3", default-features = false, features = ["CoreAudioBaseTypes"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["NSProcessInfo"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSProcessInfo"] }
 screencapturekit = { version = "=11.1.2", features = ["macos_15_0"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -60,3 +61,17 @@ windows = { version = "0.62", features = ["Win32_Media_Audio", "Win32_System_Com
 embed-resource = "3.0"
 url = "2.5"
 
+
+# Keep DeepFilterNet within its 10 ms frame budget in the debug builds shipped by CI.
+[profile.dev.package.dfn3_rs]
+opt-level = 2
+
+[profile.dev.package.realfft]
+opt-level = 2
+
+[profile.dev.package.rustfft]
+opt-level = 2
+
+[profile.dev.package.pulseaudio]
+# Keep the protocol reactor responsive to teardown during continuous capture.
+opt-level = 2
