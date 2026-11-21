@@ -50,6 +50,9 @@ impl Capture {
         if self.has_publication()
             && let Some(track) = &self.track
         {
+            if let Some(input) = &self.input {
+                input.discard_buffer();
+            }
             track.unmute();
         }
     }

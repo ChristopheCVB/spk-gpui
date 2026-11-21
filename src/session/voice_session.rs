@@ -476,8 +476,8 @@ impl VoiceSession {
                         }
                         processing.echo_cancellation = enabled;
                     }
-                    VoiceProcessingSetting::NoiseSuppression(enabled) => {
-                        processing.noise_suppression = enabled;
+                    VoiceProcessingSetting::NoiseSuppression(mode) => {
+                        processing.noise_suppression = mode;
                     }
                     VoiceProcessingSetting::AutoGain(enabled) => processing.auto_gain = enabled,
                     VoiceProcessingSetting::Sensitivity(value) => {

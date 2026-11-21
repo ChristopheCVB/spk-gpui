@@ -1,5 +1,13 @@
-use std::{borrow::Cow, time::Duration};
+use std::{
+    borrow::Cow,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
+use dfn3_rs::Denoiser;
 use livekit::prelude::LocalAudioTrack;
 use livekit::webrtc::{
     audio_frame::AudioFrame,
@@ -16,14 +24,23 @@ use tokio::{
     time::timeout,
 };
 
-use crate::voice::{Device, DeviceKind, VoiceProcessing, audio_preview::cpal_device};
+use crate::voice::{
+    Device, DeviceKind, NoiseSuppression, VoiceProcessing, audio_preview::cpal_device,
+};
 
 pub(super) const RATE: u32 = 48_000;
 const FRAME: usize = RATE as usize / 100;
+const _: () = assert!(dfn3_rs::SAMPLE_RATE == RATE && dfn3_rs::FRAME_SIZE == FRAME);
+
+struct InputBlock {
+    generation: u64,
+    samples: Vec<i16>,
+}
 
 pub(super) struct ProcessedInput {
     preferences: watch::Sender<VoiceProcessing>,
     source: NativeAudioSource,
+    generation: Arc<AtomicU64>,
     cancel: Option<oneshot::Sender<()>>,
     capture: JoinHandle<Option<()>>,
 }
@@ -38,11 +55,13 @@ impl ProcessedInput {
         let (preferences, updates) = watch::channel(preferences);
         let (ready, opened) = oneshot::channel();
         let (cancel, stopped) = oneshot::channel();
+        let generation = Arc::new(AtomicU64::new(0));
         let capture = tokio::spawn(capture(
             device,
             source.clone(),
             track,
             updates,
+            generation.clone(),
             ready,
             stopped,
         ));
@@ -50,6 +69,7 @@ impl ProcessedInput {
             Self {
                 preferences,
                 source,
+                generation,
                 cancel: Some(cancel),
                 capture,
             },
@@ -58,6 +78,9 @@ impl ProcessedInput {
     }
 
     pub(super) fn update(&self, settings: VoiceProcessing) {
+        if self.preferences.borrow().noise_suppression != settings.noise_suppression {
+            self.discard_buffer();
+        }
         self.preferences.send_if_modified(|current| {
             if *current == settings {
                 return false;
@@ -68,6 +91,7 @@ impl ProcessedInput {
     }
 
     pub(super) fn discard_buffer(&self) {
+        self.generation.fetch_add(1, Ordering::Relaxed);
         self.source.clear_buffer();
     }
 
@@ -86,6 +110,7 @@ async fn capture(
     source: NativeAudioSource,
     track: LocalAudioTrack,
     preferences: watch::Receiver<VoiceProcessing>,
+    generation: Arc<AtomicU64>,
     ready: oneshot::Sender<()>,
     mut stopped: oneshot::Receiver<()>,
 ) -> Option<()> {
@@ -112,7 +137,7 @@ async fn capture(
         stream_config.buffer_size = BufferSize::Fixed((rate / 50).clamp(min, max));
     }
     let (send, blocks) = mpsc::channel(8);
-    let (fail, failed) = oneshot::channel();
+    let (fail, mut failed) = oneshot::channel();
     let stream = match config.sample_format() {
         SampleFormat::I8 => input::<i8>,
         SampleFormat::I16 => input::<i16>,
@@ -127,14 +152,15 @@ async fn capture(
         SampleFormat::F32 => input::<f32>,
         SampleFormat::F64 => input::<f64>,
         _ => return None,
-    }(&device, stream_config, send, fail)
+    }(&device, stream_config, send, fail, generation.clone())
     .ok()?;
     stream.play().ok()?;
 
     let result = tokio::select! {
         biased;
         _ = &mut stopped => None,
-        result = send_audio(source, track, preferences, ready, blocks, failed, rate) => result,
+        _ = &mut failed => None,
+        result = send_audio(source, track, preferences, ready, blocks, rate, generation) => result,
     };
     let _ = stream.pause();
     result
@@ -145,24 +171,44 @@ async fn send_audio(
     track: LocalAudioTrack,
     preferences: watch::Receiver<VoiceProcessing>,
     ready: oneshot::Sender<()>,
-    mut blocks: mpsc::Receiver<Vec<i16>>,
-    mut failed: oneshot::Receiver<()>,
+    mut blocks: mpsc::Receiver<InputBlock>,
     rate: u32,
+    generation: Arc<AtomicU64>,
 ) -> Option<()> {
     let mut ready = Some(ready);
     let mut resampler = AudioResampler::default();
     let mut controls = None;
     let mut apm = None;
     let mut gate = Gate::default();
+    let mut denoiser = None;
+    let mut last_generation = None;
     let mut frame = [0; FRAME];
     loop {
-        let mut block = tokio::select! {
-            biased;
-            _ = &mut failed => return None,
-            block = timeout(Duration::from_secs(3), blocks.recv()) => block.ok()??,
-        };
+        let InputBlock {
+            generation: captured,
+            samples: mut block,
+        } = timeout(Duration::from_secs(3), blocks.recv())
+            .await
+            .ok()??;
+        if let Some(ready) = ready.take() {
+            ready.send(()).ok()?;
+        }
+        if track.is_muted() || captured != generation.load(Ordering::Relaxed) {
+            continue;
+        }
+        // A queued frame or the model's lookahead can outlive a mute or a mode change.
+        if last_generation != Some(captured) {
+            last_generation = Some(captured);
+            resampler = AudioResampler::default();
+            gate = Gate::default();
+            denoiser = None;
+            controls = None;
+        }
         let settings = *preferences.borrow();
-        let toggles = (settings.noise_suppression, settings.auto_gain);
+        let toggles = (
+            settings.noise_suppression == NoiseSuppression::Standard,
+            settings.auto_gain,
+        );
         if controls != Some(toggles) {
             controls = Some(toggles);
             apm = (toggles.0 || toggles.1)
@@ -184,31 +230,47 @@ async fn send_audio(
         if let Some(apm) = apm.as_mut() {
             apm.process_stream(samples, RATE as i32, 1).ok()?;
         }
-        if track.is_muted() {
-            gate = Gate::default();
-        } else {
-            gate.apply(samples, settings.sensitivity);
-            source
-                .capture_frame(&AudioFrame {
-                    data: Cow::Borrowed(samples),
-                    sample_rate: RATE,
-                    num_channels: 1,
-                    samples_per_channel: FRAME as u32,
-                })
-                .await
-                .ok()?;
+        if settings.noise_suppression == NoiseSuppression::Enhanced {
+            let model = denoiser.take();
+            let pcm = std::array::from_fn(|i| f32::from(samples[i]) / 32768.0);
+            // Run one block at a time off the session runtime. CPAL's bounded queue drops overload.
+            let (model, filtered) = tokio::task::spawn_blocking(move || {
+                let mut model = model.unwrap_or_else(|| Box::new(Denoiser::new()));
+                let filtered = process_enhanced(&mut model, pcm);
+                (model, filtered)
+            })
+            .await
+            .ok()?;
+            denoiser = Some(model);
+            if track.is_muted() || captured != generation.load(Ordering::Relaxed) {
+                continue;
+            }
+            samples.copy_from_slice(&filtered);
         }
-        if let Some(ready) = ready.take() {
-            ready.send(()).ok()?;
-        }
+        gate.apply(samples, settings.sensitivity);
+        source
+            .capture_frame(&AudioFrame {
+                data: Cow::Borrowed(samples),
+                sample_rate: RATE,
+                num_channels: 1,
+                samples_per_channel: FRAME as u32,
+            })
+            .await
+            .ok()?;
     }
+}
+
+fn process_enhanced(denoiser: &mut Denoiser, mut pcm: [f32; FRAME]) -> [i16; FRAME] {
+    denoiser.process_frame(&mut pcm);
+    pcm.map(|sample| (sample * 32768.0).round() as i16)
 }
 
 fn input<T: SizedSample>(
     device: &cpal::Device,
     config: cpal::StreamConfig,
-    send: mpsc::Sender<Vec<i16>>,
+    send: mpsc::Sender<InputBlock>,
     fail: oneshot::Sender<()>,
+    generation: Arc<AtomicU64>,
 ) -> Result<cpal::Stream, cpal::Error>
 where
     f32: FromSample<T>,
@@ -216,10 +278,16 @@ where
     let channels = usize::from(config.channels);
     let frames = config.sample_rate as usize / 100;
     let mut block = Vec::with_capacity(frames);
+    let mut last_generation = None;
     let mut fail = Some(fail);
     device.build_input_stream(
         config,
         move |samples: &[T], _| {
+            let captured = generation.load(Ordering::Relaxed);
+            if last_generation != Some(captured) {
+                last_generation = Some(captured);
+                block.clear();
+            }
             for channel_frame in samples.chunks_exact(channels) {
                 let mono = channel_frame
                     .iter()
@@ -230,7 +298,10 @@ where
                 block.push(i16::from_sample_(mono.clamp(-1.0, 1.0)));
                 if block.len() == frames {
                     if let Ok(slot) = send.try_reserve() {
-                        slot.send(std::mem::replace(&mut block, Vec::with_capacity(frames)));
+                        slot.send(InputBlock {
+                            generation: captured,
+                            samples: std::mem::replace(&mut block, Vec::with_capacity(frames)),
+                        });
                     } else {
                         block.clear();
                     }
@@ -282,6 +353,31 @@ impl Gate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enhanced_suppresses_stationary_noise() {
+        let mut denoiser = Denoiser::new();
+        let mut seed = 1_u32;
+        let (mut dry_power, mut wet_power) = (0.0, 0.0);
+        for frame in 0..80 {
+            let noise = std::array::from_fn(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                f32::from((seed >> 16) as i16) / 327_680.0
+            });
+            let filtered = process_enhanced(&mut denoiser, noise);
+            if frame >= 40 {
+                dry_power += noise.iter().map(|sample| sample.powi(2)).sum::<f32>();
+                wet_power += filtered
+                    .iter()
+                    .map(|sample| (f32::from(*sample) / 32768.0).powi(2))
+                    .sum::<f32>();
+            }
+        }
+        assert!(
+            wet_power < dry_power * 0.25,
+            "{wet_power} >= {dry_power} / 4"
+        );
+    }
 
     #[test]
     fn sensitivity_opens_for_quieter_audio_and_fades_after_the_hold() {

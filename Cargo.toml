@@ -8,6 +8,7 @@ publish = false
 async-channel = "2.5"
 bytes = "1"
 cookie_store = "0.22"
+dfn3_rs = "=0.1.2"
 dirs = "6"
 futures = "0.3"
 global-hotkey = "=0.10.0"
@@ -56,6 +57,16 @@ windows = { version = "0.62", features = ["Win32_Media_Audio", "Win32_System_Com
 embed-resource = "3.0"
 url = "2.5"
 
+
+# Keep DeepFilterNet within its 10 ms frame budget in the debug builds shipped by CI.
+[profile.dev.package.dfn3_rs]
+opt-level = 2
+
+[profile.dev.package.realfft]
+opt-level = 2
+
+[profile.dev.package.rustfft]
+opt-level = 2
 
 [profile.dev.package.pulseaudio]
 # Keep the protocol reactor responsive to teardown during continuous capture.
