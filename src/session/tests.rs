@@ -132,9 +132,17 @@ async fn restored_http_session_authenticates_websocket_and_sign_out() {
     .expect("loopback SPK protocol timed out");
 }
 
+#[derive(Clone, Copy)]
+enum SidebarSnapshot {
+    Initial,
+    Updated,
+    VoiceReplaced,
+    FailPresenceOnce,
+}
+
 async fn voice_session(
     start_call: StartCall,
-    server: impl AsyncFnOnce(TcpListener, Receiver<Request>, watch::Sender<bool>),
+    server: impl AsyncFnOnce(TcpListener, Receiver<Request>, watch::Sender<SidebarSnapshot>),
     desktop: impl AsyncFnOnce(Sender<Command>, Receiver<View>),
 ) -> SessionEnd {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -145,11 +153,13 @@ async fn voice_session(
     let (command_tx, commands) = async_channel::unbounded();
     let (views, view_rx) = async_channel::unbounded();
     let (token_requests, requests) = async_channel::unbounded();
-    let (update_snapshots, updated) = watch::channel(false);
+    let (update_snapshots, updated) = watch::channel(SidebarSnapshot::Initial);
 
     let http = async move {
+        let mut presence_failed = false;
         loop {
             let (line, request) = Request::receive(&http).await;
+            let snapshot = *updated.borrow();
             let body = match line.as_str() {
                 "POST /api/auth/sign-in/email HTTP/1.1" => {
                     request
@@ -158,16 +168,29 @@ async fn voice_session(
                     continue;
                 }
                 "GET /api/profile/me HTTP/1.1" => r#"{"id":"alice","email":"alice@example.test"}"#,
-                "GET /api/channels HTTP/1.1" if *updated.borrow() => {
+                "GET /api/channels HTTP/1.1" if matches!(snapshot, SidebarSnapshot::Updated) => {
                     r#"[{"id":"first","type":"voice"},{"id":"new","type":"voice"}]"#
                 }
-                "GET /api/voice HTTP/1.1" if *updated.borrow() => {
-                    r#"[{"userId":"bob","channelId":"first","speaking":true}]"#
-                }
+                "GET /api/voice HTTP/1.1" => match snapshot {
+                    SidebarSnapshot::FailPresenceOnce if !presence_failed => {
+                        presence_failed = true;
+                        request
+                            .respond_raw("503 Service Unavailable", &[], b"")
+                            .await;
+                        continue;
+                    }
+                    SidebarSnapshot::Initial | SidebarSnapshot::FailPresenceOnce => "[]",
+                    SidebarSnapshot::Updated => {
+                        r#"[{"userId":"bob","channelId":"first","speaking":true}]"#
+                    }
+                    SidebarSnapshot::VoiceReplaced => {
+                        r#"[{"userId":"alice","channelId":"second"}]"#
+                    }
+                },
                 "GET /api/channels HTTP/1.1" => {
                     r#"[{"id":"first","type":"voice"},{"id":"second","type":"voice"}]"#
                 }
-                "GET /api/users HTTP/1.1" | "GET /api/voice HTTP/1.1" => "[]",
+                "GET /api/users HTTP/1.1" => "[]",
                 "POST /api/voice/token HTTP/1.1" => {
                     token_requests.send(request).await.unwrap();
                     continue;
@@ -291,7 +314,7 @@ async fn spk_recovery_reclaims_the_same_voice_session_with_current_flags() {
             let sid = &join["sid"];
             drop(socket);
 
-            update_snapshots.send_replace(true);
+            update_snapshots.send_replace(SidebarSnapshot::Updated);
             let (tcp, _) = listener.accept().await.unwrap();
             resume_socket.await.unwrap();
             let mut socket = accept_async(tcp).await.unwrap();
@@ -333,7 +356,8 @@ async fn spk_recovery_reclaims_the_same_voice_session_with_current_flags() {
         async |commands, views| {
             join_test_voice(&commands, &views).await;
             wait_for_sidebar(&views, |sidebar| {
-                matches!(sidebar.connection, Connection::Reconnecting) && voice_hears_alice(sidebar)
+                matches!(sidebar.connection, Connection::Reconnecting)
+                    && shows_alice_speaking(sidebar)
             })
             .await;
             commands.send(Command::ToggleDeafen).await.unwrap();
@@ -365,8 +389,132 @@ async fn spk_recovery_reclaims_the_same_voice_session_with_current_flags() {
             .await;
             observed.recv().await.unwrap();
             commands.send(Command::ToggleDeafen).await.unwrap();
-            wait_for_sidebar(&views, voice_hears_alice).await;
+            wait_for_sidebar(&views, shows_alice_speaking).await;
             observed.recv().await.unwrap();
+            commands.send(Command::LeaveVoice).await.unwrap();
+            wait_for_sidebar(&views, |sidebar| sidebar.voice.is_none()).await;
+        },
+    )
+    .await;
+    assert!(matches!(end, SessionEnd::Closed));
+}
+
+#[tokio::test]
+async fn spk_recovery_yields_to_another_client_in_a_different_voice_channel() {
+    let (finished, closed) = oneshot::channel();
+    let end = voice_session(
+        Call::start_for_test,
+        async |listener, requests, update_snapshots| {
+            let mut socket = accept_async(listener.accept().await.unwrap().0)
+                .await
+                .unwrap();
+            establish_voice(&requests, &mut socket).await;
+            update_snapshots.send_replace(SidebarSnapshot::VoiceReplaced);
+            drop(socket);
+
+            let mut socket = accept_async(listener.accept().await.unwrap().0)
+                .await
+                .unwrap();
+            tokio::select! {
+                biased;
+                Some(Ok(Message::Text(frame))) = socket.next() => {
+                    panic!("the previous client sent a voice frame: {frame}")
+                }
+                result = closed => result.unwrap(),
+            }
+        },
+        async |commands, views| {
+            join_test_voice(&commands, &views).await;
+            let sidebar = wait_for_sidebar(&views, |sidebar| {
+                sidebar.voice.is_none() && sidebar.voice_notice == Some(VOICE_REPLACED)
+            })
+            .await;
+            assert!(
+                sidebar
+                    .participants("second")
+                    .iter()
+                    .any(|member| member.id == "alice")
+            );
+            finished.send(()).unwrap();
+        },
+    )
+    .await;
+    assert!(matches!(end, SessionEnd::Closed));
+}
+
+#[tokio::test]
+async fn spk_recovery_retries_presence_and_waits_for_livekit_before_announcing_ready() {
+    let (recovering, reconnect_socket) = oneshot::channel();
+    let (reclaimed, restore_media) = oneshot::channel();
+    let (resynced, leave) = oneshot::channel();
+    let end = voice_session(
+        voice::tests::start_recovery_fixture,
+        async |listener, requests, update_snapshots| {
+            let mut socket = accept_async(listener.accept().await.unwrap().0)
+                .await
+                .unwrap();
+            let join = accept_voice_join(&requests, &mut socket, "first").await;
+            acknowledge_voice(&mut socket, &join).await;
+            let sid = &join["sid"];
+            let ready = value!({"type":"voice:ready","sid":sid});
+            assert_eq!(receive_voice_frame(&mut socket).await, ready);
+            reconnect_socket.await.unwrap();
+            update_snapshots.send_replace(SidebarSnapshot::FailPresenceOnce);
+            drop(socket);
+
+            let mut socket = accept_async(listener.accept().await.unwrap().0)
+                .await
+                .unwrap();
+            assert_eq!(
+                receive_voice_frame(&mut socket).await,
+                value!({
+                    "type":"voice:join","sid":sid,"channelId":"first","ready":false,
+                    "muted":true,"deafened":false,"watching":[]
+                })
+            );
+            assert_eq!(
+                receive_voice_frame(&mut socket).await,
+                voice_state(sid, true, false)
+            );
+            reclaimed.send(()).unwrap();
+            assert_eq!(receive_voice_frame(&mut socket).await, ready);
+            assert_eq!(
+                receive_voice_frame(&mut socket).await,
+                voice_state(sid, true, false)
+            );
+            resynced.send(()).unwrap();
+            assert_eq!(
+                receive_voice_frame(&mut socket).await,
+                value!({"type":"voice:leave","sid":sid})
+            );
+        },
+        async |commands, views| {
+            wait_for_sidebar(&views, |sidebar| sidebar.can_join_voice("first")).await;
+            commands
+                .send(Command::JoinVoice("first".into()))
+                .await
+                .unwrap();
+            let status = |expected| {
+                move |sidebar: &Sidebar| {
+                    sidebar
+                        .voice
+                        .as_ref()
+                        .is_some_and(|voice| voice.status == expected)
+                }
+            };
+            wait_for_sidebar(&views, status(VoiceStatus::ListenOnly)).await;
+            commands.send(Command::RefreshDevices).await.unwrap();
+            wait_for_sidebar(&views, status(VoiceStatus::Reconnecting)).await;
+            recovering.send(()).unwrap();
+            wait_for_sidebar(&views, |sidebar| {
+                matches!(sidebar.connection, Connection::Online) && sidebar.load_failed
+            })
+            .await;
+            restore_media.await.unwrap();
+
+            commands.send(Command::RefreshDevices).await.unwrap();
+            wait_for_sidebar(&views, status(VoiceStatus::ListenOnly)).await;
+            leave.await.unwrap();
             commands.send(Command::LeaveVoice).await.unwrap();
             wait_for_sidebar(&views, |sidebar| sidebar.voice.is_none()).await;
         },
@@ -520,7 +668,7 @@ async fn confirm_voice_join(socket: &mut WebSocketStream<TcpStream>, join: &Valu
 
 async fn join_test_voice(commands: &Sender<Command>, views: &Receiver<View>) {
     request_first_voice(commands, views).await;
-    wait_for_sidebar(views, voice_hears_alice).await;
+    wait_for_sidebar(views, shows_alice_speaking).await;
 }
 
 async fn request_first_voice(commands: &Sender<Command>, views: &Receiver<View>) {
@@ -534,7 +682,7 @@ async fn request_first_voice(commands: &Sender<Command>, views: &Receiver<View>)
         .unwrap();
 }
 
-fn voice_hears_alice(sidebar: &Sidebar) -> bool {
+fn shows_alice_speaking(sidebar: &Sidebar) -> bool {
     sidebar.voice.as_ref().is_some_and(|voice| {
         voice.status == VoiceStatus::Connected
             && voice
@@ -1067,7 +1215,7 @@ async fn switch_voice(established: bool, moved_to: Option<&str>) {
                     .await
                     .unwrap();
                 if destination == "new" {
-                    update_snapshots.send(true).unwrap();
+                    update_snapshots.send(SidebarSnapshot::Updated).unwrap();
                     socket
                         .send(Message::text(r#"{"type":"channels:changed"}"#))
                         .await
@@ -1099,7 +1247,7 @@ async fn switch_voice(established: bool, moved_to: Option<&str>) {
             request_first_voice(&commands, &views).await;
             old_attempt.await.unwrap();
             if established {
-                wait_for_sidebar(&views, voice_hears_alice).await;
+                wait_for_sidebar(&views, shows_alice_speaking).await;
             }
             if moved_to.is_none() {
                 commands
@@ -1113,7 +1261,7 @@ async fn switch_voice(established: bool, moved_to: Option<&str>) {
                     .voice
                     .as_ref()
                     .is_some_and(|voice| voice.channel_id == destination)
-                    && voice_hears_alice(sidebar)
+                    && shows_alice_speaking(sidebar)
                     && sidebar
                         .participants("first")
                         .iter()

@@ -42,6 +42,7 @@ pub(crate) fn start_recovery_fixture(
                             deafened: intent.mute.deafened,
                             speaking: false,
                         },
+                        status != Status::Reconnecting,
                         phase == 2,
                     );
                     worker.update(Update::Media(Arc::new(Report {
@@ -224,6 +225,7 @@ async fn exercise(scenario: Scenario) {
                                         muted: true,
                                         ..VoiceFlags::default()
                                     },
+                                    true,
                                     false,
                                 );
                                 observed.recv().await.unwrap();
@@ -245,6 +247,7 @@ async fn exercise(scenario: Scenario) {
                                         speaking: true,
                                         ..VoiceFlags::default()
                                     },
+                                    true,
                                     false,
                                 );
                                 observed.recv().await.unwrap();
@@ -253,9 +256,9 @@ async fn exercise(scenario: Scenario) {
                                     deafened: true,
                                     speaking: false,
                                 };
-                                worker.publish_flags(deafened, false);
+                                worker.publish_flags(deafened, true, false);
                                 observed.recv().await.unwrap();
-                                worker.publish_flags(deafened, true);
+                                worker.publish_flags(deafened, true, true);
                                 observed.recv().await.unwrap();
                                 Err(disconnect_issue(DisconnectReason::MediaFailure))
                             }
@@ -367,6 +370,10 @@ fn deafen_restores_mute_and_unmuting_undeafens() {
 fn media_failure_is_retryable_and_session_replacement_is_authoritative() {
     assert!(matches!(
         disconnect_issue(DisconnectReason::MediaFailure),
+        Issue::LiveKitDisconnected
+    ));
+    assert!(matches!(
+        disconnect_issue(DisconnectReason::JoinFailure),
         Issue::LiveKitDisconnected
     ));
     assert!(matches!(
