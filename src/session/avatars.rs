@@ -30,11 +30,14 @@ pub(super) struct Loaded {
 
 impl AvatarLoads {
     pub(super) fn fill(&mut self, client: &SpkClient, sidebar: &Sidebar) {
-        let candidates = sidebar.profile.id.iter().chain(sidebar.rooms.keys()).chain(
-            sidebar.users.values().filter_map(|user| {
+        let candidates = sidebar
+            .profile
+            .id
+            .iter()
+            .chain(sidebar.voice_presence.keys())
+            .chain(sidebar.users.values().filter_map(|user| {
                 (sidebar.profile.id.is_some() && user.name().is_some()).then_some(&user.id)
-            }),
-        );
+            }));
 
         for user_id in candidates {
             if self.tasks.len() >= MAX_IN_FLIGHT {

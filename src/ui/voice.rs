@@ -9,7 +9,7 @@ use gpui_kit::component::popover::Popover;
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum VoiceControls {
     Profile,
-    Room,
+    Channel,
 }
 
 fn device_label(kind: DeviceKind) -> &'static str {

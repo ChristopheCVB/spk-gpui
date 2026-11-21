@@ -91,7 +91,11 @@ pub struct Devices {
 }
 
 impl Devices {
-    pub fn read(audio: &PlatformAudio) -> Self {
+    pub fn enumerate() -> Self {
+        PlatformAudio::new().map_or_else(|_| Self::default(), |audio| Self::read(&audio))
+    }
+
+    pub(super) fn read(audio: &PlatformAudio) -> Self {
         Self {
             microphones: list(
                 DeviceKind::Microphone,
@@ -149,7 +153,32 @@ fn list(kind: DeviceKind, devices: impl Iterator<Item = (usize, Device)>) -> Dev
     list
 }
 
-pub(super) fn switch_speakers(audio: &PlatformAudio, device: &Device) -> bool {
+pub(super) fn route_speakers(
+    audio: &PlatformAudio,
+    list: &DeviceList,
+    preferred: Option<&Device>,
+    previous: Option<&Device>,
+) -> Option<Device> {
+    let preferred = list.resolve(preferred);
+    let previous = previous.and_then(|device| {
+        list.choices
+            .iter()
+            .chain(list.default.iter())
+            .find(|choice| *choice == device)
+    });
+    preferred
+        .into_iter()
+        .chain(previous.filter(|device| Some(*device) != preferred))
+        .chain(
+            list.default
+                .as_ref()
+                .filter(|device| Some(*device) != preferred && Some(*device) != previous),
+        )
+        .find(|device| switch_speakers(audio, device))
+        .cloned()
+}
+
+fn switch_speakers(audio: &PlatformAudio, device: &Device) -> bool {
     audio
         .switch_playout_device(&PlayoutDeviceId::from_unchecked_guid(&device.id))
         .is_ok()

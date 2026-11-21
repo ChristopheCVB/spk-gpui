@@ -1,5 +1,6 @@
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
+use cookie_store::{CookieStore, serde::json};
 use futures::{SinkExt, StreamExt};
 use reqwest::cookie::CookieStore as _;
 use serde_json::{Value, json as value};
@@ -14,7 +15,15 @@ use tokio_tungstenite::{
     tungstenite::{Message, handshake::server},
 };
 
-use super::*;
+use super::{
+    presence::Data,
+    voice_session::{StartCall, VOICE_REPLACED},
+    *,
+};
+use crate::{
+    api::{Member, VoiceFlags},
+    voice::{self, DevicePreferences, Report as VoiceReport},
+};
 
 #[tokio::test]
 #[allow(
@@ -717,10 +726,8 @@ fn live_membership_and_flags_win_over_an_in_flight_snapshot() {
         },
         None,
     );
-    let mut refresh = Refresh {
-        presence_updates: Some(HashMap::new()),
-        ..Default::default()
-    };
+    let mut refresh = Refresh::default();
+    refresh.presence_updates = Some(HashMap::new());
     refresh.complete(
         &mut sidebar,
         Resource::Channels,
@@ -1021,7 +1028,7 @@ impl Request {
 }
 
 #[test]
-fn room_cues_follow_live_membership_of_other_users() {
+fn voice_cues_follow_live_membership_of_other_users() {
     let profile = serde_json::from_str(r#"{"id":"me","email":"me@example.test"}"#).unwrap();
     let mut sidebar = Sidebar::new(profile, None);
     let mut call = VoiceView::joining("here".into());
@@ -1029,14 +1036,15 @@ fn room_cues_follow_live_membership_of_other_users() {
     sidebar.voice = Some(call);
     let mut refresh = Refresh::default();
 
-    let present = |refresh: &mut Refresh, sidebar: &mut Sidebar, user: &str, room: Option<&str>| {
-        refresh.update_presence(
-            sidebar,
-            user.into(),
-            room.map(str::to_owned),
-            VoiceFlags::default(),
-        )
-    };
+    let present =
+        |refresh: &mut Refresh, sidebar: &mut Sidebar, user: &str, channel: Option<&str>| {
+            refresh.update_presence(
+                sidebar,
+                user.into(),
+                channel.map(str::to_owned),
+                VoiceFlags::default(),
+            )
+        };
 
     assert_eq!(
         present(&mut refresh, &mut sidebar, "already-here", Some("here")),
