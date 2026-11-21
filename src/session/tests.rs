@@ -15,7 +15,11 @@ use tokio_tungstenite::{
     tungstenite::{Message, handshake::server},
 };
 
-use super::{presence::Data, voice_session::StartCall, *};
+use super::{
+    presence::Data,
+    voice_session::{StartCall, VOICE_REPLACED},
+    *,
+};
 use crate::{
     api::{Member, VoiceFlags},
     voice::{self, DevicePreferences, Report as VoiceReport},
@@ -431,8 +435,7 @@ async fn spk_recovery_yields_to_another_client_in_a_different_voice_channel() {
         async |commands, views| {
             join_test_voice(&commands, &views).await;
             let sidebar = wait_for_sidebar(&views, |sidebar| {
-                sidebar.voice.is_none()
-                    && sidebar.voice_notice == Some("You joined voice from another tab or device.")
+                sidebar.voice.is_none() && sidebar.voice_notice == Some(VOICE_REPLACED)
             })
             .await;
             assert!(
@@ -1025,7 +1028,7 @@ impl Request {
 }
 
 #[test]
-fn room_cues_follow_live_membership_of_other_users() {
+fn voice_cues_follow_live_membership_of_other_users() {
     let profile = serde_json::from_str(r#"{"id":"me","email":"me@example.test"}"#).unwrap();
     let mut sidebar = Sidebar::new(profile, None);
     let mut call = VoiceView::joining("here".into());
@@ -1033,14 +1036,15 @@ fn room_cues_follow_live_membership_of_other_users() {
     sidebar.voice = Some(call);
     let mut refresh = Refresh::default();
 
-    let present = |refresh: &mut Refresh, sidebar: &mut Sidebar, user: &str, room: Option<&str>| {
-        refresh.update_presence(
-            sidebar,
-            user.into(),
-            room.map(str::to_owned),
-            VoiceFlags::default(),
-        )
-    };
+    let present =
+        |refresh: &mut Refresh, sidebar: &mut Sidebar, user: &str, channel: Option<&str>| {
+            refresh.update_presence(
+                sidebar,
+                user.into(),
+                channel.map(str::to_owned),
+                VoiceFlags::default(),
+            )
+        };
 
     assert_eq!(
         present(&mut refresh, &mut sidebar, "already-here", Some("here")),

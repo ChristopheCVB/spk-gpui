@@ -23,7 +23,7 @@ use authentication::{
     SESSION_EXPIRED, SavedSession, login, restore, sign_in, sign_in_message, sign_out,
 };
 use avatars::AvatarLoads;
-use presence::{Refresh, Resource, RoomMember};
+use presence::{Refresh, Resource, VoiceMembership};
 use voice_session::{DeviceSettings, VoiceDestination, VoiceSession, VoiceSettings};
 pub use {presence::Participant, voice_session::VoiceView};
 
@@ -70,7 +70,7 @@ pub struct Sidebar {
     pub device_notice: Option<&'static str>,
     pub avatars: Arc<HashMap<String, Arc<RenderImage>>>,
     users: Arc<HashMap<String, User>>,
-    rooms: HashMap<String, RoomMember>,
+    voice_presence: HashMap<String, VoiceMembership>,
 }
 
 impl Sidebar {
@@ -90,7 +90,7 @@ impl Sidebar {
             device_notice: None,
             avatars: Arc::default(),
             users: Arc::default(),
-            rooms: HashMap::new(),
+            voice_presence: HashMap::new(),
         }
     }
 
@@ -249,10 +249,9 @@ async fn watch_session(
                 Ok(Command::Refresh) => refresh.fetch_all(client),
                 Ok(Command::JoinVoice(channel_id)) => voice.join(&mut sidebar, channel_id),
                 Ok(Command::LeaveVoice) => voice.leave(&mut sidebar),
-                Ok(command @ (Command::ToggleMute | Command::ToggleDeafen | Command::RetryMicrophone | Command::RefreshDevices | Command::ChooseDevice(..))) => {
+                Ok(command) => {
                     voice.apply_controls(&mut sidebar, settings, command).await;
                 }
-                _ => {}
             },
             event = socket.recv() => match event {
                 Err(_) => break SessionEnd::Closed,
@@ -276,7 +275,7 @@ async fn watch_session(
                     Frame::ChannelsChanged => refresh.fetch(client, Resource::Channels),
                     Frame::UsersChanged => refresh.fetch(client, Resource::Users),
                     Frame::Presence { user_id, channel_id, flags } => {
-                        let new_member = channel_id.is_some() && !sidebar.rooms.contains_key(&user_id);
+                        let new_participant = channel_id.is_some() && !sidebar.voice_presence.contains_key(&user_id);
                         let own_update = sidebar.profile.id.as_ref() == Some(&user_id);
                         if let Some(cue) = refresh.update_presence(&mut sidebar, user_id, channel_id, flags) {
                             settings.sounds.play(cue, cue == Sound::Join);
@@ -284,7 +283,7 @@ async fn watch_session(
                         if own_update {
                             voice.own_presence_updated(&mut sidebar);
                         }
-                        if new_member {
+                        if new_participant {
                             avatars.fill(client, &sidebar);
                         }
                     }

@@ -9,15 +9,59 @@ use crate::voice::{Device, devices::select_microphone};
 
 #[derive(Default)]
 pub(super) struct Capture {
-    pub(super) device: Option<Device>,
-    pub(super) track: Option<LocalAudioTrack>,
-    pub(super) published: Option<TrackSid>,
+    device: Option<Device>,
+    track: Option<LocalAudioTrack>,
+    published: Option<TrackSid>,
     starting: Option<oneshot::Sender<()>>,
-    pub(super) jobs: JoinSet<Option<TrackSid>>,
-    pub(super) failed: bool,
+    jobs: JoinSet<Option<TrackSid>>,
+    failed: bool,
 }
 
 impl Capture {
+    pub(super) fn selected_device(&self) -> Option<&Device> {
+        self.device.as_ref()
+    }
+
+    pub(super) fn active_device(&self) -> Option<&Device> {
+        self.published.as_ref().and(self.selected_device())
+    }
+
+    pub(super) fn can_start(&self) -> bool {
+        self.device.is_none() && self.jobs.is_empty()
+    }
+
+    pub(super) fn unavailable(&self) -> bool {
+        self.failed || self.can_start()
+    }
+
+    pub(super) fn has_publication(&self) -> bool {
+        self.published.is_some()
+    }
+
+    pub(super) fn owns_track(&self, sid: &TrackSid) -> bool {
+        self.track.as_ref().is_some_and(|track| track.sid() == *sid)
+    }
+
+    pub(super) fn resume(&self) {
+        if self.has_publication()
+            && let Some(track) = &self.track
+        {
+            track.unmute();
+        }
+    }
+
+    pub(super) async fn shutdown(&mut self) {
+        self.silence();
+        self.jobs.shutdown().await;
+    }
+
+    pub(super) async fn next_publication(&mut self) -> Option<Option<TrackSid>> {
+        self.jobs
+            .join_next()
+            .await
+            .map(|result| result.ok().flatten())
+    }
+
     pub(super) fn silence(&self) {
         if let Some(track) = &self.track {
             track.mute();
@@ -87,10 +131,8 @@ impl Capture {
             return;
         }
         self.published = published.and_then(|_| self.current_publication(room));
-        if self.published.is_some() {
-            if let Some(track) = &self.track {
-                track.unmute();
-            }
+        if self.has_publication() {
+            self.resume();
         } else {
             self.track = None;
             self.failed = true;

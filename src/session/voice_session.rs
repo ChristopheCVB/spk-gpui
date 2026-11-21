@@ -10,7 +10,7 @@ use crate::voice::{
     Report as VoiceReport, Status as VoiceStatus, Update as VoiceUpdate,
 };
 
-const VOICE_REPLACED: &str = "You joined voice from another tab or device.";
+pub(super) const VOICE_REPLACED: &str = "You joined voice from another tab or device.";
 const CHANNEL_UNAVAILABLE: &str = "This voice channel is no longer available.";
 
 #[derive(Clone)]
@@ -97,7 +97,7 @@ impl Sidebar {
         self.profile
             .id
             .as_ref()
-            .and_then(|id| self.rooms.get(id))
+            .and_then(|id| self.voice_presence.get(id))
             .zip(self.voice.as_ref())
             .is_some_and(|(member, voice)| member.channel_id != voice.channel_id)
     }
@@ -407,7 +407,7 @@ impl VoiceSession {
                 }
                 return;
             }
-            _ => unreachable!(),
+            _ => return,
         }
         if let Some(call) = &self.call {
             call.apply(&sidebar.voice_intent);

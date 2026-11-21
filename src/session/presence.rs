@@ -10,7 +10,7 @@ use crate::api::{Channel, Failure, Member, SpkClient, User, VoiceFlags};
 use crate::sounds::Sound;
 
 #[derive(Clone)]
-pub(super) struct RoomMember {
+pub(super) struct VoiceMembership {
     pub(super) channel_id: String,
     flags: VoiceFlags,
 }
@@ -24,7 +24,7 @@ pub struct Participant<'a> {
 impl Sidebar {
     pub fn participants(&self, channel: &str) -> Vec<Participant<'_>> {
         let mut people = self
-            .rooms
+            .voice_presence
             .iter()
             .filter(|(_, member)| member.channel_id == channel)
             .map(|(user, member)| Participant {
@@ -64,7 +64,7 @@ pub(super) struct Refresh {
     in_flight: HashSet<Resource>,
     pub(super) dirty: HashSet<Resource>,
     failed: HashSet<Resource>,
-    pub(super) presence_updates: Option<HashMap<String, Option<RoomMember>>>,
+    pub(super) presence_updates: Option<HashMap<String, Option<VoiceMembership>>>,
     pub(super) presence_ready: bool,
 }
 
@@ -114,7 +114,7 @@ impl Refresh {
             })
             .and_then(|voice| {
                 let was_here = sidebar
-                    .rooms
+                    .voice_presence
                     .get(&user_id)
                     .is_some_and(|member| member.channel_id == voice.channel_id);
                 let is_here = channel_id.as_deref() == Some(voice.channel_id.as_str());
@@ -124,11 +124,11 @@ impl Refresh {
                     _ => None,
                 }
             });
-        let member = channel_id.map(|channel_id| RoomMember { channel_id, flags });
+        let member = channel_id.map(|channel_id| VoiceMembership { channel_id, flags });
         if let Some(updates) = &mut self.presence_updates {
             updates.insert(user_id.clone(), member.clone());
         }
-        apply_presence(&mut sidebar.rooms, user_id, member);
+        apply_presence(&mut sidebar.voice_presence, user_id, member);
         cue
     }
 
@@ -154,12 +154,12 @@ impl Refresh {
                     }
                     Data::Presence(members) => {
                         self.presence_ready = true;
-                        sidebar.rooms = members
+                        sidebar.voice_presence = members
                             .into_iter()
                             .map(|member| {
                                 (
                                     member.user_id,
-                                    RoomMember {
+                                    VoiceMembership {
                                         channel_id: member.channel_id,
                                         flags: member.flags,
                                     },
@@ -167,7 +167,7 @@ impl Refresh {
                             })
                             .collect();
                         for (user, member) in self.presence_updates.take().into_iter().flatten() {
-                            apply_presence(&mut sidebar.rooms, user, member);
+                            apply_presence(&mut sidebar.voice_presence, user, member);
                         }
                     }
                 }
@@ -184,13 +184,13 @@ impl Refresh {
 }
 
 fn apply_presence(
-    rooms: &mut HashMap<String, RoomMember>,
+    voice_presence: &mut HashMap<String, VoiceMembership>,
     user_id: String,
-    member: Option<RoomMember>,
+    member: Option<VoiceMembership>,
 ) {
     if let Some(member) = member {
-        rooms.insert(user_id, member);
+        voice_presence.insert(user_id, member);
     } else {
-        rooms.remove(&user_id);
+        voice_presence.remove(&user_id);
     }
 }

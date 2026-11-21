@@ -43,7 +43,7 @@ fn voice_channels(sidebar: &Sidebar) -> impl Iterator<Item = &Channel> {
 
 impl Spk {
     pub(super) fn workspace(&self, sidebar: &Sidebar, cx: &mut Context<Self>) -> impl IntoElement {
-        let room = voice_channels(sidebar)
+        let selected_channel = voice_channels(sidebar)
             .find(|channel| Some(channel.id.as_str()) == self.selected_voice_channel.as_deref())
             .or_else(|| voice_channels(sidebar).next());
         let theme = cx.theme();
@@ -65,7 +65,7 @@ impl Spk {
             .size_full()
             .flex()
             .when(self.sidebar_open, |page| {
-                page.child(self.navigation(sidebar, room, cx))
+                page.child(self.navigation(sidebar, selected_channel, cx))
             })
             .child(
                 div()
@@ -108,8 +108,12 @@ impl Spk {
                             )
                             .child(themed_icon(IconName::Volume2, theme.muted_foreground, 16.0))
                             .child(
-                                Label::new(room.map_or("Voice channels", channel_name).to_owned())
-                                    .font_semibold(),
+                                Label::new(
+                                    selected_channel
+                                        .map_or("Voice channels", channel_name)
+                                        .to_owned(),
+                                )
+                                .font_semibold(),
                             ),
                     )
                     .when(sidebar.load_failed, |area| {
@@ -158,18 +162,18 @@ impl Spk {
                                 }),
                         )
                     })
-                    .child(self.voice_channel_stage(sidebar, room, cx)),
+                    .child(self.voice_channel_stage(sidebar, selected_channel, cx)),
             )
     }
 
     fn navigation(
         &self,
         sidebar: &Sidebar,
-        room: Option<&Channel>,
+        selected_channel: Option<&Channel>,
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
-        let selected = room.map(|room| room.id.as_str());
+        let selected = selected_channel.map(|channel| channel.id.as_str());
         let people = sidebar.people();
         let has_text = sidebar
             .channels
@@ -493,18 +497,19 @@ impl Spk {
     fn voice_channel_stage(
         &self,
         sidebar: &Sidebar,
-        room: Option<&Channel>,
+        selected_channel: Option<&Channel>,
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
-        let call = room.and_then(|room| {
+        let call = selected_channel.and_then(|channel| {
             sidebar
                 .voice
                 .as_ref()
-                .filter(|call| call.channel_id == room.id)
+                .filter(|call| call.channel_id == channel.id)
         });
         let in_voice = call.is_some_and(VoiceView::is_participating);
-        let mut participants = room.map_or_else(Vec::new, |room| sidebar.participants(&room.id));
+        let mut participants =
+            selected_channel.map_or_else(Vec::new, |channel| sidebar.participants(&channel.id));
         if let Some(id) = sidebar.profile.id.as_deref().filter(|_| in_voice)
             && !participants.iter().any(|person| person.id == id)
         {
@@ -518,7 +523,7 @@ impl Spk {
                 },
             );
         }
-        let message = match (room, sidebar.channels.is_some()) {
+        let message = match (selected_channel, sidebar.channels.is_some()) {
             (None, false) if !sidebar.load_failed => Some("Loading voice channels…"),
             (None, true) => Some("No voice channels"),
             (Some(_), _) if participants.is_empty() => Some("Nobody is here yet."),
@@ -558,8 +563,8 @@ impl Spk {
                             ),
                     ),
             )
-            .when_some(room, |stage, room| {
-                let id = room.id.clone();
+            .when_some(selected_channel, |stage, channel| {
+                let id = channel.id.clone();
                 let switching_here = sidebar.switching_to() == Some(id.as_str());
                 let departing = if switching_here {
                     sidebar.voice.as_ref()
@@ -585,7 +590,7 @@ impl Spk {
                                 .when(in_voice, |bar| {
                                     bar.bg(theme.secondary).p_2().child(self.voice_controls(
                                         sidebar,
-                                        VoiceControls::Room,
+                                        VoiceControls::Channel,
                                         cx,
                                     ))
                                 })

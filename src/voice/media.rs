@@ -33,8 +33,7 @@ pub(super) struct Media {
 
 impl Media {
     pub(super) async fn stop_audio(&mut self) {
-        self.capture.silence();
-        self.capture.jobs.shutdown().await;
+        self.capture.shutdown().await;
         if let Some(audio) = self.audio.take() {
             stop_recording(&audio);
             LkRuntime::instance()
@@ -127,7 +126,8 @@ impl Media {
         let mut resync = false;
 
         loop {
-            if reconnecting && intent.mute.effective_muted() && capture.device.is_some() {
+            if reconnecting && intent.mute.effective_muted() && capture.selected_device().is_some()
+            {
                 capture.stop(room, audio).await;
             }
             if check_routes && !reconnecting {
@@ -140,14 +140,13 @@ impl Media {
                 } else {
                     input
                 };
-                if capture.device.as_ref() != wanted || retry_mic != intent.retry_mic {
+                if capture.selected_device() != wanted || retry_mic != intent.retry_mic {
                     capture.stop(room, audio).await;
                     speaking.remove(me.as_str());
                     retry_mic = intent.retry_mic;
                 }
                 if let Some(device) = wanted
-                    && capture.device.is_none()
-                    && capture.jobs.is_empty()
+                    && capture.can_start()
                 {
                     capture.start(room, audio, device.clone());
                 }
@@ -170,17 +169,13 @@ impl Media {
                 runtime
                     .pc_factory()
                     .set_adm_playout_enabled(output.is_some() && !intent.mute.deafened);
-                if resync
-                    && !intent.mute.effective_muted()
-                    && capture.published.is_some()
-                    && let Some(track) = &capture.track
-                {
-                    track.unmute();
+                if resync && !intent.mute.effective_muted() {
+                    capture.resume();
                 }
             }
 
             speaking.expire(Instant::now());
-            let muted = reconnecting || capture.published.is_none();
+            let muted = reconnecting || !capture.has_publication();
             if muted {
                 speaking.remove(me.as_str());
             }
@@ -193,19 +188,13 @@ impl Media {
             let report = Report {
                 status: if reconnecting {
                     Status::Reconnecting
-                } else if !intent.mute.effective_muted()
-                    && (capture.failed || (capture.device.is_none() && capture.jobs.is_empty()))
-                {
+                } else if !intent.mute.effective_muted() && capture.unavailable() {
                     Status::ListenOnly
                 } else {
                     Status::Connected
                 },
                 devices: devices.clone(),
-                microphone: capture
-                    .published
-                    .as_ref()
-                    .and(capture.device.as_ref())
-                    .cloned(),
+                microphone: capture.active_device().cloned(),
                 speakers: output.clone(),
                 speaking: speaking.0.keys().cloned().collect(),
             };
@@ -235,7 +224,7 @@ impl Media {
                     ),
                     Some(RoomEvent::ParticipantDisconnected(participant)) => speaking.remove(participant.identity().as_str()),
                     Some(RoomEvent::LocalTrackRepublished { publication, .. })
-                        if capture.track.as_ref().is_none_or(|track| track.sid() != publication.sid()) =>
+                        if !capture.owns_track(&publication.sid()) =>
                     {
                         // The SDK can be republishing while mute or deafen removes the old track.
                         let _ = room.local_participant().unpublish_track(&publication.sid()).await;
@@ -259,8 +248,8 @@ impl Media {
                     None => return Err(Issue::LiveKitDisconnected),
                     _ => {}
                 },
-                result = capture.jobs.join_next(), if !reconnecting && !capture.jobs.is_empty() => {
-                    capture.complete(room, audio, result.and_then(Result::ok).flatten()).await;
+                Some(published) = capture.next_publication(), if !reconnecting => {
+                    capture.complete(room, audio, published).await;
                     check_routes = true;
                 }
                 _ = scan.tick() => {
