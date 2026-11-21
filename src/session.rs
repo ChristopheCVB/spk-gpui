@@ -63,13 +63,21 @@ pub struct Sidebar {
     pub notice: Option<&'static str>,
     pub load_failed: bool,
     pub voice: Option<VoiceView>,
+    switching_to: Option<VoiceDestination>,
     pub voice_notice: Option<&'static str>,
+    voice_rejoin: Option<String>,
     pub voice_intent: Intent,
     pub devices: Arc<Devices>,
     pub device_notice: Option<&'static str>,
     pub avatars: Arc<HashMap<String, Arc<RenderImage>>>,
     users: Arc<HashMap<String, User>>,
     rooms: HashMap<String, RoomMember>,
+}
+
+#[derive(Clone)]
+struct VoiceDestination {
+    channel_id: String,
+    server_move: bool,
 }
 
 #[derive(Clone)]
@@ -93,7 +101,7 @@ impl VoiceView {
     fn listening(&self) -> bool {
         matches!(
             self.status,
-            VoiceStatus::Connected | VoiceStatus::ListenOnly
+            VoiceStatus::Connected | VoiceStatus::ListenOnly | VoiceStatus::Reconnecting
         )
     }
 
@@ -139,13 +147,43 @@ impl Sidebar {
             notice,
             load_failed: false,
             voice: None,
+            switching_to: None,
             voice_notice: None,
+            voice_rejoin: None,
             voice_intent: Intent::default(),
             devices: Arc::default(),
             device_notice: None,
             avatars: Arc::default(),
             users: Arc::default(),
             rooms: HashMap::new(),
+        }
+    }
+
+    fn has_voice_channel(&self, channel_id: &str) -> bool {
+        self.channels
+            .iter()
+            .flatten()
+            .any(|channel| channel.kind == "voice" && channel.id == channel_id)
+    }
+
+    pub fn switching_to(&self) -> Option<&str> {
+        self.switching_to
+            .as_ref()
+            .map(|destination| destination.channel_id.as_str())
+    }
+
+    fn request_voice(&mut self, call: &mut Option<Call>, channel_id: String, server_move: bool) {
+        if (server_move || self.has_voice_channel(&channel_id))
+            && self
+                .voice
+                .as_ref()
+                .is_none_or(|voice| voice.channel_id != channel_id)
+        {
+            self.switching_to = Some(VoiceDestination {
+                channel_id,
+                server_move,
+            });
+            self.cancel_voice(call, None);
         }
     }
 
@@ -156,6 +194,26 @@ impl Sidebar {
             call.cancel();
             self.voice_notice = notice;
         }
+    }
+
+    fn finish_voice(&mut self, result: Result<(), VoiceIssue>) -> bool {
+        let voice = self.voice.take();
+        self.voice_rejoin = voice
+            .as_ref()
+            .filter(|voice| {
+                voice.status != VoiceStatus::Leaving
+                    && matches!(result, Err(VoiceIssue::LiveKitDisconnected))
+            })
+            .map(|voice| voice.channel_id.clone());
+        if let Err(issue) = result {
+            self.voice_notice.get_or_insert_with(|| issue.message());
+        }
+        result.is_ok() && voice.is_some_and(|voice| voice.play_leave)
+    }
+
+    pub fn rejoin_channel(&self) -> Option<&str> {
+        let id = self.voice_rejoin.as_deref()?;
+        (matches!(self.connection, Connection::Online) && self.has_voice_channel(id)).then_some(id)
     }
 
     pub fn participants(&self, channel: &str) -> Vec<Participant<'_>> {
@@ -325,7 +383,11 @@ impl SavedSession {
     }
 }
 
+type StartCall = fn(String, SpkClient, VoiceSocket, Intent) -> Call;
+
 struct VoiceSettings {
+    socket_endpoint: String,
+    start_call: StartCall,
     devices: DeviceSettings,
     sounds: VoiceSounds,
 }
@@ -343,6 +405,8 @@ pub async fn run(
     };
     let mut next = Command::Restore;
     let mut settings = VoiceSettings {
+        socket_endpoint: env!("SPK_WS_URL").to_owned(),
+        start_call: Call::start,
         devices: DeviceSettings::load(),
         sounds: VoiceSounds::new(sound_settings),
     };
@@ -646,7 +710,8 @@ async fn watch_session(
     let (events, socket) = async_channel::bounded(32);
     let mut workers = JoinSet::new();
     let connection = client.clone();
-    workers.spawn(async move { connection.socket(env!("SPK_WS_URL"), events).await });
+    let socket_endpoint = settings.socket_endpoint.clone();
+    workers.spawn(async move { connection.socket(&socket_endpoint, events).await });
 
     let mut refresh = Refresh::default();
     refresh.fetch_all(client);
@@ -659,11 +724,39 @@ async fn watch_session(
     let mut voice_socket: Option<VoiceSocket> = None;
     let mut call = None;
     let end = loop {
-        if commands.is_closed()
-            || views
-                .send(View::SignedIn(Box::new(sidebar.clone())))
-                .await
-                .is_err()
+        if commands.is_closed() {
+            break SessionEnd::Closed;
+        }
+        if call.is_none()
+            && let Some(VoiceDestination {
+                channel_id,
+                server_move,
+            }) = sidebar.switching_to.take()
+        {
+            if let Some(socket) = &voice_socket
+                && (server_move || sidebar.has_voice_channel(&channel_id))
+            {
+                call = Some((settings.start_call)(
+                    channel_id.clone(),
+                    client.clone(),
+                    socket.clone(),
+                    sidebar.voice_intent.clone(),
+                ));
+                sidebar.voice = Some(VoiceView::joining(channel_id));
+                sidebar.voice_notice = None;
+                sidebar.voice_rejoin = None;
+            } else {
+                sidebar.voice_notice = Some(if voice_socket.is_none() {
+                    VoiceIssue::Socket.message()
+                } else {
+                    "This voice channel is no longer available."
+                });
+            }
+        }
+        if views
+            .send(View::SignedIn(Box::new(sidebar.clone())))
+            .await
+            .is_err()
         {
             break SessionEnd::Closed;
         }
@@ -672,16 +765,13 @@ async fn watch_session(
                 Err(_) => break SessionEnd::Closed,
                 Ok(Command::SignOut) => break SessionEnd::SignOut,
                 Ok(Command::Refresh) => refresh.fetch_all(client),
-                Ok(Command::JoinVoice(channel_id)) if call.is_none() => {
-                    if let Some(socket) = &voice_socket
-                        && sidebar.channels.iter().flatten().any(|channel| channel.kind == "voice" && channel.id == channel_id)
-                    {
-                        call = Some(Call::start(channel_id.clone(), client.clone(), socket.clone(), sidebar.voice_intent.clone()));
-                        sidebar.voice = Some(VoiceView::joining(channel_id));
-                        sidebar.voice_notice = None;
-                    }
+                Ok(Command::JoinVoice(channel_id)) if voice_socket.is_some() => {
+                    sidebar.request_voice(&mut call, channel_id, false);
                 }
-                Ok(Command::LeaveVoice) => sidebar.cancel_voice(&mut call, None),
+                Ok(Command::LeaveVoice) => {
+                    sidebar.switching_to = None;
+                    sidebar.cancel_voice(&mut call, None);
+                }
                 Ok(command @ (Command::ToggleMute | Command::ToggleDeafen | Command::RetryMicrophone | Command::RefreshDevices | Command::ChooseDevice(..))) => {
                     match command {
                         Command::ToggleMute => {
@@ -735,6 +825,9 @@ async fn watch_session(
                 }
                 Ok(SocketEvent::Online(socket)) => {
                     sidebar.connection = Connection::Online;
+                    if let Some(call) = &call {
+                        call.set_socket(Some(socket.clone()));
+                    }
                     voice_socket = Some(socket);
                     refresh.fetch_all(client);
                 }
@@ -742,7 +835,9 @@ async fn watch_session(
                     sidebar.connection = state;
                     voice_socket = None;
                     refresh.presence_ready = false;
-                    sidebar.cancel_voice(&mut call, Some(VoiceIssue::Socket.message()));
+                    if let Some(call) = &call {
+                        call.set_socket(None);
+                    }
                 }
                 Ok(SocketEvent::Frame(frame)) => match frame {
                     Frame::ChannelsChanged => refresh.fetch(client, Resource::Channels),
@@ -756,10 +851,23 @@ async fn watch_session(
                             avatars.fill(client, &sidebar);
                         }
                     }
-                    Frame::VoiceJoined { sid, channel_id, nonce } => {
-                        if let Some(call) = &mut call {
+                    Frame::VoiceJoined { sid, channel_id, nonce: Some(nonce) } => {
+                        if let Some(call) = &mut call
+                            && sidebar.voice.as_ref().is_some_and(|voice| voice.status != VoiceStatus::Leaving)
+                        {
                             call.acknowledge(&sid, &channel_id, &nonce);
                         }
+                    }
+                    Frame::VoiceMove { sid, channel_id }
+                        if !channel_id.is_empty()
+                            && call.as_ref().is_some_and(|call| call.owns(&sid))
+                            && sidebar.voice.as_ref().is_some_and(|voice| voice.status != VoiceStatus::Leaving) =>
+                    {
+                        // The token endpoint checks destinations that are missing from a stale channel list.
+                        if !sidebar.has_voice_channel(&channel_id) {
+                            refresh.fetch(client, Resource::Channels);
+                        }
+                        sidebar.request_voice(&mut call, channel_id, true);
                     }
                     Frame::VoiceKicked { sid } if call.as_ref().is_some_and(|call| !call.owns(&sid)) => {
                         sidebar.cancel_voice(&mut call, Some("You joined voice from another tab or device."));
@@ -783,14 +891,11 @@ async fn watch_session(
                 }
                 VoiceUpdate::Finished(result) => {
                     call = None;
-                    if sidebar.voice.take().is_some_and(|voice| voice.play_leave) && result.is_ok() {
-                        settings.sounds.play(Sound::Leave, false);
-                    }
                     if matches!(result, Err(VoiceIssue::Unauthorized)) {
                         break SessionEnd::Invalidated(SESSION_EXPIRED);
                     }
-                    if let Err(issue) = result {
-                        sidebar.voice_notice.get_or_insert_with(|| issue.message());
+                    if sidebar.finish_voice(result) {
+                        settings.sounds.play(Sound::Leave, false);
                     }
                 }
             },
@@ -808,6 +913,8 @@ async fn watch_session(
                     break SessionEnd::Invalidated(SESSION_EXPIRED);
                 }
                 let refresh_avatars = data.is_ok() && matches!(resource, Resource::Users | Resource::Presence);
+                let listed_voice_channel = matches!(resource, Resource::Channels)
+                    && sidebar.voice.as_ref().is_some_and(|voice| sidebar.has_voice_channel(&voice.channel_id));
                 refresh.complete(&mut sidebar, resource, data);
                 if refresh_avatars {
                     if resource == Resource::Users {
@@ -815,8 +922,8 @@ async fn watch_session(
                     }
                     avatars.fill(client, &sidebar);
                 }
-                if let (Some(voice), Some(channels)) = (&sidebar.voice, &sidebar.channels)
-                    && !channels.iter().any(|channel| channel.kind == "voice" && channel.id == voice.channel_id)
+                if let Some(voice) = &sidebar.voice
+                    && listed_voice_channel && !sidebar.has_voice_channel(&voice.channel_id)
                 {
                     sidebar.cancel_voice(&mut call, Some("This voice channel is no longer available."));
                 }
