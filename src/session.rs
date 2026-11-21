@@ -325,7 +325,11 @@ impl SavedSession {
     }
 }
 
+type StartCall = fn(String, SpkClient, VoiceSocket, Intent) -> Call;
+
 struct VoiceSettings {
+    socket_endpoint: String,
+    start_call: StartCall,
     devices: DeviceSettings,
     sounds: VoiceSounds,
 }
@@ -343,6 +347,8 @@ pub async fn run(
     };
     let mut next = Command::Restore;
     let mut settings = VoiceSettings {
+        socket_endpoint: env!("SPK_WS_URL").to_owned(),
+        start_call: Call::start,
         devices: DeviceSettings::load(),
         sounds: VoiceSounds::new(sound_settings),
     };
@@ -646,7 +652,8 @@ async fn watch_session(
     let (events, socket) = async_channel::bounded(32);
     let mut workers = JoinSet::new();
     let connection = client.clone();
-    workers.spawn(async move { connection.socket(env!("SPK_WS_URL"), events).await });
+    let socket_endpoint = settings.socket_endpoint.clone();
+    workers.spawn(async move { connection.socket(&socket_endpoint, events).await });
 
     let mut refresh = Refresh::default();
     refresh.fetch_all(client);
@@ -676,7 +683,7 @@ async fn watch_session(
                     if let Some(socket) = &voice_socket
                         && sidebar.channels.iter().flatten().any(|channel| channel.kind == "voice" && channel.id == channel_id)
                     {
-                        call = Some(Call::start(channel_id.clone(), client.clone(), socket.clone(), sidebar.voice_intent.clone()));
+                        call = Some((settings.start_call)(channel_id.clone(), client.clone(), socket.clone(), sidebar.voice_intent.clone()));
                         sidebar.voice = Some(VoiceView::joining(channel_id));
                         sidebar.voice_notice = None;
                     }
@@ -735,6 +742,9 @@ async fn watch_session(
                 }
                 Ok(SocketEvent::Online(socket)) => {
                     sidebar.connection = Connection::Online;
+                    if let Some(call) = &call {
+                        call.set_socket(Some(socket.clone()));
+                    }
                     voice_socket = Some(socket);
                     refresh.fetch_all(client);
                 }
@@ -742,7 +752,9 @@ async fn watch_session(
                     sidebar.connection = state;
                     voice_socket = None;
                     refresh.presence_ready = false;
-                    sidebar.cancel_voice(&mut call, Some(VoiceIssue::Socket.message()));
+                    if let Some(call) = &call {
+                        call.set_socket(None);
+                    }
                 }
                 Ok(SocketEvent::Frame(frame)) => match frame {
                     Frame::ChannelsChanged => refresh.fetch(client, Resource::Channels),
@@ -756,7 +768,7 @@ async fn watch_session(
                             avatars.fill(client, &sidebar);
                         }
                     }
-                    Frame::VoiceJoined { sid, channel_id, nonce } => {
+                    Frame::VoiceJoined { sid, channel_id, nonce: Some(nonce) } => {
                         if let Some(call) = &mut call {
                             call.acknowledge(&sid, &channel_id, &nonce);
                         }
