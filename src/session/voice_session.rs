@@ -513,6 +513,44 @@ impl VoiceSession {
         }
     }
 
+    pub(super) fn screen_report(
+        &self,
+        sidebar: &mut Sidebar,
+        settings: &super::SessionSettings,
+        report: screen::Report,
+    ) {
+        let request = &mut sidebar.voice_intent.screen;
+        let Some(voice) = sidebar
+            .voice
+            .as_mut()
+            .filter(|voice| voice.is_participating())
+        else {
+            return;
+        };
+        if report.attempt != request.attempt || request.action == Action::Stop {
+            return;
+        }
+        let was_live = voice
+            .screen
+            .as_ref()
+            .is_some_and(|screen| screen.state.active());
+        if was_live != report.state.active() {
+            settings.sounds.play(Sound::Screen, report.state.active());
+        }
+        if let State::Live { quality, quality_failed: Some(failed), .. } = &report.state
+            && request.quality == *failed
+            && !voice.screen.as_ref().is_some_and(|previous| {
+                matches!(previous.state, State::Live { quality_failed: Some(value), .. } if value == *failed)
+            })
+        {
+            request.quality = *quality;
+            if let Some(call) = &self.call {
+                call.apply(&sidebar.voice_intent);
+            }
+        }
+        voice.screen = Some(report);
+    }
+
     pub(super) async fn apply_controls(
         &self,
         sidebar: &mut Sidebar,

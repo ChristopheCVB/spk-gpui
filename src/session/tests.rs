@@ -1413,6 +1413,11 @@ fn voice_cues_follow_live_membership_of_other_users() {
             width: 1280,
             height: 720,
             fps: 30,
+            quality: screen::Quality {
+                height: 720,
+                fps: 30,
+            },
+            quality_failed: None,
             audio: None,
             audio_unavailable: false,
             frames: Default::default(),
@@ -1846,6 +1851,58 @@ async fn queued_screen_start_respects_the_latest_audio_preference() {
     assert_eq!(
         sidebar.voice_intent.screen.action,
         screen::Action::Start(false)
+    );
+}
+
+#[test]
+fn failed_screen_quality_restores_the_previous_preset_for_the_current_share() {
+    let mut sidebar = Sidebar::new(
+        serde_json::from_str(r#"{"id":"alice","email":"alice@example.test"}"#).unwrap(),
+        None,
+    );
+    let mut voice = VoiceView::joining("first".into());
+    voice.status = VoiceStatus::Connected;
+    sidebar.voice = Some(voice);
+    let request = &mut sidebar.voice_intent.screen;
+    request.open();
+    let attempt = request.attempt;
+    assert!(request.advance(attempt, screen::Action::Choose("display".into(), None)));
+    assert!(request.advance(attempt, screen::Action::Start(false)));
+    let applied = screen::Quality::default();
+    let rejected = screen::Quality {
+        height: 1440,
+        fps: 60,
+    };
+    request.quality = rejected;
+    let report = |attempt| screen::Report {
+        attempt,
+        state: screen::State::Live {
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            quality: applied,
+            quality_failed: Some(rejected),
+            audio: None,
+            audio_unavailable: false,
+            frames: Default::default(),
+        },
+    };
+    let session = VoiceSession::default();
+    let settings = fixture_settings(String::new(), Call::start_for_test);
+    session.screen_report(&mut sidebar, &settings, report(attempt - 1));
+    assert_eq!(sidebar.voice_intent.screen.quality, rejected);
+    session.screen_report(&mut sidebar, &settings, report(attempt));
+    assert_eq!(sidebar.voice_intent.screen.quality, applied);
+    assert!(
+        sidebar
+            .voice
+            .as_ref()
+            .unwrap()
+            .screen
+            .as_ref()
+            .unwrap()
+            .state
+            .active()
     );
 }
 

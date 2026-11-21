@@ -169,19 +169,20 @@ async fn x11_sources_capture_and_end_when_the_window_disappears() {
     let (video, mut frames) = mpsc::channel(1);
     let (audio, mut samples) = mpsc::channel(1);
     let (audio_unavailable, _) = watch::channel(false);
+    let (_quality, quality) = watch::channel(Quality {
+        height: 720,
+        fps: 5,
+    });
     let capture = tokio::spawn(selected.capture.start(
-        Quality {
-            height: 720,
-            fps: 5,
-        },
         false,
         CaptureSink {
             video,
+            quality,
             audio: Some(audio),
             audio_unavailable,
         },
     ));
-    let (frame, fps) = timeout(Duration::from_secs(2), frames.recv())
+    let (frame, _, fps) = timeout(Duration::from_secs(2), frames.recv())
         .await
         .unwrap()
         .unwrap();

@@ -73,7 +73,6 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
     impl Capture for Fixture {
         fn start(
             self: Box<Self>,
-            quality: Quality,
             audio: bool,
             sink: CaptureSink,
         ) -> BoxFuture<'static, Result<(), CaptureError>> {
@@ -81,21 +80,27 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
                 let mut stop = self.0;
                 if let Some(native) = self.1 {
                     return tokio::select! {
-                        result = native.start(quality, audio, sink) => result,
+                        result = native.start(audio, sink) => result,
                         _ = &mut stop => Err(CaptureError::SourceLost),
                     };
                 }
                 let mut ticks = interval(Duration::from_millis(10));
                 let mut elapsed = 0;
+                let mut quality = *sink.quality.borrow();
                 loop {
                     tokio::select! {
                         biased;
                         _ = &mut stop => return Err(CaptureError::SourceLost),
                         _ = ticks.tick() => {
-                            if elapsed % 40 == 0 {
-                                let mut frame = VideoFrame::new(VideoRotation::VideoRotation0, I420Buffer::new_black(320, 180));
+                            let requested = *sink.quality.borrow();
+                            if requested.fps != 60 {
+                                quality = requested;
+                            }
+                            if elapsed % (if quality.fps == 5 { 200 } else { 40 }) == 0 {
+                                let (width, height) = quality.dimensions(1920, 1080).unwrap();
+                                let mut frame = VideoFrame::new(VideoRotation::VideoRotation0, I420Buffer::new_black(width, height));
                                 frame.timestamp_us = elapsed * 1000;
-                                sink.video(frame, 25);
+                                sink.video(frame, quality, quality.fps);
                             }
                             if audio {
                                 let samples = (0..480)
@@ -133,7 +138,7 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
     )
     .await
     .unwrap();
-    let (native, scope, quality) = (None, AudioScope::Application, (320, 180, 25));
+    let (native, scope, quality) = (None, AudioScope::Application, (1920, 1080, 30));
     #[cfg(target_os = "linux")]
     let (native, scope, quality) = if let Ok(output) = std::env::var("SPK_TEST_PULSE_OUTPUT") {
         let choice = linux::choices()
@@ -162,11 +167,13 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
     };
     let (stop, stopped) = oneshot::channel();
     let (report_tx, mut report_rx) = tokio::sync::watch::channel(State::Starting);
+    let (requests, mut requested) = watch::channel(Intent::default());
 
     let share = tokio::spawn(async move {
         let result = capture_and_publish(
             &publisher,
             Quality::default(),
+            &mut requested,
             Some(scope),
             Box::new(Fixture(stopped, native)),
             &|state| {
@@ -198,7 +205,14 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
             {
                 match publication.source() {
                     TrackSource::Screenshare => {
-                        assert_eq!(publication.name(), "screen");
+                        assert_eq!(
+                            publication.name(),
+                            if scope == AudioScope::Application {
+                                "spk:screen:1080:30"
+                            } else {
+                                "screen"
+                            }
+                        );
                         video = Some(publication);
                     }
                     TrackSource::ScreenshareAudio => audio = Some(publication),
@@ -244,6 +258,124 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
         loop {
             let sample = samples.next().await.unwrap();
             assert_eq!(sample.sample_rate, 48_000);
+            if sample.data.iter().any(|value| value.unsigned_abs() > 500) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+
+    let preset = Quality {
+        height: 720,
+        fps: 5,
+    };
+    let replacement_size = if scope == AudioScope::Application {
+        (1280, 720)
+    } else {
+        (640, 480)
+    };
+    requests.send_modify(|intent| intent.screen.quality = preset);
+    timeout(Duration::from_secs(8), async {
+        let state = report_rx
+            .wait_for(|state| matches!(state, State::Live { fps: 5, .. }))
+            .await
+            .unwrap();
+        assert!(
+            matches!(*state, State::Live { width, height, quality, audio: Some(audio), .. }
+            if quality == preset && (width, height) == replacement_size && audio == scope)
+        );
+    })
+    .await
+    .expect("active Screen Share follows the new preset");
+
+    let replacement = timeout(Duration::from_secs(8), async {
+        loop {
+            match events.recv().await.expect("peer disconnected") {
+                RoomEvent::TrackPublished { publication, .. }
+                    if publication.source() == TrackSource::Screenshare =>
+                {
+                    break publication;
+                }
+                RoomEvent::TrackUnpublished { publication, .. }
+                    if publication.source() == TrackSource::ScreenshareAudio =>
+                {
+                    panic!("quality change interrupted Screen Share audio");
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_ne!(replacement.sid(), video.sid());
+    assert_eq!(
+        replacement.name(),
+        if scope == AudioScope::Application {
+            "spk:screen:720:5"
+        } else {
+            "screen"
+        }
+    );
+    assert!(audio.is_desired());
+
+    timeout(Duration::from_secs(8), async {
+        loop {
+            if let Some(RoomEvent::TrackUnpublished { publication, .. }) = events.recv().await
+                && publication.sid() == video.sid()
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the old video publication is released");
+
+    replacement.set_subscribed(true);
+    let mut replacement_frames = timeout(Duration::from_secs(8), async {
+        loop {
+            if let Some(RoomEvent::TrackSubscribed {
+                track: RemoteTrack::Video(track),
+                publication,
+                ..
+            }) = events.recv().await
+                && publication.sid() == replacement.sid()
+            {
+                break NativeVideoStream::new(track.rtc_track());
+            }
+        }
+    })
+    .await
+    .unwrap();
+
+    if scope == AudioScope::Application {
+        let rejected = Quality {
+            height: 1440,
+            fps: 60,
+        };
+        requests.send_modify(|intent| intent.screen.quality = rejected);
+        timeout(Duration::from_secs(8), async {
+            report_rx
+                .wait_for(|state| {
+                    matches!(state, State::Live {
+                quality, quality_failed: Some(failed), audio: Some(AudioScope::Application), ..
+            } if *quality == preset && *failed == rejected)
+                })
+                .await
+                .unwrap();
+        })
+        .await
+        .expect("an unsupported live change keeps the previous preset and audio");
+    }
+
+    timeout(Duration::from_secs(8), async {
+        let frame = replacement_frames.next().await.unwrap();
+        assert_eq!(
+            (frame.buffer.width(), frame.buffer.height()),
+            replacement_size
+        );
+        loop {
+            let sample = samples.next().await.unwrap();
             if sample.data.iter().any(|value| value.unsigned_abs() > 500) {
                 break;
             }

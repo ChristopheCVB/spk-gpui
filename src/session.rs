@@ -29,9 +29,11 @@ use crate::api::{
 };
 use crate::notifications::{Alert, LiveAlerts};
 use crate::sounds::{Sound, VoiceSounds};
+#[cfg(any(test, windows))]
+use crate::voice::screen;
 use crate::voice::{
     Call, Device, DeviceKind, Devices, Intent, Issue as VoiceIssue, NoiseSuppression,
-    ParticipantVolumeChange, Status as VoiceStatus, Update as VoiceUpdate, screen,
+    ParticipantVolumeChange, Status as VoiceStatus, Update as VoiceUpdate,
     video::{CameraResolution, preview_camera},
 };
 use accounts::{AccountLinkOutcome, choose_nickname, redeem_link};
@@ -1007,18 +1009,7 @@ async fn watch_session(
                     voice.video_participant_left(&mut sidebar, &id);
                 }
                 VoiceUpdate::Screen(report) => {
-                    let request = &sidebar.voice_intent.screen;
-                    if let Some(voice) = &mut sidebar.voice
-                        && voice.is_participating()
-                        && report.attempt == request.attempt
-                        && request.action != screen::Action::Stop
-                    {
-                        let was_live = voice.screen.as_ref().is_some_and(|screen| screen.state.active());
-                        if was_live != report.state.active() {
-                            settings.sounds.play(Sound::Screen, report.state.active());
-                        }
-                        voice.screen = Some(report);
-                    }
+                    voice.screen_report(&mut sidebar, &settings, report);
                 }
                 VoiceUpdate::Finished(result) => {
                     voice.finished();
