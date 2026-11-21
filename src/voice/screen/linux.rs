@@ -1,4 +1,6 @@
 use std::{
+    ffi::c_void,
+    ptr::{NonNull, null_mut},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -30,7 +32,19 @@ const TYPES: [(SourceType, &str, &str, PortalSource); 2] = [
 const FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 
 unsafe extern "C" {
-    fn g_main_context_iteration(context: *mut std::ffi::c_void, may_block: i32) -> i32;
+    fn g_main_context_iteration(context: *mut c_void, may_block: i32) -> i32;
+    fn g_bus_get_sync(
+        bus_type: i32,
+        cancellable: *mut c_void,
+        error: *mut *mut c_void,
+    ) -> *mut c_void;
+    fn g_dbus_connection_flush(
+        connection: *mut c_void,
+        cancellable: *mut c_void,
+        callback: Option<unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void)>,
+        user_data: *mut c_void,
+    );
+    fn g_object_unref(object: *mut c_void);
 }
 
 pub async fn choices() -> Result<Vec<Choice>, CaptureError> {
@@ -91,6 +105,21 @@ pub async fn select(choice: Choice, playback: Option<Device>) -> Result<Selectio
         })
         .ok_or(CaptureError::Unavailable)?;
 
+    let portal = if wayland {
+        Some(
+            timeout(
+                Duration::from_secs(3),
+                tokio::task::spawn_blocking(PortalConnection::open),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .flatten()
+            .ok_or(CaptureError::Unavailable)?,
+        )
+    } else {
+        None
+    };
     let mut capturer = new_desktop_capturer(options(kind));
     if capturer.is_null() {
         return Err(CaptureError::Unavailable);
@@ -114,7 +143,7 @@ pub async fn select(choice: Choice, playback: Option<Device>) -> Result<Selectio
     let mut video = VideoCapture {
         frames,
         capturer,
-        wayland,
+        portal,
     };
     let wait = if wayland {
         Duration::from_secs(60)
@@ -218,15 +247,15 @@ impl Capture for Selected {
 struct VideoCapture {
     frames: Arc<Mutex<FrameStatus>>,
     capturer: cxx::UniquePtr<DesktopCapturer>,
-    wayland: bool,
+    portal: Option<PortalConnection>,
 }
 
 impl VideoCapture {
     fn request_frame(&self) {
-        if self.wayland {
+        if self.portal.is_some() {
             // GDBus dispatches the asynchronous ScreenCast replies on the default context.
             for _ in 0..8 {
-                if unsafe { g_main_context_iteration(std::ptr::null_mut(), 0) } == 0 {
+                if unsafe { g_main_context_iteration(null_mut(), 0) } == 0 {
                     break;
                 }
             }
@@ -269,6 +298,30 @@ impl VideoCapture {
             {
                 return Err(CaptureError::SourceLost);
             }
+        }
+    }
+}
+
+// The capturer drops first and queues Session.Close on this shared GDBus connection.
+struct PortalConnection(NonNull<c_void>);
+
+// GDBusConnection methods can be used from any thread and this wrapper owns one reference.
+unsafe impl Send for PortalConnection {}
+
+impl PortalConnection {
+    fn open() -> Option<Self> {
+        const G_BUS_TYPE_SESSION: i32 = 2;
+        NonNull::new(unsafe { g_bus_get_sync(G_BUS_TYPE_SESSION, null_mut(), null_mut()) })
+            .map(Self)
+    }
+}
+
+impl Drop for PortalConnection {
+    fn drop(&mut self) {
+        // Keep the connection alive for the asynchronous flush after WebRTC releases its reference.
+        unsafe {
+            g_dbus_connection_flush(self.0.as_ptr(), null_mut(), None, null_mut());
+            g_object_unref(self.0.as_ptr());
         }
     }
 }
