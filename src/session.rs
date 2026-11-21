@@ -29,6 +29,7 @@ pub(crate) mod tests;
 const SESSION_EXPIRED: &str = "Your session expired. Sign in again.";
 const STORE_UNAVAILABLE: &str =
     "Secure storage is unavailable. Your sign-in lasts until you close SPK.";
+const VOICE_REPLACED: &str = "You joined voice from another tab or device.";
 const DELETE_FAILED: &str = "Could not remove the saved session from secure storage.";
 
 pub enum Command {
@@ -98,7 +99,7 @@ impl VoiceView {
         }
     }
 
-    fn listening(&self) -> bool {
+    pub fn is_participating(&self) -> bool {
         matches!(
             self.status,
             VoiceStatus::Connected | VoiceStatus::ListenOnly | VoiceStatus::Reconnecting
@@ -109,7 +110,7 @@ impl VoiceView {
         if self.status == VoiceStatus::Leaving {
             return false;
         }
-        self.play_leave = explicit && self.listening();
+        self.play_leave = explicit && self.is_participating();
         self.status = VoiceStatus::Leaving;
         self.media = None;
         true
@@ -119,10 +120,10 @@ impl VoiceView {
         if self.status == VoiceStatus::Leaving {
             return false;
         }
-        let was_listening = self.listening();
+        let was_listening = self.is_participating();
         self.status = report.status;
         self.media = Some(report);
-        !was_listening && self.listening()
+        !was_listening && self.is_participating()
     }
 }
 
@@ -172,19 +173,35 @@ impl Sidebar {
             .map(|destination| destination.channel_id.as_str())
     }
 
-    fn request_voice(&mut self, call: &mut Option<Call>, channel_id: String, server_move: bool) {
-        if (server_move || self.has_voice_channel(&channel_id))
+    pub fn can_join_voice(&self, channel_id: &str) -> bool {
+        matches!(self.connection, Connection::Online)
+            && self.has_voice_channel(channel_id)
+            && self.can_switch_voice(channel_id)
+    }
+
+    fn can_switch_voice(&self, channel_id: &str) -> bool {
+        self.switching_to() != Some(channel_id)
             && self
                 .voice
                 .as_ref()
                 .is_none_or(|voice| voice.channel_id != channel_id)
-        {
-            self.switching_to = Some(VoiceDestination {
-                channel_id,
-                server_move,
-            });
-            self.cancel_voice(call, None);
-        }
+    }
+
+    fn request_voice(&mut self, call: &mut Option<Call>, channel_id: String, server_move: bool) {
+        self.switching_to = Some(VoiceDestination {
+            channel_id,
+            server_move,
+        });
+        self.cancel_voice(call, None);
+    }
+
+    fn voice_replaced(&self) -> bool {
+        self.profile
+            .id
+            .as_ref()
+            .and_then(|id| self.rooms.get(id))
+            .zip(self.voice.as_ref())
+            .is_some_and(|(member, voice)| member.channel_id != voice.channel_id)
     }
 
     fn cancel_voice(&mut self, call: &mut Option<Call>, notice: Option<&'static str>) {
@@ -213,7 +230,7 @@ impl Sidebar {
 
     pub fn rejoin_channel(&self) -> Option<&str> {
         let id = self.voice_rejoin.as_deref()?;
-        (matches!(self.connection, Connection::Online) && self.has_voice_channel(id)).then_some(id)
+        self.can_join_voice(id).then_some(id)
     }
 
     pub fn participants(&self, channel: &str) -> Vec<Participant<'_>> {
@@ -612,7 +629,7 @@ impl Refresh {
         let cue = sidebar
             .voice
             .as_ref()
-            .filter(|voice| self.presence_ready && voice.listening())
+            .filter(|voice| self.presence_ready && voice.is_participating())
             .filter(|_| {
                 sidebar
                     .profile
@@ -723,6 +740,7 @@ async fn watch_session(
     sidebar.devices = idle_devices();
     let mut voice_socket: Option<VoiceSocket> = None;
     let mut call = None;
+    let mut awaiting_reclaim = false;
     let end = loop {
         if commands.is_closed() {
             break SessionEnd::Closed;
@@ -736,6 +754,7 @@ async fn watch_session(
             if let Some(socket) = &voice_socket
                 && (server_move || sidebar.has_voice_channel(&channel_id))
             {
+                awaiting_reclaim = false;
                 call = Some((settings.start_call)(
                     channel_id.clone(),
                     client.clone(),
@@ -765,8 +784,14 @@ async fn watch_session(
                 Err(_) => break SessionEnd::Closed,
                 Ok(Command::SignOut) => break SessionEnd::SignOut,
                 Ok(Command::Refresh) => refresh.fetch_all(client),
-                Ok(Command::JoinVoice(channel_id)) if voice_socket.is_some() => {
-                    sidebar.request_voice(&mut call, channel_id, false);
+                Ok(Command::JoinVoice(channel_id)) => {
+                    if sidebar.can_join_voice(&channel_id) {
+                        sidebar.request_voice(&mut call, channel_id, false);
+                    } else if voice_socket.is_none() {
+                        sidebar.voice_notice = Some(VoiceIssue::Socket.message());
+                    } else if !sidebar.has_voice_channel(&channel_id) {
+                        sidebar.voice_notice = Some("This voice channel is no longer available.");
+                    }
                 }
                 Ok(Command::LeaveVoice) => {
                     sidebar.switching_to = None;
@@ -825,15 +850,14 @@ async fn watch_session(
                 }
                 Ok(SocketEvent::Online(socket)) => {
                     sidebar.connection = Connection::Online;
-                    if let Some(call) = &call {
-                        call.set_socket(Some(socket.clone()));
-                    }
+                    awaiting_reclaim = call.is_some();
                     voice_socket = Some(socket);
                     refresh.fetch_all(client);
                 }
                 Ok(SocketEvent::Connection(state)) => {
                     sidebar.connection = state;
                     voice_socket = None;
+                    awaiting_reclaim = false;
                     refresh.presence_ready = false;
                     if let Some(call) = &call {
                         call.set_socket(None);
@@ -844,8 +868,13 @@ async fn watch_session(
                     Frame::UsersChanged => refresh.fetch(client, Resource::Users),
                     Frame::Presence { user_id, channel_id, flags } => {
                         let new_member = channel_id.is_some() && !sidebar.rooms.contains_key(&user_id);
+                        let own_update = sidebar.profile.id.as_ref() == Some(&user_id);
                         if let Some(cue) = refresh.update_presence(&mut sidebar, user_id, channel_id, flags) {
                             settings.sounds.play(cue, cue == Sound::Join);
+                        }
+                        if awaiting_reclaim && own_update && sidebar.voice_replaced() {
+                            awaiting_reclaim = false;
+                            sidebar.cancel_voice(&mut call, Some(VOICE_REPLACED));
                         }
                         if new_member {
                             avatars.fill(client, &sidebar);
@@ -861,6 +890,7 @@ async fn watch_session(
                     Frame::VoiceMove { sid, channel_id }
                         if !channel_id.is_empty()
                             && call.as_ref().is_some_and(|call| call.owns(&sid))
+                            && sidebar.can_switch_voice(&channel_id)
                             && sidebar.voice.as_ref().is_some_and(|voice| voice.status != VoiceStatus::Leaving) =>
                     {
                         // The token endpoint checks destinations that are missing from a stale channel list.
@@ -870,7 +900,7 @@ async fn watch_session(
                         sidebar.request_voice(&mut call, channel_id, true);
                     }
                     Frame::VoiceKicked { sid } if call.as_ref().is_some_and(|call| !call.owns(&sid)) => {
-                        sidebar.cancel_voice(&mut call, Some("You joined voice from another tab or device."));
+                        sidebar.cancel_voice(&mut call, Some(VOICE_REPLACED));
                     }
                     Frame::VoiceDisconnected { sid } if call.as_ref().is_some_and(|call| call.owns(&sid)) => {
                         sidebar.cancel_voice(&mut call, Some(VoiceIssue::Disconnected.message()));
@@ -891,6 +921,7 @@ async fn watch_session(
                 }
                 VoiceUpdate::Finished(result) => {
                     call = None;
+                    awaiting_reclaim = false;
                     if matches!(result, Err(VoiceIssue::Unauthorized)) {
                         break SessionEnd::Invalidated(SESSION_EXPIRED);
                     }
@@ -912,10 +943,22 @@ async fn watch_session(
                 if data.as_ref().is_err_and(Failure::unauthorized) {
                     break SessionEnd::Invalidated(SESSION_EXPIRED);
                 }
+                // A request already in flight when the socket returned cannot establish fresh presence.
+                let fresh_presence = resource == Resource::Presence
+                    && data.is_ok()
+                    && !refresh.dirty.contains(&resource);
                 let refresh_avatars = data.is_ok() && matches!(resource, Resource::Users | Resource::Presence);
                 let listed_voice_channel = matches!(resource, Resource::Channels)
                     && sidebar.voice.as_ref().is_some_and(|voice| sidebar.has_voice_channel(&voice.channel_id));
                 refresh.complete(&mut sidebar, resource, data);
+                if awaiting_reclaim && fresh_presence {
+                    awaiting_reclaim = false;
+                    if sidebar.voice_replaced() {
+                        sidebar.cancel_voice(&mut call, Some(VOICE_REPLACED));
+                    } else if let Some(call) = &call {
+                        call.set_socket(voice_socket.clone());
+                    }
+                }
                 if refresh_avatars {
                     if resource == Resource::Users {
                         avatars.directory_changed(&mut sidebar);

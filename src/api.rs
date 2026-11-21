@@ -185,10 +185,8 @@ pub enum VoiceFrame<'a> {
     Join {
         sid: &'a str,
         channel_id: &'a str,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        nonce: Option<&'a str>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        ready: Option<bool>,
+        #[serde(flatten)]
+        mode: VoiceJoin<'a>,
         muted: bool,
         deafened: bool,
         watching: [&'a str; 0],
@@ -203,6 +201,13 @@ pub enum VoiceFrame<'a> {
     },
     #[serde(rename = "voice:leave")]
     Leave { sid: &'a str },
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum VoiceJoin<'a> {
+    Initial { nonce: &'a str },
+    Reclaim { ready: bool },
 }
 
 type SocketWrite = (String, oneshot::Sender<()>);

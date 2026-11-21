@@ -17,7 +17,7 @@ use tokio::{
 use url::Url;
 use uuid::Uuid;
 
-use crate::api::{Failure, SpkClient, VoiceFlags, VoiceFrame, VoiceSocket};
+use crate::api::{Failure, SpkClient, VoiceFlags, VoiceFrame, VoiceJoin, VoiceSocket};
 
 mod devices;
 pub use devices::{Device, DeviceKind, DeviceList, DevicePreferences, Devices};
@@ -169,6 +169,7 @@ impl Call {
                                 deafened: intent.mute.deafened,
                                 speaking: !muted,
                             },
+                            true,
                             false,
                         );
                         worker.update(Update::Media(Arc::new(Report {
@@ -292,6 +293,7 @@ type RoomEvents = tokio::sync::mpsc::UnboundedReceiver<RoomEvent>;
 #[derive(Clone, Copy, PartialEq)]
 struct PublishedPresence {
     flags: VoiceFlags,
+    ready: bool,
     revision: u64,
 }
 
@@ -404,8 +406,7 @@ impl Worker {
             .send(VoiceFrame::Join {
                 sid,
                 channel_id,
-                nonce: Some(nonce),
-                ready: None,
+                mode: VoiceJoin::Initial { nonce },
                 muted: true,
                 deafened,
                 watching: [],
@@ -558,7 +559,7 @@ impl Worker {
                 reported = Some(report.clone());
                 self.update(Update::Media(Arc::new(report)));
             }
-            self.publish_flags(flags, std::mem::take(&mut resync));
+            self.publish_flags(flags, !reconnecting, std::mem::take(&mut resync));
 
             tokio::select! {
                 biased;
@@ -618,10 +619,14 @@ impl Worker {
         }
     }
 
-    fn publish_flags(&self, flags: VoiceFlags, resync: bool) {
+    fn publish_flags(&self, flags: VoiceFlags, ready: bool, resync: bool) {
         self.presence.send_if_modified(|current| {
             let revision = current.map_or(0, |current| current.revision) + u64::from(resync);
-            let next = Some(PublishedPresence { flags, revision });
+            let next = Some(PublishedPresence {
+                flags,
+                ready,
+                revision,
+            });
             if *current == next {
                 return false;
             }
@@ -674,19 +679,14 @@ impl Worker {
                 .send(VoiceFrame::Join {
                     sid,
                     channel_id: &self.join.channel_id,
-                    nonce: None,
-                    ready: Some(true),
+                    mode: VoiceJoin::Reclaim { ready: first.ready },
                     muted: first.flags.muted,
                     deafened: first.flags.deafened,
                     watching: [],
                 })
                 .await?;
-            let latest = published.borrow_and_update().expect("presence is ready");
-            let flags = latest.flags;
-            socket.send(VoiceFrame::State { sid, flags }).await?;
-            presence.sent(flags, Instant::now());
-            revision = latest.revision;
-        } else {
+            presence.resync();
+        } else if first.ready {
             socket.send(VoiceFrame::Ready { sid }).await?;
             if revision != 0 {
                 presence.resync();
@@ -694,7 +694,7 @@ impl Worker {
         }
         loop {
             let latest = published.borrow_and_update().expect("presence is ready");
-            if latest.revision != revision {
+            if latest.ready && latest.revision != revision {
                 socket.send(VoiceFrame::Ready { sid }).await?;
                 revision = latest.revision;
                 presence.resync();
@@ -825,7 +825,8 @@ fn disconnect_issue(reason: DisconnectReason) -> Issue {
         | DisconnectReason::StateMismatch
         | DisconnectReason::ConnectionTimeout
         | DisconnectReason::ServerShutdown
-        | DisconnectReason::MediaFailure => Issue::LiveKitDisconnected,
+        | DisconnectReason::MediaFailure
+        | DisconnectReason::JoinFailure => Issue::LiveKitDisconnected,
         _ => Issue::Disconnected,
     }
 }
