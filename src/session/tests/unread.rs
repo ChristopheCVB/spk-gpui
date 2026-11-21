@@ -100,8 +100,8 @@ async fn marking_read_and_unread_changes_the_shared_read_point() {
                     ],
                     "firstUnreadId":"first","hasMoreBefore":false,"hasMoreAfter":false
                 }),
-                "GET /api/channels/general/messages?around=reply HTTP/1.1" => value!({
-                    "messages":[{"id":"reply","channelId":"general","userId":"bob","createdAt":2,"body":"I agree"}],
+                "GET /api/channels/general/messages?around=older HTTP/1.1" => value!({
+                    "messages":[{"id":"older","channelId":"general","userId":"bob","createdAt":0,"body":"Earlier"}],
                     "hasMoreBefore":true,"hasMoreAfter":true
                 }),
                 "POST /api/channels/general/read HTTP/1.1" => {
@@ -201,14 +201,14 @@ async fn marking_read_and_unread_changes_the_shared_read_point() {
         commands
             .send(Command::JumpToChatMessage {
                 channel_id: "general".into(),
-                message_id: "reply".into(),
+                message_id: "older".into(),
             })
             .await
             .unwrap();
         let around = wait_for_sidebar(&views, |view| {
             view.chat
                 .as_ref()
-                .is_some_and(|chat| chat.jump.as_ref().is_some_and(|(id, _)| id == "reply"))
+                .is_some_and(|chat| chat.jump.as_ref().is_some_and(|(id, _)| id == "older"))
         })
         .await;
         let chat = around.chat.unwrap();
