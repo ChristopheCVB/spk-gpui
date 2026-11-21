@@ -20,12 +20,17 @@ mod macos;
 #[cfg(target_os = "macos")]
 use macos as platform;
 
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+use linux as platform;
+
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
 use self::windows as platform;
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 mod platform {
     use super::*;
 
@@ -105,6 +110,8 @@ pub enum CaptureError {
     Permission,
     Unavailable,
     SourceLost,
+    #[cfg(target_os = "linux")]
+    PortalSelection,
     Publication,
 }
 
@@ -117,6 +124,10 @@ impl CaptureError {
             }
             Self::Unavailable => {
                 "Screen Share is unavailable. Check capture permissions and try again."
+            }
+            #[cfg(target_os = "linux")]
+            Self::PortalSelection => {
+                "The Wayland picker did not provide a source. Check Screen Share permissions and try again."
             }
             Self::SourceLost => "The Screen Share source stopped. Select a source to share again.",
             Self::Publication => "Could not publish Screen Share. Select a source to try again.",

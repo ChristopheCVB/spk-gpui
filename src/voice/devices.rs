@@ -5,7 +5,7 @@ use rodio::cpal::{
     self,
     traits::{DeviceTrait, HostTrait},
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum DeviceKind {
@@ -56,7 +56,8 @@ impl Default for DevicePreferences {
 #[serde(default)]
 pub struct VoiceProcessing {
     pub echo_cancellation: bool,
-    pub noise_suppression: bool,
+    #[serde(deserialize_with = "deserialize_noise_suppression")]
+    pub noise_suppression: NoiseSuppression,
     pub auto_gain: bool,
     pub sensitivity: u8,
 }
@@ -65,11 +66,36 @@ impl Default for VoiceProcessing {
     fn default() -> Self {
         Self {
             echo_cancellation: true,
-            noise_suppression: true,
+            noise_suppression: NoiseSuppression::Standard,
             auto_gain: true,
             sensitivity: 50,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NoiseSuppression {
+    Off,
+    Standard,
+    Enhanced,
+}
+
+fn deserialize_noise_suppression<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<NoiseSuppression, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum SavedMode {
+        Mode(NoiseSuppression),
+        Legacy(bool),
+    }
+
+    Ok(match SavedMode::deserialize(deserializer)? {
+        SavedMode::Mode(mode) => mode,
+        SavedMode::Legacy(false) => NoiseSuppression::Off,
+        SavedMode::Legacy(true) => NoiseSuppression::Standard,
+    })
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -352,9 +378,18 @@ mod tests {
         assert_eq!(preferences.processing, VoiceProcessing::default());
         assert!(preferences.processing.echo_cancellation);
 
+        for (legacy, mode) in [
+            ("false", NoiseSuppression::Off),
+            ("true", NoiseSuppression::Standard),
+        ] {
+            let processing: VoiceProcessing =
+                serde_json::from_str(&format!(r#"{{"noise_suppression":{legacy}}}"#)).unwrap();
+            assert_eq!(processing.noise_suppression, mode);
+        }
+
         preferences.processing = VoiceProcessing {
             echo_cancellation: false,
-            noise_suppression: false,
+            noise_suppression: NoiseSuppression::Enhanced,
             auto_gain: false,
             sensitivity: 80,
         };

@@ -61,17 +61,23 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
     };
     use tokio::time::{interval, timeout};
 
-    struct Fixture(oneshot::Receiver<()>);
+    struct Fixture(oneshot::Receiver<()>, Option<Box<dyn Capture>>);
 
     impl Capture for Fixture {
         fn start(
             self: Box<Self>,
-            _: Quality,
+            quality: Quality,
             audio: bool,
             sink: CaptureSink,
         ) -> BoxFuture<'static, Result<(), CaptureError>> {
             Box::pin(async move {
                 let mut stop = self.0;
+                if let Some(native) = self.1 {
+                    return tokio::select! {
+                        result = native.start(quality, audio, sink) => result,
+                        _ = &mut stop => Err(CaptureError::SourceLost),
+                    };
+                }
                 let mut ticks = interval(Duration::from_millis(10));
                 let mut elapsed = 0;
                 loop {
@@ -120,6 +126,33 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
     )
     .await
     .unwrap();
+    let (native, scope, quality) = (None, AudioScope::Application, (320, 180, 25));
+    #[cfg(target_os = "linux")]
+    let (native, scope, quality) = if let Ok(output) = std::env::var("SPK_TEST_PULSE_OUTPUT") {
+        let choice = linux::choices()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|choice| choice.id.starts_with("display:"))
+            .expect("fixture Xvfb display");
+        let selected = linux::select(
+            choice,
+            Some(Device {
+                id: output.clone(),
+                name: output,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(selected.audio, Some(AudioScope::PlaybackMix));
+        (
+            Some(selected.capture),
+            AudioScope::PlaybackMix,
+            (640, 480, 30),
+        )
+    } else {
+        (native, scope, quality)
+    };
     let (stop, stopped) = oneshot::channel();
     let (report_tx, mut report_rx) = tokio::sync::watch::channel(State::Starting);
 
@@ -127,8 +160,8 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
         let result = capture_and_publish(
             &publisher,
             Quality::default(),
-            Some(AudioScope::Application),
-            Box::new(Fixture(stopped)),
+            Some(scope),
+            Box::new(Fixture(stopped, native)),
             &|state| {
                 report_tx.send_replace(state);
             },
@@ -142,12 +175,8 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
         assert!(matches!(
             *state,
             State::Live {
-                width: 320,
-                height: 180,
-                fps: 25,
-                audio: Some(AudioScope::Application),
-                ..
-            }
+                width, height, fps, audio: Some(audio), ..
+            } if (width, height, fps) == quality && audio == scope
         ));
     })
     .await
@@ -201,7 +230,10 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
     .unwrap();
     timeout(Duration::from_secs(8), async {
         let frame = frames.next().await.unwrap();
-        assert_eq!((frame.buffer.width(), frame.buffer.height()), (320, 180));
+        assert_eq!(
+            (frame.buffer.width(), frame.buffer.height()),
+            (quality.0, quality.1)
+        );
         loop {
             let sample = samples.next().await.unwrap();
             assert_eq!(sample.sample_rate, 48_000);

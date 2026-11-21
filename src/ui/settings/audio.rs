@@ -1,12 +1,12 @@
 use gpui_kit::base::Disableable;
 use std::time::Duration;
 
-use gpui_kit::component::{progress::Progress, slider::Slider, switch::Switch};
+use gpui_kit::component::{progress::Progress, radio::RadioGroup, slider::Slider, switch::Switch};
 
 use super::*;
 use crate::ui::voice::device_options;
 use crate::voice::{
-    Device, DeviceKind,
+    Device, DeviceKind, NoiseSuppression,
     audio_preview::{MicrophoneTest, test_playback},
 };
 
@@ -143,6 +143,27 @@ impl Settings {
                     });
                 })
         };
+        let modes = [
+            (NoiseSuppression::Off, "Off"),
+            (NoiseSuppression::Standard, "Standard"),
+            (NoiseSuppression::Enhanced, "Enhanced (DeepFilterNet)"),
+        ];
+        let active_mode = if echo {
+            NoiseSuppression::Standard
+        } else {
+            settings.noise_suppression
+        };
+        let spk = self.spk.downgrade();
+        let noise = RadioGroup::horizontal("noise-suppression")
+            .disabled(echo)
+            .selected_index(modes.iter().position(|(mode, _)| *mode == active_mode))
+            .children(modes.map(|(_, label)| label))
+            .on_change(move |index, _, cx| {
+                let _ = spk.update(cx, |app, cx| {
+                    let setting = VoiceProcessingSetting::NoiseSuppression(modes[*index].0);
+                    app.send(Command::SetVoiceProcessing(setting), None, cx);
+                });
+            });
         card(
             "Voice processing",
             div()
@@ -154,7 +175,26 @@ impl Settings {
                     Label::new("Turn off echo cancellation to adjust noise suppression, automatic gain, and sensitivity.")
                         .text_color(cx.theme().muted_foreground),
                 ))
-                .child(switch("Noise suppression (Standard)", echo || settings.noise_suppression, echo, VoiceProcessingSetting::NoiseSuppression))
+                .child(Label::new("Noise suppression"))
+                .child(noise)
+                .child(
+                    Button::new("deepfilternet-license")
+                        .ghost()
+                        .small()
+                        .tab_stop(true)
+                        .label("DeepFilterNet license")
+                        .on_click(|_, window, cx| {
+                            window.open_dialog(cx, |dialog, _, _| {
+                                dialog.title("DeepFilterNet license").child(
+                                    div()
+                                        .id("deepfilternet-license-text")
+                                        .max_h(px(420.0))
+                                        .overflow_y_scroll()
+                                        .child(include_str!("../../../assets/deepfilternet-license.txt")),
+                                )
+                            });
+                        }),
+                )
                 .child(switch("Automatic gain control", echo || settings.auto_gain, echo, VoiceProcessingSetting::AutoGain))
                 .child(Label::new(format!("Sensitivity {sensitivity:.0}%")))
                 .child(

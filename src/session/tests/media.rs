@@ -171,7 +171,7 @@ async fn desktop_voice_routes_samples_and_synchronizes_presence() {
             assert_eq!(peer.exchange(74, -31), (None, Some(-31)));
             for setting in [
                 VoiceProcessingSetting::EchoCancellation(false),
-                VoiceProcessingSetting::NoiseSuppression(false),
+                VoiceProcessingSetting::NoiseSuppression(NoiseSuppression::Enhanced),
                 VoiceProcessingSetting::AutoGain(false),
                 VoiceProcessingSetting::Sensitivity(80),
             ] {
@@ -187,7 +187,7 @@ async fn desktop_voice_routes_samples_and_synchronizes_presence() {
             let processing = tuned.voice_intent.preferred.processing;
             assert!(
                 !processing.echo_cancellation
-                    && !processing.noise_suppression
+                    && processing.noise_suppression == NoiseSuppression::Enhanced
                     && !processing.auto_gain
             );
             assert!(tuned.voice_intent.mute.effective_muted());
