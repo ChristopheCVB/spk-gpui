@@ -42,6 +42,7 @@ pub(crate) fn start_recovery_fixture(
                             muted: true,
                             deafened: intent.mute.deafened,
                             speaking: false,
+                            radio_listening: None,
                         },
                         status != Status::Reconnecting,
                         phase == 2,
@@ -258,6 +259,7 @@ async fn exercise(scenario: Scenario) {
                                     muted: true,
                                     deafened: true,
                                     speaking: false,
+                                    radio_listening: None,
                                 };
                                 worker.publish_flags(deafened, true, false);
                                 observed.recv().await.unwrap();
@@ -388,6 +390,7 @@ fn sends_only_the_latest_changed_state() {
         muted: true,
         deafened: true,
         speaking: false,
+        radio_listening: None,
     };
     let due = presence.due(deafened, &video).unwrap();
     assert_eq!(due, now + Duration::from_millis(50));

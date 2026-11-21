@@ -225,11 +225,11 @@ impl Settings {
                     .flex_col()
                     .gap_3()
                     .child(device_options(sidebar, DeviceKind::Speakers, &self.spk, cx))
-                    .child(Label::new(format!("Test sound volume {volume:.0}%")))
+                    .child(Label::new(format!("Output volume {volume:.0}%")))
                     .child(
                         Slider::new(&self.output_volume)
                             .tab_stop(true)
-                            .accessibility_label("Test sound volume"),
+                            .accessibility_label("Output volume"),
                     )
                     .child(
                         Button::new("test-sound")
@@ -245,6 +245,11 @@ impl Settings {
                                 cx.listener(|settings, _, _, cx| settings.play_test_sound(cx)),
                             ),
                     ),
+                cx,
+            ))
+            .child(card(
+                "Media Output",
+                device_options(sidebar, DeviceKind::MediaOutput, &self.spk, cx),
                 cx,
             ))
             .child(self.processing(sidebar, cx))

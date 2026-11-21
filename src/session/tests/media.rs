@@ -301,6 +301,7 @@ async fn wait_for_flags(views: &Receiver<View>, muted: bool, deafened: bool, spe
                         muted,
                         deafened,
                         speaking,
+                        radio_listening: None,
                     }
         })
     })
@@ -327,6 +328,7 @@ async fn mirror_presence_until_leave(
                     muted: true,
                     deafened: join["deafened"].as_bool().unwrap(),
                     speaking: false,
+                    radio_listening: None,
                 }
             }
             "voice:state" => {

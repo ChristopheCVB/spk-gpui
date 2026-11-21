@@ -17,7 +17,7 @@ use super::DeviceKind;
 pub(super) fn default_id(kind: DeviceKind) -> Option<String> {
     communications_endpoint(match kind {
         DeviceKind::Microphone => eCapture,
-        DeviceKind::Speakers => eRender,
+        DeviceKind::Speakers | DeviceKind::MediaOutput => eRender,
     })
 }
 

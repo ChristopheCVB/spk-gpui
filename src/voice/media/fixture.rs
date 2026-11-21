@@ -185,6 +185,7 @@ impl TestRoom {
                     default: Some(device("default-speakers")),
                     choices: vec![Peer::preferred_speakers()],
                 },
+                ..Devices::default()
             },
             capture: None,
             muted: true,
@@ -270,7 +271,7 @@ impl RoomAudio for TestRoom {
         }
     }
 
-    fn subscribe_microphones(&self) {
+    fn sync_remote_audio(&mut self, _: &Intent, _: &Devices, _: Option<&Device>) {
         self.state.lock().unwrap().subscribed = true;
     }
 

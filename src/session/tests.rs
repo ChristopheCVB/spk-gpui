@@ -1,4 +1,5 @@
 mod media;
+mod radio;
 
 use std::{collections::HashSet, time::Duration};
 
@@ -146,6 +147,11 @@ async fn restored_http_session_authenticates_websocket_and_sign_out() {
 )]
 async fn saved_session_restores_signs_out_and_clears_expired_credentials() {
     let http = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    // A cancelled request can leave a connected socket with no HTTP bytes.
+    let cancelled = TcpStream::connect(http.local_addr().unwrap())
+        .await
+        .unwrap();
+    drop(cancelled);
     let base = Url::parse(&format!("http://{}", http.local_addr().unwrap())).unwrap();
     let sockets = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("ws://{}/_ws", sockets.local_addr().unwrap());
@@ -297,6 +303,7 @@ async fn voice_session(
     let (update_snapshots, updated) = watch::channel(SidebarSnapshot::Initial);
 
     let http = async move {
+        let mut radio_favorite = false;
         let mut presence_failed = false;
         loop {
             let (line, request) = Request::receive(&http).await;
@@ -340,6 +347,10 @@ async fn voice_session(
                     r#"[{"id":"first","type":"voice"},{"id":"second","type":"voice"}]"#
                 }
                 "GET /api/users HTTP/1.1" => "[]",
+                line if line.contains(" /api/radio/") => {
+                    radio::respond(line, request, &mut radio_favorite).await;
+                    continue;
+                }
                 "POST /api/voice/token HTTP/1.1" => {
                     token_requests.send(request).await.unwrap();
                     continue;
@@ -962,7 +973,8 @@ fn live_membership_and_flags_win_over_an_in_flight_snapshot() {
         VoiceFlags {
             muted: true,
             deafened: true,
-            speaking: false
+            speaking: false,
+            radio_listening: None,
         }
     );
     assert!(refresh.presence_updates.is_none());
@@ -1129,15 +1141,20 @@ impl Request {
     }
 
     async fn receive(listener: &TcpListener) -> (String, Self) {
-        let (stream, _) = listener.accept().await.unwrap();
+        let (stream, request_line) = loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut line = String::new();
+            if stream.read_line(&mut line).await.unwrap() != 0 {
+                break (stream, line.trim_end().to_owned());
+            }
+        };
         let mut request = Self {
-            stream: BufReader::new(stream),
+            stream,
             headers: String::new(),
             body: Vec::new(),
         };
         let mut line = String::new();
-        request.stream.read_line(&mut line).await.unwrap();
-        let request_line = line.trim_end().to_owned();
         loop {
             line.clear();
             assert_ne!(request.stream.read_line(&mut line).await.unwrap(), 0);
@@ -1642,6 +1659,12 @@ async fn camera_and_watch_choices_are_scoped_to_the_current_voice_session() {
                 assert_eq!(watch["sid"], *sid);
                 assert_eq!(watch["watching"], value!(["bob"]));
                 observed.send(()).await.unwrap();
+                let stop_watching = receive_voice_frame(&mut socket).await;
+                assert_eq!(stop_watching["watching"], value!([]));
+                observed.send(()).await.unwrap();
+                let watch_again = receive_voice_frame(&mut socket).await;
+                assert_eq!(watch_again["watching"], value!(["bob"]));
+                observed.send(()).await.unwrap();
                 let publish = receive_voice_frame(&mut socket).await;
                 assert_eq!(publish["cam"], true);
                 assert_eq!(publish["watching"], value!(["bob"]));
@@ -1682,6 +1705,33 @@ async fn camera_and_watch_choices_are_scoped_to_the_current_voice_session() {
                     .send(Command::SetWatching("alice".into(), true))
                     .await
                     .unwrap();
+                for change in [
+                    ParticipantVolumeChange::Microphone(125),
+                    ParticipantVolumeChange::Screen(40),
+                    ParticipantVolumeChange::Muted(true),
+                ] {
+                    commands
+                        .send(Command::SetParticipantVolume("bob".into(), change))
+                        .await
+                        .unwrap();
+                }
+                commands
+                    .send(Command::SetParticipantVolume(
+                        "alice".into(),
+                        ParticipantVolumeChange::Muted(true),
+                    ))
+                    .await
+                    .unwrap();
+                let view = wait_for_sidebar(&views, |sidebar| {
+                    sidebar
+                        .voice_intent
+                        .preferred
+                        .participant_volume("bob")
+                        .muted
+                })
+                .await;
+                let volume = view.voice_intent.preferred.participant_volume("bob");
+                assert_eq!((volume.mic, volume.screen), (125, 40));
                 commands
                     .send(Command::SetWatching("bob".into(), true))
                     .await
@@ -1691,6 +1741,23 @@ async fn camera_and_watch_choices_are_scoped_to_the_current_voice_session() {
                 })
                 .await;
                 assert!(!view.voice_intent.watching.contains("alice"));
+                assert!(
+                    !view
+                        .voice_intent
+                        .preferred
+                        .participant_volume("alice")
+                        .muted
+                );
+                observations.recv().await.unwrap();
+                commands
+                    .send(Command::SetWatching("bob".into(), false))
+                    .await
+                    .unwrap();
+                observations.recv().await.unwrap();
+                commands
+                    .send(Command::SetWatching("bob".into(), true))
+                    .await
+                    .unwrap();
                 observations.recv().await.unwrap();
                 commands
                     .send(Command::ChooseCameraResolution(CameraResolution::P720))
@@ -1705,6 +1772,7 @@ async fn camera_and_watch_choices_are_scoped_to_the_current_voice_session() {
                 })
                 .await;
                 assert!(view.viewers("first", "alice").is_empty());
+                assert!(view.voice_intent.preferred.participant_volume("bob").muted);
                 observations.recv().await.unwrap();
                 commands
                     .send(Command::SetCameraEnabled(false))

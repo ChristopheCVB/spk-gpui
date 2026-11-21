@@ -449,6 +449,14 @@ impl Spk {
                                 this.select_voice_channel(&id, cx)
                             })),
                     )
+                    .children(sidebar.channel_radio.get(&channel.id).map(|station| {
+                        div()
+                            .id("radio-station")
+                            .role(Role::Image)
+                            .aria_label(format!("Radio playing {station}"))
+                            .px_1()
+                            .child(themed_icon(IconName::Radio, theme.primary, 14.0))
+                    }))
                     .children(call.and_then(|call| {
                         self.leave_voice("leave", call, switching_here, false, cx)
                     }))
@@ -483,6 +491,16 @@ impl Spk {
                             .text_color(theme.muted_foreground),
                     )
                     .children(participant_status(flags.muted, flags.deafened, cx))
+                    .when(
+                        sidebar.profile.id.as_deref() != Some(person.id)
+                            && call.is_some_and(|call| {
+                                call.channel_id == channel.id && call.is_participating()
+                            }),
+                        |row| row.child(self.participant_volume_button(&person, sidebar, cx)),
+                    )
+                    .when(flags.radio_listening == Some(true), |row| {
+                        row.child(radio_badge(cx))
+                    })
             }))
     }
 
@@ -718,6 +736,7 @@ impl Spk {
                         matches!(call.status, Status::ListenOnly | Status::Reconnecting)
                     }),
                 deafened: sidebar.voice_intent.mute.deafened,
+                radio_listening: sidebar.voice_intent.radio_listening,
                 ..participant.flags
             }
         } else {
@@ -806,13 +825,28 @@ impl Spk {
                                 .bg(theme.background),
                         )
                     })
-                    .children(participant_status(flags.muted, flags.deafened, cx)),
+                    .children(participant_status(flags.muted, flags.deafened, cx))
+                    .when(
+                        !is_me && call.is_some_and(VoiceView::is_participating),
+                        |row| row.child(self.participant_volume_button(&participant, sidebar, cx)),
+                    )
+                    .when(flags.radio_listening == Some(true), |row| {
+                        row.child(radio_badge(cx))
+                    }),
             )
             .children(
                 call.filter(|call| call.is_participating())
                     .map(|call| self.video_tile_controls(&participant, call, sidebar, cx)),
             )
     }
+}
+
+fn radio_badge(cx: &App) -> impl IntoElement {
+    div()
+        .id("radio-listening")
+        .role(Role::Image)
+        .aria_label("Listening to Radio")
+        .child(themed_icon(IconName::Radio, cx.theme().primary, 14.0))
 }
 
 fn participant_status(muted: bool, deafened: bool, cx: &App) -> Option<impl IntoElement> {
