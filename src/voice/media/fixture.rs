@@ -45,26 +45,30 @@ struct State {
     capture: Option<Device>,
     muted: bool,
     speakers: Option<Device>,
-    output_format: Option<u32>,
+    hardware_format: Option<(u32, u32)>,
+    output_format: Option<(u32, u32)>,
     subscribed: bool,
 }
 
 impl State {
-    fn format(&self) -> u32 {
-        if self
-            .capture
-            .as_ref()
-            .is_some_and(|mic| mic.id == "default-mic")
-        {
-            24_000
-        } else {
-            48_000
-        }
+    fn format(&self) -> (u32, u32) {
+        self.hardware_format.unwrap_or_else(|| {
+            if self
+                .capture
+                .as_ref()
+                .is_some_and(|mic| mic.id == "default-mic")
+            {
+                (24_000, 1)
+            } else {
+                (48_000, 2)
+            }
+        })
     }
 }
 
 pub(crate) struct Peer {
     state: Arc<Mutex<State>>,
+    playout_changed: Arc<tokio::sync::Notify>,
     events: UnboundedSender<MediaEvent>,
 }
 
@@ -81,6 +85,16 @@ impl Peer {
             .then(Self::preferred_speakers)
             .into_iter()
             .collect();
+    }
+
+    pub(crate) fn set_hardware_format(&self, format: Option<(u32, u32)>) {
+        self.state.lock().unwrap().hardware_format = format;
+    }
+
+    pub(crate) async fn wait_for_playout(&self, format: (u32, u32)) {
+        while self.state.lock().unwrap().output_format != Some(format) {
+            self.playout_changed.notified().await;
+        }
     }
 
     pub(crate) fn preferred_mic() -> Device {
@@ -143,6 +157,7 @@ fn device(id: &str) -> Device {
 
 pub(super) struct TestRoom {
     state: Arc<Mutex<State>>,
+    playout_changed: Arc<tokio::sync::Notify>,
     events: UnboundedReceiver<MediaEvent>,
     selected: Option<Device>,
     active: bool,
@@ -168,16 +183,20 @@ impl TestRoom {
             capture: None,
             muted: true,
             speakers: None,
+            hardware_format: None,
             output_format: None,
             subscribed: false,
         }));
+        let playout_changed = Arc::new(tokio::sync::Notify::new());
         let peer = Peer {
             state: state.clone(),
+            playout_changed: playout_changed.clone(),
             events: send,
         };
         (
             Self {
                 state,
+                playout_changed,
                 events,
                 selected: None,
                 active: false,
@@ -211,6 +230,7 @@ impl TestRoom {
 
 impl RoomAudio for TestRoom {
     type Event = MediaEvent;
+    type PlayoutFormat = (u32, u32);
 
     fn identity(&self) -> String {
         "alice".to_owned()
@@ -235,18 +255,24 @@ impl RoomAudio for TestRoom {
         let mut state = self.state.lock().unwrap();
         if enabled {
             // An initialized stream keeps its old format until explicitly reopened.
-            let format = state.format();
-            state.output_format.get_or_insert(format);
+            if state.output_format.is_none() {
+                state.output_format = Some(state.format());
+                self.playout_changed.notify_one();
+            }
         } else {
             state.output_format = None;
         }
     }
 
-    fn subscribe(&self) {
+    fn subscribe_microphones(&self) {
         self.state.lock().unwrap().subscribed = true;
     }
 
-    fn recording_affects_playout(&self) -> bool {
+    fn playout_format(&self, _: &Device) -> Option<Self::PlayoutFormat> {
+        Some(self.state.lock().unwrap().format())
+    }
+
+    fn macos_recording_initialized(&self) -> bool {
         self.active
     }
 

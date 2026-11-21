@@ -23,6 +23,8 @@ mod capture;
 #[cfg(test)]
 pub(crate) mod fixture;
 mod livekit_audio;
+#[cfg(target_os = "macos")]
+mod macos_audio;
 
 use capture::{Capture, stop_recording};
 use livekit_audio::LiveKitAudio;
@@ -118,8 +120,13 @@ impl Media {
             Some(speakers),
             |device| backend.switch_speakers(device),
         );
-        backend.set_playout(output.is_some() && !intent.mute.deafened);
-        backend.subscribe();
+        let playing = output.as_ref().filter(|_| !intent.mute.deafened);
+        let mut playout = Playout {
+            format: playing.and_then(|device| backend.playout_format(device)),
+            recording_initialized: false,
+        };
+        backend.set_playout(playing.is_some());
+        backend.subscribe_microphones();
         let me = backend.identity();
         let mut speaking = Speaking::default();
         let mut reported = None;
@@ -132,7 +139,6 @@ impl Media {
         let mut retry_speakers = intent.retry_speakers;
         let mut reconnecting = false;
         let mut resync = false;
-        let mut recording = false;
 
         loop {
             if reconnecting
@@ -164,19 +170,22 @@ impl Media {
                     || resync
                 {
                     retry_speakers = intent.retry_speakers;
-                    output = route_speakers(
+                    let next_output = route_speakers(
                         &devices.speakers,
                         intent.preferred.speakers.as_ref(),
                         output.as_ref(),
                         |device| backend.switch_speakers(device),
                     );
+                    if output != next_output {
+                        playout.format = None;
+                    }
+                    output = next_output;
                 }
-                // shortcut: track capture start/stop, use CoreAudio format notifications if Bluetooth switches later.
-                let capturing = backend.recording_affects_playout();
-                sync_playout(
-                    output.is_some() && !intent.mute.deafened,
-                    &mut recording,
-                    capturing,
+                let playing = output.as_ref().filter(|_| !intent.mute.deafened);
+                playout.sync(
+                    playing.is_some(),
+                    playing.and_then(|device| backend.playout_format(device)),
+                    backend.macos_recording_initialized(),
                     |enabled| backend.set_playout(enabled),
                 );
                 if let Some(device) = wanted
@@ -238,6 +247,7 @@ impl Media {
                         reconnecting = true;
                         backend.silence_microphone();
                         backend.set_playout(false);
+                        playout.format = None;
                         speaking.0.clear();
                     }
                     MediaEvent::Reconnected if reconnecting => {
@@ -247,7 +257,7 @@ impl Media {
                         intent = requested.borrow_and_update().clone();
                         devices = Arc::new(backend.devices());
                         backend.reconcile_microphone().await;
-                        backend.subscribe();
+                        backend.subscribe_microphones();
                     }
                     MediaEvent::Disconnected(issue) => return Err(issue),
                     MediaEvent::MicrophoneChanged => check_routes = true,
@@ -265,13 +275,15 @@ impl Media {
 
 trait RoomAudio {
     type Event;
+    type PlayoutFormat: PartialEq;
 
     fn identity(&self) -> String;
     fn devices(&self) -> Devices;
     fn switch_speakers(&self, device: &Device) -> bool;
     fn set_playout(&self, enabled: bool);
-    fn subscribe(&self);
-    fn recording_affects_playout(&self) -> bool;
+    fn subscribe_microphones(&self);
+    fn playout_format(&self, device: &Device) -> Option<Self::PlayoutFormat>;
+    fn macos_recording_initialized(&self) -> bool;
     fn selected_microphone(&self) -> Option<&Device>;
     fn active_microphone(&self) -> Option<&Device>;
     fn can_start_microphone(&self) -> bool;
@@ -295,18 +307,38 @@ enum MediaEvent {
     Other,
 }
 
-fn sync_playout(
-    enabled: bool,
-    previous_recording: &mut bool,
-    recording: bool,
-    mut set_enabled: impl FnMut(bool),
-) {
-    let recording_changed = std::mem::replace(previous_recording, recording) != recording;
-    if enabled && recording_changed {
-        // CoreAudio can change the speaker format while the selected device stays the same.
-        set_enabled(false);
+struct Playout<Format> {
+    format: Option<Format>,
+    recording_initialized: bool,
+}
+
+impl<Format: PartialEq> Playout<Format> {
+    fn sync(
+        &mut self,
+        enabled: bool,
+        format: Option<Format>,
+        recording_initialized: bool,
+        mut set_enabled: impl FnMut(bool),
+    ) {
+        let recording_changed =
+            std::mem::replace(&mut self.recording_initialized, recording_initialized)
+                != recording_initialized;
+        let format_changed = self
+            .format
+            .as_ref()
+            .zip(format.as_ref())
+            .is_some_and(|(previous, current)| previous != current);
+        if enabled && (format_changed || (format.is_none() && recording_changed)) {
+            // CoreAudio can renegotiate the format after capture has started or stopped.
+            set_enabled(false);
+        }
+        if let Some(format) = format {
+            self.format = Some(format);
+        } else if !enabled {
+            self.format = None;
+        }
+        set_enabled(enabled);
     }
-    set_enabled(enabled);
 }
 
 #[derive(Default)]
@@ -365,23 +397,38 @@ mod tests {
     fn capture_format_changes_reopen_the_same_playout_stream() {
         let stereo = (48_000, 2);
         let mono = (24_000, 1);
-        let mut recording = false;
+        let mut playout = Playout {
+            format: Some(stereo),
+            recording_initialized: false,
+        };
         let mut open_format = Some(stereo);
-        let mut update = |play, capturing, hardware_format| {
+        let mut update = |play: bool, capturing, hardware_format| {
             let mut stopped = false;
-            sync_playout(play, &mut recording, capturing, |enabled| {
-                assert!(play || !enabled);
-                if enabled {
-                    open_format.get_or_insert(hardware_format);
-                } else {
-                    stopped = open_format.take().is_some();
-                }
-            });
+            playout.sync(
+                play,
+                play.then_some(hardware_format),
+                capturing,
+                |enabled| {
+                    assert!(play || !enabled);
+                    if enabled {
+                        open_format.get_or_insert(hardware_format);
+                    } else {
+                        stopped = open_format.take().is_some();
+                    }
+                },
+            );
             (open_format, stopped)
         };
 
+        assert_eq!(update(true, true, stereo), (Some(stereo), false));
         assert_eq!(update(true, true, mono), (Some(mono), true));
         assert_eq!(update(true, true, mono), (Some(mono), false));
+        let wideband_mono = (48_000, 1);
+        assert_eq!(update(true, false, mono), (Some(mono), false));
+        assert_eq!(
+            update(true, false, wideband_mono),
+            (Some(wideband_mono), true)
+        );
         assert_eq!(update(true, false, stereo), (Some(stereo), true));
         assert_eq!(update(false, false, stereo), (None, true));
         assert_eq!(update(false, true, mono), (None, false));

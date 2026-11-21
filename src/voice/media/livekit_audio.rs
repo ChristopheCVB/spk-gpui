@@ -15,6 +15,10 @@ pub(super) enum Event {
 
 impl RoomAudio for LiveKitAudio<'_> {
     type Event = Event;
+    #[cfg(target_os = "macos")]
+    type PlayoutFormat = super::macos_audio::PlayoutFormat;
+    #[cfg(not(target_os = "macos"))]
+    type PlayoutFormat = ();
 
     fn identity(&self) -> String {
         self.room.local_participant().identity().to_string()
@@ -34,7 +38,7 @@ impl RoomAudio for LiveKitAudio<'_> {
             .set_adm_playout_enabled(enabled);
     }
 
-    fn subscribe(&self) {
+    fn subscribe_microphones(&self) {
         for participant in self.room.remote_participants().into_values() {
             for publication in participant.track_publications().into_values() {
                 subscribe_to_microphone(&publication);
@@ -42,7 +46,17 @@ impl RoomAudio for LiveKitAudio<'_> {
         }
     }
 
-    fn recording_affects_playout(&self) -> bool {
+    #[cfg(target_os = "macos")]
+    fn playout_format(&self, device: &Device) -> Option<Self::PlayoutFormat> {
+        super::macos_audio::playout_format(device)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn playout_format(&self, _: &Device) -> Option<Self::PlayoutFormat> {
+        None
+    }
+
+    fn macos_recording_initialized(&self) -> bool {
         cfg!(target_os = "macos") && self.audio.is_recording_initialized()
     }
 

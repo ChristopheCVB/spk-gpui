@@ -125,8 +125,13 @@ async fn desktop_voice_routes_samples_and_synchronizes_presence() {
             )
             .await;
 
+            peer.set_hardware_format(Some((24_000, 1)));
+            assert_eq!(peer.exchange(74, -31), (Some(74), None));
+            peer.wait_for_playout((24_000, 1)).await;
+            assert_eq!(peer.exchange(74, -31), (Some(74), Some(-31)));
+
+            peer.set_hardware_format(None);
             peer.plug_preferred_devices(false);
-            commands.send(Command::RefreshDevices).await.unwrap();
             let fallback = wait_for_route(
                 &views,
                 VoiceStatus::Connected,
@@ -145,7 +150,6 @@ async fn desktop_voice_routes_samples_and_synchronizes_presence() {
             assert_eq!(peer.exchange(74, -31), (Some(74), Some(-31)));
 
             peer.plug_preferred_devices(true);
-            commands.send(Command::RefreshDevices).await.unwrap();
             wait_for_route(
                 &views,
                 VoiceStatus::Connected,
@@ -183,6 +187,7 @@ async fn desktop_voice_routes_samples_and_synchronizes_presence() {
             )
             .await;
             wait_for_flags(&views, true, false, false).await;
+            peer.set_hardware_format(Some((24_000, 1)));
             assert_eq!(peer.exchange(75, -32), (None, None));
             peer.reconnected();
             wait_for_route(
