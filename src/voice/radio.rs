@@ -24,7 +24,7 @@ use symphonia::core::{
 use tokio::{sync::watch, task::JoinHandle, time};
 use url::{Host, Url};
 
-use super::{Device, devices::open_media_output};
+use super::devices::{MediaOutput, open_media_output};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum RadioPlayback {
@@ -35,20 +35,14 @@ pub enum RadioPlayback {
     Unavailable,
 }
 
-#[derive(Clone, PartialEq)]
-pub(crate) struct Output {
-    pub device: Option<Device>,
-    pub volume: f32,
-}
-
 pub(crate) struct RadioPlayer {
     task: JoinHandle<()>,
-    output: watch::Sender<Output>,
+    output: watch::Sender<MediaOutput>,
     pub playback: watch::Receiver<RadioPlayback>,
 }
 
 impl RadioPlayer {
-    pub fn start(url: Option<String>, initial_output: Output) -> Self {
+    pub fn start(url: Option<String>, initial_output: MediaOutput) -> Self {
         let (output, settings) = watch::channel(initial_output);
         let (status, playback) = watch::channel(RadioPlayback::Connecting);
         let task = tokio::spawn(async move {
@@ -64,7 +58,7 @@ impl RadioPlayer {
         }
     }
 
-    pub fn set_output(&self, output: Output) {
+    pub fn set_output(&self, output: MediaOutput) {
         self.output.send_if_modified(|current| {
             if *current == output {
                 return false;
@@ -83,7 +77,7 @@ impl Drop for RadioPlayer {
 
 async fn play(
     url: Url,
-    mut settings: watch::Receiver<Output>,
+    mut settings: watch::Receiver<MediaOutput>,
     status: &watch::Sender<RadioPlayback>,
 ) {
     let (bytes, stream) = async_channel::bounded(8);
@@ -139,7 +133,7 @@ async fn download(url: Url, bytes: Sender<bytes::Bytes>) {
 
 async fn play_samples(
     samples: Receiver<SamplesBuffer>,
-    settings: &mut watch::Receiver<Output>,
+    settings: &mut watch::Receiver<MediaOutput>,
     status: &watch::Sender<RadioPlayback>,
 ) {
     let deadline = time::sleep(Duration::from_secs(15));

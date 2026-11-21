@@ -27,6 +27,8 @@ pub struct DevicePreferences {
     pub speakers: Option<Device>,
     pub media_output: Option<Device>,
     pub radio_volume: u8,
+    pub soundboard_enabled: bool,
+    pub soundboard_volume: u8,
     pub output_volume: u8,
     pub participant_volumes: HashMap<String, ParticipantVolume>,
 }
@@ -38,6 +40,8 @@ impl Default for DevicePreferences {
             speakers: None,
             media_output: None,
             radio_volume: 100,
+            soundboard_enabled: true,
+            soundboard_volume: 70,
             output_volume: 100,
             participant_volumes: HashMap::new(),
         }
@@ -216,6 +220,12 @@ fn media_outputs() -> DeviceList {
     }
 }
 
+#[derive(Clone, PartialEq)]
+pub(crate) struct MediaOutput {
+    pub device: Option<Device>,
+    pub volume: f32,
+}
+
 pub(crate) fn open_media_output(
     device: Option<&Device>,
     on_error: impl FnMut(cpal::Error) + Clone + Send + 'static,
@@ -335,6 +345,8 @@ mod tests {
                 name: "Headphones".into(),
             }),
             radio_volume: 125,
+            soundboard_enabled: false,
+            soundboard_volume: 25,
             ..Default::default()
         };
         saved.save(&path).unwrap();
