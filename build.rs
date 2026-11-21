@@ -10,6 +10,11 @@ fn main() {
     println!("cargo::rerun-if-env-changed=LIVEKIT_URL");
     match env::var("CARGO_CFG_TARGET_OS").as_deref() {
         Ok("macos") => println!("cargo::rustc-link-arg=-ObjC"),
+        Ok("linux") => {
+            for library in ["gio-2.0", "gobject-2.0", "glib-2.0"] {
+                println!("cargo::rustc-link-lib=dylib={library}");
+            }
+        }
         Ok("windows") => {
             println!("cargo::rerun-if-changed=build/windows.rc");
             println!("cargo::rerun-if-changed=assets/logo.ico");

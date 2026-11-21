@@ -7617,11 +7617,13 @@ name = "spk-gpui"
 version = "0.1.0"
 dependencies = [
  "apple-cf",
+ "ashpd",
  "async-channel",
  "block2 0.6.2",
  "bytes",
  "cookie_store",
  "cpal",
+ "cxx",
  "dirs 6.0.0",
  "embed-resource",
  "futures",
@@ -7639,6 +7641,7 @@ dependencies = [
  "objc2-core-audio-types",
  "objc2-foundation 0.3.2",
  "oxideav-aac",
+ "pulseaudio",
  "raw-window-handle",
  "reqwest 0.13.5",
  "reqwest_cookie_store",
@@ -7654,6 +7657,7 @@ dependencies = [
  "tokio-tungstenite 0.30.0",
  "url",
  "uuid",
+ "webrtc-sys",
  "windows 0.62.2",
  "x11rb",
 ]
