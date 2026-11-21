@@ -443,7 +443,7 @@ impl Spk {
             });
         let composer_busy = chat.outgoing.is_some() || !chat.can_send();
         div()
-            .id(SharedString::from(format!("message-{}", &message.id)))
+            .id(SharedString::from(format!("message-{}", message.id)))
             .px_4()
             .py_2()
             .flex_shrink_0()
