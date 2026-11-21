@@ -147,6 +147,11 @@ async fn restored_http_session_authenticates_websocket_and_sign_out() {
 )]
 async fn saved_session_restores_signs_out_and_clears_expired_credentials() {
     let http = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    // A cancelled request can leave a connected socket with no HTTP bytes.
+    let cancelled = TcpStream::connect(http.local_addr().unwrap())
+        .await
+        .unwrap();
+    drop(cancelled);
     let base = Url::parse(&format!("http://{}", http.local_addr().unwrap())).unwrap();
     let sockets = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("ws://{}/_ws", sockets.local_addr().unwrap());
@@ -1136,15 +1141,20 @@ impl Request {
     }
 
     async fn receive(listener: &TcpListener) -> (String, Self) {
-        let (stream, _) = listener.accept().await.unwrap();
+        let (stream, request_line) = loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut line = String::new();
+            if stream.read_line(&mut line).await.unwrap() != 0 {
+                break (stream, line.trim_end().to_owned());
+            }
+        };
         let mut request = Self {
-            stream: BufReader::new(stream),
+            stream,
             headers: String::new(),
             body: Vec::new(),
         };
         let mut line = String::new();
-        request.stream.read_line(&mut line).await.unwrap();
-        let request_line = line.trim_end().to_owned();
         loop {
             line.clear();
             assert_ne!(request.stream.read_line(&mut line).await.unwrap(), 0);
