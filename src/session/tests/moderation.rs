@@ -55,7 +55,6 @@ async fn admin_voice_actions_follow_role_and_shared_presence() {
             }));
 
             let disconnect = moderation_request(&requests, value!({"userId":"bob"})).await;
-            disconnect.respond(&[], r#"{"ok":true}"#).await;
             for peer in [&mut desktop, &mut web_server] {
                 voice_presence(peer, None).await;
             }
@@ -67,6 +66,7 @@ async fn admin_voice_actions_follow_role_and_shared_presence() {
                 "type":"voice:presence","userId":"bob","channelId":null,
             }));
             assert_eq!(receive_server_frame(&mut web).await, disconnected);
+            disconnect.respond(&[], r#"{"ok":true}"#).await;
             step.recv().await.unwrap();
 
             snapshots.send(SidebarSnapshot::VoiceModeration {
@@ -122,8 +122,10 @@ async fn admin_voice_actions_follow_role_and_shared_presence() {
                 user_id: "bob".into(),
                 action: VoiceModeration::Disconnect,
             }).await.unwrap();
-            assert_voice_moderation_notice(&views, "Voice participant disconnected.").await;
-            let left = wait_for_sidebar(&views, |view| view.participants("second").is_empty()).await;
+            let left = wait_for_sidebar(&views, |view| {
+                view.voice_moderation_notice == Some("Voice participant disconnected.")
+                    && view.participants("second").is_empty()
+            }).await;
             assert!(left.voice_moderation_channels("bob").is_none());
             advance.send(()).await.unwrap();
 
