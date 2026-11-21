@@ -1,4 +1,5 @@
 use crate::session::ProfileEdit;
+use crate::ui::profile::user_status_picker;
 use gpui_kit::component::Disableable;
 
 use super::*;
@@ -133,6 +134,24 @@ impl Settings {
                                         ),
                                 ),
                         )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(Label::new("Status").text_color(theme.muted_foreground))
+                                .child(user_status_picker(
+                                    "profile-status",
+                                    sidebar.user_status,
+                                    spk.clone(),
+                                )),
+                        )
+                        .children(sidebar.user_status_notice.map(|notice| {
+                            div()
+                                .id("user-status-notice")
+                                .role(Role::Status)
+                                .child(Label::new(notice).text_color(theme.danger))
+                        }))
                         .children(result.map(|(message, color)| {
                             div()
                                 .id("profile-result")
