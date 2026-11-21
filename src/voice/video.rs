@@ -402,6 +402,16 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires a loopback LiveKit server and SPK_TEST_PUBLISHER/SPK_TEST_RECEIVER tokens"]
     async fn livekit_camera_only_delivers_frames_while_watching() {
+        watch_video(VideoSource::Camera, TrackSource::Camera).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a loopback LiveKit server and SPK_TEST_PUBLISHER/SPK_TEST_RECEIVER tokens"]
+    async fn livekit_screen_only_delivers_frames_while_watching() {
+        watch_video(VideoSource::Screen, TrackSource::Screenshare).await;
+    }
+
+    async fn watch_video(video_source: VideoSource, track_source: TrackSource) {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let endpoint =
             std::env::var("SPK_TEST_LIVEKIT").unwrap_or_else(|_| "ws://127.0.0.1:17880".into());
@@ -428,14 +438,42 @@ mod tests {
             VideoRotation::VideoRotation0,
             I420Buffer::new_black(320, 180),
         );
-        local.publish_camera(&publisher, &frame);
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            wait_publication(&mut local.publication),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let (capture, share) = if video_source == VideoSource::Camera {
+            local.publish_camera(&publisher, &frame);
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                wait_publication(&mut local.publication),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            (local.publication.as_ref().unwrap().source.clone(), None)
+        } else {
+            let capture = NativeVideoSource::new(
+                VideoResolution {
+                    width: 320,
+                    height: 180,
+                },
+                true,
+            );
+            let track = LocalVideoTrack::create_video_track(
+                "spk:screen:180:30",
+                RtcVideoSource::Native(capture.clone()),
+            );
+            let publication = publisher
+                .local_participant()
+                .publish_track(
+                    LocalTrack::Video(track),
+                    TrackPublishOptions {
+                        source: track_source,
+                        simulcast: false,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            (capture, Some(publication))
+        };
 
         let publication = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
@@ -446,10 +484,10 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(publication.source(), TrackSource::Camera);
+        assert_eq!(publication.source(), track_source);
         remote.sync_tracks(&receiver, false);
         let remote_tile = &remote.report.participants[&presenter];
-        assert!(remote_tile.live.contains(&VideoSource::Camera));
+        assert!(remote_tile.live.contains(&video_source));
         assert!(remote_tile.frames.is_empty());
         assert!(!publication.is_desired());
 
@@ -458,16 +496,11 @@ mod tests {
         assert!(publication.is_desired());
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
-                local
-                    .publication
-                    .as_ref()
-                    .unwrap()
-                    .source
-                    .capture_frame(&frame);
+                capture.capture_frame(&frame);
                 remote.sync_tracks(&receiver, false);
                 if remote.report.participants[&presenter]
                     .frames
-                    .get(&VideoSource::Camera)
+                    .get(&video_source)
                     .and_then(VideoFrameSlot::latest)
                     .is_some_and(|image| image.as_bytes(0).is_some_and(|pixels| !pixels.is_empty()))
                 {
@@ -483,11 +516,19 @@ mod tests {
         remote.sync_tracks(&receiver, false);
         assert!(!publication.is_desired());
         assert!(remote.report.participants[&presenter].frames.is_empty());
-        local.stop_camera().await;
+        if let Some(share) = share {
+            publisher
+                .local_participant()
+                .unpublish_track(&share.sid())
+                .await
+                .unwrap();
+        } else {
+            local.stop_camera().await;
+        }
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 if let Some(RoomEvent::TrackUnpublished { publication, .. }) = events.recv().await
-                    && publication.source() == TrackSource::Camera
+                    && publication.source() == track_source
                 {
                     break;
                 }
