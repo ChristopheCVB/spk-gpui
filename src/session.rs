@@ -1,5 +1,6 @@
 mod authentication;
 mod avatars;
+mod chat;
 mod presence;
 mod radio;
 mod soundboard;
@@ -26,11 +27,17 @@ use authentication::{
     SESSION_EXPIRED, SavedSession, login, restore, sign_in, sign_in_message, sign_out,
 };
 use avatars::AvatarLoads;
+use chat::ChatSession;
 use presence::{Refresh, Resource, VoiceMembership};
 use radio::{RadioSession, RadioView};
 use soundboard::{SoundboardSession, SoundboardView};
 use voice_session::{DeviceSettings, VoiceDestination, VoiceSession, VoiceSettings};
-pub use {presence::Participant, radio::RadioPlayback, voice_session::VoiceView};
+pub use {
+    chat::{ChatView, Delivery},
+    presence::Participant,
+    radio::RadioPlayback,
+    voice_session::VoiceView,
+};
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -43,6 +50,16 @@ pub enum Command {
     Restore,
     SignOut,
     Refresh,
+    OpenTextChannel(String),
+    CloseChat,
+    LoadOlderMessages,
+    RetryChatHistory,
+    SendChatMessage {
+        channel_id: String,
+        body: String,
+    },
+    RetryChatSend,
+    DismissChatSend,
     JoinVoice(String),
     LeaveVoice,
     ToggleMute,
@@ -112,6 +129,7 @@ pub struct Sidebar {
     pub connection: Connection,
     pub notice: Option<&'static str>,
     pub load_failed: bool,
+    pub chat: Option<ChatView>,
     pub voice: Option<VoiceView>,
     pub radio: RadioView,
     pub soundboard: SoundboardView,
@@ -135,6 +153,7 @@ impl Sidebar {
             connection: Connection::Connecting,
             notice,
             load_failed: false,
+            chat: None,
             voice: None,
             radio: RadioView::default(),
             soundboard: SoundboardView::default(),
@@ -163,6 +182,16 @@ impl Sidebar {
             .collect::<Vec<_>>();
         people.sort_by_cached_key(|(id, name)| (name.to_lowercase(), *id));
         people
+    }
+
+    pub fn message_author(&self, id: &str) -> &str {
+        if self.profile.id.as_deref() == Some(id) {
+            return self.profile.name();
+        }
+        self.users
+            .get(id)
+            .and_then(User::name)
+            .unwrap_or("Unknown user")
     }
 
     pub fn avatar(&self, id: Option<&str>) -> Option<&Arc<RenderImage>> {
@@ -289,6 +318,7 @@ async fn watch_session(
     sidebar.voice_intent.preferred = settings.devices.preferred.clone();
     sidebar.device_notice = settings.devices.notice;
     sidebar.devices = Arc::new((settings.enumerate_devices)());
+    let mut chat = ChatSession::default();
     let mut voice = VoiceSession::default();
     let mut radio = RadioSession::default();
     let mut soundboard = SoundboardSession::default();
@@ -297,6 +327,7 @@ async fn watch_session(
         if commands.is_closed() {
             break SessionEnd::Closed;
         }
+        sidebar.chat = chat.view();
         radio.sync(&mut sidebar, &voice);
         soundboard.sync(&mut sidebar, &voice);
         voice.start_pending(&mut sidebar, client, &settings.start_call);
@@ -308,7 +339,16 @@ async fn watch_session(
             break SessionEnd::Closed;
         }
         let retry_at = voice.retry_at();
+        let chat_timeout = chat.next_timeout();
         tokio::select! {
+            _ = sleep_until(chat_timeout.unwrap_or_else(Instant::now)), if chat_timeout.is_some() => chat.expire(),
+            Some(result) = chat.tasks.join_next() => {
+                let result = result.unwrap_or(Err(Failure::Connection));
+                if result.as_ref().is_err_and(Failure::unauthorized) {
+                    break SessionEnd::Invalidated(SESSION_EXPIRED);
+                }
+                chat.complete(result);
+            }
             _ = sleep_until(retry_at.unwrap_or_else(Instant::now)), if retry_at.is_some() => {
                 voice.retry_presence();
                 refresh.fetch(client, Resource::Presence);
@@ -317,6 +357,17 @@ async fn watch_session(
                 Err(_) => break SessionEnd::Closed,
                 Ok(Command::SignOut) => break SessionEnd::SignOut,
                 Ok(Command::Refresh) => refresh.fetch_all(client),
+                Ok(Command::OpenTextChannel(id)) => {
+                    if sidebar.channels.iter().flatten().any(|channel| channel.id == id && channel.kind == "text") {
+                        chat.open(client, id);
+                    }
+                }
+                Ok(Command::CloseChat) => chat.close(),
+                Ok(Command::LoadOlderMessages) => chat.older(client),
+                Ok(Command::RetryChatHistory) => chat.retry_history(client),
+                Ok(Command::SendChatMessage { channel_id, body }) => chat.send(channel_id, body),
+                Ok(Command::RetryChatSend) => chat.retry_send(),
+                Ok(Command::DismissChatSend) => chat.dismiss_send(),
                 Ok(Command::JoinVoice(channel_id)) => voice.join(&mut sidebar, channel_id),
                 Ok(Command::LeaveVoice) => voice.leave(&mut sidebar),
                 Ok(command @ (Command::SearchRadio(_) | Command::RadioFavorites
@@ -351,6 +402,7 @@ async fn watch_session(
                 }
                 Ok(SocketEvent::Online(socket)) => {
                     sidebar.connection = Connection::Online;
+                    chat.connected(client, socket.clone());
                     voice.connected(socket);
                     refresh.fetch_all(client);
                 }
@@ -358,9 +410,14 @@ async fn watch_session(
                     sidebar.connection = state;
                     sidebar.channel_radio.clear();
                     refresh.presence_ready = false;
+                    chat.disconnected();
                     voice.disconnected();
                 }
                 Ok(SocketEvent::Frame(frame)) => match frame {
+                    Frame::MessageNew { message, nonce } => {
+                        chat.message(message, nonce.as_deref(), sidebar.profile.id.as_deref());
+                    }
+                    Frame::MessageError { nonce: Some(nonce), error } => chat.error(&nonce, error),
                     Frame::ChannelsChanged => refresh.fetch(client, Resource::Channels),
                     Frame::UsersChanged => refresh.fetch(client, Resource::Users),
                     Frame::Presence { user_id, channel_id, flags, video } => {

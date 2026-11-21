@@ -1,3 +1,4 @@
+mod chat;
 mod media;
 mod radio;
 mod soundboard;

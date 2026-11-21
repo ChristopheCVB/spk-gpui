@@ -1,3 +1,4 @@
+mod chat;
 mod radio;
 mod settings;
 mod soundboard;
@@ -14,7 +15,7 @@ use gpui_kit::{
         ActiveTheme, Icon, Selectable, Sizable, WindowExt,
         avatar::Avatar,
         button::{Button, ButtonVariants},
-        input::{Input, InputContentType, InputEvent, InputState},
+        input::{Input, InputContentType, InputEvent, InputState, Textarea, TextareaState},
         label::Label,
     },
     prelude::FluentBuilder,
@@ -35,6 +36,8 @@ use voice::VoiceControls;
 pub(super) struct Spk {
     email: Entity<InputState>,
     password: Entity<InputState>,
+    chat_input: Entity<TextareaState>,
+    chat_scroll: ScrollHandle,
     commands: async_channel::Sender<Command>,
     view: View,
     form_error: Option<&'static str>,
@@ -66,6 +69,18 @@ impl Spk {
             input.set_masked(true, window, cx);
             input
         });
+        let chat_input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .rows(2)
+                .placeholder("Write a message")
+                .submit_on_enter(true)
+        });
+        cx.subscribe_in(&chat_input, window, |this, _, event, window, cx| {
+            if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
+                this.submit_chat(window, cx);
+            }
+        })
+        .detach();
         let workspace_focus = cx.focus_handle().tab_stop(false);
         cx.on_focus_lost(window, |this, window, cx| {
             if matches!(this.view, View::SignedIn(_)) && !window.has_active_dialog(cx) {
@@ -185,7 +200,7 @@ impl Spk {
                             let handle = input.focus_handle(cx);
                             window.focus(&handle, cx);
                         }
-                        this.set_session_view(view, window);
+                        this.set_session_view(view, window, cx);
                         cx.notify();
                     })
                     .is_err()
@@ -202,6 +217,7 @@ impl Spk {
                         retry_restore: false,
                     },
                     window,
+                    cx,
                 );
                 cx.notify();
             });
@@ -211,6 +227,8 @@ impl Spk {
         Self {
             email,
             password,
+            chat_input,
+            chat_scroll: ScrollHandle::new(),
             commands,
             view: View::Busy("Checking saved session…"),
             form_error: None,
@@ -227,7 +245,8 @@ impl Spk {
         }
     }
 
-    fn set_session_view(&mut self, view: View, window: &mut Window) {
+    fn set_session_view(&mut self, view: View, window: &mut Window, cx: &mut Context<Self>) {
+        self.update_chat(&view, window, cx);
         if let View::SignedIn(previous) = &self.view {
             let next = match &view {
                 View::SignedIn(sidebar) => Some(&sidebar.avatars),
