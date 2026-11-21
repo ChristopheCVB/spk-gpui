@@ -18,7 +18,7 @@ use crate::api::{Channel, Connection, Failure, Frame, Profile, SocketEvent, SpkC
 use crate::sounds::{Sound, SoundSettings, VoiceSounds};
 use crate::voice::{
     Call, Device, DeviceKind, Devices, Intent, Issue as VoiceIssue, ParticipantVolumeChange,
-    Status as VoiceStatus, Update as VoiceUpdate, video::CameraResolution,
+    Status as VoiceStatus, Update as VoiceUpdate, screen, video::CameraResolution,
 };
 use authentication::{
     SESSION_EXPIRED, SavedSession, login, restore, sign_in, sign_in_message, sign_out,
@@ -56,6 +56,12 @@ pub enum Command {
     ChooseCamera(Option<String>),
     ChooseCameraResolution(CameraResolution),
     SetWatching(String, bool),
+    OpenScreenShare,
+    ChooseScreenSource(u64, String),
+    StartScreenShare(u64),
+    StopScreenShare(u64),
+    SetScreenAudio(bool),
+    SetScreenQuality(screen::Quality),
     SetOutputVolume(u8),
     SetParticipantVolume(String, ParticipantVolumeChange),
 }
@@ -377,6 +383,20 @@ async fn watch_session(
                         && voice.status != VoiceStatus::Leaving
                     {
                         voice.video = Some(report);
+                    }
+                }
+                VoiceUpdate::Screen(report) => {
+                    let request = &sidebar.voice_intent.screen;
+                    if let Some(voice) = &mut sidebar.voice
+                        && voice.is_participating()
+                        && report.attempt == request.attempt
+                        && request.action != screen::Action::Stop
+                    {
+                        let was_live = voice.screen.as_ref().is_some_and(|screen| screen.state.active());
+                        if was_live != report.state.active() {
+                            settings.sounds.play(Sound::Screen, report.state.active());
+                        }
+                        voice.screen = Some(report);
                     }
                 }
                 VoiceUpdate::Finished(result) => {

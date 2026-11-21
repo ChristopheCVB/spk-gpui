@@ -614,6 +614,10 @@ impl Spk {
                     )
                 },
             )
+            .children(
+                call.filter(|_| in_voice && !self.video_stage.fullscreen)
+                    .and_then(|call| self.screen_options(call, sidebar, cx)),
+            )
             .when_some(
                 selected_channel.filter(|_| !self.video_stage.fullscreen),
                 |stage, channel| {
@@ -649,6 +653,7 @@ impl Spk {
                                                 cx,
                                             ))
                                             .child(self.camera_controls(sidebar, cx))
+                                            .child(self.screen_button(call, cx))
                                             .child(super::voice::connection_diagnostics(cx))
                                     })
                                     .children(departing.and_then(|call| {

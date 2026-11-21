@@ -17,6 +17,7 @@ pub(crate) mod audio_preview;
 mod devices;
 mod media;
 pub(crate) mod radio;
+pub(crate) mod screen;
 pub(crate) mod video;
 
 pub use devices::{
@@ -75,6 +76,7 @@ impl Issue {
 pub enum Update {
     Media(Arc<Report>),
     Video(Arc<video::VideoReport>),
+    Screen(screen::Report),
     Finished(Result<(), Issue>),
 }
 
@@ -108,6 +110,7 @@ pub struct Intent {
     pub refresh_devices: u64,
     pub radio_listening: Option<bool>,
     pub camera: video::CameraIntent,
+    pub screen: screen::Request,
     pub watching: HashSet<String>,
 }
 
@@ -437,10 +440,27 @@ impl Worker {
             let Some(state) = current else {
                 return false;
             };
+            let video = VideoPresence {
+                screen: state.video.screen,
+                ..video
+            };
             if state.video == video {
                 return false;
             }
             state.video = video;
+            true
+        });
+    }
+
+    fn publish_screen_presence(&self, screen: bool) {
+        self.presence.send_if_modified(|current| {
+            let Some(state) = current else {
+                return false;
+            };
+            if state.video.screen == screen {
+                return false;
+            }
+            state.video.screen = screen;
             true
         });
     }
