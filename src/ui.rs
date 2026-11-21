@@ -41,6 +41,8 @@ pub(super) struct Spk {
     nickname: Entity<InputState>,
     chat_input: Entity<TextareaState>,
     chat_scroll: ScrollHandle,
+    chat_spoiler_link: String,
+    chat_spoilers: std::collections::HashMap<(String, u64), std::collections::HashSet<usize>>,
     commands: async_channel::Sender<Command>,
     view: View,
     form_error: Option<&'static str>,
@@ -79,11 +81,15 @@ impl Spk {
                 .placeholder("Write a message")
                 .submit_on_enter(true)
         });
-        cx.subscribe_in(&chat_input, window, |this, _, event, window, cx| {
-            if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
-                this.submit_chat(window, cx);
-            }
-        })
+        cx.subscribe_in(
+            &chat_input,
+            window,
+            |this, _, event, window, cx| match event {
+                InputEvent::Change => this.update_chat_draft(cx),
+                InputEvent::PressEnter { shift: false, .. } => this.submit_chat(window, cx),
+                _ => {}
+            },
+        )
         .detach();
         let workspace_focus = cx.focus_handle().tab_stop(false);
         cx.on_focus_lost(window, |this, window, cx| {
@@ -226,6 +232,8 @@ impl Spk {
             nickname,
             chat_input,
             chat_scroll: ScrollHandle::new(),
+            chat_spoiler_link: format!("spk-spoiler:{}:", uuid::Uuid::new_v4()),
+            chat_spoilers: Default::default(),
             commands,
             view: View::Busy("Checking saved session…"),
             form_error: None,
