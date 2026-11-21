@@ -18,9 +18,10 @@ image-webp = "0.2.4"
 keyring = "4.2"
 livekit = { version = "=0.12.0", features = ["rustls-tls-native-roots"] }
 markdown = "=1.0.0"
+mime_guess = "2"
 nokhwa = { version = "=0.10.11", default-features = false, features = ["input-native"] }
 oxideav-aac = "=0.1.7"
-reqwest = { version = "0.13", default-features = false, features = ["cookies", "json", "rustls-no-provider"] }
+reqwest = { version = "0.13", default-features = false, features = ["cookies", "json", "rustls-no-provider", "stream"] }
 reqwest_cookie_store = "0.10"
 rodio = { version = "=0.23.0", default-features = false, features = ["playback"] }
 # Embed GPUI Kit icons in the debug binaries distributed by CI.

@@ -1,3 +1,8 @@
+mod attachments;
+
+pub use attachments::{AttachmentInput, UploadStatus, image_preview};
+use attachments::{AttachmentWork, QueuedAttachment};
+
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -6,7 +11,9 @@ use std::{
 
 use tokio::{task::JoinSet, time::Instant};
 
-use crate::api::{Channel, ChatMessage, Failure, MessagePage, ReplyRef, SpkClient, VoiceSocket};
+use crate::api::{
+    AttachmentRef, Channel, ChatMessage, Failure, MessagePage, ReplyRef, SpkClient, VoiceSocket,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum History {
@@ -81,6 +88,8 @@ fn position(message: &ChatMessage) -> (i64, &str) {
 pub struct Draft {
     pub body: String,
     pub reply: Option<ReplyRef>,
+    pub uploads: Vec<QueuedAttachment>,
+    pub upload_notice: Option<&'static str>,
 }
 
 #[derive(Clone)]
@@ -89,6 +98,7 @@ pub struct Outgoing {
     pub status: Delivery,
     nonce: String,
     reply: Option<ReplyRef>,
+    attachments: Vec<AttachmentRef>,
 }
 
 #[derive(Clone)]
@@ -119,6 +129,7 @@ pub(super) struct ChatSession {
     unread_request: u64,
     deleted_during_load: HashSet<String>,
     pub tasks: JoinSet<Result<MessagePage, Failure>>,
+    pub(super) attachments: AttachmentWork,
 }
 
 impl ChatSession {
@@ -286,7 +297,7 @@ impl ChatSession {
         });
     }
 
-    pub fn complete(&mut self, result: Result<MessagePage, Failure>) {
+    pub fn complete(&mut self, client: &SpkClient, result: Result<MessagePage, Failure>) {
         let (Some(view), Some(request)) = (&mut self.selected, &self.history) else {
             return;
         };
@@ -340,7 +351,11 @@ impl ChatSession {
                     view.has_more_after = false;
                     if view.direct_message_peer.is_some() {
                         self.outgoing.remove(&view.channel_id);
-                        self.drafts.remove(&view.channel_id);
+                        if let Some(draft) = self.drafts.remove(&view.channel_id) {
+                            for upload in draft.uploads {
+                                self.attachments.cancel(client, upload);
+                            }
+                        }
                         self.typers.clear();
                         view.history = History::Unavailable;
                         self.buffered.clear();
@@ -477,17 +492,27 @@ impl ChatSession {
             .as_ref()
             .is_none_or(|view| view.channel_id != channel_id || !view.can_send())
             || self.outgoing.contains_key(&channel_id)
-            || body.trim().is_empty()
         {
             return;
         }
         let draft = self.drafts.entry(channel_id.clone()).or_default();
+        if draft.attachments_block_send() || (body.trim().is_empty() && !draft.attachments_ready())
+        {
+            return;
+        }
         draft.body.clone_from(&body);
         let reply = draft.reply.clone();
-        self.send_draft(channel_id, body, reply);
+        let attachments = draft.attachment_refs();
+        self.send_draft(channel_id, body, reply, attachments);
     }
 
-    fn send_draft(&mut self, channel_id: String, body: String, reply: Option<ReplyRef>) {
+    fn send_draft(
+        &mut self,
+        channel_id: String,
+        body: String,
+        reply: Option<ReplyRef>,
+        attachments: Vec<AttachmentRef>,
+    ) {
         let nonce = uuid::Uuid::new_v4().to_string();
         let status = if self.socket.as_ref().is_some_and(|socket| {
             socket.send_message(
@@ -495,6 +520,7 @@ impl ChatSession {
                 &body,
                 &nonce,
                 reply.as_ref().map(|reply| reply.id.as_str()),
+                &attachments,
             )
         }) {
             Delivery::Sending(Instant::now() + Duration::from_secs(12))
@@ -508,6 +534,7 @@ impl ChatSession {
                 status,
                 nonce,
                 reply,
+                attachments,
             },
         );
     }
@@ -522,7 +549,7 @@ impl ChatSession {
         {
             let channel = view.channel_id.clone();
             let outgoing = self.outgoing.remove(&channel).unwrap();
-            self.send_draft(channel, outgoing.body, outgoing.reply);
+            self.send_draft(channel, outgoing.body, outgoing.reply, outgoing.attachments);
         }
     }
 
@@ -545,12 +572,14 @@ impl ChatSession {
                 .is_some_and(|pending| Some(pending.nonce.as_str()) == nonce)
         {
             let outgoing = self.outgoing.remove(&message.channel_id).unwrap();
-            if self
-                .drafts
-                .get(&message.channel_id)
-                .is_some_and(|draft| draft.body == outgoing.body && draft.reply == outgoing.reply)
-            {
-                self.drafts.remove(&message.channel_id);
+            if let Some(draft) = self.drafts.get_mut(&message.channel_id) {
+                draft.uploads.retain(|upload| !matches!(&upload.status,
+                    UploadStatus::Ready(id) if outgoing.attachments.iter().any(|sent| sent.id == *id)));
+                if draft.body == outgoing.body && draft.reply == outgoing.reply {
+                    draft.body.clear();
+                    draft.reply = None;
+                    draft.upload_notice = None;
+                }
             }
         }
         if let Some(view) = &mut self.selected

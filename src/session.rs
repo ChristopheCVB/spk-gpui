@@ -47,7 +47,7 @@ pub use {
     crate::api::UserStatus,
     accounts::AccountLinkForm,
     avatars::AvatarPhoto,
-    chat::{ChatView, Delivery},
+    chat::{AttachmentInput, ChatView, Delivery, UploadStatus, image_preview},
     presence::Participant,
     profiles::ProfileEdit,
     radio::RadioPlayback,
@@ -102,6 +102,24 @@ pub enum Command {
     SendChatMessage {
         channel_id: String,
         body: String,
+    },
+    AddChatAttachments {
+        channel_id: String,
+        files: Vec<AttachmentInput>,
+    },
+    CancelChatAttachment {
+        channel_id: String,
+        key: uuid::Uuid,
+    },
+    ToggleChatAttachmentSpoiler {
+        channel_id: String,
+        key: uuid::Uuid,
+    },
+    ReadChatAttachment {
+        channel_id: String,
+        message_id: String,
+        attachment_id: String,
+        reply: oneshot::Sender<Result<Vec<u8>, Failure>>,
     },
     RetryChatSend,
     DismissChatSend,
@@ -513,8 +531,14 @@ async fn watch_session(
                 if result.as_ref().is_err_and(Failure::unauthorized) {
                     break SessionEnd::Invalidated(SESSION_EXPIRED);
                 }
-                chat.complete(result);
+                chat.complete(client, result);
             }
+            Some(result) = chat.attachments.tasks.join_next() => {
+                if matches!(result, Ok(true)) {
+                    break SessionEnd::Invalidated(SESSION_EXPIRED);
+                }
+            }
+            Ok(event) = chat.attachments.events.recv() => chat.attachment_event(client, event),
             Some(result) = direct_message_opens.join_next() => {
                 match result.unwrap_or(Err(Failure::Connection)) {
                     Ok(channel) => {
@@ -606,6 +630,12 @@ async fn watch_session(
                 Ok(Command::UpdateChatDraft { channel_id, body }) => chat.update_draft(channel_id, body),
                 Ok(Command::SetChatReply { channel_id, message_id }) => chat.set_reply(&channel_id, message_id.as_deref()),
                 Ok(Command::SendChatMessage { channel_id, body }) => chat.send(channel_id, body),
+                Ok(Command::AddChatAttachments { channel_id, files }) => chat.add_attachments(client, channel_id, files),
+                Ok(Command::CancelChatAttachment { channel_id, key }) => chat.cancel_attachment(client, &channel_id, key),
+                Ok(Command::ToggleChatAttachmentSpoiler { channel_id, key }) => chat.toggle_attachment_spoiler(&channel_id, key),
+                Ok(Command::ReadChatAttachment { channel_id, message_id, attachment_id, reply }) => {
+                    chat.read_attachment(client, &channel_id, &message_id, attachment_id, reply);
+                }
                 Ok(Command::RetryChatSend) => chat.retry_send(),
                 Ok(Command::DismissChatSend) => chat.dismiss_send(),
                 Ok(command @ (Command::SaveNickname(_) | Command::UploadAvatar(_) | Command::InspectProfileEmail(..))) => {

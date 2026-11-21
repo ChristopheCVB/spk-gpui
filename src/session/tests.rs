@@ -1,4 +1,6 @@
 mod accounts;
+#[cfg(debug_assertions)]
+mod attachments;
 mod chat;
 mod media;
 mod profile;

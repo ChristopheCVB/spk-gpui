@@ -1,3 +1,7 @@
+mod attachments;
+
+pub use attachments::{Attachment, AttachmentRef, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS};
+
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use futures::{SinkExt, StreamExt};
@@ -167,6 +171,8 @@ pub struct ChatMessage {
     pub body: String,
     pub created_at: i64,
     pub reply_to: Option<ReplyRef>,
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
 }
 
 impl ChatMessage {
@@ -464,6 +470,7 @@ impl VoiceSocket {
         body: &str,
         nonce: &str,
         reply_to_id: Option<&str>,
+        attachments: &[AttachmentRef],
     ) -> bool {
         let frame = serde_json::json!({
             "type": "message:send",
@@ -471,6 +478,7 @@ impl VoiceSocket {
             "body": body,
             "nonce": nonce,
             "replyToId": reply_to_id,
+            "attachments": attachments,
         });
         self.0.try_send((frame.to_string(), None)).is_ok()
     }
@@ -936,7 +944,14 @@ impl SpkClient {
     }
 
     async fn storage_bytes(&self, url: Url, max_bytes: usize) -> Result<Vec<u8>, Failure> {
-        let mut response = Self::send(self.storage.get(url)).await?;
+        Self::limited_bytes(self.storage.get(url), max_bytes).await
+    }
+
+    async fn limited_bytes(
+        request: reqwest::RequestBuilder,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, Failure> {
+        let mut response = Self::send(request).await?;
         let mut bytes = Vec::new();
         if response
             .content_length()
