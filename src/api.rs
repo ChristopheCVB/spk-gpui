@@ -1,9 +1,13 @@
+mod account_admin;
 mod attachments;
 mod chat_actions;
 mod gifs;
 mod public_media;
 mod search;
 
+pub use account_admin::{
+    AccountRole, AdminDirectory, AdminUser, Invite, InviteStatus, IssuedAccountLink,
+};
 pub use attachments::{Attachment, AttachmentRef, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS};
 pub use chat_actions::{LinkPreview, MessageAction, MessageChange, Reaction};
 pub use gifs::{GifItem, GifPage, gif_message_url};

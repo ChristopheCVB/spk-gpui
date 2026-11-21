@@ -4,6 +4,7 @@ use std::{
     path::PathBuf,
 };
 
+mod account_admin;
 mod audio;
 mod camera;
 mod notifications;
@@ -17,7 +18,7 @@ use gpui_kit::component::{
 
 use super::*;
 use crate::{
-    session::{View, VoiceProcessingSetting},
+    session::{AdminAccountAction, View, VoiceProcessingSetting},
     sounds::Sound,
 };
 
@@ -92,6 +93,8 @@ enum Tab {
     Voice,
     Notifications,
     Shortcuts,
+    Invites,
+    Users,
 }
 
 impl Spk {
@@ -115,7 +118,19 @@ impl Spk {
                 }
             })
             .detach();
+            let invite_note = cx.new(|cx| InputState::new(window, cx));
+            let ban_reason = cx.new(|cx| InputState::new(window, cx));
+            cx.subscribe_in(&invite_note, window, |settings, _, event, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    settings.create_invite(window, cx);
+                }
+            })
+            .detach();
             cx.observe(&spk, |settings, _, cx| {
+                if matches!(&settings.spk.read(cx).view, View::SignedIn(sidebar) if !sidebar.is_admin()) && settings.tab.admin_page().is_some() {
+                    settings.tab = Tab::Profile;
+                    settings.ban_target = None;
+                }
                 settings.sync_mic_test(cx);
                 settings.sync_camera_preview(cx);
                 cx.notify();
@@ -190,6 +205,9 @@ impl Spk {
                 spk,
                 tab: Tab::Profile,
                 nickname,
+                invite_note,
+                ban_reason,
+                ban_target: None,
                 avatar_picker_open: false,
                 avatar_picker_error: None,
                 volumes,
@@ -206,6 +224,13 @@ impl Spk {
         });
         cx.observe_release_in(&content, window, |this, settings, window, cx| {
             this.cancel_shortcut_editor(cx);
+            if settings.tab.admin_page().is_some() && matches!(this.view, View::SignedIn(_)) {
+                this.send(
+                    Command::AdminAccounts(AdminAccountAction::Show(None)),
+                    None,
+                    cx,
+                );
+            }
             settings.camera.release(window);
         })
         .detach();
@@ -229,6 +254,9 @@ struct Settings {
     spk: Entity<Spk>,
     tab: Tab,
     nickname: Entity<InputState>,
+    invite_note: Entity<InputState>,
+    ban_reason: Entity<InputState>,
+    ban_target: Option<String>,
     avatar_picker_open: bool,
     avatar_picker_error: Option<&'static str>,
     volumes: [Entity<SliderState>; Sound::ALL.len()],
@@ -257,6 +285,16 @@ impl Render for Settings {
             Tab::Voice => self.audio(sidebar, cx).into_any_element(),
             Tab::Notifications => self.notifications(cx).into_any_element(),
             Tab::Shortcuts => self.shortcuts(cx).into_any_element(),
+            Tab::Invites | Tab::Users if !sidebar.is_admin() => {
+                self.profile(sidebar, cx).into_any_element()
+            }
+            Tab::Invites | Tab::Users => self
+                .manage_accounts(
+                    self.tab.admin_page().expect("admin account tab"),
+                    sidebar,
+                    cx,
+                )
+                .into_any_element(),
         };
         div()
             .size_full()
@@ -319,8 +357,13 @@ impl Render for Settings {
                                     (Tab::Voice, "Voice & Video", IconName::Mic),
                                     (Tab::Notifications, "Notifications", IconName::Bell),
                                     (Tab::Shortcuts, "Shortcuts", IconName::Settings2),
+                                    (Tab::Invites, "Invites", IconName::Link),
+                                    (Tab::Users, "Users", IconName::Users),
                                 ]
                                 .into_iter()
+                                .filter(|(tab, _, _)| {
+                                    tab.admin_page().is_none() || sidebar.is_admin()
+                                })
                                 .map(|(tab, label, icon)| {
                                     let active = self.tab == tab;
                                     let color = if active {
@@ -354,6 +397,15 @@ impl Render for Settings {
                                                 this.spk.update(cx, |app, cx| {
                                                     app.cancel_shortcut_editor(cx)
                                                 });
+                                            }
+                                            let old_admin_page = this.tab.admin_page();
+                                            let admin_page = tab.admin_page();
+                                            if old_admin_page != admin_page {
+                                                this.ban_target = None;
+                                                this.account_action(
+                                                    AdminAccountAction::Show(admin_page),
+                                                    cx,
+                                                );
                                             }
                                             this.tab = tab;
                                             this.sync_mic_test(cx);

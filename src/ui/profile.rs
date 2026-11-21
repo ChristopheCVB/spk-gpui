@@ -199,14 +199,32 @@ impl Spk {
         self.send(command, None, cx);
     }
 
-    fn open_person_profile(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_person_profile(
+        &mut self,
+        id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let View::SignedIn(sidebar) = &self.view else {
             return;
         };
-        if sidebar.person(&id).is_none() {
+        if sidebar.inspect_person(&id).is_none() {
             return;
         }
-        let email = sidebar.is_admin().then(|| {
+        let cached_email = sidebar
+            .is_admin()
+            .then(|| {
+                sidebar
+                    .admin_accounts
+                    .users
+                    .as_ref()?
+                    .users
+                    .iter()
+                    .find(|row| row.user.id == id)
+                    .map(|row| row.email.clone())
+            })
+            .flatten();
+        let email = (sidebar.is_admin() && cached_email.is_none()).then(|| {
             let (reply, result) = tokio::sync::oneshot::channel();
             self.send(Command::InspectProfileEmail(id.clone(), reply), None, cx);
             result
@@ -234,7 +252,7 @@ impl Spk {
                 })
                 .detach();
             }
-            PersonProfile { app, id, email: None }
+            PersonProfile { app, id, email: cached_email }
         });
         window.open_dialog(cx, move |dialog, _, _| {
             dialog
@@ -257,7 +275,7 @@ impl Render for PersonProfile {
         let View::SignedIn(sidebar) = &self.app.read(cx).view else {
             return div();
         };
-        let Some(person) = sidebar.person(&self.id) else {
+        let Some(person) = sidebar.inspect_person(&self.id) else {
             return div().child(Label::new("Profile unavailable."));
         };
         let name = person.name().unwrap_or("Unknown user");
@@ -288,6 +306,9 @@ impl Render for PersonProfile {
                     .child(Label::new(name.to_owned()).text_lg().font_bold())
                     .child(user_presence_label(sidebar.user_presence(&self.id), cx))
                     .child(Label::new(role).text_color(cx.theme().muted_foreground))
+                    .when(person.banned, |content| {
+                        content.child(Label::new("Banned").text_color(cx.theme().danger))
+                    })
                     .children(
                         self.email
                             .as_ref()
@@ -297,7 +318,7 @@ impl Render for PersonProfile {
                             }),
                     )
                     .when(
-                        sidebar.profile.id.as_deref() != Some(self.id.as_str()),
+                        !person.banned && sidebar.profile.id.as_deref() != Some(self.id.as_str()),
                         |profile| {
                             profile.child(
                                 Button::new("send-profile-dm")
