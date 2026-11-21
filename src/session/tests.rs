@@ -9,7 +9,7 @@ use tokio::{
     time::timeout,
 };
 use tokio_tungstenite::{
-    accept_hdr_async,
+    WebSocketStream, accept_hdr_async,
     tungstenite::{Message, handshake::server},
 };
 
@@ -129,6 +129,138 @@ async fn restored_http_session_authenticates_websocket_and_sign_out() {
     })
     .await
     .expect("loopback SPK protocol timed out");
+}
+
+async fn voice_session(
+    start_call: StartCall,
+    server: impl AsyncFnOnce(TcpListener, Receiver<Request>),
+    desktop: impl AsyncFnOnce(Sender<Command>, Receiver<View>),
+) -> SessionEnd {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let http = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = Url::parse(&format!("http://{}", http.local_addr().unwrap())).unwrap();
+    let sockets = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let socket_endpoint = format!("ws://{}/_ws", sockets.local_addr().unwrap());
+    let (command_tx, commands) = async_channel::unbounded();
+    let (views, view_rx) = async_channel::unbounded();
+    let (token_requests, requests) = async_channel::unbounded();
+
+    let http = async move {
+        loop {
+            let (line, request) = Request::receive(&http).await;
+            let body = match line.as_str() {
+                "POST /api/auth/sign-in/email HTTP/1.1" => {
+                    request
+                        .respond(&["session=fixture; Path=/; HttpOnly; Max-Age=3600"], "{}")
+                        .await;
+                    continue;
+                }
+                "GET /api/profile/me HTTP/1.1" => r#"{"id":"alice","email":"alice@example.test"}"#,
+                "GET /api/channels HTTP/1.1" => {
+                    r#"[{"id":"first","type":"voice"},{"id":"second","type":"voice"}]"#
+                }
+                "GET /api/users HTTP/1.1" | "GET /api/voice HTTP/1.1" => "[]",
+                "POST /api/voice/token HTTP/1.1" => {
+                    token_requests.send(request).await.unwrap();
+                    continue;
+                }
+                _ => panic!("unexpected request: {line}"),
+            };
+            request.respond(&[], body).await;
+        }
+    };
+
+    let session = async {
+        let (client, profile) = sign_in(&base, "alice@example.test".into(), "fixture".into())
+            .await
+            .unwrap();
+        let mut persisted = Vec::new();
+        json::save(&client.cookies().lock().unwrap(), &mut persisted).unwrap();
+        let mut saved = SavedSession {
+            origin: base.origin().ascii_serialization(),
+            persisted: Some(persisted),
+        };
+        let mut settings = VoiceSettings {
+            socket_endpoint,
+            start_call,
+            devices: DeviceSettings {
+                path: None,
+                preferred: DevicePreferences::default(),
+                notice: None,
+            },
+            sounds: VoiceSounds::new(tokio::sync::watch::channel(SoundSettings::default()).1),
+        };
+        watch_session(
+            &client,
+            profile,
+            None,
+            &mut saved,
+            &mut settings,
+            &commands,
+            &views,
+        )
+        .await
+    };
+
+    timeout(Duration::from_secs(7), async {
+        tokio::select! {
+            () = http => unreachable!(),
+            ((), (), end) = async { tokio::join!(server(sockets, requests), desktop(command_tx, view_rx), session) } => end,
+        }
+    }).await.expect("loopback voice session timed out")
+}
+
+async fn wait_for_sidebar(
+    views: &Receiver<View>,
+    matches: impl Fn(&Sidebar) -> bool,
+) -> Box<Sidebar> {
+    loop {
+        let View::SignedIn(sidebar) = views.recv().await.unwrap() else {
+            panic!("expected the signed-in sidebar");
+        };
+        if matches(&sidebar) {
+            return sidebar;
+        }
+    }
+}
+
+async fn accept_voice_join(
+    requests: &Receiver<Request>,
+    socket: &mut WebSocketStream<TcpStream>,
+    channel: &str,
+) -> Value {
+    let request = requests.recv().await.unwrap();
+    assert_eq!(request.header("cookie"), Some("session=fixture"));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&request.body).unwrap(),
+        value!({"channelId":channel})
+    );
+    request
+        .respond(
+            &[],
+            &value!({"token":"fixture-token","url":env!("LIVEKIT_URL")}).to_string(),
+        )
+        .await;
+    let join = receive_voice_frame(socket).await;
+    assert_eq!(
+        join,
+        value!({
+            "type":"voice:join","sid":join["sid"],"channelId":channel,"nonce":join["nonce"],
+            "muted":true,"deafened":false,"watching":[]
+        }),
+    );
+    join
+}
+
+async fn receive_voice_frame(socket: &mut WebSocketStream<TcpStream>) -> Value {
+    let frame = socket.next().await.unwrap().unwrap();
+    serde_json::from_str(frame.to_text().unwrap()).unwrap()
+}
+
+async fn acknowledge_voice(socket: &mut WebSocketStream<TcpStream>, join: &Value) {
+    socket.send(Message::text(value!({
+        "type":"voice:joined","sid":join["sid"],"channelId":join["channelId"],"nonce":join["nonce"]
+    }).to_string())).await.unwrap();
 }
 
 #[test]
@@ -382,6 +514,12 @@ pub(crate) struct Request {
 
 impl Request {
     pub(crate) async fn read(listener: &TcpListener, request_line: &str) -> Self {
+        let (line, request) = Self::receive(listener).await;
+        assert_eq!(line, request_line);
+        request
+    }
+
+    async fn receive(listener: &TcpListener) -> (String, Self) {
         let (stream, _) = listener.accept().await.unwrap();
         let mut request = Self {
             stream: BufReader::new(stream),
@@ -390,7 +528,7 @@ impl Request {
         };
         let mut line = String::new();
         request.stream.read_line(&mut line).await.unwrap();
-        assert_eq!(line.trim_end(), request_line);
+        let request_line = line.trim_end().to_owned();
         loop {
             line.clear();
             assert_ne!(request.stream.read_line(&mut line).await.unwrap(), 0);
@@ -406,7 +544,7 @@ impl Request {
             request.body.resize(length, 0);
             request.stream.read_exact(&mut request.body).await.unwrap();
         }
-        request
+        (request_line, request)
     }
 
     pub(crate) fn header(&self, name: &str) -> Option<&str> {
