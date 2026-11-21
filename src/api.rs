@@ -17,7 +17,7 @@ use url::{Host, Url};
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_AVATAR_BYTES: usize = 8 * 1024 * 1024;
 
-fn avatar_storage_url(url: &Url) -> bool {
+fn signed_storage_url(url: &Url) -> bool {
     if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
         return false;
     }
@@ -175,6 +175,8 @@ pub enum Frame {
     RadioSnapshot { channels: Vec<RadioSummary> },
     #[serde(rename = "radio:update")]
     RadioUpdate(RadioSummary),
+    #[serde(rename = "voice:sound", rename_all = "camelCase")]
+    VoiceSound { user_id: String, sound_id: String },
     #[serde(rename = "voice:radio:state", rename_all = "camelCase")]
     RadioState {
         sid: String,
@@ -215,6 +217,15 @@ pub enum SocketEvent {
     Unauthorized,
 }
 
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundboardClip {
+    pub id: String,
+    pub name: String,
+    pub icon: String,
+    pub duration_ms: u32,
+}
+
 #[derive(Deserialize)]
 pub struct VoiceToken {
     pub token: String,
@@ -248,6 +259,8 @@ pub enum VoiceFrame<'a> {
     RadioSet { sid: &'a str, station_id: &'a str },
     #[serde(rename = "voice:radio:stop")]
     RadioStop { sid: &'a str },
+    #[serde(rename = "voice:sound", rename_all = "camelCase")]
+    Sound { sid: &'a str, sound_id: &'a str },
     #[serde(rename = "voice:leave")]
     Leave { sid: &'a str },
 }
@@ -285,7 +298,7 @@ impl VoiceSocket {
 #[derive(Clone)]
 pub struct SpkClient {
     http: Client,
-    avatar_storage: Client,
+    storage: Client,
     base: Url,
     origin: String,
     cookies: Arc<CookieStoreMutex>,
@@ -301,7 +314,7 @@ impl SpkClient {
             .cookie_provider(cookies.clone())
             .build()
             .map_err(|_| Failure::Connection)?;
-        let avatar_storage = Client::builder()
+        let storage = Client::builder()
             .redirect(Policy::none())
             .timeout(REQUEST_TIMEOUT)
             .build()
@@ -309,7 +322,7 @@ impl SpkClient {
 
         Ok(Self {
             http,
-            avatar_storage,
+            storage,
             base,
             origin,
             cookies,
@@ -408,6 +421,27 @@ impl SpkClient {
         }
     }
 
+    pub async fn soundboard_clips(&self) -> Result<Vec<SoundboardClip>, Failure> {
+        self.get("/api/sounds").await
+    }
+
+    pub async fn soundboard_file(&self, id: uuid::Uuid) -> Result<Vec<u8>, Failure> {
+        #[derive(Deserialize)]
+        struct SignedFile {
+            url: String,
+        }
+
+        let file: SignedFile = self.get(&format!("/api/sounds/{id}/file")).await?;
+        let url = Url::parse(&file.url)
+            .ok()
+            .filter(signed_storage_url)
+            .ok_or(Failure::InvalidResponse)?;
+        // A storage response cannot expire the authenticated SPK session.
+        self.storage_bytes(url, 3 * 1024 * 1024)
+            .await
+            .map_err(|_| Failure::InvalidResponse)
+    }
+
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, Failure> {
         Self::send(self.request(Method::GET, path))
             .await?
@@ -443,19 +477,23 @@ impl SpkClient {
             .headers()
             .get(header::LOCATION)
             .and_then(|location| Url::parse(location.to_str().ok()?).ok())
-            .filter(avatar_storage_url)
+            .filter(signed_storage_url)
             .ok_or(Failure::InvalidResponse)?;
         // The storage URL carries its own authorization and can use a different host.
-        let mut response = Self::send(self.avatar_storage.get(url)).await?;
+        self.storage_bytes(url, MAX_AVATAR_BYTES).await
+    }
+
+    async fn storage_bytes(&self, url: Url, max_bytes: usize) -> Result<Vec<u8>, Failure> {
+        let mut response = Self::send(self.storage.get(url)).await?;
         let mut bytes = Vec::new();
         if response
             .content_length()
-            .is_some_and(|len| len > MAX_AVATAR_BYTES as u64)
+            .is_some_and(|len| len > max_bytes as u64)
         {
             return Err(Failure::InvalidResponse);
         }
         while let Some(chunk) = response.chunk().await.map_err(|_| Failure::Connection)? {
-            if chunk.len() > MAX_AVATAR_BYTES - bytes.len() {
+            if chunk.len() > max_bytes - bytes.len() {
                 return Err(Failure::InvalidResponse);
             }
             bytes.extend_from_slice(&chunk);
