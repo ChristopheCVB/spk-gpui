@@ -261,23 +261,11 @@ impl Spk {
                                     IconName::MessageCircle,
                                     cx,
                                 ))
-                                .children(people.into_iter().map(|(id, name)| {
-                                    div()
-                                        .id(SharedString::from(format!("person-{id}")))
-                                        .flex()
-                                        .items_center()
-                                        .h_8()
-                                        .gap_2()
-                                        .px_2()
-                                        .child(profile_avatar(
-                                            Avatar::new().name(name.to_owned()).small(),
-                                            sidebar.avatar(Some(id)),
-                                            20.0,
-                                            false,
-                                            cx,
-                                        ))
-                                        .child(Label::new(name.to_owned()).truncate())
-                                })),
+                                .children(
+                                    people
+                                        .into_iter()
+                                        .map(|(id, name)| self.person_row(sidebar, id, name, cx)),
+                                ),
                         )
                     })
                     .when(has_text, |nav| {

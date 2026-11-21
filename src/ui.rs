@@ -1,4 +1,5 @@
 mod chat;
+mod profile;
 mod radio;
 mod settings;
 mod soundboard;
@@ -23,7 +24,7 @@ use gpui_kit::{
 };
 
 use crate::{
-    session::{self, Command, Sidebar, View},
+    session::{self, AvatarPhoto, Command, Sidebar, View},
     shortcuts::{Chord, Shortcuts},
     sounds::{Sound, SoundSetting, SoundSettings},
     voice::{DeviceKind, Status},
@@ -254,8 +255,11 @@ impl Spk {
             };
             if !next.is_some_and(|next| std::sync::Arc::ptr_eq(&previous.avatars, next)) {
                 for (id, image) in previous.avatars.iter() {
-                    if next.and_then(|images| images.get(id)) != Some(image) {
-                        let _ = window.drop_image(image.clone());
+                    if !next
+                        .and_then(|images| images.get(id))
+                        .is_some_and(|next| Arc::ptr_eq(next, image))
+                    {
+                        profile::release_avatar(image, window, cx);
                     }
                 }
             }
@@ -490,7 +494,7 @@ fn logo(size: f32) -> Img {
 
 fn profile_avatar(
     fallback: Avatar,
-    photo: Option<&Arc<RenderImage>>,
+    photo: Option<&Arc<AvatarPhoto>>,
     diameter: f32,
     speaking: bool,
     cx: &App,
@@ -504,6 +508,8 @@ fn profile_avatar(
             .into_any_element();
     };
 
+    let photo = Arc::clone(photo);
+    let photo_id = photo.image.id.0;
     div()
         .size(size)
         .flex_shrink_0()
@@ -517,11 +523,13 @@ fn profile_avatar(
             theme.border
         })
         .child(
-            img(Arc::clone(photo))
-                .id(("avatar-photo", photo.id.0))
-                .size_full()
-                .rounded_full()
-                .object_fit(ObjectFit::Cover),
+            img(move |window: &mut Window, cx: &mut App| {
+                Some(Ok(profile::avatar_thumbnail(&photo, diameter, window, cx)))
+            })
+            .id(("avatar-photo", photo_id))
+            .size_full()
+            .rounded_full()
+            .object_fit(ObjectFit::Cover),
         )
         .into_any_element()
 }

@@ -1,5 +1,6 @@
 mod chat;
 mod media;
+mod profile;
 mod radio;
 mod soundboard;
 
@@ -891,6 +892,7 @@ fn live_membership_and_flags_win_over_an_in_flight_snapshot() {
             email: "reader@example.test".into(),
             display_name: None,
             avatar_key: None,
+            role: "user".into(),
         },
         None,
     );
@@ -925,6 +927,7 @@ fn live_membership_and_flags_win_over_an_in_flight_snapshot() {
             id: "alice".into(),
             display_name: Some("Alice".into()),
             avatar_key: None,
+            role: "user".into(),
             banned: false,
         }])),
     );
@@ -1102,7 +1105,7 @@ async fn avatar_loads_share_a_photo_and_discard_an_older_response() {
             .avatar(sidebar.profile.id.as_deref())
             .unwrap()
             .clone();
-        assert_eq!(photo.frame_count(), 2);
+        assert_eq!(photo.image.frame_count(), 2);
         new_applied.send(()).unwrap();
         let loaded = avatars.tasks.join_next().await.unwrap().unwrap();
         avatars.complete(&mut sidebar, loaded);

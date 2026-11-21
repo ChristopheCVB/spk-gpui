@@ -44,12 +44,15 @@ impl Sidebar {
             .filter(|(_, member)| member.channel_id == channel)
             .map(|(user, member)| Participant {
                 id: user,
-                name: self
-                    .users
-                    .get(user)
-                    .filter(|user| !user.banned)
-                    .and_then(User::name)
-                    .unwrap_or("Unknown user"),
+                name: if self.profile.id.as_ref() == Some(user) {
+                    self.profile
+                        .display_name
+                        .as_deref()
+                        .filter(|name| !name.is_empty())
+                } else {
+                    self.person(user).and_then(User::name)
+                }
+                .unwrap_or("Unknown user"),
                 flags: member.flags,
                 video: Some(&member.video),
             })
@@ -181,6 +184,18 @@ impl Refresh {
                 match data {
                     Data::Channels(channels) => sidebar.channels = Some(channels),
                     Data::Users(users) => {
+                        // A snapshot queued before a completed edit can contain the old Profile.
+                        if !self.dirty.contains(&resource)
+                            && let Some(me) = users
+                                .iter()
+                                .find(|user| sidebar.profile.id.as_ref() == Some(&user.id))
+                        {
+                            sidebar.profile.role.clone_from(&me.role);
+                            if !sidebar.profile_edit.busy() {
+                                sidebar.profile.display_name.clone_from(&me.display_name);
+                                sidebar.profile.avatar_key.clone_from(&me.avatar_key);
+                            }
+                        }
                         sidebar.users = Arc::new(
                             users
                                 .into_iter()

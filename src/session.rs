@@ -2,15 +2,17 @@ mod authentication;
 mod avatars;
 mod chat;
 mod presence;
+mod profiles;
 mod radio;
 mod soundboard;
 mod voice_session;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use async_channel::{Receiver, Sender};
 use gpui_kit::RenderImage;
 use tokio::{
+    sync::oneshot,
     task::JoinSet,
     time::{Instant, sleep_until},
 };
@@ -29,12 +31,15 @@ use authentication::{
 use avatars::AvatarLoads;
 use chat::ChatSession;
 use presence::{Refresh, Resource, VoiceMembership};
+use profiles::Work as ProfileWork;
 use radio::{RadioSession, RadioView};
 use soundboard::{SoundboardSession, SoundboardView};
 use voice_session::{DeviceSettings, VoiceDestination, VoiceSession, VoiceSettings};
 pub use {
+    avatars::AvatarPhoto,
     chat::{ChatView, Delivery},
     presence::Participant,
+    profiles::ProfileEdit,
     radio::RadioPlayback,
     voice_session::VoiceView,
 };
@@ -60,6 +65,9 @@ pub enum Command {
     },
     RetryChatSend,
     DismissChatSend,
+    SaveNickname(String),
+    UploadAvatar(PathBuf),
+    InspectProfileEmail(String, oneshot::Sender<Option<String>>),
     JoinVoice(String),
     LeaveVoice,
     ToggleMute,
@@ -125,6 +133,7 @@ pub enum View {
 #[derive(Clone)]
 pub struct Sidebar {
     pub profile: Profile,
+    pub profile_edit: ProfileEdit,
     pub channels: Option<Vec<Channel>>,
     pub connection: Connection,
     pub notice: Option<&'static str>,
@@ -140,7 +149,7 @@ pub struct Sidebar {
     pub voice_intent: Intent,
     pub devices: Arc<Devices>,
     pub device_notice: Option<&'static str>,
-    pub avatars: Arc<HashMap<String, Arc<RenderImage>>>,
+    pub avatars: Arc<HashMap<String, Arc<AvatarPhoto>>>,
     users: Arc<HashMap<String, User>>,
     voice_presence: HashMap<String, VoiceMembership>,
 }
@@ -149,6 +158,7 @@ impl Sidebar {
     fn new(profile: Profile, notice: Option<&'static str>) -> Self {
         Self {
             profile,
+            profile_edit: ProfileEdit::Idle,
             channels: None,
             connection: Connection::Connecting,
             notice,
@@ -194,15 +204,23 @@ impl Sidebar {
             .unwrap_or("Unknown user")
     }
 
-    pub fn avatar(&self, id: Option<&str>) -> Option<&Arc<RenderImage>> {
+    pub fn person(&self, id: &str) -> Option<&User> {
+        self.users.get(id).filter(|user| !user.banned)
+    }
+
+    pub fn is_admin(&self) -> bool {
+        self.profile.role == "admin"
+    }
+
+    pub fn avatar(&self, id: Option<&str>) -> Option<&Arc<AvatarPhoto>> {
         self.avatars.get(id?)
     }
 
     fn avatar_key(&self, id: &str) -> Option<&str> {
-        match self.users.get(id) {
-            Some(user) if !user.banned => user.avatar_key.as_deref(),
-            None if self.profile.id.as_deref() == Some(id) => self.profile.avatar_key.as_deref(),
-            _ => None,
+        if self.profile.id.as_deref() == Some(id) {
+            self.profile.avatar_key.as_deref()
+        } else {
+            self.person(id)?.avatar_key.as_deref()
         }
         .filter(|key| !key.is_empty())
     }
@@ -323,6 +341,7 @@ async fn watch_session(
     let mut radio = RadioSession::default();
     let mut soundboard = SoundboardSession::default();
     let mut camera_previews = JoinSet::new();
+    let mut profiles = JoinSet::new();
     let end = loop {
         if commands.is_closed() {
             break SessionEnd::Closed;
@@ -368,6 +387,9 @@ async fn watch_session(
                 Ok(Command::SendChatMessage { channel_id, body }) => chat.send(channel_id, body),
                 Ok(Command::RetryChatSend) => chat.retry_send(),
                 Ok(Command::DismissChatSend) => chat.dismiss_send(),
+                Ok(command @ (Command::SaveNickname(_) | Command::UploadAvatar(_) | Command::InspectProfileEmail(..))) => {
+                    ProfileWork::start(&mut profiles, &mut sidebar, client, command);
+                }
                 Ok(Command::JoinVoice(channel_id)) => voice.join(&mut sidebar, channel_id),
                 Ok(Command::LeaveVoice) => voice.leave(&mut sidebar),
                 Ok(command @ (Command::SearchRadio(_) | Command::RadioFavorites
@@ -532,6 +554,17 @@ async fn watch_session(
             Some(Ok((id, result))) = soundboard.tasks.join_next_with_id() => {
                 if soundboard.complete(&mut sidebar.soundboard, id, result).is_err_and(|error| error.unauthorized()) {
                     break SessionEnd::Invalidated(SESSION_EXPIRED);
+                }
+            }
+            Some(Ok(work)) = profiles.join_next() => {
+                let edit_finished = match work.complete(&mut sidebar) {
+                    Ok(edited) => edited,
+                    Err(_) => break SessionEnd::Invalidated(SESSION_EXPIRED),
+                };
+                if edit_finished {
+                    refresh.fetch(client, Resource::Users);
+                    avatars.directory_changed(&mut sidebar);
+                    avatars.fill(client, &sidebar);
                 }
             }
             Some(result) = avatars.tasks.join_next() => {
