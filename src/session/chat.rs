@@ -363,14 +363,12 @@ impl ChatSession {
     }
 
     pub fn start_mark_unread(&mut self, channel_id: &str, message_id: &str) -> Option<u64> {
-        let Some(view) = self.selected.as_mut().filter(|view| {
+        let view = self.selected.as_mut().filter(|view| {
             view.channel_id == channel_id
                 && !view.unavailable()
                 && view.pending_unread.is_none()
                 && view.messages.iter().any(|message| message.id == message_id)
-        }) else {
-            return None;
-        };
+        })?;
         self.unread_request += 1;
         view.pending_unread = Some(self.unread_request);
         view.pending_unread
