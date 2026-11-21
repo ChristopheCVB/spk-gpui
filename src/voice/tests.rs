@@ -14,6 +14,50 @@ use crate::{
 
 use super::*;
 
+pub(crate) fn start_recovery_fixture(
+    channel: String,
+    client: SpkClient,
+    socket: VoiceSocket,
+    intent: Intent,
+) -> Call {
+    Call::spawn(channel, socket, intent, |worker, ack, cancelled| {
+        tokio::spawn(worker.run(
+            client,
+            ack,
+            cancelled,
+            async |worker: &Worker, _: &mut Media, _| {
+                let mut requested = worker.requested.clone();
+                let start = requested.borrow().refresh_devices;
+                loop {
+                    let intent = requested.borrow_and_update().clone();
+                    let phase = intent.refresh_devices - start;
+                    let status = match phase {
+                        0 | 2 => Status::ListenOnly,
+                        1 => Status::Reconnecting,
+                        _ => return Err(disconnect_issue(DisconnectReason::MediaFailure)),
+                    };
+                    worker.publish_flags(
+                        VoiceFlags {
+                            muted: true,
+                            deafened: intent.mute.deafened,
+                            speaking: false,
+                        },
+                        phase == 2,
+                    );
+                    worker.update(Update::Media(Arc::new(Report {
+                        status,
+                        devices: Arc::default(),
+                        microphone: None,
+                        speakers: None,
+                        speaking: HashSet::new(),
+                    })));
+                    requested.changed().await.unwrap();
+                }
+            },
+        ))
+    })
+}
+
 #[derive(Clone, Copy)]
 enum Scenario {
     Cancelled,
@@ -45,6 +89,7 @@ async fn exercise(scenario: Scenario) {
     let controls = matches!(scenario, Scenario::Controls);
     let (left, departure) = oneshot::channel();
     let (release_recovery, recovery) = oneshot::channel();
+    let (seen, mut observed) = tokio::sync::mpsc::channel(1);
 
     let server = async {
         Request::read(&listener, "POST /api/auth/sign-in/email HTTP/1.1")
@@ -84,16 +129,30 @@ async fn exercise(scenario: Scenario) {
                 receive_frame(&mut socket).await,
                 json!({"type":"voice:ready","sid":sid})
             );
+            if matches!(scenario, Scenario::MicrophoneFailure) {
+                seen.send(()).await.unwrap();
+            }
         }
         if controls {
             assert_eq!(
                 receive_frame(&mut socket).await,
                 json!({"type":"voice:state","sid":sid,"muted":false,"deafened":false,"speaking":true})
             );
+            seen.send(()).await.unwrap();
             assert_eq!(
                 receive_frame(&mut socket).await,
                 json!({"type":"voice:state","sid":sid,"muted":true,"deafened":true,"speaking":false})
             );
+            seen.send(()).await.unwrap();
+            assert_eq!(
+                receive_frame(&mut socket).await,
+                json!({"type":"voice:ready","sid":sid})
+            );
+            assert_eq!(
+                receive_frame(&mut socket).await,
+                json!({"type":"voice:state","sid":sid,"muted":true,"deafened":true,"speaking":false})
+            );
+            seen.send(()).await.unwrap();
         }
         assert_eq!(
             receive_frame(&mut socket).await,
@@ -160,7 +219,14 @@ async fn exercise(scenario: Scenario) {
                             Scenario::Cancelled => panic!("a cancelled call started media"),
                             Scenario::MediaFailure => Err(Issue::Media),
                             Scenario::MicrophoneFailure => {
-                                worker.ready().await?;
+                                worker.publish_flags(
+                                    VoiceFlags {
+                                        muted: true,
+                                        ..VoiceFlags::default()
+                                    },
+                                    false,
+                                );
+                                observed.recv().await.unwrap();
                                 for status in [Status::ListenOnly, Status::Reconnecting] {
                                     worker.update(Update::Media(Arc::new(Report {
                                         status,
@@ -174,20 +240,23 @@ async fn exercise(scenario: Scenario) {
                                 panic!("cancelled media recovery ran")
                             }
                             Scenario::Controls => {
-                                worker.ready().await?;
-                                worker
-                                    .state(VoiceFlags {
+                                worker.publish_flags(
+                                    VoiceFlags {
                                         speaking: true,
                                         ..VoiceFlags::default()
-                                    })
-                                    .await?;
-                                worker
-                                    .state(VoiceFlags {
-                                        muted: true,
-                                        deafened: true,
-                                        speaking: false,
-                                    })
-                                    .await?;
+                                    },
+                                    false,
+                                );
+                                observed.recv().await.unwrap();
+                                let deafened = VoiceFlags {
+                                    muted: true,
+                                    deafened: true,
+                                    speaking: false,
+                                };
+                                worker.publish_flags(deafened, false);
+                                observed.recv().await.unwrap();
+                                worker.publish_flags(deafened, true);
+                                observed.recv().await.unwrap();
                                 Err(disconnect_issue(DisconnectReason::MediaFailure))
                             }
                         }
@@ -366,7 +435,7 @@ async fn apply_acknowledgment(call: &mut Call, updates: &Receiver<SocketEvent>) 
     let SocketEvent::Frame(Frame::VoiceJoined {
         sid,
         channel_id,
-        nonce,
+        nonce: Some(nonce),
     }) = updates.recv().await.unwrap()
     else {
         panic!("expected a voice acknowledgment");
