@@ -76,8 +76,25 @@ impl RoomAudio for LiveKitAudio<'_> {
         self.capture.unavailable()
     }
 
-    fn start_microphone(&mut self, device: Device) {
-        self.capture.start(self.room, self.audio, device);
+    fn start_microphone(
+        &mut self,
+        device: Device,
+        processing: VoiceProcessing,
+        use_system_default: bool,
+    ) {
+        self.capture.start(
+            self.room,
+            self.audio,
+            device,
+            processing,
+            use_system_default,
+        );
+    }
+
+    async fn sync_microphone_processing(&mut self, processing: VoiceProcessing) {
+        self.capture
+            .sync_processing(self.room, self.audio, processing)
+            .await;
     }
 
     async fn stop_microphone(&mut self) {

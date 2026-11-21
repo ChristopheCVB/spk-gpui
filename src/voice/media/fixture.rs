@@ -298,7 +298,7 @@ impl RoomAudio for TestRoom {
         !self.starting && !self.active
     }
 
-    fn start_microphone(&mut self, device: Device) {
+    fn start_microphone(&mut self, device: Device, _: VoiceProcessing, _: bool) {
         self.selected = Some(device);
         self.starting = true;
     }

@@ -13,7 +13,10 @@ use gpui_kit::component::{
 };
 
 use super::*;
-use crate::{session::View, sounds::Sound};
+use crate::{
+    session::{View, VoiceProcessingSetting},
+    sounds::Sound,
+};
 
 pub use shortcuts::ShortcutKeys;
 
@@ -92,9 +95,9 @@ impl Spk {
         self.device_picker = None;
         let spk = cx.entity();
         let sounds = self.shortcuts.sound_settings();
-        let output_volume = match &self.view {
-            View::SignedIn(sidebar) => sidebar.voice_intent.preferred.output_volume.min(200),
-            _ => 100,
+        let preferences = match &self.view {
+            View::SignedIn(sidebar) => sidebar.voice_intent.preferred.clone(),
+            _ => Default::default(),
         };
         let content = cx.new(|cx: &mut Context<Settings>| {
             cx.observe(&spk, |settings, _, cx| {
@@ -105,12 +108,31 @@ impl Spk {
             let output_volume = cx.new(|_| {
                 SliderState::new()
                     .max(200.0)
-                    .default_value(f32::from(output_volume))
+                    .default_value(f32::from(preferences.output_volume.min(200)))
             });
             cx.subscribe(&output_volume, |settings, _, event, cx| {
                 if let SliderEvent::Release(SliderValue::Single(value)) = event {
                     settings.spk.update(cx, |app, cx| {
                         app.send(Command::SetOutputVolume(*value as u8), None, cx)
+                    });
+                }
+                cx.notify();
+            })
+            .detach();
+            let sensitivity = cx.new(|_| {
+                SliderState::new()
+                    .default_value(f32::from(preferences.processing.sensitivity.min(100)))
+            });
+            cx.subscribe(&sensitivity, |settings, _, event, cx| {
+                if let SliderEvent::Release(SliderValue::Single(value)) = event {
+                    settings.spk.update(cx, |app, cx| {
+                        app.send(
+                            Command::SetVoiceProcessing(VoiceProcessingSetting::Sensitivity(
+                                *value as u8,
+                            )),
+                            None,
+                            cx,
+                        );
                     });
                 }
                 cx.notify();
@@ -136,6 +158,7 @@ impl Spk {
                 volumes,
                 recorder_focus: cx.focus_handle(),
                 output_volume,
+                sensitivity,
                 mic_test: None,
                 mic_level: 0,
                 playback_pending: false,
@@ -163,6 +186,7 @@ struct Settings {
     volumes: [Entity<SliderState>; Sound::ALL.len()],
     recorder_focus: FocusHandle,
     output_volume: Entity<SliderState>,
+    sensitivity: Entity<SliderState>,
     mic_test: Option<(Option<crate::voice::Device>, Task<()>)>,
     mic_level: u8,
     playback_pending: bool,

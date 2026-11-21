@@ -21,6 +21,7 @@ pub struct DevicePreferences {
     pub microphone: Option<Device>,
     pub speakers: Option<Device>,
     pub output_volume: u8,
+    pub processing: VoiceProcessing,
 }
 
 impl Default for DevicePreferences {
@@ -29,6 +30,27 @@ impl Default for DevicePreferences {
             microphone: None,
             speakers: None,
             output_volume: 100,
+            processing: VoiceProcessing::default(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct VoiceProcessing {
+    pub echo_cancellation: bool,
+    pub noise_suppression: bool,
+    pub auto_gain: bool,
+    pub sensitivity: u8,
+}
+
+impl Default for VoiceProcessing {
+    fn default() -> Self {
+        Self {
+            echo_cancellation: true,
+            noise_suppression: true,
+            auto_gain: true,
+            sensitivity: 50,
         }
     }
 }
@@ -208,6 +230,25 @@ pub(super) fn select_microphone(audio: &PlatformAudio, device: &Device) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn microphone_processing_preserves_old_defaults_and_round_trips_saved_settings() {
+        let mut preferences: DevicePreferences =
+            serde_json::from_str(r#"{"output_volume":75}"#).unwrap();
+        assert_eq!(preferences.processing, VoiceProcessing::default());
+        assert!(preferences.processing.echo_cancellation);
+
+        preferences.processing = VoiceProcessing {
+            echo_cancellation: false,
+            noise_suppression: false,
+            auto_gain: false,
+            sensitivity: 80,
+        };
+        let config = tempfile::tempdir().unwrap();
+        let path = config.path().join("voice-devices.json");
+        preferences.save(&path).unwrap();
+        assert_eq!(DevicePreferences::load(&path).unwrap(), preferences);
+    }
 
     #[test]
     fn saved_devices_survive_restart_and_fall_back_until_they_return() {

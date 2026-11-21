@@ -1,7 +1,7 @@
 use gpui_kit::base::Disableable;
 use std::time::Duration;
 
-use gpui_kit::component::{progress::Progress, slider::Slider};
+use gpui_kit::component::{progress::Progress, slider::Slider, switch::Switch};
 
 use super::*;
 use crate::ui::voice::device_options;
@@ -120,6 +120,53 @@ impl Settings {
         cx.notify();
     }
 
+    fn processing(&self, sidebar: &Sidebar, cx: &Context<Self>) -> impl IntoElement {
+        let settings = sidebar.voice_intent.preferred.processing;
+        let echo = settings.echo_cancellation;
+        let SliderValue::Single(sensitivity) = self.sensitivity.read(cx).value() else {
+            unreachable!("single microphone sensitivity slider");
+        };
+        let switch = |label: &'static str,
+                      checked,
+                      disabled,
+                      setting: fn(bool) -> VoiceProcessingSetting| {
+            let spk = self.spk.downgrade();
+            Switch::new(label)
+                .label(label)
+                .accessibility_label(label)
+                .checked(checked)
+                .disabled(disabled)
+                .tab_stop(true)
+                .on_change(move |enabled, _, cx| {
+                    let _ = spk.update(cx, |app, cx| {
+                        app.send(Command::SetVoiceProcessing(setting(*enabled)), None, cx);
+                    });
+                })
+        };
+        card(
+            "Voice processing",
+            div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(switch("Echo cancellation", echo, false, VoiceProcessingSetting::EchoCancellation))
+                .when(echo, |body| body.child(
+                    Label::new("Turn off echo cancellation to adjust noise suppression, automatic gain, and sensitivity.")
+                        .text_color(cx.theme().muted_foreground),
+                ))
+                .child(switch("Noise suppression (Standard)", echo || settings.noise_suppression, echo, VoiceProcessingSetting::NoiseSuppression))
+                .child(switch("Automatic gain control", echo || settings.auto_gain, echo, VoiceProcessingSetting::AutoGain))
+                .child(Label::new(format!("Sensitivity {sensitivity:.0}%")))
+                .child(
+                    Slider::new(&self.sensitivity)
+                        .tab_stop(true)
+                        .accessibility_label("Microphone sensitivity")
+                        .disabled(echo),
+                ),
+            cx,
+        )
+    }
+
     pub(super) fn audio(&self, sidebar: &Sidebar, cx: &Context<Self>) -> impl IntoElement {
         let testing = self.mic_test.is_some();
         let volume = self.output_volume.read(cx).value();
@@ -132,41 +179,79 @@ impl Settings {
             .gap_5()
             .child(card(
                 "Microphone",
-                div().flex().flex_col().gap_3()
-                    .child(device_options(sidebar, DeviceKind::Microphone, &self.spk, cx))
-                    .child(Button::new("test-microphone")
-                        .small().tab_stop(true)
-                        .disabled(sidebar.voice.is_some())
-                        .label(if testing { "Stop microphone test" } else { "Test microphone" })
-                        .on_click(cx.listener(|settings, _, _, cx| settings.toggle_mic_test(cx))))
-                    .when(sidebar.voice.is_some(), |body| body.child(
-                        Label::new("Leave voice to test the microphone.").text_color(cx.theme().muted_foreground)
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(device_options(
+                        sidebar,
+                        DeviceKind::Microphone,
+                        &self.spk,
+                        cx,
                     ))
-                    .when(testing, |body| body.child(
-                        Progress::new("microphone-level").value(f32::from(self.mic_level))
-                            .accessibility_label("Microphone input level")
-                    )),
+                    .child(
+                        Button::new("test-microphone")
+                            .small()
+                            .tab_stop(true)
+                            .disabled(sidebar.voice.is_some())
+                            .label(if testing {
+                                "Stop microphone test"
+                            } else {
+                                "Test microphone"
+                            })
+                            .on_click(
+                                cx.listener(|settings, _, _, cx| settings.toggle_mic_test(cx)),
+                            ),
+                    )
+                    .when(sidebar.voice.is_some(), |body| {
+                        body.child(
+                            Label::new("Leave voice to test the microphone.")
+                                .text_color(cx.theme().muted_foreground),
+                        )
+                    })
+                    .when(testing, |body| {
+                        body.child(
+                            Progress::new("microphone-level")
+                                .value(f32::from(self.mic_level))
+                                .accessibility_label("Microphone input level"),
+                        )
+                    }),
                 cx,
             ))
             .child(card(
                 "Speakers",
-                div().flex().flex_col().gap_3()
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
                     .child(device_options(sidebar, DeviceKind::Speakers, &self.spk, cx))
                     .child(Label::new(format!("Test sound volume {volume:.0}%")))
-                    .child(Slider::new(&self.output_volume).tab_stop(true).accessibility_label("Test sound volume"))
-                    .child(Button::new("test-sound")
-                        .small().tab_stop(true)
-                        .disabled(self.playback_pending)
-                        .label(if self.playback_pending { "Playing test sound…" } else { "Test sound" })
-                        .on_click(cx.listener(|settings, _, _, cx| settings.play_test_sound(cx)))),
+                    .child(
+                        Slider::new(&self.output_volume)
+                            .tab_stop(true)
+                            .accessibility_label("Test sound volume"),
+                    )
+                    .child(
+                        Button::new("test-sound")
+                            .small()
+                            .tab_stop(true)
+                            .disabled(self.playback_pending)
+                            .label(if self.playback_pending {
+                                "Playing test sound…"
+                            } else {
+                                "Test sound"
+                            })
+                            .on_click(
+                                cx.listener(|settings, _, _, cx| settings.play_test_sound(cx)),
+                            ),
+                    ),
                 cx,
             ))
-            .child(card(
-                "Voice processing",
-                Label::new("WebRTC manages noise suppression, echo cancellation, and auto gain on desktop. Sensitivity adjustment is unavailable."),
-                cx,
-            ))
-            .children(self.audio_test_error.map(|error| Label::new(error).text_color(cx.theme().danger)))
+            .child(self.processing(sidebar, cx))
+            .children(
+                self.audio_test_error
+                    .map(|error| Label::new(error).text_color(cx.theme().danger)),
+            )
             .child(self.voice_sounds(cx))
             .children(
                 sidebar

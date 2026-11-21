@@ -47,6 +47,14 @@ pub enum Command {
     ChooseCameraResolution(CameraResolution),
     SetWatching(String, bool),
     SetOutputVolume(u8),
+    SetVoiceProcessing(VoiceProcessingSetting),
+}
+
+pub enum VoiceProcessingSetting {
+    EchoCancellation(bool),
+    NoiseSuppression(bool),
+    AutoGain(bool),
+    Sensitivity(u8),
 }
 
 pub enum View {

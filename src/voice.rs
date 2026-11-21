@@ -18,7 +18,7 @@ mod devices;
 mod media;
 pub(crate) mod video;
 
-pub use devices::{Device, DeviceKind, DeviceList, DevicePreferences, Devices};
+pub use devices::{Device, DeviceKind, DeviceList, DevicePreferences, Devices, VoiceProcessing};
 pub use media::Diagnostics;
 use media::Media;
 #[cfg(test)]

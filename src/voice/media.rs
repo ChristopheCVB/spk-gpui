@@ -13,7 +13,7 @@ use tokio::{
 };
 
 use super::{
-    Device, Devices, Issue, Report, Status, Update, Worker,
+    Device, Devices, Issue, Report, Status, Update, VoiceProcessing, Worker,
     devices::{route_speakers, switch_speakers},
     video::Video,
     wait_until,
@@ -29,6 +29,7 @@ pub(crate) mod fixture;
 mod livekit_audio;
 #[cfg(target_os = "macos")]
 mod macos_audio;
+mod processing;
 
 #[cfg(target_os = "macos")]
 pub(crate) use capture::microphone_permission;
@@ -211,8 +212,17 @@ impl Media {
                 if let Some(device) = wanted
                     && backend.can_start_microphone()
                 {
-                    backend.start_microphone(device.clone());
+                    let use_system_default =
+                        !cfg!(windows) && Some(device) == devices.microphones.default.as_ref();
+                    backend.start_microphone(
+                        device.clone(),
+                        intent.preferred.processing,
+                        use_system_default,
+                    );
                 }
+                backend
+                    .sync_microphone_processing(intent.preferred.processing)
+                    .await;
                 if resync && !intent.mute.effective_muted() {
                     backend.resume_microphone();
                 }
@@ -253,7 +263,9 @@ impl Media {
                 result = requested.changed() => {
                     result.map_err(|_| Issue::Disconnected)?;
                     let next = requested.borrow_and_update().clone();
-                    if next.refresh_devices != intent.refresh_devices || next.preferred != intent.preferred
+                    if next.refresh_devices != intent.refresh_devices
+                        || next.preferred.microphone != intent.preferred.microphone
+                        || next.preferred.speakers != intent.preferred.speakers
                         || next.retry_mic != intent.retry_mic || next.retry_speakers != intent.retry_speakers
                     {
                         devices = Arc::new(backend.devices());
@@ -322,7 +334,13 @@ trait RoomAudio {
     fn active_microphone(&self) -> Option<&Device>;
     fn can_start_microphone(&self) -> bool;
     fn microphone_unavailable(&self) -> bool;
-    fn start_microphone(&mut self, device: Device);
+    fn start_microphone(
+        &mut self,
+        device: Device,
+        processing: VoiceProcessing,
+        use_system_default: bool,
+    );
+    async fn sync_microphone_processing(&mut self, _: VoiceProcessing) {}
     async fn stop_microphone(&mut self);
     fn silence_microphone(&self);
     fn resume_microphone(&self);
