@@ -1,11 +1,14 @@
-use gpui_kit::component::menu::ContextMenuExt;
+use gpui_kit::component::{
+    Disableable,
+    menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
+};
 
 use super::{
     chat::{mark_read_item, unread_badges, unread_label},
     *,
 };
 use crate::{
-    api::{Channel, Connection},
+    api::{Channel, Connection, VoiceModeration},
     session::{Participant, VoiceView},
     voice::video::CameraStatus,
 };
@@ -91,6 +94,7 @@ impl Spk {
             sidebar.chat_notice,
             sidebar.read_notice,
             sidebar.device_notice,
+            sidebar.voice_moderation_notice,
             self.form_error,
         ];
         let rejoin = sidebar.rejoin_channel().map(str::to_owned);
@@ -303,6 +307,8 @@ impl Spk {
                                                 .as_ref()
                                                 .is_some_and(|chat| chat.channel_id == id);
                                             let counts = sidebar.unread(&id);
+                                            let muted =
+                                                self.notification_preferences.muted.contains(&id);
                                             let menu_id = id.clone();
                                             let app = cx.weak_entity();
                                             div()
@@ -361,6 +367,11 @@ impl Spk {
                                                 .context_menu(move |menu, _, _| {
                                                     menu.item(mark_read_item(
                                                         menu_id.clone(),
+                                                        app.clone(),
+                                                    ))
+                                                    .item(notifications::mute_item(
+                                                        menu_id.clone(),
+                                                        muted,
                                                         app.clone(),
                                                     ))
                                                 })
@@ -564,6 +575,7 @@ impl Spk {
                             .text_color(theme.muted_foreground),
                     )
                     .children(participant_status(flags.muted, flags.deafened, cx))
+                    .children(voice_moderation_menu(&person, sidebar, cx))
                     .when(
                         sidebar.profile.id.as_deref() != Some(person.id)
                             && call.is_some_and(|call| {
@@ -920,6 +932,7 @@ impl Spk {
                         )
                     })
                     .children(participant_status(flags.muted, flags.deafened, cx))
+                    .children(voice_moderation_menu(&participant, sidebar, cx))
                     .when(
                         !is_me && call.is_some_and(VoiceView::is_participating),
                         |row| row.child(self.participant_volume_button(&participant, sidebar, cx)),
@@ -933,6 +946,72 @@ impl Spk {
                     .map(|call| self.video_tile_controls(&participant, call, sidebar, cx)),
             )
     }
+}
+
+fn voice_moderation_menu(
+    participant: &Participant<'_>,
+    sidebar: &Sidebar,
+    cx: &Context<Spk>,
+) -> Option<impl IntoElement> {
+    let destinations = sidebar
+        .voice_moderation_channels(participant.id)?
+        .into_iter()
+        .map(|channel| (channel.id.clone(), channel_name(channel).to_owned()))
+        .collect::<Vec<_>>();
+    let user_id = participant.id.to_owned();
+    let app = cx.weak_entity();
+    Some(
+        tool_button(
+            "voice-moderation",
+            IconName::Ellipsis,
+            format!("Moderate {}", participant.name),
+        )
+        .disabled(sidebar.voice_moderation_pending)
+        .dropdown_menu(move |mut menu, window, cx| {
+            if !destinations.is_empty() {
+                let app = app.clone();
+                let user_id = user_id.clone();
+                let destinations = destinations.clone();
+                menu = menu.submenu("Move to", window, cx, move |mut submenu, _, _| {
+                    for (id, name) in &destinations {
+                        submenu = submenu.item(voice_moderation_item(
+                            name.clone(),
+                            app.clone(),
+                            user_id.clone(),
+                            VoiceModeration::Move(id.clone()),
+                        ));
+                    }
+                    submenu
+                });
+            }
+            menu.item(voice_moderation_item(
+                "Disconnect from voice",
+                app.clone(),
+                user_id.clone(),
+                VoiceModeration::Disconnect,
+            ))
+        }),
+    )
+}
+
+fn voice_moderation_item(
+    label: impl Into<SharedString>,
+    app: WeakEntity<Spk>,
+    user_id: String,
+    action: VoiceModeration,
+) -> PopupMenuItem {
+    PopupMenuItem::new(label).on_click(move |_, _, cx| {
+        let _ = app.update(cx, |app, cx| {
+            app.send(
+                Command::ModerateVoice {
+                    user_id: user_id.clone(),
+                    action: action.clone(),
+                },
+                None,
+                cx,
+            );
+        });
+    })
 }
 
 fn radio_badge(cx: &App) -> impl IntoElement {

@@ -6,6 +6,7 @@ use std::{
 
 mod audio;
 mod camera;
+mod notifications;
 mod profile;
 mod shortcuts;
 
@@ -89,6 +90,7 @@ enum Tab {
     Profile,
     Appearance,
     Voice,
+    Notifications,
     Shortcuts,
 }
 
@@ -166,6 +168,24 @@ impl Spk {
                 .detach();
                 volume
             });
+            let message_volume = cx.new(|_| {
+                SliderState::new()
+                    .max(200.0)
+                    .default_value(f32::from(sounds.get(Sound::Message).volume.min(200)))
+            });
+            cx.subscribe(&message_volume, |settings, _, event, cx| {
+                if let SliderEvent::Release(SliderValue::Single(value)) = event {
+                    settings.spk.update(cx, |app, cx| {
+                        app.change_sound(
+                            Sound::Message,
+                            |setting| setting.volume = *value as u8,
+                            cx,
+                        )
+                    });
+                }
+                cx.notify();
+            })
+            .detach();
             Settings {
                 spk,
                 tab: Tab::Profile,
@@ -173,6 +193,7 @@ impl Spk {
                 avatar_picker_open: false,
                 avatar_picker_error: None,
                 volumes,
+                message_volume,
                 recorder_focus: cx.focus_handle(),
                 output_volume,
                 sensitivity,
@@ -211,6 +232,7 @@ struct Settings {
     avatar_picker_open: bool,
     avatar_picker_error: Option<&'static str>,
     volumes: [Entity<SliderState>; Sound::ALL.len()],
+    message_volume: Entity<SliderState>,
     recorder_focus: FocusHandle,
     output_volume: Entity<SliderState>,
     sensitivity: Entity<SliderState>,
@@ -233,6 +255,7 @@ impl Render for Settings {
             Tab::Profile => self.profile(sidebar, cx).into_any_element(),
             Tab::Appearance => self.appearance(app, cx).into_any_element(),
             Tab::Voice => self.audio(sidebar, cx).into_any_element(),
+            Tab::Notifications => self.notifications(cx).into_any_element(),
             Tab::Shortcuts => self.shortcuts(cx).into_any_element(),
         };
         div()
@@ -294,6 +317,7 @@ impl Render for Settings {
                                     (Tab::Profile, "Profile", IconName::User),
                                     (Tab::Appearance, "Appearance", IconName::Palette),
                                     (Tab::Voice, "Voice & Video", IconName::Mic),
+                                    (Tab::Notifications, "Notifications", IconName::Bell),
                                     (Tab::Shortcuts, "Shortcuts", IconName::Settings2),
                                 ]
                                 .into_iter()

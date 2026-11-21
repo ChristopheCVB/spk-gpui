@@ -23,10 +23,11 @@ use tokio::{
 use url::Url;
 
 use crate::api::{
-    Channel, Connection, Failure, Frame, MessageChange, Profile, SocketEvent, SpkClient,
-    UnreadState, User, UserPresence,
+    Channel, Connection, Failure, Frame, MessageChange, MessageTarget, Profile, SocketEvent,
+    SpkClient, UnreadState, User, UserPresence, VoiceModeration,
 };
-use crate::sounds::{Sound, SoundSettings, VoiceSounds};
+use crate::notifications::{Alert, LiveAlerts};
+use crate::sounds::{Sound, VoiceSounds};
 use crate::voice::{
     Call, Device, DeviceKind, Devices, Intent, Issue as VoiceIssue, NoiseSuppression,
     ParticipantVolumeChange, Status as VoiceStatus, Update as VoiceUpdate, screen,
@@ -161,6 +162,10 @@ pub enum Command {
     InspectProfileEmail(String, oneshot::Sender<Option<String>>),
     JoinVoice(String),
     LeaveVoice,
+    ModerateVoice {
+        user_id: String,
+        action: VoiceModeration,
+    },
     ToggleMute,
     ToggleDeafen,
     RetryMicrophone,
@@ -243,6 +248,7 @@ pub struct Sidebar {
     pub search: SearchView,
     pub chat_notice: Option<&'static str>,
     pub read_notice: Option<&'static str>,
+    pub alerts: Vec<Alert>,
     unread: Arc<HashMap<String, UnreadState>>,
     pub voice: Option<VoiceView>,
     pub radio: RadioView,
@@ -250,6 +256,8 @@ pub struct Sidebar {
     pub channel_radio: HashMap<String, String>,
     switching_to: Option<VoiceDestination>,
     pub voice_notice: Option<&'static str>,
+    pub voice_moderation_notice: Option<&'static str>,
+    pub voice_moderation_pending: bool,
     voice_rejoin: Option<String>,
     pub voice_intent: Intent,
     pub devices: Arc<Devices>,
@@ -275,6 +283,7 @@ impl Sidebar {
             search: SearchView::default(),
             chat_notice: None,
             read_notice: None,
+            alerts: Vec::new(),
             unread: Arc::default(),
             voice: None,
             radio: RadioView::default(),
@@ -282,6 +291,8 @@ impl Sidebar {
             channel_radio: HashMap::new(),
             switching_to: None,
             voice_notice: None,
+            voice_moderation_notice: None,
+            voice_moderation_pending: false,
             voice_rejoin: None,
             voice_intent: Intent::default(),
             devices: Arc::default(),
@@ -374,13 +385,15 @@ struct SessionSettings {
     devices: DeviceSettings,
     sounds: VoiceSounds,
     presence: PresenceSettings,
+    alert_activation: watch::Receiver<Option<MessageTarget>>,
 }
 
 pub async fn run(
     commands: Receiver<Command>,
     views: Sender<View>,
-    sound_settings: watch::Receiver<SoundSettings>,
+    sounds: VoiceSounds,
     activity: watch::Receiver<bool>,
+    alert_activation: watch::Receiver<Option<MessageTarget>>,
 ) {
     let base = Url::parse(env!("SPK_URL")).expect("validated SPK URL");
     let saved = SavedSession::new(&base);
@@ -389,8 +402,9 @@ pub async fn run(
         start_call: Box::new(Call::start),
         enumerate_devices: Devices::enumerate,
         devices: DeviceSettings::load(),
-        sounds: VoiceSounds::new(sound_settings),
+        sounds,
         presence: PresenceSettings::load(activity),
+        alert_activation,
     };
     run_session(base, saved, settings, commands, views).await;
 }
@@ -523,8 +537,10 @@ async fn watch_session(
     let mut radio = RadioSession::default();
     let mut search = SearchSession::default();
     let mut pending_message_target = None;
+    let mut alerts = LiveAlerts::default();
     let mut soundboard = SoundboardSession::default();
     let mut camera_previews = JoinSet::new();
+    let mut voice_moderation = JoinSet::new();
     let mut profiles = JoinSet::new();
     let end = loop {
         if commands.is_closed() {
@@ -534,19 +550,19 @@ async fn watch_session(
         chat.fill_previews(client);
         chat.gifs.fill_previews(client);
         sidebar.chat = chat.view();
+        sidebar.voice_moderation_pending = !voice_moderation.is_empty();
         radio.sync(&mut sidebar, &voice);
         soundboard.sync(&mut sidebar, &voice);
         voice.start_pending(&mut sidebar, client, &settings.start_call);
-        if views
-            .send(View::SignedIn(Box::new(sidebar.clone())))
-            .await
-            .is_err()
-        {
+        let mut next = sidebar.clone();
+        next.alerts = std::mem::take(&mut alerts.ready);
+        if views.send(View::SignedIn(Box::new(next))).await.is_err() {
             break SessionEnd::Closed;
         }
         let retry_at = voice.retry_at();
         let chat_timeout = chat.next_timeout();
         let active = *settings.presence.activity.borrow_and_update();
+        let alert_activation = &mut settings.alert_activation;
         tokio::select! {
             () = presence.report(sidebar.user_status, active) => {}
             Ok(()) = settings.presence.activity.changed() => {}
@@ -628,7 +644,16 @@ async fn watch_session(
                 voice.retry_presence();
                 refresh.fetch(client, Resource::Presence);
             }
-            command = commands.recv() => match command {
+            command = async {
+                tokio::select! {
+                    // Keep launch and signed-out activations pending until this authenticated loop.
+                    Ok(()) = alert_activation.changed() => {
+                        Ok(Command::OpenMessageTarget(alert_activation.borrow_and_update().clone()
+                            .expect("the desktop only publishes message targets")))
+                    }
+                    command = commands.recv() => command,
+                }
+            } => match command {
                 Err(_) => break SessionEnd::Closed,
                 Ok(Command::SignOut) => break SessionEnd::SignOut,
                 Ok(Command::SetUserStatus(status)) => {
@@ -749,6 +774,10 @@ async fn watch_session(
                 }
                 Ok(Command::JoinVoice(channel_id)) => voice.join(&mut sidebar, channel_id),
                 Ok(Command::LeaveVoice) => voice.leave(&mut sidebar),
+                Ok(Command::ModerateVoice { user_id, action }) if voice_moderation.is_empty() => {
+                    sidebar.moderate_voice(client, &mut voice_moderation, user_id, action);
+                }
+                Ok(Command::ModerateVoice { .. }) => {}
                 Ok(command @ (Command::SearchRadio(_) | Command::RadioFavorites
                     | Command::SetRadioFavorite { .. } | Command::SelectRadio(_) | Command::StopRadio
                     | Command::PauseRadio | Command::ListenToRadio)) => {
@@ -771,6 +800,26 @@ async fn watch_session(
                 }
             },
             Some(_) = camera_previews.join_next() => {}
+            Some(result) = voice_moderation.join_next() => {
+                let result = result.unwrap_or(Err(Failure::Connection));
+                if result.as_ref().is_err_and(Failure::unauthorized) {
+                    break SessionEnd::Invalidated(SESSION_EXPIRED);
+                }
+                sidebar.voice_moderation_notice = Some(match result {
+                    Ok(VoiceModeration::Move(_)) => "Move requested.",
+                    Ok(VoiceModeration::Disconnect) => "Voice participant disconnected.",
+                    Err(Failure::Http(reqwest::StatusCode::FORBIDDEN)) => {
+                        "You don’t have permission to moderate voice."
+                    }
+                    Err(Failure::Http(reqwest::StatusCode::CONFLICT)) => {
+                        "That participant is no longer in the expected voice channel."
+                    }
+                    Err(Failure::Http(reqwest::StatusCode::NOT_FOUND)) => {
+                        "That voice channel is unavailable."
+                    }
+                    Err(_) => "Could not moderate voice. Try again.",
+                });
+            }
             event = socket.recv() => match event {
                 Err(_) => break SessionEnd::Closed,
                 Ok(SocketEvent::Unauthorized | SocketEvent::Frame(Frame::SignedOut)) => {
@@ -793,6 +842,7 @@ async fn watch_session(
                     sidebar.channel_radio.clear();
                     refresh.presence_ready = false;
                     chat.disconnected();
+                    alerts.disconnected();
                     unread.disconnected();
                     presence = PresenceReporter::default();
                     voice.disconnected();
@@ -803,6 +853,12 @@ async fn watch_session(
                             .is_none_or(|channel| channel.kind == "dm" && channel.last_activity_at.is_none_or(|at| at < message.created_at))
                         {
                             refresh.fetch(client, Resource::Channels);
+                        }
+                        if !sidebar.chat.as_ref().is_some_and(|chat| {
+                            chat.channel_id == message.channel_id
+                                && chat.messages.iter().any(|loaded| loaded.id == message.id)
+                        }) {
+                            alerts.receive(&sidebar, &message);
                         }
                         chat.message(*message, nonce.as_deref(), sidebar.profile.id.as_deref());
                     }
@@ -992,6 +1048,9 @@ async fn watch_session(
                     && (!presence_loaded || !search::open_message_target(&mut sidebar, &mut chat, client, &target))
                 {
                     sidebar.chat_notice = Some("Message unavailable.");
+                }
+                if resource == Resource::Channels && !refresh.dirty.contains(&resource) && presence_loaded {
+                    alerts.resolve_unlisted(&sidebar);
                 }
                 if fresh_presence {
                     voice.presence_refreshed(&mut sidebar, presence_loaded);

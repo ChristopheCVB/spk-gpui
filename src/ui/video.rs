@@ -109,7 +109,7 @@ impl Spk {
         }
     }
 
-    fn exit_video_fullscreen(&mut self, window: &Window) {
+    pub(super) fn exit_video_fullscreen(&mut self, window: &Window) {
         if self.video_stage.fullscreen && window.is_fullscreen() {
             window.toggle_fullscreen();
         }

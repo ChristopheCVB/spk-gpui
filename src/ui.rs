@@ -1,5 +1,6 @@
 mod accounts;
 mod chat;
+mod notifications;
 mod profile;
 mod radio;
 mod search;
@@ -31,7 +32,7 @@ use gpui_kit::{
 use crate::{
     session::{self, AccountLinkForm, AvatarPhoto, Command, Sidebar, View},
     shortcuts::{Chord, Shortcuts},
-    sounds::{Sound, SoundSetting, SoundSettings},
+    sounds::{Sound, SoundSetting, SoundSettings, VoiceSounds},
     voice::{DeviceKind, Status},
 };
 
@@ -65,13 +66,21 @@ pub(super) struct Spk {
     appearance_error: bool,
     shortcuts: Shortcuts,
     sound_settings: tokio::sync::watch::Sender<SoundSettings>,
+    cues: VoiceSounds,
+    notification_preferences: crate::notifications::Preferences,
+    notification_error: bool,
+    alert_activation: tokio::sync::watch::Sender<Option<crate::api::MessageTarget>>,
     signing_out: bool,
     last_activity: Instant,
     activity: tokio::sync::watch::Sender<bool>,
 }
 
 impl Spk {
-    pub(super) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(super) fn new(
+        initial_alert: Option<crate::api::MessageTarget>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let appearance = Appearance::load();
         appearance.apply(window, cx);
         cx.observe_window_appearance(window, |this, window, cx| {
@@ -143,6 +152,11 @@ impl Spk {
         let shortcuts = Shortcuts::new(window);
         let (activity, presence_activity) = tokio::sync::watch::channel(window.is_window_active());
         let (sound_settings, sounds) = tokio::sync::watch::channel(shortcuts.sound_settings());
+        let (alert_activation, targets) = tokio::sync::watch::channel(None);
+        if initial_alert.is_some() {
+            alert_activation.send_replace(initial_alert);
+        }
+        let cues = VoiceSounds::new(sounds);
         let global_events = shortcuts.watch_events();
         cx.spawn_in(window, async move |this, cx| {
             while let Ok((generation, event)) = global_events.recv().await {
@@ -240,12 +254,19 @@ impl Spk {
             }
         })
         .detach();
+        let session_cues = cues.clone();
         std::thread::spawn(move || {
             if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
             {
-                runtime.block_on(session::run(requests, updates, sounds, presence_activity));
+                runtime.block_on(session::run(
+                    requests,
+                    updates,
+                    session_cues,
+                    presence_activity,
+                    targets,
+                ));
             }
             let _ = finished.send(());
         });
@@ -316,6 +337,10 @@ impl Spk {
             appearance_error: false,
             shortcuts,
             sound_settings,
+            cues,
+            notification_preferences: crate::notifications::Preferences::load(),
+            notification_error: false,
+            alert_activation,
             signing_out: false,
             last_activity: Instant::now(),
             activity,
@@ -339,7 +364,7 @@ impl Spk {
         });
     }
 
-    fn set_session_view(&mut self, view: View, window: &mut Window, cx: &mut Context<Self>) {
+    fn set_session_view(&mut self, mut view: View, window: &mut Window, cx: &mut Context<Self>) {
         self.update_chat(&view, window, cx);
         if let View::SignedIn(previous) = &self.view {
             let next = match &view {
@@ -356,6 +381,13 @@ impl Spk {
                     }
                 }
             }
+        }
+        if let View::SignedIn(sidebar) = &mut view {
+            for alert in std::mem::take(&mut sidebar.alerts) {
+                self.show_alert(alert, sidebar, window, cx);
+            }
+        } else if matches!(self.view, View::SignedIn(_)) {
+            window.clear_notifications(cx);
         }
         self.view = view;
     }

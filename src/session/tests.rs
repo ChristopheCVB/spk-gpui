@@ -4,6 +4,7 @@ mod attachments;
 mod chat;
 mod gifs;
 mod media;
+mod moderation;
 mod profile;
 mod radio;
 mod search;
@@ -31,6 +32,7 @@ use tokio_tungstenite::{
 use super::{presence::Data, voice_session::VOICE_REPLACED, *};
 use crate::{
     api::{Member, VideoPresence, VoiceFlags, VoiceSocket},
+    sounds::SoundSettings,
     voice::{self, DevicePreferences, Report as VoiceReport},
 };
 
@@ -311,6 +313,10 @@ enum SidebarSnapshot {
     VoiceReplaced,
     FailPresenceOnce,
     DelayUserPresence,
+    VoiceModeration {
+        role: &'static str,
+        channel: Option<&'static str>,
+    },
     MediaPresence {
         channel: &'static str,
         flags: VoiceFlags,
@@ -369,6 +375,15 @@ async fn voice_session_with_activity(
                     SidebarSnapshot::Initial
                     | SidebarSnapshot::FailPresenceOnce
                     | SidebarSnapshot::DelayUserPresence => "[]",
+                    SidebarSnapshot::VoiceModeration {
+                        channel: Some(channel),
+                        ..
+                    } => {
+                        let body = value!([{"userId":"bob","channelId":channel}]);
+                        request.respond(&[], &body.to_string()).await;
+                        continue;
+                    }
+                    SidebarSnapshot::VoiceModeration { channel: None, .. } => "[]",
                     SidebarSnapshot::Updated => {
                         r#"[{"userId":"bob","channelId":"first","speaking":true}]"#
                     }
@@ -386,6 +401,14 @@ async fn voice_session_with_activity(
                 },
                 "GET /api/channels HTTP/1.1" => {
                     r#"[{"id":"first","type":"voice"},{"id":"second","type":"voice"}]"#
+                }
+                "GET /api/users HTTP/1.1"
+                    if let SidebarSnapshot::VoiceModeration { role, .. } = snapshot =>
+                {
+                    request
+                        .respond(&[], &value!([{"id":"alice","role":role}]).to_string())
+                        .await;
+                    continue;
                 }
                 "GET /api/users HTTP/1.1" => "[]",
                 "GET /api/unread HTTP/1.1" => "{}",
@@ -406,6 +429,16 @@ async fn voice_session_with_activity(
                     continue;
                 }
                 "POST /api/voice/token HTTP/1.1" => {
+                    token_requests.send(request).await.unwrap();
+                    continue;
+                }
+                "POST /api/admin/voice/move HTTP/1.1"
+                | "POST /api/admin/voice/disconnect HTTP/1.1" => {
+                    let payload: Value = serde_json::from_slice(&request.body).unwrap();
+                    assert_eq!(
+                        payload.get("channelId").is_some(),
+                        line == "POST /api/admin/voice/move HTTP/1.1",
+                    );
                     token_requests.send(request).await.unwrap();
                     continue;
                 }
@@ -462,6 +495,7 @@ fn fixture_settings(
             notice: None,
         },
         sounds: VoiceSounds::new(watch::channel(sounds).1),
+        alert_activation: watch::channel(None).1,
         presence: PresenceSettings {
             path: None,
             status: UserStatus::default(),
