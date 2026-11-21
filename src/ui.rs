@@ -45,6 +45,8 @@ pub(super) struct Spk {
     password: Entity<InputState>,
     nickname: Entity<InputState>,
     chat_input: Entity<TextareaState>,
+    message_action_input: Entity<TextareaState>,
+    message_action_form: Option<chat::MessageActionForm>,
     chat_scroll: ScrollHandle,
     chat_spoiler_link: String,
     chat_spoilers: std::collections::HashMap<(String, u64), std::collections::HashSet<usize>>,
@@ -97,6 +99,14 @@ impl Spk {
                 _ => {}
             },
         )
+        .detach();
+        let message_action_input =
+            cx.new(|cx| TextareaState::new(window, cx).rows(2).submit_on_enter(true));
+        cx.subscribe_in(&message_action_input, window, |this, _, event, _, cx| {
+            if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
+                this.submit_message_action(cx);
+            }
+        })
         .detach();
         let workspace_focus = cx.focus_handle().tab_stop(false);
         cx.on_focus_lost(window, |this, window, cx| {
@@ -269,6 +279,8 @@ impl Spk {
             password,
             nickname,
             chat_input,
+            message_action_input,
+            message_action_form: None,
             chat_scroll: ScrollHandle::new(),
             chat_spoiler_link: format!("spk-spoiler:{}:", uuid::Uuid::new_v4()),
             chat_spoilers: Default::default(),

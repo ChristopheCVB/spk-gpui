@@ -124,6 +124,36 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         live(&mut peer, &sent, retry["nonce"].as_str()).await;
         live(&mut peer, &sent, retry["nonce"].as_str()).await;
         wait_for_messages(&rx, &["m1", "m2", "m3"]).await;
+        tx.send(Command::MutateChatMessage {
+            channel_id: "general".into(),
+            message_id: "m3".into(),
+            action: MessageAction::Edit("Corrected from desktop https://example.test/story".into()),
+        }).await.unwrap();
+        let (line, edit) = history.recv().await.unwrap();
+        assert_eq!(line, "PATCH /api/messages/m3 HTTP/1.1");
+        assert_eq!(serde_json::from_slice::<Value>(&edit.body).unwrap(), value!({"body":"Corrected from desktop https://example.test/story"}));
+        let mut edited = message("m3", 3, "alice", "Corrected from desktop https://example.test/story");
+        edited["editedAt"] = value!(30);
+        peer.send(Message::text(value!({"type":"message:edit","message":edited}).to_string())).await.unwrap();
+        edit.respond(&[], &edited.to_string()).await;
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
+            chat.messages.iter().any(|m| m.id == "m3" && m.body == "Corrected from desktop https://example.test/story" && m.edited_at == Some(30))
+        })).await;
+
+        let url = "https://example.test/story";
+        let card = value!({"url":url,"title":"A story","description":"A preview","siteName":"Example","image":false});
+        peer.send(Message::text(value!({"type":"message:previews","channelId":"general","messageId":"m3","previews":[card]}).to_string())).await.unwrap();
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().unwrap().messages.last().is_some_and(|m| {
+            m.previews.first().is_some_and(|preview| preview.title.as_deref() == Some("A story"))
+        })).await;
+        tx.send(Command::MutateChatMessage {
+            channel_id: "general".into(), message_id: "m3".into(), action: MessageAction::RemovePreview(url.into()),
+        }).await.unwrap();
+        let remove = chat_action_request(&history, "DELETE /api/messages/m3/previews HTTP/1.1", value!({"url":url})).await;
+        peer.send(Message::text(value!({"type":"message:previews","channelId":"general","messageId":"m3","previews":[]}).to_string())).await.unwrap();
+        remove.respond(&[], r#"{"ok":true}"#).await;
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().unwrap().messages.last().is_some_and(|m| m.previews.is_empty())).await;
+
         tx.send(Command::RetryChatSend).await.unwrap();
         tx.send(Command::SendChatMessage {
             channel_id: "general".into(),
@@ -509,6 +539,68 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
         page(private_history(&requests, "session=bob").await, std::slice::from_ref(&first), false).await;
         wait_for_messages(&bob_views, &["private-1"]).await;
 
+        // A standard member can pin another participant's message in a DM.
+        bob.send(Command::ShowChatPins { channel_id: "private".into(), shown: true }).await.unwrap();
+        let (line, empty) = requests.recv().await.unwrap();
+        assert_eq!(line, "GET /api/channels/private/pins HTTP/1.1");
+        assert_eq!(empty.header("cookie"), Some("session=bob"));
+        empty.respond(&[], "[]").await;
+        wait_for_sidebar(&bob_views, |view| matches!(&view.chat.as_ref().unwrap().pins, Some(Pins::Ready(pins)) if pins.is_empty())).await;
+
+        bob.send(Command::MutateChatMessage {
+            channel_id: "private".into(), message_id: "private-1".into(), action: MessageAction::Pin(true),
+        }).await.unwrap();
+        let pin = chat_action_request(&requests, "POST /api/messages/private-1/pin HTTP/1.1", value!({"on":true})).await;
+        assert_eq!(pin.header("cookie"), Some("session=bob"));
+        let pinned = value!({"channelId":"private","messageId":"private-1","pinned":true});
+        let event = value!({"type":"pin:update","channelId":"private","messageId":"private-1","pinned":true});
+        for peer in [&mut alice_peer, &mut bob_peer] {
+            peer.send(Message::text(event.to_string())).await.unwrap();
+        }
+        wait_for_sidebar(&alice_views, |view| view.chat.as_ref().unwrap().messages[0].pinned).await;
+        wait_for_sidebar(&bob_views, |view| view.chat.as_ref().unwrap().messages[0].pinned).await;
+        pin.respond(&[], &pinned.to_string()).await;
+        let (line, pins) = requests.recv().await.unwrap();
+        assert_eq!(line, "GET /api/channels/private/pins HTTP/1.1");
+        let mut pinned_message = first.clone();
+        pinned_message["pinned"] = value!(true);
+        pins.respond(&[], &value!([pinned_message]).to_string()).await;
+        wait_for_sidebar(&bob_views, |view| matches!(&view.chat.as_ref().unwrap().pins, Some(Pins::Ready(pins)) if pins.iter().any(|m| m.id == "private-1"))).await;
+
+        // An HTTP refusal leaves both participants' current pin state unchanged.
+        bob.send(Command::MutateChatMessage {
+            channel_id: "private".into(), message_id: "private-1".into(), action: MessageAction::Pin(false),
+        }).await.unwrap();
+        let denied = chat_action_request(&requests, "POST /api/messages/private-1/pin HTTP/1.1", value!({"on":false})).await;
+        denied.respond_raw("403 Forbidden", &[], b"").await;
+        let denied = wait_for_sidebar(&bob_views, |view| view.chat.as_ref().unwrap().action_outcome.as_ref().is_some_and(|outcome| outcome.error.is_some())).await;
+        assert!(denied.chat.unwrap().messages[0].pinned);
+        bob.send(Command::ShowChatPins { channel_id: "private".into(), shown: false }).await.unwrap();
+
+        for on in [true, false] {
+            bob.send(Command::MutateChatMessage {
+                channel_id: "private".into(), message_id: "private-1".into(),
+                action: MessageAction::React { emoji: "👍".into(), on },
+            }).await.unwrap();
+            let reaction = chat_action_request(&requests, "POST /api/messages/private-1/reactions HTTP/1.1", value!({"emoji":"👍","on":on})).await;
+            let reactions = if on { value!([{"emoji":"👍","userIds":["bob"]}]) } else { value!([]) };
+            let update = value!({"type":"reaction:update","channelId":"private","messageId":"private-1","reactions":reactions});
+            for peer in [&mut alice_peer, &mut bob_peer] {
+                peer.send(Message::text(update.to_string())).await.unwrap();
+            }
+            reaction.respond(&[], &update.to_string()).await;
+            for views in [&alice_views, &bob_views] {
+                wait_for_sidebar(views, |view| {
+                    let chat = view.chat.as_ref().unwrap();
+                    !chat.action_pending && if on {
+                        chat.messages[0].reactions.first().is_some_and(|r| r.emoji == "👍" && r.user_ids == ["bob"])
+                    } else {
+                        chat.messages[0].reactions.is_empty()
+                    }
+                }).await;
+            }
+        }
+
         let body = "> Hello Bob\n\n**Hi** <@alice> 👋 ||a secret||";
         bob.send(Command::UpdateChatDraft { channel_id: "private".into(), body: body.into() }).await.unwrap();
         receive_typing(&mut bob_peer, "private").await;
@@ -555,7 +647,17 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
         alice.send(Command::StartDirectMessage("bob".into())).await.unwrap();
         page(private_history(&requests, "session=alice").await, &latest, false).await;
         wait_for_messages(&alice_views, &["private-1", "private-2", "private-3", "private-4"]).await;
-        alice_peer.send(Message::text(value!({"type":"message:delete","channelId":"private","id":"private-1"}).to_string())).await.unwrap();
+        alice.send(Command::MutateChatMessage {
+            channel_id: "private".into(), message_id: "private-1".into(), action: MessageAction::Delete,
+        }).await.unwrap();
+        let (line, request) = requests.recv().await.unwrap();
+        assert_eq!(line, "DELETE /api/messages/private-1 HTTP/1.1");
+        assert_eq!(request.header("cookie"), Some("session=alice"));
+        for peer in [&mut alice_peer, &mut bob_peer] {
+            peer.send(Message::text(value!({"type":"message:delete","channelId":"private","id":"private-1"}).to_string())).await.unwrap();
+        }
+        request.respond(&[], r#"{"ok":true}"#).await;
+        wait_for_messages(&bob_views, &["private-2"]).await;
         wait_for_sidebar(&alice_views, |view| view.chat.as_ref().is_some_and(|chat| {
             chat.messages.len() == 3 && chat.messages.first().is_some_and(|message| {
                 message.id == "private-2" && message.reply_to.as_ref().is_some_and(|reply| reply.deleted && reply.preview.is_empty())
@@ -575,5 +677,19 @@ async fn private_history(requests: &Receiver<(String, Request)>, cookie: &str) -
     let (line, request) = requests.recv().await.unwrap();
     assert_eq!(line, "GET /api/channels/private/messages HTTP/1.1");
     assert_eq!(request.header("cookie"), Some(cookie));
+    request
+}
+
+async fn chat_action_request(
+    requests: &Receiver<(String, Request)>,
+    path: &str,
+    body: Value,
+) -> Request {
+    let (line, request) = requests.recv().await.unwrap();
+    assert_eq!(line, path);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&request.body).unwrap(),
+        body
+    );
     request
 }

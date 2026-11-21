@@ -1,3 +1,7 @@
+mod chat_actions;
+
+pub use chat_actions::{LinkPreview, MessageAction, MessageChange, Reaction};
+
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use futures::{SinkExt, StreamExt};
@@ -167,6 +171,13 @@ pub struct ChatMessage {
     pub body: String,
     pub created_at: i64,
     pub reply_to: Option<ReplyRef>,
+    pub edited_at: Option<i64>,
+    #[serde(default)]
+    pub reactions: Vec<Reaction>,
+    #[serde(default)]
+    pub previews: Vec<LinkPreview>,
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 #[derive(Clone, Deserialize, PartialEq, Eq)]
@@ -245,6 +256,26 @@ pub enum Frame {
     },
     #[serde(rename = "message:delete", rename_all = "camelCase")]
     MessageDelete { channel_id: String, id: String },
+    #[serde(rename = "message:edit")]
+    MessageEdit { message: ChatMessage },
+    #[serde(rename = "message:previews", rename_all = "camelCase")]
+    MessagePreviews {
+        channel_id: String,
+        message_id: String,
+        previews: Vec<LinkPreview>,
+    },
+    #[serde(rename = "reaction:update", rename_all = "camelCase")]
+    ReactionUpdate {
+        channel_id: String,
+        message_id: String,
+        reactions: Vec<Reaction>,
+    },
+    #[serde(rename = "pin:update", rename_all = "camelCase")]
+    PinUpdate {
+        channel_id: String,
+        message_id: String,
+        pinned: bool,
+    },
     #[serde(rename = "message:error")]
     MessageError {
         nonce: Option<String>,
@@ -813,13 +844,19 @@ impl SpkClient {
             .pop_if_empty()
             .push(user_id);
         url.query_pairs_mut().append_pair("v", key);
-        let response = self
-            .http
-            .get(url)
-            .header(header::ORIGIN, &self.origin)
-            .send()
-            .await
-            .map_err(|_| Failure::Connection)?;
+        self.storage_redirect(
+            self.http.get(url).header(header::ORIGIN, &self.origin),
+            MAX_AVATAR_BYTES,
+        )
+        .await
+    }
+
+    async fn storage_redirect(
+        &self,
+        request: reqwest::RequestBuilder,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, Failure> {
+        let response = request.send().await.map_err(|_| Failure::Connection)?;
         if !response.status().is_redirection() {
             return Err(Failure::Http(response.status()));
         }
@@ -830,7 +867,7 @@ impl SpkClient {
             .filter(signed_storage_url)
             .ok_or(Failure::InvalidResponse)?;
         // The storage URL carries its own authorization and can use a different host.
-        self.storage_bytes(url, MAX_AVATAR_BYTES).await
+        self.storage_bytes(url, max_bytes).await
     }
 
     async fn storage_bytes(&self, url: Url, max_bytes: usize) -> Result<Vec<u8>, Failure> {
