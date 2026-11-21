@@ -2,18 +2,20 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use tokio::{task::JoinSet, time::Instant};
 
-use crate::api::{ChatMessage, Failure, MessagePage, SpkClient, VoiceSocket};
+use crate::api::{Channel, ChatMessage, Failure, MessagePage, SpkClient, VoiceSocket};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum History {
     Loading,
     Ready,
     Failed,
+    Unavailable,
 }
 
 #[derive(Clone)]
 pub struct ChatView {
     pub channel_id: String,
+    pub direct_message_peer: Option<String>,
     pub messages: Arc<Vec<ChatMessage>>,
     pub has_more_before: bool,
     pub outgoing: Option<Outgoing>,
@@ -27,6 +29,14 @@ impl ChatView {
 
     pub fn history_failed(&self) -> bool {
         self.history == History::Failed
+    }
+
+    pub fn unavailable(&self) -> bool {
+        self.history == History::Unavailable
+    }
+
+    pub fn can_send(&self) -> bool {
+        self.direct_message_peer.is_none() || self.history == History::Ready
     }
 
     fn merge(&mut self, messages: impl IntoIterator<Item = ChatMessage>) {
@@ -74,20 +84,33 @@ pub(super) struct ChatSession {
 impl ChatSession {
     pub fn view(&self) -> Option<ChatView> {
         let mut view = self.selected.clone()?;
-        view.outgoing = self.outgoing.get(&view.channel_id).cloned();
+        // Hide cached DM content until SPK confirms access during a refresh.
+        if view.direct_message_peer.is_some()
+            && view.history != History::Ready
+            && matches!(self.history, Some(HistoryRequest::Refresh))
+        {
+            view.messages = Arc::default();
+            view.has_more_before = false;
+        } else {
+            view.outgoing = self.outgoing.get(&view.channel_id).cloned();
+        }
         Some(view)
     }
 
-    pub fn open(&mut self, client: &SpkClient, channel_id: String) {
+    pub fn open(&mut self, client: &SpkClient, channel: &Channel) {
         if self
             .selected
             .as_ref()
-            .is_some_and(|chat| chat.channel_id == channel_id)
+            .is_some_and(|chat| chat.channel_id == channel.id && !chat.unavailable())
         {
             return;
         }
         self.selected = Some(ChatView {
-            channel_id,
+            channel_id: channel.id.clone(),
+            direct_message_peer: channel
+                .other_user_id
+                .clone()
+                .filter(|_| channel.kind == "dm"),
             messages: Arc::default(),
             has_more_before: false,
             outgoing: None,
@@ -182,6 +205,12 @@ impl ChatSession {
                 if matches!(error, Failure::Http(reqwest::StatusCode::FORBIDDEN)) {
                     view.messages = Arc::default();
                     view.has_more_before = false;
+                    if view.direct_message_peer.is_some() {
+                        self.outgoing.remove(&view.channel_id);
+                        view.history = History::Unavailable;
+                        self.buffered.clear();
+                        return;
+                    }
                 }
                 view.history = History::Failed;
                 self.buffered.clear();
@@ -193,7 +222,7 @@ impl ChatSession {
         if self
             .selected
             .as_ref()
-            .is_none_or(|view| view.channel_id != channel_id)
+            .is_none_or(|view| view.channel_id != channel_id || view.unavailable())
             || self.outgoing.contains_key(&channel_id)
             || body.trim().is_empty()
         {
@@ -221,6 +250,7 @@ impl ChatSession {
 
     pub fn retry_send(&mut self) {
         if let Some(view) = &self.selected
+            && !view.unavailable()
             && self
                 .outgoing
                 .get(&view.channel_id)
@@ -254,9 +284,17 @@ impl ChatSession {
         }
         if let Some(view) = &mut self.selected
             && view.channel_id == message.channel_id
+            && !view.unavailable()
         {
-            if view.loading() && matches!(self.history, Some(HistoryRequest::Refresh)) {
-                self.buffered.push(message.clone());
+            if matches!(self.history, Some(HistoryRequest::Refresh))
+                && view.history != History::Ready
+            {
+                if view.loading() {
+                    self.buffered.push(message.clone());
+                }
+                if view.direct_message_peer.is_some() {
+                    return;
+                }
             }
             view.merge([message]);
         }

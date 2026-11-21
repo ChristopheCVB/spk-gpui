@@ -978,6 +978,8 @@ fn live_membership_and_flags_win_over_an_in_flight_snapshot() {
                     id: id.into(),
                     kind: kind.into(),
                     name: None,
+                    other_user_id: None,
+                    last_activity_at: None,
                 })
                 .collect(),
         )),
@@ -1688,6 +1690,8 @@ fn terminal_media_failure_offers_the_affected_voice_channel_for_rejoin() {
         id: "room".into(),
         kind: "voice".into(),
         name: None,
+        other_user_id: None,
+        last_activity_at: None,
     }]);
     sidebar.voice = Some(VoiceView::joining("room".into()));
     sidebar.voice.as_mut().unwrap().status = VoiceStatus::Reconnecting;

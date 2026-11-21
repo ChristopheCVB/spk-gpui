@@ -62,26 +62,59 @@ impl Spk {
         name: &str,
         cx: &Context<Self>,
     ) -> impl IntoElement {
-        let person_id = id.to_owned();
-        let profile_id = person_id.clone();
-        let menu_id = person_id;
+        let profile_id = id.to_owned();
+        let message_id = id.to_owned();
+        let menu_id = id.to_owned();
+        let conversation = sidebar.direct_message(id).map(|channel| channel.id.clone());
+        let active = sidebar
+            .chat
+            .as_ref()
+            .is_some_and(|chat| chat.direct_message_peer.as_deref() == Some(id));
         let app = cx.weak_entity();
+        let theme = cx.theme();
+        let status = sidebar.user_presence(id);
         div()
             .id(SharedString::from(format!("person-{id}")))
             .flex()
             .items_center()
             .h_8()
-            .gap_2()
-            .px_2()
-            .child(profile_avatar(
-                Avatar::new().name(name.to_owned()).small(),
-                sidebar.avatar(Some(id)),
-                20.0,
-                false,
-                cx,
-            ))
-            .child(Label::new(name.to_owned()).flex_1().min_w_0().truncate())
-            .child(user_presence_label(sidebar.user_presence(id), cx))
+            .gap_1()
+            .child(
+                Button::new("open-direct-message")
+                    .ghost()
+                    .small()
+                    .tab_stop(true)
+                    .selected(active)
+                    .accessibility_label(format!("Direct message {name}, {}", status.label()))
+                    .h_8()
+                    .flex_1()
+                    .min_w_0()
+                    .when(active, |button| button.bg(theme.primary.opacity(0.10)))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .w_full()
+                            .min_w_0()
+                            .gap_2()
+                            .child(profile_avatar(
+                                Avatar::new().name(name.to_owned()).small(),
+                                sidebar.avatar(Some(id)),
+                                20.0,
+                                false,
+                                cx,
+                            ))
+                            .child(Label::new(name.to_owned()).flex_1().min_w_0().truncate())
+                            .child(user_presence_label(status, cx)),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let command = match &conversation {
+                            Some(id) => Command::OpenDirectMessage(id.clone()),
+                            None => Command::StartDirectMessage(message_id.clone()),
+                        };
+                        this.open_direct_message(command, cx);
+                    })),
+            )
             .child(
                 tool_button(
                     "inspect-person",
@@ -95,6 +128,8 @@ impl Spk {
             .context_menu(move |menu, _, _| {
                 let app = app.clone();
                 let id = menu_id.clone();
+                let message_app = app.clone();
+                let message_id = id.clone();
                 let copy_app = app.clone();
                 let copy_id = id.clone();
                 menu.item(
@@ -104,6 +139,14 @@ impl Spk {
                         });
                     }),
                 )
+                .item(PopupMenuItem::new("Send DM").on_click(move |_, _, cx| {
+                    let _ = message_app.update(cx, |app, cx| {
+                        app.open_direct_message(
+                            Command::StartDirectMessage(message_id.clone()),
+                            cx,
+                        );
+                    });
+                }))
                 .item(PopupMenuItem::new("Copy name").on_click(move |_, _, cx| {
                     if let Some(name) = copy_app.upgrade().and_then(|app| {
                         let View::SignedIn(sidebar) = &app.read(cx).view else {
@@ -115,6 +158,11 @@ impl Spk {
                     }
                 }))
             })
+    }
+
+    fn open_direct_message(&mut self, command: Command, cx: &mut Context<Self>) {
+        self.device_picker = None;
+        self.send(command, None, cx);
     }
 
     fn open_person_profile(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -184,6 +232,8 @@ impl Render for PersonProfile {
         } else {
             "User"
         };
+        let app = self.app.downgrade();
+        let message_id = self.id.clone();
         div()
             .flex()
             .items_center()
@@ -211,6 +261,26 @@ impl Render for PersonProfile {
                             .map(|email| {
                                 Label::new(email.clone()).text_color(cx.theme().muted_foreground)
                             }),
+                    )
+                    .when(
+                        sidebar.profile.id.as_deref() != Some(self.id.as_str()),
+                        |profile| {
+                            profile.child(
+                                Button::new("send-profile-dm")
+                                    .small()
+                                    .tab_stop(true)
+                                    .label("Send DM")
+                                    .on_click(move |_, window, cx| {
+                                        let _ = app.update(cx, |app, cx| {
+                                            app.open_direct_message(
+                                                Command::StartDirectMessage(message_id.clone()),
+                                                cx,
+                                            );
+                                        });
+                                        window.close_dialog(cx);
+                                    }),
+                            )
+                        },
                     ),
             )
     }
