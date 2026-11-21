@@ -20,7 +20,12 @@ mod macos;
 #[cfg(target_os = "macos")]
 use macos as platform;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+use self::windows as platform;
+
+#[cfg(not(any(target_os = "macos", windows)))]
 mod platform {
     use super::*;
 
@@ -108,7 +113,7 @@ impl CaptureError {
         match self {
             Self::Cancelled => "Screen Share selection cancelled.",
             Self::Permission => {
-                "Allow Screen Recording in system settings, then select a source again."
+                "Allow screen capture in system settings, then select a source again."
             }
             Self::Unavailable => {
                 "Screen Share is unavailable. Check capture permissions and try again."
@@ -364,9 +369,9 @@ async fn capture_and_publish(
         biased;
         result = capture => result,
         result = async {
-            let (frame, fps) = tokio::time::timeout(Duration::from_secs(15), video_frames.recv()).await
+            let (frame, mut fps) = tokio::time::timeout(Duration::from_secs(15), video_frames.recv()).await
                 .ok().flatten().ok_or(CaptureError::Unavailable)?;
-            let (width, height) = (frame.buffer.width(), frame.buffer.height());
+            let (mut width, mut height) = (frame.buffer.width(), frame.buffer.height());
             let source = NativeVideoSource::new(VideoResolution { width, height }, true);
             let video = LocalVideoTrack::create_video_track(&quality.name(), RtcVideoSource::Native(source.clone()));
             let (video, started) = Publication::new(room, LocalTrack::Video(video), TrackPublishOptions {
@@ -445,9 +450,17 @@ async fn capture_and_publish(
                             }).await;
                         }
                     }
-                    Some((frame, _)) = video_frames.recv() => {
+                    Some((frame, active_fps)) = video_frames.recv() => {
                         source.capture_frame(&frame);
                         frames.update(&frame, false);
+                        let (active_width, active_height) = (frame.buffer.width(), frame.buffer.height());
+                        if (width, height, fps) != (active_width, active_height, active_fps) {
+                            (width, height, fps) = (active_width, active_height, active_fps);
+                            report(State::Live {
+                                width, height, fps, audio: scope.filter(|_| audio_available),
+                                audio_unavailable: scope.is_some() && !audio_available, frames: frames.clone(),
+                            });
+                        }
                     }
                 }
             }
