@@ -46,6 +46,16 @@ jobs:
       - run: mise exec -- cargo fmt --all --check
       - run: mise exec -- cargo test --locked
       - run: mise exec -- cargo build --locked
+      - name: Verify Windows executable embeds DirectX shaders
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Launching on the runner can pass even when GPUI loads its shaders from the Cargo cache.
+          $exe = (Resolve-Path target/debug/spk-gpui.exe).Path
+          $image = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe))
+          if (!$image.Contains('DXBC') -or $image.Contains('src/shaders.hlsl')) {
+            throw 'The Windows executable must embed its DirectX shaders.'
+          }
       - name: Verify macOS development bundle
         if: runner.os == 'macOS'
         run: |
