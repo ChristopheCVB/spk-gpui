@@ -1,3 +1,7 @@
+mod search;
+
+pub use search::{MessageTarget, SearchHit, SearchPage, SearchScope};
+
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use futures::{SinkExt, StreamExt};

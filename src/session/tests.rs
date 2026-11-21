@@ -3,6 +3,7 @@ mod chat;
 mod media;
 mod profile;
 mod radio;
+mod search;
 mod soundboard;
 mod user_presence;
 

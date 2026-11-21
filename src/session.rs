@@ -5,6 +5,7 @@ mod chat;
 mod presence;
 mod profiles;
 mod radio;
+mod search;
 mod soundboard;
 mod voice_session;
 
@@ -38,6 +39,7 @@ use chat::ChatSession;
 use presence::{PresenceReporter, PresenceSettings, Refresh, Resource, VoiceMembership};
 use profiles::Work as ProfileWork;
 use radio::{RadioSession, RadioView};
+use search::{SearchSession, SearchView};
 use soundboard::{SoundboardSession, SoundboardView};
 use voice_session::{DeviceSettings, StartCall, VoiceDestination, VoiceSession};
 pub use {
@@ -81,6 +83,11 @@ pub enum Command {
         channel_id: String,
         body: String,
     },
+    SearchMessages {
+        query: String,
+        scope: crate::api::SearchScope,
+    },
+    MoreSearchResults,
     RetryChatSend,
     DismissChatSend,
     SaveNickname(String),
@@ -167,6 +174,7 @@ pub struct Sidebar {
     pub notice: Option<&'static str>,
     pub load_failed: bool,
     pub chat: Option<ChatView>,
+    pub search: SearchView,
     pub chat_notice: Option<&'static str>,
     pub voice: Option<VoiceView>,
     pub radio: RadioView,
@@ -196,6 +204,7 @@ impl Sidebar {
             notice,
             load_failed: false,
             chat: None,
+            search: SearchView::default(),
             chat_notice: None,
             voice: None,
             radio: RadioView::default(),
@@ -436,6 +445,7 @@ async fn watch_session(
     let mut direct_message_opens = JoinSet::new();
     let mut voice = VoiceSession::default();
     let mut radio = RadioSession::default();
+    let mut search = SearchSession::default();
     let mut soundboard = SoundboardSession::default();
     let mut camera_previews = JoinSet::new();
     let mut profiles = JoinSet::new();
@@ -537,6 +547,8 @@ async fn watch_session(
                 Ok(Command::LoadOlderMessages) => chat.older(client),
                 Ok(Command::RetryChatHistory) => chat.retry_history(client),
                 Ok(Command::SendChatMessage { channel_id, body }) => chat.send(channel_id, body),
+                Ok(Command::SearchMessages { query, scope }) => search.start(&mut sidebar.search, client, query, scope),
+                Ok(Command::MoreSearchResults) => search.more(&mut sidebar.search, client),
                 Ok(Command::RetryChatSend) => chat.retry_send(),
                 Ok(Command::DismissChatSend) => chat.dismiss_send(),
                 Ok(command @ (Command::SaveNickname(_) | Command::UploadAvatar(_) | Command::InspectProfileEmail(..))) => {
@@ -705,6 +717,13 @@ async fn watch_session(
                     }
                 }
             },
+            Some(result) = search.tasks.join_next() => {
+                let result = result.unwrap_or(Err(Failure::Connection));
+                if result.as_ref().is_err_and(Failure::unauthorized) {
+                    break SessionEnd::Invalidated(SESSION_EXPIRED);
+                }
+                SearchSession::complete(&mut sidebar.search, result);
+            }
             () = RadioSession::playback_changed(&mut radio.player) => {}
             Some(Ok((id, result))) = radio.tasks.join_next_with_id() => {
                 if let Err(error) = radio.complete(&mut sidebar.radio, id, result) {
