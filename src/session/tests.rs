@@ -680,3 +680,56 @@ fn local_cues_follow_first_ready_report_and_explicit_leave() {
     assert!(disconnected.begin_leave(false));
     assert!(!disconnected.play_leave);
 }
+
+#[tokio::test]
+async fn switching_cancels_a_pending_join() {
+    let (old_joined, old_attempt) = tokio::sync::oneshot::channel();
+    let (next_joined, next_attempt) = tokio::sync::oneshot::channel();
+    let end = voice_session(
+        Call::start,
+        async |listener, requests| {
+            let mut socket = tokio_tungstenite::accept_async(listener.accept().await.unwrap().0)
+                .await
+                .unwrap();
+            let old = accept_voice_join(&requests, &mut socket, "first").await;
+            old_joined.send(()).unwrap();
+            assert_eq!(
+                receive_voice_frame(&mut socket).await,
+                value!({"type":"voice:leave","sid":old["sid"]})
+            );
+            let next = accept_voice_join(&requests, &mut socket, "second").await;
+            acknowledge_voice(&mut socket, &old).await;
+            next_joined.send(()).unwrap();
+            assert_eq!(
+                receive_voice_frame(&mut socket).await,
+                value!({"type":"voice:leave","sid":next["sid"]})
+            );
+        },
+        async |commands, views| {
+            wait_for_sidebar(&views, |sidebar| {
+                matches!(sidebar.connection, Connection::Online) && sidebar.channels.is_some()
+            })
+            .await;
+            commands
+                .send(Command::JoinVoice("first".into()))
+                .await
+                .unwrap();
+            old_attempt.await.unwrap();
+            commands
+                .send(Command::JoinVoice("second".into()))
+                .await
+                .unwrap();
+            wait_for_sidebar(&views, |sidebar| {
+                sidebar.voice.as_ref().is_some_and(|voice| {
+                    voice.channel_id == "second" && voice.status == VoiceStatus::Joining
+                })
+            })
+            .await;
+            next_attempt.await.unwrap();
+            commands.send(Command::LeaveVoice).await.unwrap();
+            wait_for_sidebar(&views, |sidebar| sidebar.voice.is_none()).await;
+        },
+    )
+    .await;
+    assert!(matches!(end, SessionEnd::Closed));
+}

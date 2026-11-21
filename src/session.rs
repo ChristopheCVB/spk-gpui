@@ -63,6 +63,7 @@ pub struct Sidebar {
     pub notice: Option<&'static str>,
     pub load_failed: bool,
     pub voice: Option<VoiceView>,
+    pub switching_to: Option<String>,
     pub voice_notice: Option<&'static str>,
     pub voice_intent: Intent,
     pub devices: Arc<Devices>,
@@ -139,6 +140,7 @@ impl Sidebar {
             notice,
             load_failed: false,
             voice: None,
+            switching_to: None,
             voice_notice: None,
             voice_intent: Intent::default(),
             devices: Arc::default(),
@@ -146,6 +148,25 @@ impl Sidebar {
             avatars: Arc::default(),
             users: Arc::default(),
             rooms: HashMap::new(),
+        }
+    }
+
+    fn has_voice_channel(&self, channel_id: &str) -> bool {
+        self.channels
+            .iter()
+            .flatten()
+            .any(|channel| channel.kind == "voice" && channel.id == channel_id)
+    }
+
+    fn request_voice(&mut self, call: &mut Option<Call>, channel_id: String) {
+        if self.has_voice_channel(&channel_id)
+            && self
+                .voice
+                .as_ref()
+                .is_none_or(|voice| voice.channel_id != channel_id)
+        {
+            self.switching_to = Some(channel_id);
+            self.cancel_voice(call, None);
         }
     }
 
@@ -666,11 +687,35 @@ async fn watch_session(
     let mut voice_socket: Option<VoiceSocket> = None;
     let mut call = None;
     let end = loop {
-        if commands.is_closed()
-            || views
-                .send(View::SignedIn(Box::new(sidebar.clone())))
-                .await
-                .is_err()
+        if commands.is_closed() {
+            break SessionEnd::Closed;
+        }
+        if call.is_none()
+            && let Some(channel_id) = sidebar.switching_to.take()
+        {
+            if let Some(socket) = &voice_socket
+                && sidebar.has_voice_channel(&channel_id)
+            {
+                call = Some((settings.start_call)(
+                    channel_id.clone(),
+                    client.clone(),
+                    socket.clone(),
+                    sidebar.voice_intent.clone(),
+                ));
+                sidebar.voice = Some(VoiceView::joining(channel_id));
+                sidebar.voice_notice = None;
+            } else {
+                sidebar.voice_notice = Some(if voice_socket.is_none() {
+                    VoiceIssue::Socket.message()
+                } else {
+                    "This voice channel is no longer available."
+                });
+            }
+        }
+        if views
+            .send(View::SignedIn(Box::new(sidebar.clone())))
+            .await
+            .is_err()
         {
             break SessionEnd::Closed;
         }
@@ -679,16 +724,13 @@ async fn watch_session(
                 Err(_) => break SessionEnd::Closed,
                 Ok(Command::SignOut) => break SessionEnd::SignOut,
                 Ok(Command::Refresh) => refresh.fetch_all(client),
-                Ok(Command::JoinVoice(channel_id)) if call.is_none() => {
-                    if let Some(socket) = &voice_socket
-                        && sidebar.channels.iter().flatten().any(|channel| channel.kind == "voice" && channel.id == channel_id)
-                    {
-                        call = Some((settings.start_call)(channel_id.clone(), client.clone(), socket.clone(), sidebar.voice_intent.clone()));
-                        sidebar.voice = Some(VoiceView::joining(channel_id));
-                        sidebar.voice_notice = None;
-                    }
+                Ok(Command::JoinVoice(channel_id)) if voice_socket.is_some() => {
+                    sidebar.request_voice(&mut call, channel_id);
                 }
-                Ok(Command::LeaveVoice) => sidebar.cancel_voice(&mut call, None),
+                Ok(Command::LeaveVoice) => {
+                    sidebar.switching_to = None;
+                    sidebar.cancel_voice(&mut call, None);
+                }
                 Ok(command @ (Command::ToggleMute | Command::ToggleDeafen | Command::RetryMicrophone | Command::RefreshDevices | Command::ChooseDevice(..))) => {
                     match command {
                         Command::ToggleMute => {
@@ -764,7 +806,9 @@ async fn watch_session(
                         }
                     }
                     Frame::VoiceJoined { sid, channel_id, nonce } => {
-                        if let Some(call) = &mut call {
+                        if let Some(call) = &mut call
+                            && sidebar.voice.as_ref().is_some_and(|voice| voice.status != VoiceStatus::Leaving)
+                        {
                             call.acknowledge(&sid, &channel_id, &nonce);
                         }
                     }
@@ -822,8 +866,8 @@ async fn watch_session(
                     }
                     avatars.fill(client, &sidebar);
                 }
-                if let (Some(voice), Some(channels)) = (&sidebar.voice, &sidebar.channels)
-                    && !channels.iter().any(|channel| channel.kind == "voice" && channel.id == voice.channel_id)
+                if let Some(voice) = &sidebar.voice
+                    && sidebar.channels.is_some() && !sidebar.has_voice_channel(&voice.channel_id)
                 {
                     sidebar.cancel_voice(&mut call, Some("This voice channel is no longer available."));
                 }
