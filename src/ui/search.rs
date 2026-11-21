@@ -66,19 +66,11 @@ impl Spk {
         let panel_query = query.clone();
         let panel = cx.new(|cx: &mut Context<SearchPanel>| {
             cx.observe(&spk, |_, _, cx| cx.notify()).detach();
-            cx.subscribe_in(&panel_query, window, |this, _, event, window, cx| {
-                match event {
-                    InputEvent::PressEnter { .. } => {
-                        if let Some(target) = this.selected_result.clone() {
-                            this.open_result(target, window, cx);
-                        } else {
-                            this.search(cx);
-                        }
-                    }
-                    InputEvent::Change => this.selected_result = None,
-                    _ => {}
+            cx.subscribe(&panel_query, |this, _, event, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.selected_result = None;
+                    cx.notify();
                 }
-                cx.notify();
             })
             .detach();
             let panel = cx.weak_entity();
@@ -87,11 +79,22 @@ impl Spk {
                 let key = &event.keystroke;
                 if window.window_handle().window_id() == window_id
                     && !key.modifiers.modified()
-                    && matches!(key.key.as_str(), "up" | "down")
+                    && matches!(key.key.as_str(), "up" | "down" | "enter")
                     && panel
                         .update(cx, |panel, cx| {
-                            panel.query.focus_handle(cx).is_focused(window)
-                                && panel.step_result(key.key == "up", cx)
+                            if !panel.query.focus_handle(cx).is_focused(window) {
+                                return false;
+                            }
+                            if key.key == "enter" {
+                                if let Some(target) = panel.selected_result.clone() {
+                                    panel.open_result(target, window, cx);
+                                } else {
+                                    panel.search(cx);
+                                }
+                                true
+                            } else {
+                                panel.step_result(key.key == "up", cx)
+                            }
                         })
                         .unwrap_or(false)
                 {
