@@ -13,13 +13,19 @@ use tokio::{
 };
 
 use super::{
-    Device, Devices, Issue, Report, Status, Update, Worker, devices::route_speakers, wait_until,
+    Device, Devices, Issue, Report, Status, Update, Worker,
+    devices::{route_speakers, switch_speakers},
+    wait_until,
 };
 use crate::api::VoiceFlags;
 
 mod capture;
+#[cfg(test)]
+pub(crate) mod fixture;
+mod livekit_audio;
 
 use capture::{Capture, stop_recording};
+use livekit_audio::LiveKitAudio;
 
 type RoomEvents = tokio::sync::mpsc::UnboundedReceiver<RoomEvent>;
 
@@ -29,10 +35,16 @@ pub(super) struct Media {
     capture: Capture,
     connecting: Option<JoinHandle<Result<(Room, RoomEvents), Issue>>>,
     room: Option<Room>,
+    #[cfg(test)]
+    fixture: Option<fixture::TestRoom>,
 }
 
 impl Media {
     pub(super) async fn stop_audio(&mut self) {
+        #[cfg(test)]
+        if let Some(fixture) = &mut self.fixture {
+            fixture.stop_audio();
+        }
         self.capture.shutdown().await;
         if let Some(audio) = self.audio.take() {
             stop_recording(&audio);
@@ -43,6 +55,10 @@ impl Media {
     }
 
     pub(super) async fn close(self) {
+        #[cfg(test)]
+        if let Some(fixture) = self.fixture {
+            fixture.close();
+        }
         if let Some(room) = self.room {
             let _ = room.close().await;
         } else if let Some(connecting) = self.connecting
@@ -64,10 +80,10 @@ impl Media {
         let requested = worker.requested.borrow().clone();
         let devices = Devices::read(audio);
         let speakers = route_speakers(
-            audio,
             &devices.speakers,
             requested.preferred.speakers.as_ref(),
             None,
+            |device| switch_speakers(audio, device),
         )
         .ok_or(Issue::Playback)?;
         LkRuntime::instance()
@@ -78,41 +94,33 @@ impl Media {
         let connected = connection.await.map_err(|_| Issue::Media)?;
         media.connecting.take();
         let (room, events) = connected?;
-        Self::listen(
-            worker,
-            media.room.insert(room),
+        let mut backend = LiveKitAudio {
+            room: media.room.insert(room),
             audio,
             events,
-            speakers,
-            &mut media.capture,
-        )
-        .await
+            capture: &mut media.capture,
+        };
+        Self::listen(worker, &mut backend, &speakers).await
     }
 
     async fn listen(
         worker: &Worker,
-        room: &Room,
-        audio: &PlatformAudio,
-        mut events: RoomEvents,
-        speakers: Device,
-        capture: &mut Capture,
+        backend: &mut impl RoomAudio,
+        speakers: &Device,
     ) -> Result<(), Issue> {
         let mut requested = worker.requested.clone();
         let mut intent = requested.borrow_and_update().clone();
-        let runtime = LkRuntime::instance();
-        let mut devices = Arc::new(Devices::read(audio));
+        let mut devices = Arc::new(backend.devices());
         // LiveKit can initialize WebRTC with the default route while connecting.
         let mut output = route_speakers(
-            audio,
             &devices.speakers,
             intent.preferred.speakers.as_ref(),
-            Some(&speakers),
+            Some(speakers),
+            |device| backend.switch_speakers(device),
         );
-        runtime
-            .pc_factory()
-            .set_adm_playout_enabled(output.is_some() && !intent.mute.deafened);
-        subscribe_to_microphones(room);
-        let me = room.local_participant().identity();
+        backend.set_playout(output.is_some() && !intent.mute.deafened);
+        backend.subscribe();
+        let me = backend.identity();
         let mut speaking = Speaking::default();
         let mut reported = None;
         // shortcut: a remove and return between scans can be missed, use backend notifications when available.
@@ -127,9 +135,11 @@ impl Media {
         let mut recording = false;
 
         loop {
-            if reconnecting && intent.mute.effective_muted() && capture.selected_device().is_some()
+            if reconnecting
+                && intent.mute.effective_muted()
+                && backend.selected_microphone().is_some()
             {
-                capture.stop(room, audio).await;
+                backend.stop_microphone().await;
             }
             if check_routes && !reconnecting {
                 check_routes = false;
@@ -141,13 +151,13 @@ impl Media {
                 } else {
                     input
                 };
-                if capture.selected_device() != wanted || retry_mic != intent.retry_mic {
-                    capture.stop(room, audio).await;
+                if backend.selected_microphone() != wanted || retry_mic != intent.retry_mic {
+                    backend.stop_microphone().await;
                     speaking.remove(me.as_str());
                     retry_mic = intent.retry_mic;
                 }
                 if intent.mute.deafened {
-                    runtime.pc_factory().set_adm_playout_enabled(false);
+                    backend.set_playout(false);
                 }
                 if devices.speakers.resolve(intent.preferred.speakers.as_ref()) != output.as_ref()
                     || retry_speakers != intent.retry_speakers
@@ -155,34 +165,32 @@ impl Media {
                 {
                     retry_speakers = intent.retry_speakers;
                     output = route_speakers(
-                        audio,
                         &devices.speakers,
                         intent.preferred.speakers.as_ref(),
                         output.as_ref(),
+                        |device| backend.switch_speakers(device),
                     );
                 }
                 // shortcut: track capture start/stop, use CoreAudio format notifications if Bluetooth switches later.
-                let capturing = cfg!(target_os = "macos") && audio.is_recording_initialized();
+                let capturing = backend.recording_affects_playout();
                 sync_playout(
                     output.is_some() && !intent.mute.deafened,
                     &mut recording,
                     capturing,
-                    |enabled| {
-                        runtime.pc_factory().set_adm_playout_enabled(enabled);
-                    },
+                    |enabled| backend.set_playout(enabled),
                 );
                 if let Some(device) = wanted
-                    && capture.can_start()
+                    && backend.can_start_microphone()
                 {
-                    capture.start(room, audio, device.clone());
+                    backend.start_microphone(device.clone());
                 }
                 if resync && !intent.mute.effective_muted() {
-                    capture.resume();
+                    backend.resume_microphone();
                 }
             }
 
             speaking.expire(Instant::now());
-            let muted = reconnecting || !capture.has_publication();
+            let muted = reconnecting || backend.active_microphone().is_none();
             if muted {
                 speaking.remove(me.as_str());
             }
@@ -195,13 +203,13 @@ impl Media {
             let report = Report {
                 status: if reconnecting {
                     Status::Reconnecting
-                } else if !intent.mute.effective_muted() && capture.unavailable() {
+                } else if !intent.mute.effective_muted() && backend.microphone_unavailable() {
                     Status::ListenOnly
                 } else {
                     Status::Connected
                 },
                 devices: devices.clone(),
-                microphone: capture.active_device().cloned(),
+                microphone: backend.active_microphone().cloned(),
                 speakers: output.clone(),
                 speaking: speaking.0.keys().cloned().collect(),
             };
@@ -218,55 +226,73 @@ impl Media {
                     if next.refresh_devices != intent.refresh_devices || next.preferred != intent.preferred
                         || next.retry_mic != intent.retry_mic || next.retry_speakers != intent.retry_speakers
                     {
-                        devices = Arc::new(Devices::read(audio));
+                        devices = Arc::new(backend.devices());
                     }
                     intent = next;
                     check_routes = true;
                 }
-                event = events.recv() => match event {
-                    Some(RoomEvent::TrackPublished { publication, .. }) => subscribe_to_microphone(&publication),
-                    Some(RoomEvent::ActiveSpeakersChanged { speakers }) if !reconnecting => speaking.update(
-                        speakers.into_iter().map(|speaker| speaker.identity().to_string()).collect(),
-                        Instant::now(),
-                    ),
-                    Some(RoomEvent::ParticipantDisconnected(participant)) => speaking.remove(participant.identity().as_str()),
-                    Some(RoomEvent::LocalTrackRepublished { publication, .. })
-                        if !capture.owns_track(&publication.sid()) =>
-                    {
-                        // The SDK can be republishing while mute or deafen removes the old track.
-                        let _ = room.local_participant().unpublish_track(&publication.sid()).await;
-                    }
-                    Some(RoomEvent::Reconnecting) => {
+                event = backend.next_event(reconnecting) => match backend.handle_event(event).await {
+                    MediaEvent::Speaking(active) if !reconnecting => speaking.update(active, Instant::now()),
+                    MediaEvent::ParticipantLeft(id) => speaking.remove(&id),
+                    MediaEvent::Reconnecting => {
                         reconnecting = true;
-                        capture.silence();
-                        runtime.pc_factory().set_adm_playout_enabled(false);
+                        backend.silence_microphone();
+                        backend.set_playout(false);
                         speaking.0.clear();
                     }
-                    Some(RoomEvent::Reconnected) if reconnecting => {
+                    MediaEvent::Reconnected if reconnecting => {
                         reconnecting = false;
                         resync = true;
                         check_routes = true;
                         intent = requested.borrow_and_update().clone();
-                        devices = Arc::new(Devices::read(audio));
-                        capture.reconcile_publication(room, audio).await;
-                        subscribe_to_microphones(room);
+                        devices = Arc::new(backend.devices());
+                        backend.reconcile_microphone().await;
+                        backend.subscribe();
                     }
-                    Some(RoomEvent::Disconnected { reason }) => return Err(disconnect_issue(reason)),
-                    None => return Err(Issue::LiveKitDisconnected),
+                    MediaEvent::Disconnected(issue) => return Err(issue),
+                    MediaEvent::MicrophoneChanged => check_routes = true,
                     _ => {}
                 },
-                Some(published) = capture.next_publication(), if !reconnecting => {
-                    capture.complete(room, audio, published).await;
-                    check_routes = true;
-                }
                 _ = scan.tick() => {
-                    devices = Arc::new(Devices::read(audio));
+                    devices = Arc::new(backend.devices());
                     check_routes = true;
                 }
                 _ = wait_until(speaking.deadline()) => {},
             }
         }
     }
+}
+
+trait RoomAudio {
+    type Event;
+
+    fn identity(&self) -> String;
+    fn devices(&self) -> Devices;
+    fn switch_speakers(&self, device: &Device) -> bool;
+    fn set_playout(&self, enabled: bool);
+    fn subscribe(&self);
+    fn recording_affects_playout(&self) -> bool;
+    fn selected_microphone(&self) -> Option<&Device>;
+    fn active_microphone(&self) -> Option<&Device>;
+    fn can_start_microphone(&self) -> bool;
+    fn microphone_unavailable(&self) -> bool;
+    fn start_microphone(&mut self, device: Device);
+    async fn stop_microphone(&mut self);
+    fn silence_microphone(&self);
+    fn resume_microphone(&self);
+    async fn reconcile_microphone(&mut self);
+    async fn next_event(&mut self, reconnecting: bool) -> Self::Event;
+    async fn handle_event(&mut self, event: Self::Event) -> MediaEvent;
+}
+
+enum MediaEvent {
+    Speaking(HashSet<String>),
+    ParticipantLeft(String),
+    Reconnecting,
+    Reconnected,
+    Disconnected(Issue),
+    MicrophoneChanged,
+    Other,
 }
 
 fn sync_playout(
@@ -328,20 +354,6 @@ pub(super) fn disconnect_issue(reason: DisconnectReason) -> Issue {
         | DisconnectReason::MediaFailure
         | DisconnectReason::JoinFailure => Issue::LiveKitDisconnected,
         _ => Issue::Disconnected,
-    }
-}
-
-fn subscribe_to_microphones(room: &Room) {
-    for participant in room.remote_participants().into_values() {
-        for publication in participant.track_publications().into_values() {
-            subscribe_to_microphone(&publication);
-        }
-    }
-}
-
-fn subscribe_to_microphone(publication: &RemoteTrackPublication) {
-    if publication.kind() == TrackKind::Audio && publication.source() == TrackSource::Microphone {
-        publication.set_subscribed(true);
     }
 }
 

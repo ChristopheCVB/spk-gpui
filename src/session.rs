@@ -127,19 +127,27 @@ pub async fn run(
     views: Sender<View>,
     sound_settings: tokio::sync::watch::Receiver<SoundSettings>,
 ) {
-    let _ = rustls::crypto::ring::default_provider().install_default();
     let base = Url::parse(env!("SPK_URL")).expect("validated SPK URL");
-    let mut saved = SavedSession {
-        origin: base.origin().ascii_serialization(),
-        persisted: None,
-    };
-    let mut next = Command::Restore;
-    let mut settings = VoiceSettings {
+    let saved = SavedSession::new(&base);
+    let settings = VoiceSettings {
         socket_endpoint: env!("SPK_WS_URL").to_owned(),
-        start_call: Call::start,
+        start_call: Box::new(Call::start),
+        enumerate_devices: Devices::enumerate,
         devices: DeviceSettings::load(),
         sounds: VoiceSounds::new(sound_settings),
     };
+    run_session(base, saved, settings, commands, views).await;
+}
+
+async fn run_session(
+    base: Url,
+    mut saved: SavedSession,
+    mut settings: VoiceSettings,
+    commands: Receiver<Command>,
+    views: Sender<View>,
+) {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let mut next = Command::Restore;
     loop {
         let auth = match next {
             Command::Restore => restore(&base, &mut saved).await,
@@ -223,13 +231,13 @@ async fn watch_session(
     avatars.fill(client, &sidebar);
     sidebar.voice_intent.preferred = settings.devices.preferred.clone();
     sidebar.device_notice = settings.devices.notice;
-    sidebar.devices = Arc::new(Devices::enumerate());
+    sidebar.devices = Arc::new((settings.enumerate_devices)());
     let mut voice = VoiceSession::default();
     let end = loop {
         if commands.is_closed() {
             break SessionEnd::Closed;
         }
-        voice.start_pending(&mut sidebar, client, settings.start_call);
+        voice.start_pending(&mut sidebar, client, &settings.start_call);
         if views
             .send(View::SignedIn(Box::new(sidebar.clone())))
             .await

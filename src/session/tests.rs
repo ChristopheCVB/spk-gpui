@@ -1,3 +1,5 @@
+mod media;
+
 use std::{collections::HashSet, time::Duration};
 
 use cookie_store::{CookieStore, serde::json};
@@ -15,13 +17,9 @@ use tokio_tungstenite::{
     tungstenite::{Message, handshake::server},
 };
 
-use super::{
-    presence::Data,
-    voice_session::{StartCall, VOICE_REPLACED},
-    *,
-};
+use super::{presence::Data, voice_session::VOICE_REPLACED, *};
 use crate::{
-    api::{Member, VoiceFlags},
+    api::{Member, VoiceFlags, VoiceSocket},
     voice::{self, DevicePreferences, Report as VoiceReport},
 };
 
@@ -141,16 +139,150 @@ async fn restored_http_session_authenticates_websocket_and_sign_out() {
     .expect("loopback SPK protocol timed out");
 }
 
+#[tokio::test]
+#[allow(
+    clippy::result_large_err,
+    reason = "Tungstenite defines the handshake callback type"
+)]
+async fn saved_session_restores_signs_out_and_clears_expired_credentials() {
+    let http = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = Url::parse(&format!("http://{}", http.local_addr().unwrap())).unwrap();
+    let sockets = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("ws://{}/_ws", sockets.local_addr().unwrap());
+    let mut cookies = CookieStore::default();
+    cookies
+        .parse("session=saved; Path=/; HttpOnly; Max-Age=3600", &base)
+        .unwrap();
+    let mut bytes = Vec::new();
+    json::save(&cookies, &mut bytes).unwrap();
+
+    for expired in [false, true] {
+        let (tx, commands) = async_channel::unbounded();
+        let (views, rx) = async_channel::unbounded();
+        let (saved, storage) = SavedSession::with_test_store(bytes.clone());
+        let settings = fixture_settings(endpoint.clone(), Call::start_for_test);
+        let server = async {
+            let request = Request::read(&http, "GET /api/profile/me HTTP/1.1").await;
+            assert_eq!(request.header("cookie"), Some("session=saved"));
+            if expired {
+                request.respond_raw("401 Unauthorized", &[], b"").await;
+                let sign_in = Request::read(&http, "POST /api/auth/sign-in/email HTTP/1.1").await;
+                assert_eq!(sign_in.header("cookie"), None);
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&sign_in.body).unwrap(),
+                    value!({"email":"alice@example.test","password":"test password","rememberMe":true}),
+                );
+                sign_in
+                    .respond(&["session=new; Path=/; HttpOnly; Max-Age=3600"], "{}")
+                    .await;
+                let profile = Request::read(&http, "GET /api/profile/me HTTP/1.1").await;
+                assert_eq!(profile.header("cookie"), Some("session=new"));
+                profile
+                    .respond(&[], r#"{"id":"alice","email":"alice@example.test"}"#)
+                    .await;
+                return;
+            }
+            request
+                .respond(&[], r#"{"id":"alice","email":"alice@example.test"}"#)
+                .await;
+            let mut ws = accept_hdr_async(
+                sockets.accept().await.unwrap().0,
+                |request: &server::Request, response: server::Response| {
+                    assert_eq!(request.headers()["cookie"], "session=saved");
+                    Ok(response)
+                },
+            )
+            .await
+            .unwrap();
+            loop {
+                let (line, request) = Request::receive(&http).await;
+                assert_eq!(request.header("cookie"), Some("session=saved"));
+                match line.as_str() {
+                    "GET /api/channels HTTP/1.1"
+                    | "GET /api/voice HTTP/1.1"
+                    | "GET /api/users HTTP/1.1" => request.respond(&[], "[]").await,
+                    "POST /api/auth/sign-out HTTP/1.1" => {
+                        request
+                            .respond(&["session=; Path=/; HttpOnly; Max-Age=0"], "{}")
+                            .await;
+                        let _ = ws.close(None).await;
+                        break;
+                    }
+                    _ => panic!("unexpected request: {line}"),
+                }
+            }
+        };
+        let desktop = async {
+            if !expired {
+                let sidebar = wait_for_sidebar(&rx, |sidebar| {
+                    matches!(sidebar.connection, Connection::Online)
+                })
+                .await;
+                assert_eq!(sidebar.profile.id.as_deref(), Some("alice"));
+                assert_eq!(*storage.lock().unwrap(), Some(bytes.clone()));
+                tx.send(Command::SignOut).await.unwrap();
+                loop {
+                    if matches!(rx.recv().await.unwrap(), View::Busy("Signing out…")) {
+                        break;
+                    }
+                }
+            }
+            match rx.recv().await.unwrap() {
+                View::SignIn {
+                    message,
+                    retry_restore: false,
+                } => {
+                    assert_eq!(message, expired.then_some(SESSION_EXPIRED));
+                }
+                _ => panic!("expected the sign-in form"),
+            }
+            assert!(storage.lock().unwrap().is_none());
+            if expired {
+                tx.send(Command::SignIn {
+                    email: "alice@example.test".into(),
+                    password: "test password".into(),
+                })
+                .await
+                .unwrap();
+                let sidebar = wait_for_sidebar(&rx, |_| true).await;
+                assert_eq!(sidebar.profile.id.as_deref(), Some("alice"));
+                let persisted = storage.lock().unwrap();
+                let cookies = json::load(persisted.as_deref().unwrap()).unwrap();
+                assert!(
+                    cookies
+                        .matches(&base)
+                        .iter()
+                        .any(|cookie| { cookie.name() == "session" && cookie.value() == "new" })
+                );
+            }
+            drop(tx);
+        };
+        timeout(Duration::from_secs(7), async {
+            tokio::join!(
+                server,
+                desktop,
+                run_session(base.clone(), saved, settings, commands, views)
+            )
+        })
+        .await
+        .expect("stored session workflow timed out");
+    }
+}
+
 #[derive(Clone, Copy)]
 enum SidebarSnapshot {
     Initial,
     Updated,
     VoiceReplaced,
     FailPresenceOnce,
+    MediaPresence {
+        channel: &'static str,
+        flags: VoiceFlags,
+    },
 }
 
 async fn voice_session(
-    start_call: StartCall,
+    start_call: impl Fn(String, SpkClient, VoiceSocket, Intent) -> Call + Send + Sync + 'static,
     server: impl AsyncFnOnce(TcpListener, Receiver<Request>, watch::Sender<SidebarSnapshot>),
     desktop: impl AsyncFnOnce(Sender<Command>, Receiver<View>),
 ) -> SessionEnd {
@@ -195,6 +327,14 @@ async fn voice_session(
                     SidebarSnapshot::VoiceReplaced => {
                         r#"[{"userId":"alice","channelId":"second"}]"#
                     }
+                    SidebarSnapshot::MediaPresence { channel, flags } => {
+                        let body = value!([{
+                            "userId":"alice","channelId":channel,
+                            "muted":flags.muted,"deafened":flags.deafened,"speaking":flags.speaking,
+                        }]);
+                        request.respond(&[], &body.to_string()).await;
+                        continue;
+                    }
                 },
                 "GET /api/channels HTTP/1.1" => {
                     r#"[{"id":"first","type":"voice"},{"id":"second","type":"voice"}]"#
@@ -216,20 +356,8 @@ async fn voice_session(
             .unwrap();
         let mut persisted = Vec::new();
         json::save(&client.cookies().lock().unwrap(), &mut persisted).unwrap();
-        let mut saved = SavedSession {
-            origin: base.origin().ascii_serialization(),
-            persisted: Some(persisted),
-        };
-        let mut settings = VoiceSettings {
-            socket_endpoint,
-            start_call,
-            devices: DeviceSettings {
-                path: None,
-                preferred: DevicePreferences::default(),
-                notice: None,
-            },
-            sounds: VoiceSounds::new(tokio::sync::watch::channel(SoundSettings::default()).1),
-        };
+        let (mut saved, _) = SavedSession::with_test_store(persisted);
+        let mut settings = fixture_settings(socket_endpoint, start_call);
         watch_session(
             &client,
             profile,
@@ -248,6 +376,27 @@ async fn voice_session(
             ((), (), end) = async { tokio::join!(server(sockets, requests, update_snapshots), desktop(command_tx, view_rx), session) } => end,
         }
     }).await.expect("loopback voice session timed out")
+}
+
+fn fixture_settings(
+    socket_endpoint: String,
+    start_call: impl Fn(String, SpkClient, VoiceSocket, Intent) -> Call + Send + Sync + 'static,
+) -> VoiceSettings {
+    let mut sounds = SoundSettings::default();
+    for sound in Sound::ALL {
+        sounds.get_mut(sound).enabled = false;
+    }
+    VoiceSettings {
+        socket_endpoint,
+        start_call: Box::new(start_call),
+        enumerate_devices: Devices::default,
+        devices: DeviceSettings {
+            path: None,
+            preferred: DevicePreferences::default(),
+            notice: None,
+        },
+        sounds: VoiceSounds::new(tokio::sync::watch::channel(sounds).1),
+    }
 }
 
 async fn wait_for_sidebar(

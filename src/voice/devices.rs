@@ -154,10 +154,10 @@ fn list(kind: DeviceKind, devices: impl Iterator<Item = (usize, Device)>) -> Dev
 }
 
 pub(super) fn route_speakers(
-    audio: &PlatformAudio,
     list: &DeviceList,
     preferred: Option<&Device>,
     previous: Option<&Device>,
+    mut switch: impl FnMut(&Device) -> bool,
 ) -> Option<Device> {
     let preferred = list.resolve(preferred);
     let previous = previous.and_then(|device| {
@@ -174,11 +174,11 @@ pub(super) fn route_speakers(
                 .as_ref()
                 .filter(|device| Some(*device) != preferred && Some(*device) != previous),
         )
-        .find(|device| switch_speakers(audio, device))
+        .find(|device| switch(device))
         .cloned()
 }
 
-fn switch_speakers(audio: &PlatformAudio, device: &Device) -> bool {
+pub(super) fn switch_speakers(audio: &PlatformAudio, device: &Device) -> bool {
     audio
         .switch_playout_device(&PlayoutDeviceId::from_unchecked_guid(&device.id))
         .is_ok()

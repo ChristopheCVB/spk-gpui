@@ -163,11 +163,12 @@ impl DeviceSettings {
     }
 }
 
-pub(super) type StartCall = fn(String, SpkClient, VoiceSocket, Intent) -> Call;
+pub(super) type StartCall = dyn Fn(String, SpkClient, VoiceSocket, Intent) -> Call + Send + Sync;
 
 pub(super) struct VoiceSettings {
     pub(super) socket_endpoint: String,
-    pub(super) start_call: StartCall,
+    pub(super) start_call: Box<StartCall>,
+    pub(super) enumerate_devices: fn() -> Devices,
     pub(super) devices: DeviceSettings,
     pub(super) sounds: VoiceSounds,
 }
@@ -190,7 +191,7 @@ impl VoiceSession {
         &mut self,
         sidebar: &mut Sidebar,
         client: &SpkClient,
-        start_call: StartCall,
+        start_call: &StartCall,
     ) {
         if self.call.is_none()
             && let Some(VoiceDestination {
@@ -385,7 +386,7 @@ impl VoiceSession {
             Command::RetryMicrophone => sidebar.voice_intent.retry_mic += 1,
             Command::RefreshDevices => {
                 if self.call.is_none() {
-                    sidebar.devices = Arc::new(Devices::enumerate());
+                    sidebar.devices = Arc::new((settings.enumerate_devices)());
                 } else {
                     sidebar.voice_intent.refresh_devices += 1;
                 }

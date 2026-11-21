@@ -16,6 +16,8 @@ mod media;
 
 pub use devices::{Device, DeviceKind, DeviceList, DevicePreferences, Devices};
 use media::Media;
+#[cfg(test)]
+pub(crate) use media::fixture;
 
 #[cfg(test)]
 pub(crate) mod tests;
