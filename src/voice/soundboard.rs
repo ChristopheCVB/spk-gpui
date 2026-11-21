@@ -8,12 +8,12 @@ use super::devices::{MediaOutput, open_media_output};
 const MAX_SECONDS: u32 = 10;
 
 fn decode(bytes: &[u8]) -> Option<SamplesBuffer> {
-    // shortcut: decode the web uploader's PCM layout, extend the decoder if the server adds other formats.
+    // shortcut: decode the web uploaders' fixed PCM layout, extend the decoder if the server adds other layouts.
     let header = bytes.get(..44)?;
     if &header[..4] != b"RIFF"
         || &header[8..16] != b"WAVEfmt "
         || &header[16..22] != b"\x10\0\0\0\x01\0"
-        || &header[34..40] != b"\x18\0data"
+        || &header[36..40] != b"data"
     {
         return None;
     }
@@ -22,18 +22,27 @@ fn decode(bytes: &[u8]) -> Option<SamplesBuffer> {
         .filter(|channels| channels.get() <= 2)?;
     let rate = NonZero::new(u32::from_le_bytes(header[24..28].try_into().ok()?))
         .filter(|rate| (8_000..=192_000).contains(&rate.get()))?;
+    let sample_bytes = match u16::from_le_bytes(header[34..36].try_into().ok()?) {
+        16 => 2,
+        24 => 3,
+        _ => return None,
+    };
     let size = u32::from_le_bytes(header[40..44].try_into().ok()?) as usize;
-    let frame_bytes = usize::from(channels.get()) * 3;
+    let frame_bytes = usize::from(channels.get()) * sample_bytes;
     if size == 0 || !size.is_multiple_of(frame_bytes) {
         return None;
     }
     let pcm = bytes.get(44..)?.get(..size)?;
-    let (frames, _) = pcm.as_chunks::<3>();
-    let samples = frames
-        .iter()
+    let samples = pcm
+        .chunks_exact(sample_bytes)
         .take((rate.get() * MAX_SECONDS) as usize * usize::from(channels.get()))
         .map(|sample| {
-            i32::from_le_bytes([0, sample[0], sample[1], sample[2]]) as f32 / 2_147_483_648.0
+            let bytes = if sample_bytes == 2 {
+                [0, 0, sample[0], sample[1]]
+            } else {
+                [0, sample[0], sample[1], sample[2]]
+            };
+            i32::from_le_bytes(bytes) as f32 / 2_147_483_648.0
         })
         .collect::<Vec<_>>();
     Some(SamplesBuffer::new(channels, rate, samples))
@@ -105,6 +114,16 @@ pub(crate) async fn play(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decodes_legacy_web_pcm() {
+        let wav = b"RIFF\x2A\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0\x80\xBB\0\0\0\x77\x01\0\x02\0\x10\0data\x06\0\0\0\0\x80\0\0\0\x40";
+
+        let clip = decode(wav).expect("legacy SPK WAV should decode for playback");
+        assert_eq!(clip.channels().get(), 1);
+        assert_eq!(clip.sample_rate().get(), 48_000);
+        assert_eq!(clip.collect::<Vec<_>>(), [-1.0, 0.0, 0.5]);
+    }
 
     #[test]
     fn decodes_web_pcm_with_a_ten_second_limit() {
