@@ -13,9 +13,15 @@ use livekit::webrtc::{
     video_frame::{I420Buffer, VideoBuffer, VideoFrame, VideoRotation},
 };
 use nokhwa::{
-    Buffer, Camera,
-    pixel_format::{FormatDecoder, RgbAFormat},
-    utils::{ApiBackend, CameraInfo, FrameFormat, RequestedFormat, RequestedFormatType},
+    Buffer,
+    pixel_format::RgbAFormat,
+    utils::{ApiBackend, CameraInfo, FrameFormat},
+};
+#[cfg(not(windows))]
+use nokhwa::{
+    Camera,
+    pixel_format::FormatDecoder,
+    utils::{RequestedFormat, RequestedFormatType},
 };
 use tokio::{
     io::{AsyncReadExt, BufReader},
@@ -25,6 +31,11 @@ use tokio::{
 };
 
 use super::CameraIntent;
+
+#[cfg(any(windows, test))]
+mod rgb24;
+#[cfg(windows)]
+mod windows;
 
 const CAMERA_CAPTURE: &str = "--camera-capture";
 const UNAVAILABLE: &str =
@@ -198,29 +209,10 @@ fn capture(resolution: CameraResolution, id: Option<&str>) -> Result<(), u8> {
         .find(|device| id.is_none_or(|id| camera_id(device) == id))
         .ok_or(3u8)?;
     let (max_width, max_height) = resolution.ceiling();
-    let mut camera = Camera::new(
-        device.index().clone(),
-        RequestedFormat::new::<RgbAFormat>(RequestedFormatType::None),
-    )
-    .map_err(|_| 3u8)?;
-    if let Ok(formats) = camera.compatible_camera_formats()
-        && let Some(format) = formats
-            .into_iter()
-            .filter(|format| RgbAFormat::FORMATS.contains(&format.format()))
-            .min_by_key(|format| {
-                let (width, height) = (format.resolution().width(), format.resolution().height());
-                let oversize = width > max_width || height > max_height;
-                let distance = max_width.abs_diff(width) + max_height.abs_diff(height);
-                (oversize, distance, format.frame_rate().abs_diff(30))
-            })
-    {
-        camera
-            .set_camera_requset(RequestedFormat::new::<RgbAFormat>(
-                RequestedFormatType::Exact(format),
-            ))
-            .map_err(|_| 3u8)?;
-    }
-    camera.open_stream().map_err(|_| 3u8)?;
+    #[cfg(windows)]
+    let mut camera = windows::Camera::open(device, (max_width, max_height)).map_err(|_| 3u8)?;
+    #[cfg(not(windows))]
+    let mut camera = open_camera(device, (max_width, max_height))?;
     let mut output = BufWriter::new(io::stdout().lock());
     let started = Instant::now();
     let mut last_frame = None;
@@ -268,6 +260,47 @@ fn capture(resolution: CameraResolution, id: Option<&str>) -> Result<(), u8> {
             return Ok(());
         }
     }
+}
+
+#[cfg(not(windows))]
+fn open_camera(device: &CameraInfo, ceiling: (u32, u32)) -> Result<Camera, u8> {
+    let mut camera = Camera::new(
+        device.index().clone(),
+        RequestedFormat::new::<RgbAFormat>(RequestedFormatType::None),
+    )
+    .map_err(|_| 3u8)?;
+    if let Ok(formats) = camera.compatible_camera_formats()
+        && let Some(format) = formats
+            .into_iter()
+            .filter(|format| RgbAFormat::FORMATS.contains(&format.format()))
+            .min_by_key(|format| {
+                format_preference(
+                    format.resolution().width(),
+                    format.resolution().height(),
+                    format.frame_rate(),
+                    ceiling,
+                )
+            })
+    {
+        camera
+            .set_camera_requset(RequestedFormat::new::<RgbAFormat>(
+                RequestedFormatType::Exact(format),
+            ))
+            .map_err(|_| 3u8)?;
+    }
+    camera.open_stream().map_err(|_| 3u8)?;
+    Ok(camera)
+}
+
+fn format_preference(
+    width: u32,
+    height: u32,
+    fps: u32,
+    (max_width, max_height): (u32, u32),
+) -> (bool, u64, u32) {
+    let oversize = width > max_width || height > max_height;
+    let distance = u64::from(max_width.abs_diff(width)) + u64::from(max_height.abs_diff(height));
+    (oversize, distance, fps.abs_diff(30))
 }
 
 fn decode_frame(frame: &Buffer) -> Option<RgbaImage> {
