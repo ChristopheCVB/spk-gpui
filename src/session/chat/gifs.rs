@@ -3,7 +3,10 @@ use super::*;
 use gpui_kit::RenderImage;
 use reqwest::StatusCode;
 
-use crate::api::{GifItem, GifPage};
+use crate::{
+    api::{GifItem, GifPage},
+    chat_markdown::{image_preview_links, message_markdown},
+};
 
 #[derive(Clone)]
 pub struct StagedGif {
@@ -55,11 +58,11 @@ pub(in crate::session) enum FavoriteResult {
     Changed { gif: GifItem, saved: bool },
 }
 
-pub(in crate::session) type GifImage = Option<Arc<RenderImage>>;
-pub(in crate::session) type MessageGifResult = (String, String, GifImage);
+pub(in crate::session) type PreviewImage = Option<Arc<RenderImage>>;
+pub(in crate::session) type MessageImageResult = (String, String, PreviewImage);
 
 #[derive(Clone)]
-pub struct MessageGif {
+pub struct MessageImage {
     pub message_id: String,
     pub url: String,
     pub image: Option<Arc<RenderImage>>,
@@ -74,8 +77,8 @@ pub(in crate::session) struct GifPicker {
     updating_favorite: bool,
     pub browsing: JoinSet<Result<GifPage, Failure>>,
     pub favorites: JoinSet<Result<FavoriteResult, Failure>>,
-    pub previews: JoinSet<(String, GifImage)>,
-    pub message_preview: JoinSet<MessageGifResult>,
+    pub previews: JoinSet<(String, PreviewImage)>,
+    pub message_preview: JoinSet<MessageImageResult>,
 }
 
 impl GifPicker {
@@ -318,13 +321,13 @@ impl GifPicker {
             }
             let client = client.clone();
             self.previews.spawn(async move {
-                let image = load_gif(&client, &url, 160, 100).await;
+                let image = load_image(&client, &url, 160, 100).await;
                 (url, image)
             });
         }
     }
 
-    pub fn preview_complete(&mut self, (url, image): (String, GifImage)) {
+    pub fn preview_complete(&mut self, (url, image): (String, PreviewImage)) {
         if let Some(view) = &mut self.view {
             Arc::make_mut(&mut view.images).insert(url, image);
         }
@@ -362,7 +365,7 @@ impl ChatSession {
         self.drafts.entry(view.channel_id.clone()).or_default().gif = gif;
     }
 
-    pub fn preview_message_gif(&mut self, client: &SpkClient, message_id: String, url: String) {
+    pub fn preview_message_image(&mut self, client: &SpkClient, message_id: String, url: String) {
         let Some(view) = self
             .selected
             .as_mut()
@@ -370,14 +373,21 @@ impl ChatSession {
         else {
             return;
         };
-        if !view
+        let Some(message) = view
             .messages
             .iter()
-            .any(|msg| msg.id == message_id && message_gif_line(&msg.body) == Some(url.as_str()))
+            .find(|message| message.id == message_id)
+        else {
+            return;
+        };
+        let rendered = message_markdown(&message.body, |_| "", |_| true, Some("spk-spoiler:"));
+        if !image_preview_links(&rendered)
+            .iter()
+            .any(|link| link.as_str() == url)
         {
             return;
         }
-        view.message_gif = Some(MessageGif {
+        view.message_image = Some(MessageImage {
             message_id: message_id.clone(),
             url: url.clone(),
             image: None,
@@ -386,16 +396,16 @@ impl ChatSession {
         self.gifs.message_preview = JoinSet::new();
         let client = client.clone();
         self.gifs.message_preview.spawn(async move {
-            let image = load_gif(&client, &url, 480, 300).await;
+            let image = load_image(&client, &url, 480, 300).await;
             (message_id, url, image)
         });
     }
 
-    pub fn message_gif_complete(&mut self, (id, url, image): MessageGifResult) {
+    pub fn message_image_complete(&mut self, (id, url, image): MessageImageResult) {
         if let Some(preview) = self
             .selected
             .as_mut()
-            .and_then(|view| view.message_gif.as_mut())
+            .and_then(|view| view.message_image.as_mut())
             && preview.message_id == id
             && preview.url == url
         {
@@ -405,17 +415,15 @@ impl ChatSession {
     }
 }
 
-pub fn message_gif_line(body: &str) -> Option<&str> {
-    let line = body.trim_end().lines().last()?.trim();
-    crate::api::gif_message_url(line).map(|_| line)
-}
-
-async fn load_gif(client: &SpkClient, url: &str, width: u32, height: u32) -> GifImage {
-    let bytes = client.gif_preview(url).await.ok()?;
+async fn load_image(client: &SpkClient, url: &str, width: u32, height: u32) -> PreviewImage {
+    let bytes = client.public_image_preview(url).await.ok()?;
     tokio::task::spawn_blocking(move || {
         if matches!(
             image::guess_format(&bytes).ok()?,
-            image::ImageFormat::Gif | image::ImageFormat::WebP
+            image::ImageFormat::Gif
+                | image::ImageFormat::WebP
+                | image::ImageFormat::Png
+                | image::ImageFormat::Jpeg
         ) {
             return attachments::raster_thumbnail(&bytes, width, height);
         }

@@ -1,9 +1,6 @@
 use super::*;
 
-use crate::{
-    api::{GifItem, gif_message_url},
-    session::{GifPickerView, message_gif_line},
-};
+use crate::{api::GifItem, session::GifPickerView};
 
 fn gif_button(id: &'static str, label: &'static str) -> Button {
     Button::new(id).ghost().small().tab_stop(true).label(label)
@@ -277,86 +274,97 @@ impl Spk {
         })
     }
 
-    pub(super) fn message_gif(
+    pub(super) fn message_images(
         &self,
         chat: &ChatView,
         message_id: &str,
-        raw: &str,
         rendered: &str,
         cx: &Context<Self>,
-    ) -> Option<impl IntoElement + use<>> {
-        let url = message_gif_line(raw)?.to_owned();
-        if !markdown::has_final_gif_link(rendered, &url) {
-            return None;
-        }
-        let target = gif_message_url(&url)?;
-        let preview = chat
-            .message_gif
-            .as_ref()
-            .filter(|gif| gif.message_id == message_id && gif.url == url);
-        let message_id = message_id.to_owned();
-        Some(
+    ) -> impl IntoElement + use<> {
+        let links = image_preview_links(rendered);
+        let multiple = links.len() > 1;
+        div().children(links.into_iter().enumerate().map(|(index, target)| {
+            let preview = chat
+                .message_image
+                .as_ref()
+                .filter(|image| image.message_id == message_id && image.url == target.as_str());
+            let loading = preview.is_some_and(|result| result.loading);
+            let image = preview.and_then(|result| result.image.clone());
+            let label = if loading {
+                "Loading image…".to_owned()
+            } else if multiple {
+                let filename = target
+                    .path_segments()
+                    .and_then(|mut segments| segments.next_back())
+                    .unwrap_or("image");
+                format!("Preview {filename}")
+            } else {
+                "Preview image".to_owned()
+            };
+            let message_id = message_id.to_owned();
+            let url = target.to_string();
+            let copy_url = url.clone();
             div()
+                .id(("message-image", index))
                 .flex()
                 .flex_col()
                 .gap_1()
-                .when_some(
-                    preview.and_then(|result| result.image.clone()),
-                    |preview, image| {
-                        preview.child(
-                            img(image)
-                                .max_w_full()
-                                .w(px(360.0))
-                                .h(px(225.0))
-                                .object_fit(ObjectFit::Contain),
-                        )
-                    },
-                )
+                .when_some(image.clone(), |row, image| {
+                    row.child(
+                        img(image)
+                            .max_w_full()
+                            .w(px(360.0))
+                            .h(px(225.0))
+                            .object_fit(ObjectFit::Contain),
+                    )
+                })
                 .child(
                     div()
                         .flex()
                         .gap_1()
-                        .when(preview.is_none_or(|result| result.image.is_none()), |row| {
-                            let loading = preview.is_some_and(|result| result.loading);
+                        .when(image.is_none(), |row| {
                             row.child(
-                                gif_button(
-                                    "preview-message-gif",
-                                    if loading {
-                                        "Loading GIF…"
-                                    } else {
-                                        "Preview GIF"
-                                    },
-                                )
-                                .disabled(loading)
-                                .on_click(cx.listener(
-                                    move |this, _, _, cx| {
+                                Button::new("preview-message-image")
+                                    .ghost()
+                                    .small()
+                                    .tab_stop(true)
+                                    .label(label)
+                                    .disabled(loading || !chat.history_ready())
+                                    .on_click(cx.listener(move |this, _, _, cx| {
                                         this.send(
-                                            Command::PreviewMessageGif {
+                                            Command::PreviewMessageImage {
                                                 message_id: message_id.clone(),
                                                 url: url.clone(),
                                             },
                                             None,
                                             cx,
                                         );
-                                    },
-                                )),
+                                    })),
                             )
                         })
-                        .child(
-                            gif_button("open-message-gif", "Open GIF link")
-                                .on_click(move |_, _, cx| cx.open_url(target.as_str())),
-                        ),
+                        .when(preview.is_some(), |row| {
+                            row.child(
+                                gif_button("open-image-link", "Open image link")
+                                    .on_click(move |_, _, cx| cx.open_url(target.as_str())),
+                            )
+                            .child(
+                                gif_button("copy-image-link", "Copy image link").on_click(
+                                    move |_, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            copy_url.clone(),
+                                        ));
+                                    },
+                                ),
+                            )
+                        }),
                 )
-                .when(
-                    preview.is_some_and(|result| !result.loading && result.image.is_none()),
-                    |preview| {
-                        preview.child(
-                            Label::new("GIF preview unavailable")
-                                .text_color(cx.theme().muted_foreground),
-                        )
-                    },
-                ),
-        )
+                .when(preview.is_some() && !loading && image.is_none(), |row| {
+                    row.child(
+                        Label::new("Image preview unavailable")
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                })
+        }))
     }
 }
 

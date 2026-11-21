@@ -1,7 +1,6 @@
 mod actions;
 mod attachments;
 mod gifs;
-pub(super) mod markdown;
 
 pub(super) use actions::MessageActionForm;
 pub(super) use attachments::AttachmentUi;
@@ -17,12 +16,11 @@ use gpui_kit::component::{
     text::{MarkdownExtensions, TextView},
 };
 
-use markdown::{message_markdown, plain_text, safe_link};
-
 use super::*;
 
 use crate::{
     api::{ChatMessage, MessageTarget, UnreadState},
+    chat_markdown::{image_preview_links, message_markdown, plain_text, safe_link},
     session::{ChatView, Delivery},
 };
 
@@ -665,7 +663,7 @@ impl Spk {
         let link_app = app.clone();
         let link_filter = self.chat_spoiler_link.clone();
         let link_prefix = self.chat_spoiler_link.clone();
-        let gif = self.message_gif(chat, &message_id, &body, &rendered, cx);
+        let images = self.message_images(chat, &message_id, &rendered, cx);
         let share_text = SharedString::from(rendered);
         let target = MessageTarget::new(&message.channel_id, &message.id);
         let text = TextView::markdown("message-body", share_text.clone())
@@ -939,7 +937,7 @@ impl Spk {
                     ),
             )
             .when(!message.body.is_empty(), |row| row.child(text))
-            .children(gif)
+            .child(images)
             .when(!message.attachments.is_empty(), |row| {
                 row.child(self.attachment_cards(message, cx))
             })

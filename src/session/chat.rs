@@ -7,8 +7,8 @@ pub use actions::Pins;
 use actions::{ActionOutcome, PendingAction, change_message};
 pub use attachments::{AttachmentInput, UploadStatus, image_preview};
 use attachments::{AttachmentWork, QueuedAttachment};
-use gifs::{GifPicker, MessageGif, StagedGif};
-pub use gifs::{GifPickerView, message_gif_line};
+pub use gifs::GifPickerView;
+use gifs::{GifPicker, MessageImage, StagedGif};
 use preview_images::{PreviewImages, PreviewResult};
 
 use std::{
@@ -50,7 +50,7 @@ pub struct ChatView {
     pub pins: Option<Pins>,
     pub preview_images: PreviewImages,
     pub gifs: Option<GifPickerView>,
-    pub message_gif: Option<MessageGif>,
+    pub message_image: Option<MessageImage>,
     pub action_pending: bool,
     pub action_outcome: Option<ActionOutcome>,
     history: History,
@@ -173,7 +173,7 @@ impl ChatSession {
             view.messages = Arc::default();
             view.pins = None;
             view.preview_images = PreviewImages::default();
-            view.message_gif = None;
+            view.message_image = None;
             view.has_more_before = false;
             view.has_more_after = false;
         } else if !view.unavailable() {
@@ -237,7 +237,7 @@ impl ChatSession {
             pins: None,
             preview_images: PreviewImages::default(),
             gifs: None,
-            message_gif: None,
+            message_image: None,
             action_pending: false,
             action_outcome: None,
             history: History::Loading,
@@ -426,7 +426,7 @@ impl ChatSession {
                     view.messages = Arc::default();
                     view.pins = None;
                     view.preview_images = PreviewImages::default();
-                    view.message_gif = None;
+                    view.message_image = None;
                     self.gifs.reset_conversation();
                     self.pin_tasks = JoinSet::new();
                     self.preview_tasks = JoinSet::new();

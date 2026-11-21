@@ -1,8 +1,11 @@
-use std::{borrow::Cow, cmp::Reverse, ops::Range};
+use std::{borrow::Cow, cmp::Reverse, collections::HashSet, ops::Range};
 
 use ::markdown::{ParseOptions, mdast::Node};
+use url::Url;
 
-pub(in crate::ui) fn message_markdown<'a, 'b>(
+use crate::api::image_message_url;
+
+pub(crate) fn message_markdown<'a, 'b>(
     source: &'a str,
     name_of: impl Fn(&str) -> &'b str,
     revealed: impl Fn(usize) -> bool,
@@ -16,7 +19,10 @@ pub(in crate::ui) fn message_markdown<'a, 'b>(
     {
         return Cow::Borrowed(source);
     }
-    let Ok(document) = ::markdown::to_mdast(source, &parse_options()) else {
+    let mut options = parse_options();
+    // Scan spoiler delimiters before bare URLs can absorb adjacent pipes.
+    options.constructs.gfm_autolink_literal = false;
+    let Ok(document) = ::markdown::to_mdast(source, &options) else {
         return Cow::Borrowed("Message preview unavailable.");
     };
     let mut edits = Vec::new();
@@ -163,15 +169,35 @@ fn escape_markdown(text: &str) -> String {
     result
 }
 
-pub(super) fn has_final_gif_link(rendered: &str, url: &str) -> bool {
-    let Ok(Node::Root(root)) = ::markdown::to_mdast(rendered, &parse_options()) else {
-        return false;
+pub(crate) fn image_preview_links(source: &str) -> Vec<Url> {
+    if !source.contains("://") {
+        return Vec::new();
+    }
+    let Ok(document) = ::markdown::to_mdast(source, &parse_options()) else {
+        return Vec::new();
     };
-    matches!(root.children.last(), Some(Node::Paragraph(paragraph))
-        if matches!(paragraph.children.last(), Some(Node::Link(link)) if link.url == url))
+    let mut links = Vec::new();
+    collect_image_links(&document, source, &mut HashSet::new(), &mut links);
+    links
 }
 
-pub(super) fn safe_link(raw: &str) -> Option<url::Url> {
+fn collect_image_links(node: &Node, source: &str, seen: &mut HashSet<Url>, links: &mut Vec<Url>) {
+    if let Node::Link(link) = node
+        && let Some(position) = &link.position
+        && source.as_bytes().get(position.start.offset) != Some(&b'<')
+        && let Some(url) = image_message_url(&link.url)
+        && seen.insert(url.clone())
+    {
+        links.push(url);
+    }
+    if let Some(children) = node.children() {
+        for child in children {
+            collect_image_links(child, source, seen, links);
+        }
+    }
+}
+
+pub(crate) fn safe_link(raw: &str) -> Option<url::Url> {
     if raw.trim_start().starts_with("//") {
         return None;
     }
@@ -187,14 +213,14 @@ fn parse_options() -> ParseOptions {
     options
 }
 
-pub(in crate::ui) fn plain_text(source: &str) -> String {
+pub(crate) fn plain_text(source: &str) -> String {
     ::markdown::to_mdast(source, &parse_options()).map_or_else(
         |_| source.to_owned(),
         |document| node_text(&document, false),
     )
 }
 
-pub(in crate::ui) fn notification_preview<'a>(
+pub(crate) fn notification_preview<'a>(
     source: &str,
     has_attachment: bool,
     name_of: impl Fn(&str) -> &'a str,
@@ -257,17 +283,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gif_preview_follows_visible_markdown() {
-        let url = "https://media.klipy.com/cat.gif";
-        let render = |body: &str| {
-            message_markdown(body, |_| "", |_| false, Some("spk-spoiler:test:")).into_owned()
+    fn image_previews_follow_visible_markdown_and_respect_autolink_opt_out() {
+        let png = "https://media.example.com/cat.PNG?download=1";
+        let jpeg = "https://media.example.com/cat.jpeg";
+        let webp = "https://media.example.com/cat.webp";
+        let gif = "https://media.example.com/cat.gif";
+        let render = |body: &str, revealed| {
+            message_markdown(body, |_| "", |_| revealed, Some("spk-spoiler:test:")).into_owned()
         };
-        assert!(has_final_gif_link(&render(&format!("A cat\n{url}")), url));
-        assert!(!has_final_gif_link(&render(&format!("```\n{url}")), url));
-        assert!(!has_final_gif_link(
-            &render(&format!("||hidden\n{url}||")),
-            url
-        ));
+        let body = format!(
+            "A cat {png} beside [a JPEG]({jpeg}) and {webp}\n\n<{gif}>\n\n`{gif}`\n\n```\n{gif}\n```\n\n||{gif}||"
+        );
+        let links = |body: &str, revealed| {
+            image_preview_links(&render(body, revealed))
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(links(&body, false), [png, jpeg, webp]);
+        assert_eq!(links(&body, true), [png, jpeg, webp, gif]);
+        assert!(links(r"\||https://media.example.com/cat.png?secret=1||", false).is_empty());
+        assert_eq!(render(&format!("||{gif}||"), true), gif);
+        assert!(!render(&format!("||{gif}||"), false).contains(gif));
+        assert!(links("https://127.0.0.1/cat.png", false).is_empty());
+        assert!(links("https://media.example.com/code.svg", false).is_empty());
     }
 
     #[test]

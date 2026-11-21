@@ -6,11 +6,11 @@ use gpui_kit::component::{
 };
 use url::Url;
 
-use super::{
-    chat::markdown::{message_markdown, plain_text},
-    *,
+use super::*;
+use crate::{
+    api::{MessageTarget, SearchHit, SearchScope},
+    chat_markdown::{message_markdown, plain_text},
 };
-use crate::api::{MessageTarget, SearchHit, SearchScope};
 
 static SPK_BASE: LazyLock<Url> =
     LazyLock::new(|| Url::parse(env!("SPK_URL")).expect("validated SPK URL"));

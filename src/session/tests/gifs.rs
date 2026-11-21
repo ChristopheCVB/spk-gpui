@@ -3,6 +3,8 @@ use super::*;
 const PREVIEW_GIF: &[u8] =
     b"GIF89a\x01\0\x01\0\x80\0\0\0\0\0\xff\xff\xff,\0\0\0\0\x01\0\x01\0\0\x02\x02D\x01\0;";
 
+const PREVIEW_PNG: &[u8] = b"\x89PNG\x0d\x0a\x1a\x0a\x00\x00\x00\x0dIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\xcf\xc0\x00\x00\x03\x01\x01\x00\xc9\xfe\x92\xef\x00\x00\x00\x00IEND\xaeB`\x82";
+
 #[tokio::test]
 async fn gif_picker_searches_saves_and_shares_across_conversations() {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -163,21 +165,24 @@ async fn gif_picker_searches_saves_and_shares_across_conversations() {
                 && chat.draft.gif.is_none() && chat.messages.iter().any(|m| m.body == expected))).await;
         }
 
-        let incoming_url = base.join("/from-web.gif").unwrap().to_string();
-        peer.send(Message::text(value!({"type":"message:new","message":{
-            "id":"from-web","channelId":"general","userId":"bob","body":incoming_url,"createdAt":2
-        }}).to_string())).await.unwrap();
-        wait_for_sidebar(&rx, |s| s.chat.as_ref().is_some_and(|chat| chat.messages.iter().any(|message| message.id == "from-web"))).await;
-        let preview = || Command::PreviewMessageGif { message_id: "from-web".into(), url: incoming_url.clone() };
-        for (status, bytes) in [("404 Not Found", &b""[..]), ("200 OK", PREVIEW_GIF)] {
-            send(preview()).await;
-            let (line, request) = requests.recv().await.unwrap();
-            assert_eq!(line, "GET /from-web.gif HTTP/1.1");
-            assert_eq!(request.header("cookie"), None);
-            assert_eq!(request.header("origin"), None);
-            request.respond_raw(status, &[], bytes).await;
-            let view = wait_for_sidebar(&rx, |s| s.chat.as_ref().and_then(|chat| chat.message_gif.as_ref()).is_some_and(|gif| !gif.loading)).await;
-            assert_eq!(view.chat.unwrap().message_gif.unwrap().image.is_some(), status == "200 OK");
+        for (path, preview_bytes) in [("/from-web.gif", PREVIEW_GIF), ("/from-web.png", PREVIEW_PNG)] {
+            let incoming_url = base.join(path).unwrap().to_string();
+            peer.send(Message::text(value!({"type":"message:new","message":{
+                "id":path,"channelId":"general","userId":"bob","body":format!("Shared {incoming_url} inline"),"createdAt":2
+            }}).to_string())).await.unwrap();
+            wait_for_sidebar(&rx, |s| s.chat.as_ref().is_some_and(|chat| chat.messages.iter().any(|message| message.id == path))).await;
+            assert!(requests.is_empty(), "incoming image links must wait for a click");
+            let preview = || Command::PreviewMessageImage { message_id: path.into(), url: incoming_url.clone() };
+            for (status, bytes) in [("404 Not Found", &b""[..]), ("200 OK", preview_bytes)] {
+                send(preview()).await;
+                let (line, request) = timeout(Duration::from_secs(2), requests.recv()).await.expect("clicked image must fetch").unwrap();
+                assert_eq!(line, format!("GET {path} HTTP/1.1"));
+                assert_eq!(request.header("cookie"), None);
+                assert_eq!(request.header("origin"), None);
+                request.respond_raw(status, &[], bytes).await;
+                let view = wait_for_sidebar(&rx, |s| s.chat.as_ref().and_then(|chat| chat.message_image.as_ref()).is_some_and(|gif| !gif.loading && gif.message_id == path)).await;
+                assert_eq!(view.chat.unwrap().message_image.unwrap().image.is_some(), status == "200 OK");
+            }
         }
     }).await.expect("GIF picker workflow timed out");
 

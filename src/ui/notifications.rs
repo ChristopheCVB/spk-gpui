@@ -77,9 +77,10 @@ impl Spk {
             return;
         };
         self.cues.play(Sound::Message, true);
-        let body = chat::markdown::notification_preview(&alert.body, alert.has_attachment, |id| {
-            sidebar.message_author(id)
-        });
+        let body =
+            crate::chat_markdown::notification_preview(&alert.body, alert.has_attachment, |id| {
+                sidebar.message_author(id)
+            });
         let target = alert.target;
         match delivery {
             Delivery::InApp => {

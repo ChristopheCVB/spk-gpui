@@ -59,10 +59,7 @@ pub use {
     accounts::AccountLinkForm,
     avatars::AvatarPhoto,
     channel_admin::{ChannelAction, ChannelAdmin, ChannelKind},
-    chat::{
-        AttachmentInput, ChatView, Delivery, GifPickerView, Pins, UploadStatus, image_preview,
-        message_gif_line,
-    },
+    chat::{AttachmentInput, ChatView, Delivery, GifPickerView, Pins, UploadStatus, image_preview},
     presence::Participant,
     profiles::ProfileEdit,
     radio::RadioPlayback,
@@ -129,7 +126,7 @@ pub enum Command {
     ToggleGifFavorite(String),
     PickGif(String),
     RemoveDraftGif(String),
-    PreviewMessageGif {
+    PreviewMessageImage {
         message_id: String,
         url: String,
     },
@@ -659,7 +656,7 @@ async fn watch_session(
                 chat.gifs.favorites_complete(client, result);
             }
             Some(Ok(result)) = chat.gifs.previews.join_next() => chat.gifs.preview_complete(result),
-            Some(Ok(result)) = chat.gifs.message_preview.join_next() => chat.message_gif_complete(result),
+            Some(Ok(result)) = chat.gifs.message_preview.join_next() => chat.message_image_complete(result),
             Some(result) = chat.pin_tasks.join_next() => {
                 let result = result.unwrap_or(Err(Failure::Connection));
                 if result.as_ref().is_err_and(Failure::unauthorized) {
@@ -807,8 +804,8 @@ async fn watch_session(
                 Ok(Command::ToggleGifFavorite(id)) => chat.gifs.toggle_favorite(client, &id),
                 Ok(Command::PickGif(id)) => chat.set_gif(Some(&id), None),
                 Ok(Command::RemoveDraftGif(channel)) => chat.set_gif(None, Some(&channel)),
-                Ok(Command::PreviewMessageGif { message_id, url }) => {
-                    chat.preview_message_gif(client, message_id, url);
+                Ok(Command::PreviewMessageImage { message_id, url }) => {
+                    chat.preview_message_image(client, message_id, url);
                 }
                 Ok(Command::AddChatAttachments { channel_id, files }) => chat.add_attachments(client, channel_id, files),
                 Ok(Command::CancelChatAttachment { channel_id, key }) => chat.cancel_attachment(client, &channel_id, key),

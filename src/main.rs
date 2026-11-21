@@ -1,6 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod api;
+mod chat_markdown;
 mod notifications;
 mod session;
 mod shortcuts;

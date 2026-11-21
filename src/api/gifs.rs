@@ -43,12 +43,14 @@ pub fn gif_media_url(raw: &str) -> Option<Url> {
     public_media_url(&url).then_some(url)
 }
 
-pub fn gif_message_url(raw: &str) -> Option<Url> {
+pub fn image_message_url(raw: &str) -> Option<Url> {
     let url = gif_media_url(raw)?;
-    url.path()
-        .to_ascii_lowercase()
-        .ends_with(".gif")
-        .then_some(url)
+    let (_, extension) = url.path().rsplit_once('.')?;
+    matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "png" | "jpg" | "jpeg" | "webp" | "gif"
+    )
+    .then_some(url)
 }
 
 impl SpkClient {
@@ -90,7 +92,7 @@ impl SpkClient {
         Ok(gif)
     }
 
-    pub async fn gif_preview(&self, raw: &str) -> Result<Vec<u8>, Failure> {
+    pub async fn public_image_preview(&self, raw: &str) -> Result<Vec<u8>, Failure> {
         let url = gif_media_url(raw).ok_or(Failure::InvalidResponse)?;
         Self::limited_bytes(self.public_media.get(url), 2 * 1024 * 1024).await
     }
