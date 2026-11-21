@@ -11,6 +11,18 @@ use crate::{
 
 use super::*;
 
+pub(super) fn account_id(view: &View) -> Option<&str> {
+    match view {
+        View::SignedIn(sidebar) => sidebar.profile.id.as_deref().filter(|id| !id.is_empty()),
+        _ => None,
+    }
+}
+
+pub(super) fn preferences_path(user_id: &str) -> Option<std::path::PathBuf> {
+    let base = Url::parse(env!("SPK_URL")).expect("validated SPK URL");
+    notifications::Preferences::path(&base, user_id)
+}
+
 pub(super) fn mute_item(channel_id: String, muted: bool, app: WeakEntity<Spk>) -> PopupMenuItem {
     PopupMenuItem::new(if muted {
         "Unmute notifications"
@@ -37,8 +49,12 @@ impl Spk {
         change: impl FnOnce(&mut notifications::Preferences),
         cx: &mut Context<Self>,
     ) {
+        let Some(user_id) = account_id(&self.view).filter(|_| !self.signing_out) else {
+            return;
+        };
         change(&mut self.notification_preferences);
-        self.notification_error = self.notification_preferences.save().is_err();
+        self.notification_error = preferences_path(user_id)
+            .is_none_or(|path| self.notification_preferences.save(&path).is_err());
         cx.notify();
     }
 

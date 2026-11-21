@@ -200,7 +200,7 @@ impl Spk {
             .chat
             .as_ref()
             .map(|chat| chat.channel_id.as_str())
-            .or_else(|| self.selected_voice_channel.as_deref())
+            .or(self.selected_voice_channel.as_deref())
             .or_else(|| {
                 voice_channels(sidebar)
                     .next()

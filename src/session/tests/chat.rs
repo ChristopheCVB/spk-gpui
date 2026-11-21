@@ -251,6 +251,8 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
 
         tx.send(Command::RetryChatSend).await.unwrap();
         tx.send(Command::DismissChatSend).await.unwrap();
+        let kept = wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| chat.outgoing.is_none() && chat.draft.body == "Closed before confirmation")).await;
+        assert_eq!(kept.chat.unwrap().draft.body, "Closed before confirmation");
         tx.send(Command::SendChatMessage {
             channel_id: "general".into(),
             body: "Still here".into(),

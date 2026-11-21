@@ -1,4 +1,8 @@
-use std::{collections::HashSet, fs, io, path::PathBuf};
+use std::{
+    collections::HashSet,
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -29,23 +33,18 @@ impl Default for Preferences {
 }
 
 impl Preferences {
-    fn path() -> Option<PathBuf> {
-        Some(
-            dirs::config_dir()?
-                .join("spk-gpui")
-                .join("notifications.json"),
-        )
+    pub fn path(base: &Url, user_id: &str) -> Option<PathBuf> {
+        Some(scoped_path(&dirs::config_dir()?, base, user_id))
     }
 
-    pub fn load() -> Self {
-        Self::path()
-            .and_then(|path| fs::read(path).ok())
+    pub fn load(path: &Path) -> Self {
+        fs::read(path)
+            .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default()
     }
 
-    pub fn save(&self) -> io::Result<()> {
-        let path = Self::path().ok_or_else(|| io::Error::other("Missing config directory"))?;
+    pub fn save(&self, path: &Path) -> io::Result<()> {
         let directory = path.parent().expect("notifications file has a parent");
         fs::create_dir_all(directory)?;
         let mut file = tempfile::NamedTempFile::new_in(directory)?;
@@ -53,6 +52,24 @@ impl Preferences {
         file.persist(path)?;
         Ok(())
     }
+}
+
+fn scoped_path(root: &Path, base: &Url, user_id: &str) -> PathBuf {
+    let origin = base.origin().ascii_serialization();
+    let mut path = root.join("spk-gpui").join("notifications");
+    // Encode each component for case-insensitive filesystems and keep names within their limits.
+    for (scope, value) in [("instance", origin.as_str()), ("account", user_id)] {
+        path.push(scope);
+        for chunk in value.as_bytes().chunks(100) {
+            path.push(
+                chunk
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>(),
+            );
+        }
+    }
+    path.join("preferences.json")
 }
 
 #[derive(Clone, Copy)]
@@ -203,6 +220,31 @@ mod tests {
             has_attachment: false,
             kind,
         }
+    }
+
+    #[test]
+    fn notification_preferences_are_isolated_by_account_and_instance() {
+        let root = tempfile::tempdir().unwrap();
+        let here = Url::parse("https://spk.example").unwrap();
+        let there = Url::parse("https://spk.example:8443").unwrap();
+        let alice = scoped_path(root.path(), &here, "Alice");
+        let other_account = scoped_path(root.path(), &here, "alice");
+        let other_instance = scoped_path(root.path(), &there, "Alice");
+
+        let mut preferences = Preferences::load(&alice);
+        preferences.muted.insert("general".into());
+        preferences.system_previews = false;
+        preferences.save(&alice).unwrap();
+
+        for other in [other_account, other_instance] {
+            let settings = Preferences::load(&other);
+            assert!(settings.muted.is_empty());
+            assert!(settings.system_previews);
+            settings.save(&other).unwrap();
+        }
+        let settings = Preferences::load(&alice);
+        assert!(settings.muted.contains("general"));
+        assert!(!settings.system_previews);
     }
 
     #[test]

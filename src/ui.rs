@@ -348,7 +348,7 @@ impl Spk {
             shortcuts,
             sound_settings,
             cues,
-            notification_preferences: crate::notifications::Preferences::load(),
+            notification_preferences: Default::default(),
             notification_error: false,
             alert_activation,
             signing_out: false,
@@ -376,6 +376,19 @@ impl Spk {
 
     fn set_session_view(&mut self, mut view: View, window: &mut Window, cx: &mut Context<Self>) {
         self.update_chat(&view, window, cx);
+        if let Some(user_id) = notifications::account_id(&view) {
+            if notifications::account_id(&self.view) != Some(user_id) {
+                self.notification_preferences = notifications::preferences_path(user_id)
+                    .as_deref()
+                    .map(crate::notifications::Preferences::load)
+                    .unwrap_or_default();
+                self.notification_error = false;
+                window.clear_notifications(cx);
+            }
+        } else {
+            self.notification_preferences = Default::default();
+            self.notification_error = false;
+        }
         if let View::SignedIn(previous) = &self.view {
             let next = match &view {
                 View::SignedIn(sidebar) => Some(&sidebar.avatars),

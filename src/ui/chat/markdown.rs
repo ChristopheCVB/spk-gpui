@@ -10,6 +10,7 @@ pub(in crate::ui) fn message_markdown<'a, 'b>(
 ) -> Cow<'a, str> {
     if !source.contains("<@")
         && !source.contains("||")
+        && !source.contains("\\|")
         && !source.contains("![")
         && (spoiler_link.is_none() || !source.contains('\n'))
     {
@@ -53,7 +54,7 @@ fn find_edits<'a>(
         return;
     };
     let preview = spoiler_link.is_none();
-    let mut spoiler = None;
+    let mut spoiler: Option<Range<usize>> = None;
     for child in children {
         let Some(position) = child.position() else {
             continue;
@@ -64,43 +65,53 @@ fn find_edits<'a>(
                 let text = &source[range.clone()];
                 let mut end = 0;
                 for (i, ch) in text.match_indices(['<', '|', '\n']) {
-                    if i < end
-                        || text.as_bytes()[..i]
-                            .iter()
-                            .rev()
-                            .take_while(|&&b| b == b'\\')
-                            .count()
-                            % 2
-                            != 0
-                    {
+                    if i < end {
                         continue;
                     }
+                    let escaped = text.as_bytes()[..i]
+                        .iter()
+                        .rev()
+                        .take_while(|&&b| b == b'\\')
+                        .count()
+                        % 2
+                        != 0;
                     let start = range.start + i;
-                    if ch == "\n" && !preview {
+                    if ch == "|" {
+                        let width = if text[i..].starts_with("||") {
+                            2
+                        } else if text[i..].starts_with("|\\|") {
+                            3
+                        } else {
+                            continue;
+                        };
+                        end = i + width;
+                        // The web renderer pairs pipes after the Markdown parser decodes escapes.
+                        let marker = start - usize::from(escaped)..range.start + end;
+                        if let Some(open) = spoiler.take() {
+                            if source[open.end..marker.start].trim().is_empty() {
+                                continue;
+                            }
+                            if !preview && revealed(open.start) {
+                                edits.push((open, String::new()));
+                                edits.push((marker, String::new()));
+                            } else {
+                                let label = match spoiler_link {
+                                    Some(link) => format!("[Reveal spoiler]({link}{})", open.start),
+                                    None => "▒▒▒".into(),
+                                };
+                                edits.push((open.start..marker.end, label));
+                            }
+                        } else {
+                            spoiler = Some(marker);
+                        }
+                    } else if escaped {
+                        continue;
+                    } else if ch == "\n" && !preview {
                         let offset = start
                             - usize::from(
                                 source.as_bytes().get(start.wrapping_sub(1)) == Some(&b'\r'),
                             );
                         edits.push((offset..offset, "  ".into()));
-                    } else if ch == "|" && text[i..].starts_with("||") {
-                        end = i + 2;
-                        if let Some(open) = spoiler.take() {
-                            if source[open + 2..start].trim().is_empty() {
-                                continue;
-                            }
-                            if !preview && revealed(open) {
-                                edits.push((open..open + 2, String::new()));
-                                edits.push((start..start + 2, String::new()));
-                            } else {
-                                let label = match spoiler_link {
-                                    Some(link) => format!("[Reveal spoiler]({link}{open})"),
-                                    None => "▒▒▒".into(),
-                                };
-                                edits.push((open..start + 2, label));
-                            }
-                        } else {
-                            spoiler = Some(start);
-                        }
                     } else if let Some(token) = text[i..].strip_prefix("<@")
                         && let Some(end_id) = token.find(|ch: char| {
                             !ch.is_ascii_alphanumeric() && !matches!(ch, '_' | '-')
@@ -137,7 +148,7 @@ fn find_edits<'a>(
         }
     }
     if preview && let Some(open) = spoiler {
-        edits.push((open..source.len(), "▒▒▒".into()));
+        edits.push((open.start..source.len(), "▒▒▒".into()));
     }
 }
 
@@ -291,6 +302,24 @@ mod tests {
             message_markdown("<@alice> ||truncated spoiler", name, |_| false, None),
             "@Alice *here* ▒▒▒",
         );
+    }
+
+    #[test]
+    fn escaped_spoilers_stay_hidden_in_messages_and_notifications() {
+        for body in [r"Visible \||private||", r"Visible \|\|private|\|"] {
+            assert_eq!(
+                message_markdown(body, |_| "", |_| false, Some("spk-spoiler:test:")),
+                "Visible [Reveal spoiler](spk-spoiler:test:8)"
+            );
+            assert_eq!(
+                message_markdown(body, |_| "", |_| true, Some("spk-spoiler:test:")),
+                "Visible private"
+            );
+            assert_eq!(
+                notification_preview(body, false, |_| ""),
+                "Visible [spoiler]"
+            );
+        }
     }
 
     #[test]

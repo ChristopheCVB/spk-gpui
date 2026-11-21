@@ -110,7 +110,7 @@ impl Spk {
                 None,
                 cx,
             );
-        } else if chat.first_unread_id.is_some() {
+        } else if chat.history_ready() {
             self.send(Command::MarkChatRead(chat.channel_id.clone()), None, cx);
         } else {
             return false;
@@ -521,7 +521,8 @@ impl Spk {
                                 (format!("Could not send message. {error}"), true, true)
                             }
                             Delivery::Unconfirmed => (
-                                "Delivery unconfirmed. Check message history.".into(),
+                                "Delivery unconfirmed. Check message history before sending again."
+                                    .into(),
                                 false,
                                 true,
                             ),
@@ -568,7 +569,7 @@ impl Spk {
                                                     .label(if retry {
                                                         "Edit message"
                                                     } else {
-                                                        "Dismiss"
+                                                        "Keep draft"
                                                     })
                                                     .on_click(cx.listener(|this, _, _, cx| {
                                                         this.send(

@@ -1068,7 +1068,7 @@ async fn watch_session(
                     voice.video_participant_left(&mut sidebar, &id);
                 }
                 VoiceUpdate::Screen(report) => {
-                    voice.screen_report(&mut sidebar, &settings, report);
+                    voice.screen_report(&mut sidebar, settings, report);
                 }
                 VoiceUpdate::Finished(result) => {
                     voice.finished();
@@ -1164,14 +1164,15 @@ async fn watch_session(
                     && sidebar.voice.as_ref().is_some_and(|voice| sidebar.has_voice_channel(&voice.channel_id));
                 refresh.complete(&mut sidebar, resource, data);
                 account_admin.clear_if_demoted(&mut sidebar);
-                if resource == Resource::Channels && !refresh.dirty.contains(&resource) {
-                    if let Some(result) = channel_mutation_result.take() {
-                        sidebar.channel_admin.pending = false;
-                        sidebar.channel_admin.result = Some(match (result, presence_loaded) {
-                            (Ok(_), false) => Ok("Channel updated. Refresh to reload the channel list."),
-                            _ => result,
-                        });
-                    }
+                if resource == Resource::Channels
+                    && !refresh.dirty.contains(&resource)
+                    && let Some(result) = channel_mutation_result.take()
+                {
+                    sidebar.channel_admin.pending = false;
+                    sidebar.channel_admin.result = Some(match (result, presence_loaded) {
+                        (Ok(_), false) => Ok("Channel updated. Refresh to reload the channel list."),
+                        _ => result,
+                    });
                 }
                 if resource == Resource::Channels
                     && presence_loaded

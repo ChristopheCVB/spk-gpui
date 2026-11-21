@@ -229,14 +229,13 @@ pub(super) fn shortcut_reference(
             "Voice and video",
             Action::ALL
                 .into_iter()
-                .filter_map(|action| {
-                    include_voice_bindings.then(|| {
-                        let label = shortcuts.binding(action).map_or_else(
-                            || "Unassigned".to_owned(),
-                            |binding| format!("{} · {}", binding.chord, binding.scope.label()),
-                        );
-                        (action.label(), label)
-                    })
+                .filter(|_| include_voice_bindings)
+                .map(|action| {
+                    let label = shortcuts.binding(action).map_or_else(
+                        || "Unassigned".to_owned(),
+                        |binding| format!("{} · {}", binding.chord, binding.scope.label()),
+                    );
+                    (action.label(), label)
                 })
                 .chain([
                     ("Camera on or off", media("E")),

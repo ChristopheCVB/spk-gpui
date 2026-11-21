@@ -360,6 +360,10 @@ impl Asset for AvatarThumbnail {
     type Source = ThumbnailRequest;
     type Output = Arc<RenderImage>;
 
+    #[expect(
+        clippy::manual_async_fn,
+        reason = "The asset future must not borrow the app context"
+    )]
     fn load(
         request: Self::Source,
         _: &mut App,
@@ -461,7 +465,9 @@ mod tests {
             resized
                 .as_bytes(0)
                 .unwrap()
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .all(|pixel| { (120..=135).contains(&pixel[0]) && pixel[3] == 255 })
         );
     }

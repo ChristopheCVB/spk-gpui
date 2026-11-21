@@ -69,8 +69,12 @@ impl ChatView {
         self.history == History::Unavailable
     }
 
+    pub fn history_ready(&self) -> bool {
+        self.history == History::Ready
+    }
+
     pub fn latest_ready(&self) -> bool {
-        self.history == History::Ready && !self.has_more_after
+        self.history_ready() && !self.has_more_after
     }
 
     pub fn can_send(&self) -> bool {
@@ -722,12 +726,10 @@ impl ChatSession {
         }
         if let Some(view) = &mut self.selected
             && view.channel_id == channel_id
-            && !view.unavailable()
+            && view.loading()
         {
-            if view.loading() {
-                self.deleted_during_load.insert(id.to_owned());
-                remove_message(&mut self.buffered, id);
-            }
+            self.deleted_during_load.insert(id.to_owned());
+            remove_message(&mut self.buffered, id);
         }
     }
 

@@ -100,6 +100,10 @@ async fn marking_read_and_unread_changes_the_shared_read_point() {
                     ],
                     "firstUnreadId":"first","hasMoreBefore":false,"hasMoreAfter":false
                 }),
+                "GET /api/channels/general/messages?around=reply HTTP/1.1" => value!({
+                    "messages":[{"id":"reply","channelId":"general","userId":"bob","createdAt":2,"body":"I agree"}],
+                    "hasMoreBefore":true,"hasMoreAfter":true
+                }),
                 "POST /api/channels/general/read HTTP/1.1" => {
                     count = 0;
                     let result = value!({"unread":0,"mentions":0});
@@ -193,6 +197,30 @@ async fn marking_read_and_unread_changes_the_shared_read_point() {
                     .is_some_and(|chat| chat.first_unread_id.is_none())
         })
         .await;
+
+        commands
+            .send(Command::JumpToChatMessage {
+                channel_id: "general".into(),
+                message_id: "reply".into(),
+            })
+            .await
+            .unwrap();
+        let around = wait_for_sidebar(&views, |view| {
+            view.chat
+                .as_ref()
+                .is_some_and(|chat| chat.jump.as_ref().is_some_and(|(id, _)| id == "reply"))
+        })
+        .await;
+        let chat = around.chat.unwrap();
+        assert!(chat.history_ready() && chat.has_more_after && chat.first_unread_id.is_none());
+        commands
+            .send(Command::MarkChatRead(chat.channel_id))
+            .await
+            .unwrap();
+        assert_eq!(
+            changes.recv().await.unwrap(),
+            value!({"unread":0,"mentions":0})
+        );
 
         // This tab missed the read event while reconnecting. The fresh snapshot clears the ping.
         other_peer.close(None).await.unwrap();

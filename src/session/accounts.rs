@@ -4,7 +4,7 @@ use reqwest::StatusCode;
 use url::Url;
 
 use super::{Command, SessionEnd, View, authentication::SESSION_EXPIRED};
-use crate::api::{AccountLinkCheck, Failure, Profile, SpkClient};
+use crate::api::{AccountLinkCheck, Failure, Profile, SpkClient, account_link_token};
 
 const INVALID_LINK: &str = "Paste an invite or password reset link from this SPK instance.";
 const RESET_UNAVAILABLE: &str =
@@ -31,29 +31,12 @@ enum AccountLink {
 impl AccountLink {
     fn parse(base: &Url, text: &str) -> Option<Self> {
         let url = Url::parse(text.trim()).ok()?;
-        if url.origin() != base.origin()
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.fragment().is_some()
-        {
-            return None;
+        let path = url.path();
+        match path {
+            "/signup" => account_link_token(base, &url, path, "invite").map(Self::Invite),
+            "/reset-password" => account_link_token(base, &url, path, "token").map(Self::Reset),
+            _ => None,
         }
-        let (build, query_key): (fn(String) -> Self, _) = match url.path() {
-            "/signup" => (Self::Invite, "invite"),
-            "/reset-password" => (Self::Reset, "token"),
-            _ => return None,
-        };
-        let mut tokens = url.query_pairs().filter(|(key, _)| key == query_key);
-        let (_, token) = tokens.next()?;
-        if tokens.next().is_some()
-            || token.is_empty()
-            || !token
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
-        {
-            return None;
-        }
-        Some(build(token.into_owned()))
     }
 
     fn form(&self) -> AccountLinkForm {

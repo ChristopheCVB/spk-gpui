@@ -155,6 +155,10 @@ async fn moderation_request(requests: &Receiver<Request>, body: Value) -> Reques
     request
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "The WebSocket handshake fixes the callback signature"
+)]
 async fn web_peer(
     listener: &TcpListener,
 ) -> (

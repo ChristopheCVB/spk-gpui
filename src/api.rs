@@ -7,6 +7,7 @@ mod public_media;
 mod search;
 mod soundboard_admin;
 
+pub(crate) use account_admin::account_link_token;
 pub use account_admin::{
     AccountRole, AdminDirectory, AdminUser, Invite, InviteStatus, IssuedAccountLink,
 };

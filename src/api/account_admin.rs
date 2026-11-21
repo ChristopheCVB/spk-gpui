@@ -126,19 +126,33 @@ impl SpkClient {
             .await
             .map_err(|_| Failure::InvalidResponse)?;
         let url = Url::parse(&link.url).map_err(|_| Failure::InvalidResponse)?;
-        if url.origin() != self.base.origin()
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.fragment().is_some()
-            || url.path() != path
-            || !url
-                .query_pairs()
-                .any(|(key, token)| key == token_key && !token.is_empty())
-        {
-            return Err(Failure::InvalidResponse);
-        }
+        account_link_token(&self.base, &url, path, token_key).ok_or(Failure::InvalidResponse)?;
         Ok(link)
     }
+}
+
+pub(crate) fn account_link_token(base: &Url, url: &Url, path: &str, key: &str) -> Option<String> {
+    if url.origin() != base.origin()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+        || url.path() != path
+    {
+        return None;
+    }
+    let mut tokens = url
+        .query_pairs()
+        .filter_map(|(name, value)| (name == key).then_some(value));
+    let token = tokens.next()?;
+    if tokens.next().is_some()
+        || token.is_empty()
+        || !token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return None;
+    }
+    Some(token.into_owned())
 }
 
 fn admin_account_path(prefix: &str, id: &str, action: &str) -> Result<String, Failure> {
@@ -150,4 +164,33 @@ fn admin_account_path(prefix: &str, id: &str, action: &str) -> Result<String, Fa
         return Err(Failure::InvalidResponse);
     }
     Ok(format!("{prefix}/{id}/{action}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn account_links_require_a_single_valid_token_for_the_expected_instance_and_form() {
+        let base = Url::parse("https://spk.example").unwrap();
+        let parse = |url| account_link_token(&base, &Url::parse(url).unwrap(), "/signup", "invite");
+        assert_eq!(
+            parse("https://spk.example/signup?invite=abc_123-"),
+            Some("abc_123-".into())
+        );
+        for url in [
+            "https://spk.example/signup?invite=abc&%69nvite=def",
+            "https://spk.example/signup?invite=abc&invite=",
+            "https://spk.example/signup?invite=abc%2Fdef",
+            "https://spk.example/signup?invite=abc+def",
+            "https://spk.example/signup?invite=",
+            "https://spk.example/signup?token=abc",
+            "https://spk.example/signup?invite=abc#fragment",
+            "https://user@spk.example/signup?invite=abc",
+            "https://other.example/signup?invite=abc",
+            "https://spk.example/reset-password?invite=abc",
+        ] {
+            assert_eq!(parse(url), None, "{url}");
+        }
+    }
 }
