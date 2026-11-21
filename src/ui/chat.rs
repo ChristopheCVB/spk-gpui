@@ -1,7 +1,9 @@
 mod actions;
+mod attachments;
 pub(super) mod markdown;
 
 pub(super) use actions::MessageActionForm;
+pub(super) use attachments::AttachmentUi;
 
 use std::{
     cell::RefCell,
@@ -101,7 +103,9 @@ impl Spk {
 
     pub(super) fn update_chat(&mut self, next: &View, window: &mut Window, cx: &mut Context<Self>) {
         let previous = chat(&self.view);
+        let signed_in = matches!(next, View::SignedIn(_));
         let next = chat(next);
+        self.chat_attachments.sync(previous, next, signed_in);
         Self::update_message_actions(&mut self.message_action_form, previous, next);
         if let Some(next) = next.filter(|chat| chat.latest_ready())
             && previous.is_none_or(|previous| {
@@ -196,7 +200,9 @@ impl Spk {
             return;
         };
         let body = self.chat_input.read(cx).value().to_string();
-        if body.trim().is_empty() {
+        if chat.draft.attachments_block_send()
+            || (body.trim().is_empty() && !chat.draft.attachments_ready())
+        {
             return;
         }
         let reading_older = chat.has_more_after;
@@ -220,6 +226,7 @@ impl Spk {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
+        let app = cx.weak_entity();
         let status = if chat.jump_failed {
             Some("Message unavailable.")
         } else if chat.unavailable() {
@@ -351,11 +358,22 @@ impl Spk {
             })
             .children((!chat.unavailable()).then(|| {
                 div()
+                    .id("chat-composer")
                     .px_4()
                     .py_3()
                     .border_t_1()
                     .border_color(theme.border)
                     .flex_shrink_0()
+                    .when(chat.can_send() && chat.outgoing.is_none(), |composer| {
+                        let accent = theme.primary;
+                        composer
+                            .drag_over::<ExternalPaths>(move |style, _, _, _| {
+                                style.border_color(accent)
+                            })
+                            .on_drop(cx.listener(|app, paths: &ExternalPaths, _, cx| {
+                                app.add_attachment_paths(paths.paths().to_vec(), cx);
+                            }))
+                    })
                     .when(!chat.typing.is_empty(), |composer| {
                         let names: Vec<_> = chat
                             .typing
@@ -483,15 +501,23 @@ impl Spk {
                                 ),
                         )
                     })
+                    .child(self.attachment_queue(chat, cx))
                     .child(
                         div()
                             .flex()
                             .items_end()
                             .gap_2()
+                            .child(self.attachment_picker(chat, cx))
                             .child(
                                 div().flex_1().min_w_0().child(
                                     Textarea::new(&self.chat_input)
                                         .aria_label("Write a message")
+                                        .on_paste(move |item, _, cx| {
+                                            app.update(cx, |app, cx| {
+                                                app.paste_attachments(item, cx)
+                                            })
+                                            .unwrap_or(false)
+                                        })
                                         .disabled(chat.outgoing.is_some() || !chat.can_send()),
                                 ),
                             )
@@ -499,7 +525,11 @@ impl Spk {
                                 Button::new("send-chat")
                                     .label("Send")
                                     .tab_stop(true)
-                                    .disabled(chat.outgoing.is_some() || !chat.can_send())
+                                    .disabled(
+                                        chat.outgoing.is_some()
+                                            || !chat.can_send()
+                                            || chat.draft.attachments_block_send(),
+                                    )
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.submit_chat(window, cx)
                                     })),
@@ -808,7 +838,10 @@ impl Spk {
                             }),
                     ),
             )
-            .child(text)
+            .when(!message.body.is_empty(), |row| row.child(text))
+            .when(!message.attachments.is_empty(), |row| {
+                row.child(self.attachment_cards(message, cx))
+            })
             .children(self.message_action_form(chat, message, cx))
             .when(!message.previews.is_empty(), |row| {
                 row.child(self.link_previews(sidebar, chat, message, cx))

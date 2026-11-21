@@ -50,7 +50,7 @@ pub use {
     crate::api::{MessageAction, UserStatus},
     accounts::AccountLinkForm,
     avatars::AvatarPhoto,
-    chat::{ChatView, Delivery, Pins},
+    chat::{AttachmentInput, ChatView, Delivery, Pins, UploadStatus, image_preview},
     presence::Participant,
     profiles::ProfileEdit,
     radio::RadioPlayback,
@@ -105,6 +105,24 @@ pub enum Command {
     SendChatMessage {
         channel_id: String,
         body: String,
+    },
+    AddChatAttachments {
+        channel_id: String,
+        files: Vec<AttachmentInput>,
+    },
+    CancelChatAttachment {
+        channel_id: String,
+        key: uuid::Uuid,
+    },
+    ToggleChatAttachmentSpoiler {
+        channel_id: String,
+        key: uuid::Uuid,
+    },
+    ReadChatAttachment {
+        channel_id: String,
+        message_id: String,
+        attachment_id: String,
+        reply: oneshot::Sender<Result<Vec<u8>, Failure>>,
     },
     SearchMessages {
         query: String,
@@ -558,6 +576,12 @@ async fn watch_session(
                 }
                 chat.pins_complete(result);
             }
+            Some(result) = chat.attachments.tasks.join_next() => {
+                if matches!(result, Ok(true)) {
+                    break SessionEnd::Invalidated(SESSION_EXPIRED);
+                }
+            }
+            Ok(event) = chat.attachments.events.recv() => chat.attachment_event(client, event),
             Some(result) = direct_message_opens.join_next() => {
                 match result.unwrap_or(Err(Failure::Connection)) {
                     Ok(channel) => {
@@ -666,6 +690,12 @@ async fn watch_session(
                 Ok(Command::UpdateChatDraft { channel_id, body }) => chat.update_draft(channel_id, body),
                 Ok(Command::SetChatReply { channel_id, message_id }) => chat.set_reply(&channel_id, message_id.as_deref()),
                 Ok(Command::SendChatMessage { channel_id, body }) => chat.send(channel_id, body),
+                Ok(Command::AddChatAttachments { channel_id, files }) => chat.add_attachments(client, channel_id, files),
+                Ok(Command::CancelChatAttachment { channel_id, key }) => chat.cancel_attachment(client, &channel_id, key),
+                Ok(Command::ToggleChatAttachmentSpoiler { channel_id, key }) => chat.toggle_attachment_spoiler(&channel_id, key),
+                Ok(Command::ReadChatAttachment { channel_id, message_id, attachment_id, reply }) => {
+                    chat.read_attachment(client, &channel_id, &message_id, attachment_id, reply);
+                }
                 Ok(Command::SearchMessages { query, scope }) => search.start(&mut sidebar.search, client, query, scope),
                 Ok(Command::MoreSearchResults) => search.more(&mut sidebar.search, client),
                 Ok(Command::OpenMessageTarget(target)) => {
@@ -750,7 +780,7 @@ async fn watch_session(
                         }) {
                             alerts.receive(&sidebar, &message);
                         }
-                        chat.message(message, nonce.as_deref(), sidebar.profile.id.as_deref());
+                        chat.message(*message, nonce.as_deref(), sidebar.profile.id.as_deref());
                     }
                     Frame::UnreadUpdate { channel_id, state } => {
                         unread.update(&mut sidebar, channel_id, state);
@@ -963,6 +993,7 @@ async fn watch_session(
             }
         }
     };
+    drop(chat);
     camera_previews.shutdown().await;
     drop(soundboard);
     drop(radio);

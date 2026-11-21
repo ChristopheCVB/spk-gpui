@@ -208,11 +208,14 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         )
         .await;
         let overlap_request = history_request(&history, "?before=m4").await;
-        let later = message("m6", 6, "bob", "After history was read <@alice>");
+        let mut later = message("m6", 6, "bob", "");
+        later["replyTo"] = value!({"id":"m3","userId":"alice","preview":"Hi","deleted":false});
+        later["attachments"] = value!([{"id":"image","filename":"private.png","mime":"image/png","size":10,"spoiler":true}]);
         live(&mut peer, &later, None).await;
         wait_for_sidebar(&rx, |view| {
             view.alerts.iter().any(|alert| {
                 alert.target.channel_id() == "general" && alert.target.message_id() == "m6"
+                    && alert.has_attachment && alert.body.is_empty()
             })
         }).await;
         live(&mut peer, &later, None).await;

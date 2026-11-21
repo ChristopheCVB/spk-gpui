@@ -262,6 +262,9 @@ mod tests {
         assert_eq!(cue(Sound::Mute, true).notes(), &[330.0, 415.0]);
         assert_eq!(cue(Sound::Mute, false).notes(), &[415.0, 262.0]);
         assert_eq!(cue(Sound::Deafen, true).notes(), &[262.0, 330.0, 392.0]);
+        let message = cue(Sound::Message, true);
+        assert_eq!(message.notes(), &[660.0, 880.0]);
+        assert_eq!(message.samples().len(), 10_560);
         let deafen = cue(Sound::Deafen, false);
         assert_eq!(deafen.notes(), &[392.0, 294.0, 196.0]);
         let samples = deafen.samples();

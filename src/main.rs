@@ -101,6 +101,7 @@ mod tests {
     fn desktop_icons_are_embedded() {
         for icon in [
             IconName::Hash,
+            IconName::Bell,
             IconName::Settings,
             IconName::User,
             IconName::X,

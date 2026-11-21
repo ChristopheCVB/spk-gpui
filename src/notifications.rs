@@ -66,6 +66,7 @@ pub struct Alert {
     pub target: MessageTarget,
     pub title: String,
     pub body: String,
+    pub has_attachment: bool,
     kind: Kind,
 }
 
@@ -98,6 +99,7 @@ impl Alert {
             target: MessageTarget::new(&message.channel_id, &message.id)?,
             title,
             body: message.body.clone(),
+            has_attachment: !message.attachments.is_empty(),
             kind,
         })
     }
@@ -198,6 +200,7 @@ mod tests {
             target: MessageTarget::new("general", "42").unwrap(),
             title: "Alice".to_owned(),
             body: "Hello".into(),
+            has_attachment: false,
             kind,
         }
     }

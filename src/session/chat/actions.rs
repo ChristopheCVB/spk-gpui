@@ -250,7 +250,7 @@ pub(super) fn change_message(
     } else if let Some(index) = messages.iter().position(|message| message.id == id) {
         let message = &mut Arc::make_mut(messages)[index];
         match change {
-            MessageChange::Edit(edited) => *message = edited.clone(),
+            MessageChange::Edit(edited) => message.clone_from(edited),
             MessageChange::Reactions(reactions) => message.reactions.clone_from(reactions),
             MessageChange::Pin(pinned) => message.pinned = *pinned,
             MessageChange::Previews(previews) => message.previews.clone_from(previews),

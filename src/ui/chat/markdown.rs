@@ -177,17 +177,19 @@ pub(in crate::ui) fn plain_text(source: &str) -> String {
 
 pub(in crate::ui) fn notification_preview<'a>(
     source: &str,
+    has_attachment: bool,
     name_of: impl Fn(&str) -> &'a str,
 ) -> String {
     let body = message_markdown(source, name_of, |_| false, None);
-    let Ok(document) = ::markdown::to_mdast(&body, &parse_options()) else {
-        return String::new();
-    };
-    let text = node_text(&document, true)
+    let text = ::markdown::to_mdast(&body, &parse_options())
+        .map_or_else(|_| String::new(), |document| node_text(&document, true))
         .replace("▒▒▒", "[spoiler]")
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
+    if text.is_empty() && has_attachment {
+        return "Sent an attachment".into();
+    }
     if let Some((limit, _)) = text.char_indices().nth(140) {
         let end = text[..limit].char_indices().next_back().unwrap().0;
         format!("{}…", text[..end].trim_end())
@@ -273,24 +275,28 @@ mod tests {
     fn notification_preview_hides_spoilers_and_code_and_limits_unicode() {
         let body = "> **Hi** <@alice> 👋 ||keep **this** private||\n\n```rs\nprivate_code()\n```\n\n[Public label](https://example.test/path)";
         assert_eq!(
-            notification_preview(body, |_| "Alice"),
+            notification_preview(body, false, |_| "Alice"),
             "Hi @Alice 👋 [spoiler] [code] Public label"
+        );
+        assert_eq!(
+            notification_preview(" ", true, |_| "Alice"),
+            "Sent an attachment"
         );
         let long = "é".repeat(141);
         assert_eq!(
-            notification_preview(&long, |_| "Alice"),
+            notification_preview(&long, false, |_| "Alice"),
             format!("{}…", "é".repeat(139))
         );
         assert_eq!(
-            notification_preview("Visible ||unfinished spoiler", |_| "Alice"),
+            notification_preview("Visible ||unfinished spoiler", false, |_| "Alice"),
             "Visible [spoiler]"
         );
         assert_eq!(
-            notification_preview("```rs\nunclosed_code()", |_| "Alice"),
+            notification_preview("```rs\nunclosed_code()", false, |_| "Alice"),
             "[code]"
         );
         assert_eq!(
-            notification_preview("`||inline spoiler||`", |_| "Alice"),
+            notification_preview("`||inline spoiler||`", false, |_| "Alice"),
             "[spoiler]"
         );
     }
