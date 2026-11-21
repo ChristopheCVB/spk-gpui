@@ -471,3 +471,34 @@ fn main() {
         cx.activate(true);
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use gpui_kit::{
+        AssetSource,
+        assets::{AllAssets, IconName},
+    };
+    use std::borrow::Cow;
+
+    #[test]
+    fn desktop_icons_are_embedded() {
+        for icon in [
+            IconName::Hash,
+            IconName::Settings,
+            IconName::User,
+            IconName::X,
+            IconName::PhoneOff,
+            IconName::Mic,
+            IconName::MicOff,
+            IconName::Headphones,
+            IconName::HeadphoneOff,
+        ] {
+            let path = icon.path();
+            let data = AllAssets.load(&path).unwrap();
+            assert!(
+                matches!(data, Some(Cow::Borrowed(svg)) if !svg.is_empty()),
+                "{path} should be embedded"
+            );
+        }
+    }
+}
