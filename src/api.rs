@@ -123,6 +123,18 @@ pub struct RadioStation {
 }
 
 #[derive(Deserialize)]
+pub struct RadioStationName {
+    pub name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RadioSummary {
+    pub channel_id: String,
+    pub station: Option<RadioStationName>,
+}
+
+#[derive(Deserialize)]
 #[serde(tag = "type")]
 pub enum Frame {
     #[serde(rename = "ping")]
@@ -147,6 +159,10 @@ pub enum Frame {
     VoiceMove { sid: String, channel_id: String },
     #[serde(rename = "voice:disconnect")]
     VoiceDisconnected { sid: String },
+    #[serde(rename = "radio:snapshot")]
+    RadioSnapshot { channels: Vec<RadioSummary> },
+    #[serde(rename = "radio:update")]
+    RadioUpdate(RadioSummary),
     #[serde(rename = "voice:radio:state", rename_all = "camelCase")]
     RadioState {
         sid: String,

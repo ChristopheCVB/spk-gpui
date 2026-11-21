@@ -321,3 +321,72 @@ fn device_status(active: Option<&Device>, preferred: Option<&Device>, list: &Dev
         label.to_owned()
     }
 }
+
+pub(super) fn connection_diagnostics(cx: &Context<Spk>) -> Popover {
+    let app = cx.weak_entity();
+    Popover::new("voice-connection")
+        .anchor(Anchor::BottomRight)
+        .w(px(300.0))
+        .trigger(tool_button(
+            "voice-connection-diagnostics",
+            IconName::Activity,
+            "Voice connection diagnostics",
+        ))
+        .content(move |_, _, cx| {
+            let Some(app) = app.upgrade() else {
+                return div();
+            };
+            let View::SignedIn(sidebar) = &app.read(cx).view else {
+                return div();
+            };
+            let Some(call) = &sidebar.voice else {
+                return div();
+            };
+            let diagnostics = call
+                .media
+                .as_ref()
+                .map_or_else(Default::default, |media| media.diagnostics);
+            use livekit::prelude::ConnectionQuality;
+            let quality = match diagnostics.quality {
+                Some(ConnectionQuality::Excellent) => "Excellent",
+                Some(ConnectionQuality::Good) => "Good",
+                Some(ConnectionQuality::Poor) => "Poor",
+                Some(ConnectionQuality::Lost) => "Lost",
+                None => "Unavailable",
+            };
+            let metric = |value: Option<u32>, unit| {
+                value.map_or_else(
+                    || "Unavailable".to_owned(),
+                    |value| format!("{}.{:01} {unit}", value / 10, value % 10),
+                )
+            };
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(Label::new("Voice connection").font_semibold())
+                .children(
+                    [
+                        ("Connection quality", quality.to_owned()),
+                        ("Media round-trip", metric(diagnostics.round_trip_ms, "ms")),
+                        (
+                            "Audio jitter (worst track)",
+                            metric(diagnostics.jitter_ms, "ms"),
+                        ),
+                        (
+                            "Incoming audio packet loss",
+                            metric(diagnostics.loss_percent, "%"),
+                        ),
+                    ]
+                    .into_iter()
+                    .map(|(label, value)| {
+                        div()
+                            .flex()
+                            .justify_between()
+                            .gap_2()
+                            .child(Label::new(label).text_color(cx.theme().muted_foreground))
+                            .child(Label::new(value))
+                    }),
+                )
+        })
+}

@@ -446,6 +446,14 @@ impl Spk {
                                 this.select_voice_channel(&id, cx)
                             })),
                     )
+                    .children(sidebar.channel_radio.get(&channel.id).map(|station| {
+                        div()
+                            .id("radio-station")
+                            .role(Role::Image)
+                            .aria_label(format!("Radio playing {station}"))
+                            .px_1()
+                            .child(themed_icon(IconName::Radio, theme.primary, 14.0))
+                    }))
                     .children(call.and_then(|call| {
                         self.leave_voice("leave", call, switching_here, false, cx)
                     }))
@@ -591,11 +599,14 @@ impl Spk {
                                 .gap_1()
                                 .rounded_lg()
                                 .when(in_voice, |bar| {
-                                    bar.bg(theme.secondary).p_2().child(self.voice_controls(
-                                        sidebar,
-                                        VoiceControls::Channel,
-                                        cx,
-                                    ))
+                                    bar.bg(theme.secondary)
+                                        .p_2()
+                                        .child(self.voice_controls(
+                                            sidebar,
+                                            VoiceControls::Channel,
+                                            cx,
+                                        ))
+                                        .child(super::voice::connection_diagnostics(cx))
                                 })
                                 .children(departing.and_then(|call| {
                                     self.leave_voice(

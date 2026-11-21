@@ -200,7 +200,7 @@ async fn publish_microphone(
 }
 
 #[cfg(target_os = "macos")]
-async fn microphone_permission() -> bool {
+pub(crate) async fn microphone_permission() -> bool {
     use block2::RcBlock;
     use objc2::runtime::Bool;
     use objc2_av_foundation::{AVCaptureDevice, AVMediaTypeAudio};

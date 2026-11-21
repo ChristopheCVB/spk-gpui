@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) struct LiveKitAudio<'a> {
-    pub(super) room: &'a Room,
+    pub(super) room: &'a Arc<Room>,
     pub(super) audio: &'a PlatformAudio,
     pub(super) events: RoomEvents,
     pub(super) capture: &'a mut Capture,
@@ -98,6 +98,16 @@ impl RoomAudio for LiveKitAudio<'_> {
             .await;
     }
 
+    fn start_stats(&self, jobs: &mut JoinSet<Option<SessionStats>>) {
+        let room = self.room.clone();
+        jobs.spawn(async move {
+            tokio::time::timeout(Duration::from_secs(1), room.get_stats())
+                .await
+                .ok()?
+                .ok()
+        });
+    }
+
     async fn next_event(&mut self, reconnecting: bool) -> Event {
         tokio::select! {
             biased;
@@ -145,6 +155,10 @@ impl LiveKitAudio<'_> {
                 // The SDK can be republishing while mute or deafen removes the old track.
                 return Event::Unpublish(publication.sid());
             }
+            Some(RoomEvent::ConnectionQualityChanged {
+                quality,
+                participant: Participant::Local(_),
+            }) => MediaEvent::Quality(quality),
             Some(RoomEvent::Reconnecting) => MediaEvent::Reconnecting,
             Some(RoomEvent::Reconnected) => MediaEvent::Reconnected,
             Some(RoomEvent::Disconnected { reason }) => {

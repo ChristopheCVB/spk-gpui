@@ -125,6 +125,20 @@ impl VoiceSounds {
 
 const SAMPLE_RATE: u32 = 48_000;
 
+pub(crate) fn test_tone(volume: u8) -> (u32, Vec<f32>) {
+    let mut samples = Cue {
+        sound: Sound::Join,
+        rising: true,
+        volume: 100,
+    }
+    .samples();
+    let gain = f32::from(volume.min(200)) / 100.0;
+    for sample in &mut samples {
+        *sample *= gain;
+    }
+    (SAMPLE_RATE, samples)
+}
+
 struct Cue {
     sound: Sound,
     rising: bool,
@@ -173,6 +187,20 @@ impl Cue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn speaker_test_scales_the_tone_from_silent_to_double_gain() {
+        let (sample_rate, unity) = test_tone(100);
+        assert_eq!(sample_rate, SAMPLE_RATE);
+        let (_, silent) = test_tone(0);
+        let (_, amplified) = test_tone(200);
+        assert!(silent.iter().all(|sample| *sample == 0.0));
+        assert!(unity.iter().any(|sample| sample.abs() > 0.1));
+        for (sample, double) in unity.into_iter().zip(amplified) {
+            assert_eq!(sample * 2.0, double);
+            assert!(double.abs() < 1.0);
+        }
+    }
 
     #[test]
     fn cues_have_web_pitch_order_duration_and_headroom() {

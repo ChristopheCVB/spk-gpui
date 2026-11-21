@@ -52,6 +52,7 @@ pub enum Command {
     PauseRadio,
     ListenToRadio,
     SetRadioVolume(u8),
+    SetOutputVolume(u8),
 }
 
 pub enum View {
@@ -73,6 +74,7 @@ pub struct Sidebar {
     pub load_failed: bool,
     pub voice: Option<VoiceView>,
     pub radio: RadioView,
+    pub channel_radio: HashMap<String, String>,
     switching_to: Option<VoiceDestination>,
     pub voice_notice: Option<&'static str>,
     voice_rejoin: Option<String>,
@@ -94,6 +96,7 @@ impl Sidebar {
             load_failed: false,
             voice: None,
             radio: RadioView::default(),
+            channel_radio: HashMap::new(),
             switching_to: None,
             voice_notice: None,
             voice_rejoin: None,
@@ -295,6 +298,7 @@ async fn watch_session(
                 }
                 Ok(SocketEvent::Connection(state)) => {
                     sidebar.connection = state;
+                    sidebar.channel_radio.clear();
                     refresh.presence_ready = false;
                     voice.disconnected();
                 }
@@ -323,6 +327,18 @@ async fn watch_session(
                             refresh.fetch(client, Resource::Channels);
                         }
                         voice.move_to(&mut sidebar, channel_id);
+                    }
+                    Frame::RadioSnapshot { channels } => {
+                        sidebar.channel_radio = channels.into_iter()
+                            .filter_map(|channel| Some((channel.channel_id, channel.station?.name)))
+                            .collect();
+                    }
+                    Frame::RadioUpdate(channel) => {
+                        if let Some(station) = channel.station {
+                            sidebar.channel_radio.insert(channel.channel_id, station.name);
+                        } else {
+                            sidebar.channel_radio.remove(&channel.channel_id);
+                        }
                     }
                     Frame::RadioState { sid, channel_id, revision, station }
                         if voice.radio_scope(&sidebar) == Some((sid.as_str(), channel_id.as_str())) => {

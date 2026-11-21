@@ -73,7 +73,7 @@ impl RadioSession {
             sidebar.radio.command_error = None;
         }
         let preferences = &sidebar.voice_intent.preferred;
-        sidebar.radio.volume = preferences.radio_volume.unwrap_or(100).min(200);
+        sidebar.radio.volume = preferences.radio_volume.min(200);
         let output = Output {
             device: sidebar
                 .devices
@@ -83,7 +83,7 @@ impl RadioSession {
             volume: if sidebar.voice_intent.mute.deafened {
                 0.0
             } else {
-                f32::from(sidebar.radio.volume) / 100.0
+                preferences.output_gain() * f32::from(sidebar.radio.volume) / 100.0
             },
         };
         if sidebar.radio.enabled
