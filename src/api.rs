@@ -64,11 +64,14 @@ impl Profile {
 }
 
 #[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Channel {
     pub id: String,
     #[serde(rename = "type")]
     pub kind: String,
     pub name: Option<String>,
+    pub other_user_id: Option<String>,
+    pub last_activity_at: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -417,6 +420,25 @@ impl SpkClient {
 
     pub async fn channels(&self) -> Result<Vec<Channel>, Failure> {
         self.get("/api/channels").await
+    }
+
+    pub async fn open_direct_message(&self, user_id: &str) -> Result<Channel, Failure> {
+        let response = Self::send(
+            self.request(Method::POST, "/api/dms")
+                .json(&serde_json::json!({ "userId": user_id })),
+        )
+        .await?;
+        let channel: Channel = response
+            .json()
+            .await
+            .map_err(|_| Failure::InvalidResponse)?;
+        if channel.kind != "dm"
+            || channel.id.is_empty()
+            || channel.other_user_id.as_deref() != Some(user_id)
+        {
+            return Err(Failure::InvalidResponse);
+        }
+        Ok(channel)
     }
 
     pub async fn messages(
