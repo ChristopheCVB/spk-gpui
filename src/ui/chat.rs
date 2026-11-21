@@ -563,7 +563,7 @@ impl Spk {
                 .as_deref()
                 .is_some_and(|id| message.pings(id));
         div()
-            .id(SharedString::from(format!("message-{}", &message.id)))
+            .id(SharedString::from(format!("message-{}", message.id)))
             .px_4()
             .py_2()
             .flex_shrink_0()
