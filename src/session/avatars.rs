@@ -1,4 +1,8 @@
-use std::{collections::HashMap, io::Cursor, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    io::Cursor,
+    sync::{Arc, Mutex},
+};
 
 use gpui_kit::{Image, ImageFormat, RenderImage, SvgRenderer};
 use image_webp::WebPDecoder;
@@ -10,6 +14,11 @@ use crate::api::SpkClient;
 const MAX_IN_FLIGHT: usize = 4;
 const MAX_DIMENSION: u32 = 256;
 const MAX_FRAMES: u32 = 256;
+
+pub struct AvatarPhoto {
+    pub image: Arc<RenderImage>,
+    pub thumbnail_sizes: Mutex<HashSet<u32>>,
+}
 
 #[derive(Default)]
 pub(super) struct AvatarLoads {
@@ -25,7 +34,7 @@ struct Attempt {
 pub(super) struct Loaded {
     pub(super) user_id: String,
     pub(super) key: String,
-    pub(super) photo: Option<Arc<RenderImage>>,
+    pub(super) photo: Option<Arc<AvatarPhoto>>,
 }
 
 impl AvatarLoads {
@@ -102,13 +111,17 @@ impl AvatarLoads {
     }
 }
 
-fn decode(bytes: Vec<u8>) -> Option<Arc<RenderImage>> {
+fn decode(bytes: Vec<u8>) -> Option<Arc<AvatarPhoto>> {
     let header = WebPDecoder::new(Cursor::new(&bytes)).ok()?;
     let (width, height) = header.dimensions();
     if width > MAX_DIMENSION || height > MAX_DIMENSION || header.num_frames() > MAX_FRAMES {
         return None;
     }
-    Image::from_bytes(ImageFormat::Webp, bytes)
+    let image = Image::from_bytes(ImageFormat::Webp, bytes)
         .to_image_data(SvgRenderer::new(Arc::new(())))
-        .ok()
+        .ok()?;
+    Some(Arc::new(AvatarPhoto {
+        image,
+        thumbnail_sizes: Mutex::default(),
+    }))
 }

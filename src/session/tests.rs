@@ -1,5 +1,7 @@
+mod accounts;
 mod chat;
 mod media;
+mod profile;
 mod radio;
 mod soundboard;
 
@@ -168,7 +170,7 @@ async fn saved_session_restores_signs_out_and_clears_expired_credentials() {
         }
         let (tx, commands) = async_channel::unbounded();
         let (views, rx) = async_channel::unbounded();
-        let (saved, storage) = SavedSession::with_test_store(bytes.clone());
+        let (saved, storage) = SavedSession::with_test_store(Some(bytes.clone()));
         let settings = fixture_settings(endpoint.clone(), Call::start_for_test);
         let server = async {
             let request = Request::read(&http, "GET /api/profile/me HTTP/1.1").await;
@@ -187,12 +189,18 @@ async fn saved_session_restores_signs_out_and_clears_expired_credentials() {
                 let profile = Request::read(&http, "GET /api/profile/me HTTP/1.1").await;
                 assert_eq!(profile.header("cookie"), Some("session=new"));
                 profile
-                    .respond(&[], r#"{"id":"alice","email":"alice@example.test"}"#)
+                    .respond(
+                        &[],
+                        r#"{"id":"alice","email":"alice@example.test","displayName":"Alice"}"#,
+                    )
                     .await;
                 return;
             }
             request
-                .respond(&[], r#"{"id":"alice","email":"alice@example.test"}"#)
+                .respond(
+                    &[],
+                    r#"{"id":"alice","email":"alice@example.test","displayName":"Alice"}"#,
+                )
                 .await;
             let mut ws = accept_hdr_async(
                 sockets.accept().await.unwrap().0,
@@ -247,6 +255,16 @@ async fn saved_session_restores_signs_out_and_clears_expired_credentials() {
             }
             assert!(storage.lock().unwrap().is_none());
             if expired {
+                tx.send(Command::OpenAccountLink).await.unwrap();
+                assert!(matches!(rx.recv().await.unwrap(), View::AccountLink { .. }));
+                tx.send(Command::BackToSignIn).await.unwrap();
+                assert!(matches!(
+                    rx.recv().await.unwrap(),
+                    View::SignIn {
+                        message: Some(SESSION_EXPIRED),
+                        retry_restore: false
+                    }
+                ));
                 tx.send(Command::SignIn {
                     email: "alice@example.test".into(),
                     password: "test password".into(),
@@ -375,7 +393,7 @@ async fn voice_session(
             .unwrap();
         let mut persisted = Vec::new();
         json::save(&client.cookies().lock().unwrap(), &mut persisted).unwrap();
-        let (mut saved, _) = SavedSession::with_test_store(persisted);
+        let (mut saved, _) = SavedSession::with_test_store(Some(persisted));
         let mut settings = fixture_settings(socket_endpoint, start_call);
         watch_session(
             &client,
@@ -891,6 +909,7 @@ fn live_membership_and_flags_win_over_an_in_flight_snapshot() {
             email: "reader@example.test".into(),
             display_name: None,
             avatar_key: None,
+            role: "user".into(),
         },
         None,
     );
@@ -927,6 +946,7 @@ fn live_membership_and_flags_win_over_an_in_flight_snapshot() {
             id: "alice".into(),
             display_name: Some("Alice".into()),
             avatar_key: None,
+            role: "user".into(),
             banned: false,
         }])),
     );
@@ -1104,7 +1124,7 @@ async fn avatar_loads_share_a_photo_and_discard_an_older_response() {
             .avatar(sidebar.profile.id.as_deref())
             .unwrap()
             .clone();
-        assert_eq!(photo.frame_count(), 2);
+        assert_eq!(photo.image.frame_count(), 2);
         new_applied.send(()).unwrap();
         let loaded = avatars.tasks.join_next().await.unwrap().unwrap();
         avatars.complete(&mut sidebar, loaded);

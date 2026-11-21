@@ -16,6 +16,7 @@ use url::{Host, Url};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_AVATAR_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_AVATAR_UPLOAD: usize = 5 * 1024 * 1024;
 
 fn signed_storage_url(url: &Url) -> bool {
     if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
@@ -45,6 +46,12 @@ impl Failure {
     }
 }
 
+#[derive(Deserialize)]
+pub struct AccountLinkCheck {
+    pub valid: bool,
+    pub reason: Option<String>,
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Profile {
@@ -52,6 +59,8 @@ pub struct Profile {
     pub email: String,
     pub display_name: Option<String>,
     pub avatar_key: Option<String>,
+    #[serde(default)]
+    pub role: String,
 }
 
 impl Profile {
@@ -80,6 +89,8 @@ pub struct User {
     pub id: String,
     pub display_name: Option<String>,
     pub avatar_key: Option<String>,
+    #[serde(default)]
+    pub role: String,
     #[serde(default)]
     pub banned: bool,
 }
@@ -409,6 +420,67 @@ impl SpkClient {
         Ok(())
     }
 
+    pub async fn check_invite(&self, token: &str) -> Result<AccountLinkCheck, Failure> {
+        self.check_account_link("/api/invites/check", token).await
+    }
+
+    pub async fn check_password_reset(&self, token: &str) -> Result<AccountLinkCheck, Failure> {
+        self.check_account_link("/api/reset-password/check", token)
+            .await
+    }
+
+    async fn check_account_link(
+        &self,
+        path: &str,
+        token: &str,
+    ) -> Result<AccountLinkCheck, Failure> {
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("token", token)
+            .finish();
+        self.get(&format!("{path}?{query}")).await
+    }
+
+    pub async fn sign_up(&self, token: &str, email: &str, password: &str) -> Result<(), Failure> {
+        let name = email.split('@').next().unwrap_or_default();
+        let mut token =
+            header::HeaderValue::from_str(token).map_err(|_| Failure::InvalidResponse)?;
+        token.set_sensitive(true);
+        Self::send(
+            self.request(Method::POST, "/api/auth/sign-up/email")
+                .header("x-invite-token", token)
+                .json(&serde_json::json!({"email": email, "password": password, "name": name})),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn reset_password(&self, token: &str, password: &str) -> Result<(), Failure> {
+        Self::send(
+            self.request(Method::POST, "/api/reset-password")
+                .json(&serde_json::json!({"token": token, "password": password})),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn set_nickname(&self, nickname: &str) -> Result<String, Failure> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Nickname {
+            display_name: String,
+        }
+
+        Self::send(
+            self.request(Method::POST, "/api/profile/nickname")
+                .json(&serde_json::json!({"displayName": nickname})),
+        )
+        .await?
+        .json::<Nickname>()
+        .await
+        .map(|result| result.display_name)
+        .map_err(|_| Failure::InvalidResponse)
+    }
+
     pub async fn sign_out(&self) -> Result<(), Failure> {
         Self::send(self.request(Method::POST, "/api/auth/sign-out")).await?;
         Ok(())
@@ -416,6 +488,78 @@ impl SpkClient {
 
     pub async fn profile(&self) -> Result<Profile, Failure> {
         self.get("/api/profile/me").await
+    }
+
+    pub async fn upload_avatar(
+        &self,
+        bytes: Vec<u8>,
+        mime: &'static str,
+    ) -> Result<String, Failure> {
+        #[derive(Deserialize)]
+        struct Upload {
+            key: String,
+            url: String,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Avatar {
+            avatar_key: String,
+        }
+
+        let upload: Upload = Self::send(
+            self.request(Method::POST, "/api/profile/avatar-upload")
+                .json(&serde_json::json!({ "size": bytes.len(), "type": mime })),
+        )
+        .await?
+        .json()
+        .await
+        .map_err(|_| Failure::InvalidResponse)?;
+        let url = Url::parse(&upload.url)
+            .ok()
+            .filter(signed_storage_url)
+            .ok_or(Failure::InvalidResponse)?;
+        if upload.key.is_empty() {
+            return Err(Failure::InvalidResponse);
+        }
+        // The storage response cannot expire the authenticated SPK session.
+        Self::send(
+            self.storage
+                .put(url)
+                .header(header::CONTENT_TYPE, mime)
+                .body(bytes),
+        )
+        .await
+        .map_err(|_| Failure::InvalidResponse)?;
+        let avatar: Avatar = Self::send(
+            self.request(Method::POST, "/api/profile/avatar")
+                .json(&serde_json::json!({ "key": upload.key })),
+        )
+        .await?
+        .json()
+        .await
+        .map_err(|_| Failure::InvalidResponse)?;
+        Ok(avatar.avatar_key)
+    }
+
+    pub async fn admin_profile_email(&self, id: &str) -> Result<Option<String>, Failure> {
+        #[derive(Deserialize)]
+        struct Directory {
+            users: Vec<Entry>,
+        }
+
+        #[derive(Deserialize)]
+        struct Entry {
+            id: String,
+            email: String,
+        }
+
+        let directory: Directory = self.get("/api/admin/users").await?;
+        Ok(directory
+            .users
+            .into_iter()
+            .find(|entry| entry.id == id)
+            .map(|entry| entry.email))
     }
 
     pub async fn channels(&self) -> Result<Vec<Channel>, Failure> {

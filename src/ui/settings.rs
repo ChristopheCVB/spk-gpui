@@ -6,6 +6,7 @@ use std::{
 
 mod audio;
 mod camera;
+mod profile;
 mod shortcuts;
 
 use gpui_kit::component::{
@@ -100,7 +101,18 @@ impl Spk {
             View::SignedIn(sidebar) => sidebar.voice_intent.preferred.clone(),
             _ => Default::default(),
         };
+        let initial_nickname = match &self.view {
+            View::SignedIn(sidebar) => sidebar.profile.display_name.clone().unwrap_or_default(),
+            _ => String::new(),
+        };
         let content = cx.new(|cx: &mut Context<Settings>| {
+            let nickname = cx.new(|cx| InputState::new(window, cx).default_value(initial_nickname));
+            cx.subscribe_in(&nickname, window, |settings, _, event, _, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    settings.save_nickname(cx);
+                }
+            })
+            .detach();
             cx.observe(&spk, |settings, _, cx| {
                 settings.sync_mic_test(cx);
                 settings.sync_camera_preview(cx);
@@ -157,6 +169,9 @@ impl Spk {
             Settings {
                 spk,
                 tab: Tab::Profile,
+                nickname,
+                avatar_picker_open: false,
+                avatar_picker_error: None,
                 volumes,
                 recorder_focus: cx.focus_handle(),
                 output_volume,
@@ -192,6 +207,9 @@ impl Spk {
 struct Settings {
     spk: Entity<Spk>,
     tab: Tab,
+    nickname: Entity<InputState>,
+    avatar_picker_open: bool,
+    avatar_picker_error: Option<&'static str>,
     volumes: [Entity<SliderState>; Sound::ALL.len()],
     recorder_focus: FocusHandle,
     output_volume: Entity<SliderState>,
@@ -363,72 +381,6 @@ fn card(title: &'static str, body: impl IntoElement, cx: &App) -> impl IntoEleme
 }
 
 impl Settings {
-    fn profile(&self, sidebar: &Sidebar, cx: &App) -> impl IntoElement {
-        let profile = &sidebar.profile;
-        let muted = cx.theme().muted_foreground;
-        let spk = self.spk.downgrade();
-        div()
-            .flex()
-            .flex_col()
-            .items_start()
-            .gap_5()
-            .child(
-                card(
-                    "Profile",
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_4()
-                        .child(profile_avatar(
-                            Avatar::new().name(profile.name().to_owned()),
-                            sidebar.avatar(profile.id.as_deref()),
-                            40.0,
-                            false,
-                            cx,
-                        ))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .child(Label::new("Nickname").text_color(muted))
-                                .child(
-                                    Label::new(
-                                        profile
-                                            .display_name
-                                            .as_deref()
-                                            .filter(|name| !name.is_empty())
-                                            .unwrap_or("No nickname set")
-                                            .to_owned(),
-                                    )
-                                    .font_semibold(),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .child(Label::new("Email").text_color(muted))
-                                .child(Label::new(profile.email.clone())),
-                        ),
-                    cx,
-                )
-                .w_full(),
-            )
-            .child(
-                Button::new("sign-out")
-                    .small()
-                    .tab_stop(true)
-                    .icon(IconName::LogOut)
-                    .label("Sign out")
-                    .on_click(move |_, window, cx| {
-                        let _ = spk.update(cx, |app, cx| app.send(Command::SignOut, None, cx));
-                        window.close_dialog(cx);
-                    }),
-            )
-    }
-
     fn appearance(&self, app: &Spk, cx: &App) -> impl IntoElement {
         card(
             "Theme",
