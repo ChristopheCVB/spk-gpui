@@ -20,7 +20,7 @@ use crate::sounds::{Sound, SoundSettings, VoiceSounds};
 use crate::voice::{
     Call, Device, DeviceKind, Devices, Intent, Issue as VoiceIssue, NoiseSuppression,
     ParticipantVolumeChange, Status as VoiceStatus, Update as VoiceUpdate, screen,
-    video::CameraResolution,
+    video::{CameraResolution, preview_camera},
 };
 use authentication::{
     SESSION_EXPIRED, SavedSession, login, restore, sign_in, sign_in_message, sign_out,
@@ -67,6 +67,7 @@ pub enum Command {
     SetSoundboardEnabled(bool),
     SetSoundboardVolume(u8),
     SetCameraEnabled(bool),
+    PreviewCamera(Sender<Result<Arc<RenderImage>, &'static str>>),
     ChooseCamera(Option<String>),
     ChooseCameraResolution(CameraResolution),
     SetWatching(String, bool),
@@ -291,6 +292,7 @@ async fn watch_session(
     let mut voice = VoiceSession::default();
     let mut radio = RadioSession::default();
     let mut soundboard = SoundboardSession::default();
+    let mut camera_previews = JoinSet::new();
     let end = loop {
         if commands.is_closed() {
             break SessionEnd::Closed;
@@ -325,10 +327,20 @@ async fn watch_session(
                 Ok(command @ (Command::LoadSoundboard | Command::PlaySound(_) | Command::PreviewSound(_))) => {
                     soundboard.command(&mut sidebar, &voice, client, command);
                 }
+                Ok(Command::PreviewCamera(frames)) => {
+                    if !sidebar.camera_publishing() {
+                        camera_previews.shutdown().await;
+                        camera_previews.spawn(preview_camera(sidebar.voice_intent.camera.clone(), frames));
+                    }
+                }
                 Ok(command) => {
+                    if matches!(command, Command::SetCameraEnabled(true)) {
+                        camera_previews.shutdown().await;
+                    }
                     voice.apply_controls(&mut sidebar, settings, command).await;
                 }
             },
+            Some(_) = camera_previews.join_next() => {}
             event = socket.recv() => match event {
                 Err(_) => break SessionEnd::Closed,
                 Ok(SocketEvent::Unauthorized | SocketEvent::Frame(Frame::SignedOut)) => {
@@ -506,6 +518,7 @@ async fn watch_session(
             }
         }
     };
+    camera_previews.shutdown().await;
     drop(soundboard);
     drop(radio);
     voice.stop().await;

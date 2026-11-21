@@ -168,8 +168,11 @@ impl Spk {
                 camera: camera::Preview::default(),
             }
         });
-        cx.observe_release(&content, |this, _, cx| this.cancel_shortcut_editor(cx))
-            .detach();
+        cx.observe_release_in(&content, window, |this, settings, window, cx| {
+            this.cancel_shortcut_editor(cx);
+            settings.camera.release(window);
+        })
+        .detach();
         window.open_dialog(cx, move |dialog, window, _| {
             dialog
                 .centered()

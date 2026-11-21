@@ -1271,6 +1271,44 @@ fn voice_cues_follow_live_membership_of_other_users() {
         ),
         vec![],
     );
+    let watching = |enabled: bool| VideoPresence {
+        watching: enabled.then(|| "me".to_owned()).into_iter().collect(),
+        ..Default::default()
+    };
+    let update_watch = |refresh: &mut Refresh, sidebar: &mut Sidebar, enabled: bool| {
+        refresh.update_presence(
+            sidebar,
+            "peer".into(),
+            Some("here".into()),
+            VoiceFlags::default(),
+            watching(enabled),
+        )
+    };
+    sidebar.voice.as_mut().unwrap().video = Some(Arc::new(crate::voice::video::VideoReport {
+        camera: crate::voice::video::CameraStatus::Live(640, 360),
+        ..Default::default()
+    }));
+    assert!(update_watch(&mut refresh, &mut sidebar, true).is_empty());
+    sidebar.voice.as_mut().unwrap().screen = Some(screen::Report {
+        attempt: 1,
+        state: screen::State::Live {
+            width: 1280,
+            height: 720,
+            fps: 30,
+            audio: None,
+            audio_unavailable: false,
+            frames: Default::default(),
+        },
+    });
+    assert_eq!(
+        update_watch(&mut refresh, &mut sidebar, false),
+        [(Sound::Watch, false)]
+    );
+    assert_eq!(
+        update_watch(&mut refresh, &mut sidebar, true),
+        [(Sound::Watch, true)]
+    );
+
     assert_eq!(
         present(&mut refresh, &mut sidebar, "peer", Some("other")),
         vec![(Sound::Leave, false)]
@@ -1647,6 +1685,45 @@ async fn livekit_recovery_and_rejoin_use_the_signed_in_voice_flow() {
 }
 
 #[tokio::test]
+async fn queued_screen_start_respects_the_latest_audio_preference() {
+    let mut sidebar = Sidebar::new(
+        serde_json::from_str(r#"{"id":"alice","email":"alice@example.test"}"#).unwrap(),
+        None,
+    );
+    let mut view = VoiceView::joining("first".into());
+    view.status = VoiceStatus::Connected;
+    let request = &mut sidebar.voice_intent.screen;
+    request.open();
+    let attempt = request.attempt;
+    assert!(request.advance(attempt, screen::Action::Choose("display".into(), None)));
+    view.screen = Some(screen::Report {
+        attempt,
+        state: screen::State::Confirm {
+            label: "Display".into(),
+            audio: Some(screen::AudioScope::PlaybackMix),
+        },
+    });
+    sidebar.voice = Some(view);
+    let session = VoiceSession::default();
+    let mut settings = fixture_settings(String::new(), Call::start_for_test);
+
+    session
+        .apply_controls(&mut sidebar, &mut settings, Command::SetScreenAudio(false))
+        .await;
+    session
+        .apply_controls(
+            &mut sidebar,
+            &mut settings,
+            Command::StartScreenShare(attempt, true),
+        )
+        .await;
+    assert_eq!(
+        sidebar.voice_intent.screen.action,
+        screen::Action::Start(false)
+    );
+}
+
+#[tokio::test]
 async fn camera_and_watch_choices_are_scoped_to_the_current_voice_session() {
     let (observed, observations) = async_channel::bounded(1);
     let end =
@@ -1794,6 +1871,12 @@ async fn camera_and_watch_choices_are_scoped_to_the_current_voice_session() {
                     }
                 );
                 observations.recv().await.unwrap();
+                let (preview, frames) = async_channel::bounded(1);
+                commands
+                    .send(Command::PreviewCamera(preview))
+                    .await
+                    .unwrap();
+                assert!(frames.recv().await.is_err());
                 commands
                     .send(Command::SetWatching("bob".into(), true))
                     .await

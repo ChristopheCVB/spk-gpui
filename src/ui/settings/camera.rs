@@ -3,7 +3,7 @@ use gpui_kit::base::Disableable;
 use super::*;
 use crate::{
     ui::video::camera_options,
-    voice::video::{CameraDevice, CameraIntent, CameraStatus, camera_devices, preview_camera},
+    voice::video::{CameraDevice, CameraIntent, camera_devices},
 };
 
 #[derive(Default)]
@@ -21,11 +21,16 @@ impl Preview {
         self.image = None;
     }
 
+    pub(super) fn release(&mut self, window: &mut Window) {
+        self.stop();
+        self.release_unused_image(window);
+    }
+
     pub(super) fn release_unused_image(&mut self, window: &mut Window) {
-        if self.rendered != self.image {
-            if let Some(previous) = std::mem::replace(&mut self.rendered, self.image.clone()) {
-                let _ = window.drop_image(previous);
-            }
+        if self.rendered != self.image
+            && let Some(previous) = std::mem::replace(&mut self.rendered, self.image.clone())
+        {
+            let _ = window.drop_image(previous);
         }
     }
 }
@@ -47,7 +52,7 @@ impl Settings {
         if let Some((active, _)) = &self.camera.active
             && (self.tab != Tab::Voice
                 || !matches!(&self.spk.read(cx).view, View::SignedIn(sidebar)
-                    if !camera_publishing(sidebar) && sidebar.voice_intent.camera == *active))
+                    if !sidebar.camera_publishing() && sidebar.voice_intent.camera == *active))
         {
             self.camera.stop();
             self.camera.error = None;
@@ -64,32 +69,37 @@ impl Settings {
         let View::SignedIn(sidebar) = &self.spk.read(cx).view else {
             return;
         };
-        if camera_publishing(sidebar) {
+        if sidebar.camera_publishing() {
             return;
         }
         let choice = sidebar.voice_intent.camera.clone();
-        let frames = preview_camera(choice.clone());
+        let (send_frames, frames) = async_channel::bounded(1);
+        self.spk.update(cx, |app, cx| {
+            app.send(Command::PreviewCamera(send_frames), None, cx);
+        });
         let task = cx.spawn(async move |settings, cx| {
-            while let Ok(frame) = frames.recv().await {
-                let failed = frame.is_err();
-                if settings
-                    .update(cx, |settings, cx| {
-                        match frame {
-                            Ok(image) => settings.camera.image = Some(image),
-                            Err(error) => {
-                                settings.camera.active = None;
-                                settings.camera.image = None;
-                                settings.camera.error = Some(error);
-                            }
+            let error = loop {
+                match frames.recv().await {
+                    Ok(Ok(image)) => {
+                        if settings
+                            .update(cx, |settings, cx| {
+                                settings.camera.image = Some(image);
+                                cx.notify();
+                            })
+                            .is_err()
+                        {
+                            return;
                         }
-                        cx.notify();
-                    })
-                    .is_err()
-                    || failed
-                {
-                    return;
+                    }
+                    Ok(Err(error)) => break Some(error),
+                    Err(_) => break None,
                 }
-            }
+            };
+            let _ = settings.update(cx, |settings, cx| {
+                settings.camera.stop();
+                settings.camera.error = error;
+                cx.notify();
+            });
         });
         self.camera.active = Some((choice, task));
         cx.notify();
@@ -118,7 +128,7 @@ impl Settings {
                     Button::new("settings-camera-preview")
                         .small()
                         .tab_stop(true)
-                        .disabled(camera_publishing(sidebar))
+                        .disabled(sidebar.camera_publishing())
                         .label(label)
                         .on_click(
                             cx.listener(|settings, _, _, cx| settings.toggle_camera_preview(cx)),
@@ -142,13 +152,4 @@ impl Settings {
             cx,
         )
     }
-}
-
-fn camera_publishing(sidebar: &Sidebar) -> bool {
-    sidebar.voice_intent.camera.enabled
-        && !sidebar
-            .voice
-            .as_ref()
-            .and_then(|call| call.video.as_ref())
-            .is_some_and(|report| matches!(report.camera, CameraStatus::Failed(_)))
 }

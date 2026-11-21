@@ -74,6 +74,25 @@ impl VoiceView {
 }
 
 impl Sidebar {
+    pub fn camera_status(&self) -> CameraStatus {
+        let camera = &self.voice_intent.camera;
+        if !camera.enabled {
+            return CameraStatus::Off;
+        }
+        self.voice
+            .as_ref()
+            .and_then(|voice| voice.video.as_ref())
+            .filter(|report| report.camera_revision == camera.revision)
+            .map_or(CameraStatus::Starting, |report| report.camera)
+    }
+
+    pub fn camera_publishing(&self) -> bool {
+        matches!(
+            self.camera_status(),
+            CameraStatus::Starting | CameraStatus::Live(..)
+        )
+    }
+
     pub(super) fn has_voice_channel(&self, channel_id: &str) -> bool {
         self.channels
             .iter()
@@ -588,13 +607,13 @@ impl VoiceSession {
                 sidebar.voice_intent.camera.revision += 1;
             }
             Command::ChooseCamera(device) => {
-                if camera_failed(sidebar) {
+                if matches!(sidebar.camera_status(), CameraStatus::Failed(_)) {
                     sidebar.voice_intent.camera.enabled = false;
                 }
                 sidebar.voice_intent.camera.device = device;
             }
             Command::ChooseCameraResolution(resolution) => {
-                if camera_failed(sidebar) {
+                if matches!(sidebar.camera_status(), CameraStatus::Failed(_)) {
                     sidebar.voice_intent.camera.enabled = false;
                 }
                 sidebar.voice_intent.camera.resolution = resolution;
@@ -666,10 +685,11 @@ impl VoiceSession {
                 }) {
                     return;
                 }
+                let audio = confirmed_audio && sidebar.voice_intent.preferred.screen_audio;
                 sidebar
                     .voice_intent
                     .screen
-                    .advance(attempt, Action::Start(confirmed_audio));
+                    .advance(attempt, Action::Start(audio));
             }
             Command::StopScreenShare(attempt) => {
                 if sidebar.voice_intent.screen.advance(attempt, Action::Stop)
@@ -728,12 +748,4 @@ impl VoiceSession {
             sidebar.device_notice = settings.devices.notice;
         }
     }
-}
-
-fn camera_failed(sidebar: &Sidebar) -> bool {
-    sidebar
-        .voice
-        .as_ref()
-        .and_then(|voice| voice.video.as_ref())
-        .is_some_and(|video| matches!(video.camera, CameraStatus::Failed(_)))
 }

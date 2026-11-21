@@ -94,46 +94,47 @@ impl VideoFrameSlot {
     }
 }
 
-pub(crate) fn preview_camera(
-    mut choice: CameraIntent,
-) -> async_channel::Receiver<Result<Arc<RenderImage>, &'static str>> {
-    choice.enabled = false;
-    let (frames, receiver) = async_channel::bounded(1);
-    std::thread::spawn(move || {
-        let result = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-            Ok(runtime) => runtime.block_on(async {
-                let mut capture = Some(camera::Capture::start(&choice)?);
-                let frame_slot = VideoFrameSlot::default();
-                let mut deadline = tokio::time::Instant::now() + camera::START_TIMEOUT;
-                let result = loop {
-                    tokio::select! {
-                        biased;
-                        () = frames.closed() => break Ok(()),
-                        _ = tokio::time::sleep_until(deadline) => break Err("Camera preview stopped. Check the device and try again."),
-                        frame = camera::next_frame(&mut capture) => {
-                            let Some(frame) = frame else {
-                                break Err(capture.as_mut().expect("camera capture exists").failure().await);
-                            };
-                            deadline = tokio::time::Instant::now() + camera::FRAME_TIMEOUT;
-                            if !frames.is_full() {
-                                frame_slot.update(&frame, true);
-                                if let Some(image) = frame_slot.latest() {
-                                    let _ = frames.try_send(Ok(image));
-                                }
-                            }
-                        }
-                    }
-                };
-                capture.take().expect("camera capture exists").stop().await;
-                result
-            }),
-            Err(_) => Err("Could not start Camera preview."),
-        };
-        if let Err(message) = result {
-            let _ = frames.send_blocking(Err(message));
+pub(crate) async fn preview_camera(
+    choice: CameraIntent,
+    frames: async_channel::Sender<Result<Arc<RenderImage>, &'static str>>,
+) {
+    if frames.is_closed() {
+        return;
+    }
+    let mut capture = match camera::Capture::start(&choice) {
+        Ok(capture) => Some(capture),
+        Err(message) => {
+            let _ = frames.try_send(Err(message));
+            return;
         }
-    });
-    receiver
+    };
+    let frame_slot = VideoFrameSlot::default();
+    let mut deadline = tokio::time::Instant::now() + camera::START_TIMEOUT;
+    let error = loop {
+        tokio::select! {
+            biased;
+            () = frames.closed() => break None,
+            _ = tokio::time::sleep_until(deadline) => {
+                break Some("Camera preview stopped. Check the device and try again.");
+            }
+            frame = camera::next_frame(&mut capture) => {
+                let Some(frame) = frame else {
+                    break Some(capture.as_mut().expect("camera capture exists").failure().await);
+                };
+                deadline = tokio::time::Instant::now() + camera::FRAME_TIMEOUT;
+                if !frames.is_full() {
+                    frame_slot.update(&frame, true);
+                    if let Some(image) = frame_slot.latest() {
+                        let _ = frames.try_send(Ok(image));
+                    }
+                }
+            }
+        }
+    };
+    capture.take().expect("camera capture exists").stop().await;
+    if let Some(message) = error {
+        let _ = frames.send(Err(message)).await;
+    }
 }
 
 #[derive(Clone, Default)]
@@ -146,6 +147,7 @@ pub struct ParticipantVideo {
 pub struct VideoReport {
     pub devices: Arc<Vec<CameraDevice>>,
     pub camera: CameraStatus,
+    pub camera_revision: u64,
     pub reconnecting: bool,
     pub participants: HashMap<String, ParticipantVideo>,
 }
@@ -198,6 +200,7 @@ impl Video {
                 self.stop_camera().await;
                 self.report.camera = CameraStatus::Off;
                 camera = intent.camera;
+                self.report.camera_revision = camera.revision;
                 if camera.enabled {
                     match camera::Capture::start(&camera) {
                         Ok(capture) => {

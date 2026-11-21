@@ -555,13 +555,11 @@ impl Spk {
             self.video_stage.theater.as_deref().filter(|id| {
                 in_voice && participants.iter().any(|participant| participant.id == *id)
             });
-        let camera_status =
-            call.and_then(|call| call.video.as_ref())
-                .and_then(|report| match report.camera {
-                    CameraStatus::Starting => Some("Starting Camera…"),
-                    CameraStatus::Failed(message) => Some(message),
-                    _ => None,
-                });
+        let camera_status = call.and_then(|_| match sidebar.camera_status() {
+            CameraStatus::Starting => Some("Starting Camera…"),
+            CameraStatus::Failed(message) => Some(message),
+            _ => None,
+        });
         div()
             .id("voice-stage")
             .relative()
@@ -755,8 +753,7 @@ impl Spk {
         let theater = self.video_stage.theater.as_deref() == Some(participant.id)
             && call.is_some_and(VoiceView::is_participating);
         let camera_live = if is_me {
-            call.and_then(|call| call.video.as_ref())
-                .is_some_and(|video| matches!(video.camera, CameraStatus::Live(..)))
+            matches!(sidebar.camera_status(), CameraStatus::Live(..))
         } else {
             call.and_then(|call| call.video.as_ref())
                 .and_then(|video| video.participants.get(participant.id))

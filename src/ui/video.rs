@@ -134,12 +134,7 @@ impl Spk {
         sidebar: &Sidebar,
         cx: &Context<Self>,
     ) -> impl IntoElement {
-        let report = sidebar.voice.as_ref().and_then(|call| call.video.as_ref());
-        let status = report.map_or(CameraStatus::Off, |report| report.camera);
-        let on = match status {
-            CameraStatus::Failed(_) => false,
-            _ => sidebar.voice_intent.camera.enabled,
-        };
+        let on = sidebar.camera_publishing();
         let label = if on { "Stop Camera" } else { "Start Camera" };
         let app = cx.weak_entity();
         div()
@@ -555,7 +550,6 @@ pub(super) fn camera_options(
     let default_camera = entity.clone();
     let resolution_entity = entity.clone();
     let choice = &sidebar.voice_intent.camera;
-    let report = sidebar.voice.as_ref().and_then(|call| call.video.as_ref());
     let chosen = choice.device.as_deref();
     let unavailable = chosen.is_some_and(|id| !devices.iter().any(|device| device.id == id));
     div()
@@ -624,10 +618,10 @@ pub(super) fn camera_options(
                 })),
         )
         .when_some(
-            report.and_then(|report| match report.camera {
+            match sidebar.camera_status() {
                 CameraStatus::Live(width, height) => Some(format!("Live at {width} × {height}")),
                 _ => None,
-            }),
+            },
             |panel, resolution| panel.child(Label::new(resolution).text_xs()),
         )
 }

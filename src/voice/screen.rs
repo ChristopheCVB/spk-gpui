@@ -317,7 +317,7 @@ pub(super) async fn run(worker: &Worker, room: &Room) {
                     platform::select(choice, playback).await?
                 }
                 #[cfg(windows)]
-                Action::ChooseSystem(item) => platform::select_system(item?)?,
+                Action::ChooseSystem(item) => platform::select_system(item?).await?,
                 _ => unreachable!(),
             };
             report(State::Confirm {

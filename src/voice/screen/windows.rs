@@ -80,23 +80,28 @@ pub(crate) async fn pick_system_source(hwnd: isize) -> Result<GraphicsCaptureIte
         })
 }
 
-pub(super) fn select_system(item: GraphicsCaptureItem) -> Result<Selection, CaptureError> {
-    let apartment = GraphicsApartment::new()?;
-    let label = item
-        .DisplayName()
-        .map_err(graphics_error)?
-        .to_string_lossy();
-    // The system picker exposes a capture item without a stable HWND or playback endpoint.
-    Ok(Selection {
-        label,
-        audio: None,
-        capture: Box::new(Selected {
-            item: SelectedItem(item, apartment),
-            window: None,
-            fps: None,
+pub(super) async fn select_system(item: GraphicsCaptureItem) -> Result<Selection, CaptureError> {
+    tokio::task::spawn_blocking(move || {
+        let _apartment = Apartment::new()?;
+        let apartment = GraphicsApartment::new()?;
+        let label = item
+            .DisplayName()
+            .map_err(graphics_error)?
+            .to_string_lossy();
+        // The system picker exposes a capture item without a stable HWND or playback endpoint.
+        Ok(Selection {
+            label,
             audio: None,
-        }),
+            capture: Box::new(Selected {
+                item: SelectedItem(item, apartment),
+                window: None,
+                fps: None,
+                audio: None,
+            }),
+        })
     })
+    .await
+    .map_err(|_| CaptureError::Unavailable)?
 }
 
 pub(super) async fn choices() -> Result<Vec<Choice>, CaptureError> {
