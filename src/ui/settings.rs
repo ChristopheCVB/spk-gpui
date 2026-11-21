@@ -6,6 +6,7 @@ use std::{
 
 mod audio;
 mod camera;
+mod channels;
 mod notifications;
 mod profile;
 mod shortcuts;
@@ -92,6 +93,7 @@ enum Tab {
     Voice,
     Notifications,
     Shortcuts,
+    Channels,
 }
 
 impl Spk {
@@ -115,7 +117,15 @@ impl Spk {
                 }
             })
             .detach();
+            let channel_name = cx.new(|cx| InputState::new(window, cx).placeholder("Channel name"));
+            cx.subscribe_in(&channel_name, window, |settings, _, event, _, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    settings.submit_channel_form(false, cx);
+                }
+            })
+            .detach();
             cx.observe(&spk, |settings, _, cx| {
+                settings.sync_channel_form(cx);
                 settings.sync_mic_test(cx);
                 settings.sync_camera_preview(cx);
                 cx.notify();
@@ -190,6 +200,9 @@ impl Spk {
                 spk,
                 tab: Tab::Profile,
                 nickname,
+                channel_name,
+                channel_form: None,
+                channel_submitted_at: None,
                 avatar_picker_open: false,
                 avatar_picker_error: None,
                 volumes,
@@ -229,6 +242,9 @@ struct Settings {
     spk: Entity<Spk>,
     tab: Tab,
     nickname: Entity<InputState>,
+    channel_name: Entity<InputState>,
+    channel_form: Option<channels::ChannelForm>,
+    channel_submitted_at: Option<u64>,
     avatar_picker_open: bool,
     avatar_picker_error: Option<&'static str>,
     volumes: [Entity<SliderState>; Sound::ALL.len()],
@@ -251,12 +267,16 @@ impl Render for Settings {
         let View::SignedIn(sidebar) = &app.view else {
             return div();
         };
+        if self.tab == Tab::Channels && !sidebar.is_admin() {
+            self.tab = Tab::Profile;
+        }
         let body = match self.tab {
             Tab::Profile => self.profile(sidebar, cx).into_any_element(),
             Tab::Appearance => self.appearance(app, cx).into_any_element(),
             Tab::Voice => self.audio(sidebar, cx).into_any_element(),
             Tab::Notifications => self.notifications(cx).into_any_element(),
             Tab::Shortcuts => self.shortcuts(cx).into_any_element(),
+            Tab::Channels => self.channels(sidebar, cx).into_any_element(),
         };
         div()
             .size_full()
@@ -319,8 +339,10 @@ impl Render for Settings {
                                     (Tab::Voice, "Voice & Video", IconName::Mic),
                                     (Tab::Notifications, "Notifications", IconName::Bell),
                                     (Tab::Shortcuts, "Shortcuts", IconName::Settings2),
+                                    (Tab::Channels, "Channels", IconName::Hash),
                                 ]
                                 .into_iter()
+                                .filter(|(tab, _, _)| *tab != Tab::Channels || sidebar.is_admin())
                                 .map(|(tab, label, icon)| {
                                     let active = self.tab == tab;
                                     let color = if active {
@@ -371,14 +393,40 @@ impl Render for Settings {
                     )
                     .child(
                         div()
-                            .id("settings-body")
                             .flex()
                             .flex_col()
                             .flex_1()
                             .min_w_0()
-                            .overflow_y_scroll()
-                            .p_6()
-                            .child(body),
+                            .children(
+                                self.channel_form
+                                    .as_ref()
+                                    .filter(|_| self.tab == Tab::Channels)
+                                    .map(|form| {
+                                        div()
+                                            .px_6()
+                                            .pt_6()
+                                            .gap_2()
+                                            .flex()
+                                            .flex_col()
+                                            .children(self.channel_status(sidebar, cx))
+                                            .child(self.channel_editor(
+                                                form,
+                                                sidebar.channel_admin.pending,
+                                                cx,
+                                            ))
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .id("settings-body")
+                                    .flex()
+                                    .flex_col()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .overflow_y_scroll()
+                                    .p_6()
+                                    .child(body),
+                            ),
                     ),
             )
     }

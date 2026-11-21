@@ -226,6 +226,13 @@ impl ChatSession {
         true
     }
 
+    pub(super) fn selected_text_channel(&self) -> Option<&str> {
+        self.selected
+            .as_ref()
+            .filter(|chat| chat.direct_message_peer.is_none())
+            .map(|chat| chat.channel_id.as_str())
+    }
+
     pub fn close(&mut self) {
         self.cancel_history();
         self.reset_actions();

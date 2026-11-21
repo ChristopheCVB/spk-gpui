@@ -1,8 +1,10 @@
 mod attachments;
+mod channel_admin;
 mod chat_actions;
 mod search;
 
 pub use attachments::{Attachment, AttachmentRef, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS};
+pub use channel_admin::{ChannelKind, ChannelMutation};
 pub use chat_actions::{LinkPreview, MessageAction, MessageChange, Reaction};
 pub use search::{MessageTarget, SearchHit, SearchPage, SearchScope};
 

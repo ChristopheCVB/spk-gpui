@@ -1,6 +1,7 @@
 mod accounts;
 #[cfg(debug_assertions)]
 mod attachments;
+mod channel_admin;
 mod chat;
 mod media;
 mod moderation;
