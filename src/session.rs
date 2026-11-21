@@ -101,6 +101,7 @@ pub enum Command {
         scope: crate::api::SearchScope,
     },
     MoreSearchResults,
+    OpenMessageTarget(crate::api::MessageTarget),
     RetryChatSend,
     DismissChatSend,
     SaveNickname(String),
@@ -459,6 +460,7 @@ async fn watch_session(
     let mut voice = VoiceSession::default();
     let mut radio = RadioSession::default();
     let mut search = SearchSession::default();
+    let mut pending_message_target = None;
     let mut soundboard = SoundboardSession::default();
     let mut camera_previews = JoinSet::new();
     let mut profiles = JoinSet::new();
@@ -524,6 +526,7 @@ async fn watch_session(
                     }
                 }
                 Ok(Command::OpenTextChannel(id)) => {
+                    pending_message_target = None;
                     if let Some(channel) = sidebar.channels.iter().flatten().find(|channel| channel.id == id && channel.kind == "text") {
                         direct_message_opens = JoinSet::new();
                         sidebar.chat_notice = None;
@@ -531,6 +534,7 @@ async fn watch_session(
                     }
                 }
                 Ok(Command::OpenDirectMessage(id)) => {
+                    pending_message_target = None;
                     direct_message_opens = JoinSet::new();
                     if let Some(channel) = sidebar.channels.iter().flatten().find(|channel| channel.id == id && channel.kind == "dm" && channel.other_user_id.is_some()) {
                         sidebar.chat_notice = None;
@@ -540,6 +544,7 @@ async fn watch_session(
                     }
                 }
                 Ok(Command::StartDirectMessage(user_id)) => {
+                    pending_message_target = None;
                     direct_message_opens = JoinSet::new();
                     if user_id.is_empty() || sidebar.profile.id.as_deref() == Some(&user_id) {
                         sidebar.chat_notice = Some("Direct message unavailable.");
@@ -553,19 +558,33 @@ async fn watch_session(
                     }
                 }
                 Ok(Command::CloseChat) => {
+                    pending_message_target = None;
                     direct_message_opens = JoinSet::new();
                     sidebar.chat_notice = None;
                     chat.close();
                 }
                 Ok(Command::LoadOlderMessages) => chat.older(client),
                 Ok(Command::RetryChatHistory) => chat.retry_history(client),
-                Ok(Command::JumpToChatMessage { channel_id, message_id }) => chat.jump(client, &channel_id, message_id),
+                Ok(Command::JumpToChatMessage { channel_id, message_id }) => {
+                    pending_message_target = None;
+                    sidebar.chat_notice = None;
+                    chat.jump(client, &channel_id, message_id);
+                }
                 Ok(Command::LoadLatestMessages) => chat.latest(client),
                 Ok(Command::UpdateChatDraft { channel_id, body }) => chat.update_draft(channel_id, body),
                 Ok(Command::SetChatReply { channel_id, message_id }) => chat.set_reply(&channel_id, message_id.as_deref()),
                 Ok(Command::SendChatMessage { channel_id, body }) => chat.send(channel_id, body),
                 Ok(Command::SearchMessages { query, scope }) => search.start(&mut sidebar.search, client, query, scope),
                 Ok(Command::MoreSearchResults) => search.more(&mut sidebar.search, client),
+                Ok(Command::OpenMessageTarget(target)) => {
+                    direct_message_opens = JoinSet::new();
+                    pending_message_target = None;
+                    if !search::open_message_target(&mut sidebar, &mut chat, client, &target) {
+                        sidebar.chat_notice = Some("Opening message…");
+                        pending_message_target = Some(target);
+                        refresh.fetch(client, Resource::Channels);
+                    }
+                }
                 Ok(Command::RetryChatSend) => chat.retry_send(),
                 Ok(Command::DismissChatSend) => chat.dismiss_send(),
                 Ok(command @ (Command::SaveNickname(_) | Command::UploadAvatar(_) | Command::InspectProfileEmail(..))) => {
@@ -790,6 +809,13 @@ async fn watch_session(
                 let listed_voice_channel = matches!(resource, Resource::Channels)
                     && sidebar.voice.as_ref().is_some_and(|voice| sidebar.has_voice_channel(&voice.channel_id));
                 refresh.complete(&mut sidebar, resource, data);
+                if resource == Resource::Channels
+                    && !refresh.dirty.contains(&resource)
+                    && let Some(target) = pending_message_target.take()
+                    && (!presence_loaded || !search::open_message_target(&mut sidebar, &mut chat, client, &target))
+                {
+                    sidebar.chat_notice = Some("Message unavailable.");
+                }
                 if fresh_presence {
                     voice.presence_refreshed(&mut sidebar, presence_loaded);
                 }

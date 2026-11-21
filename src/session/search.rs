@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use tokio::task::JoinSet;
 
-use crate::api::{Failure, SearchHit, SearchPage, SearchScope, SpkClient};
+use super::{Sidebar, chat::ChatSession};
+use crate::api::{Failure, MessageTarget, SearchHit, SearchPage, SearchScope, SpkClient};
 
 #[derive(Clone, Default)]
 pub struct SearchView {
@@ -68,4 +69,21 @@ impl SearchSession {
             Err(_) => view.failed = true,
         }
     }
+}
+
+pub(super) fn open_message_target(
+    sidebar: &mut Sidebar,
+    chat: &mut ChatSession,
+    client: &SpkClient,
+    target: &MessageTarget,
+) -> bool {
+    let Some(channel) = sidebar.channels.iter().flatten().find(|channel| {
+        channel.id == target.channel_id()
+            && (channel.kind == "text" || channel.kind == "dm" && channel.other_user_id.is_some())
+    }) else {
+        return false;
+    };
+    chat.open_target(client, channel, target.message_id().to_owned());
+    sidebar.chat_notice = None;
+    true
 }

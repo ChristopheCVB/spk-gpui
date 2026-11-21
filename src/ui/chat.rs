@@ -1,4 +1,4 @@
-mod markdown;
+pub(super) mod markdown;
 
 use std::{
     cell::RefCell,
@@ -11,9 +11,9 @@ use gpui_kit::component::{
     text::{MarkdownExtensions, TextView},
 };
 
-use crate::api::ChatMessage;
+use crate::api::{ChatMessage, MessageTarget};
 
-use markdown::{message_markdown, safe_link};
+use markdown::{message_markdown, plain_text, safe_link};
 
 use super::*;
 
@@ -133,12 +133,12 @@ impl Spk {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
-        let status = if chat.unavailable() {
+        let status = if chat.jump_failed {
+            Some("Message unavailable.")
+        } else if chat.unavailable() {
             Some("Direct message unavailable.")
         } else if chat.history_failed() {
             Some("Could not load message history.")
-        } else if chat.jump_failed {
-            Some("Original message unavailable.")
         } else if chat.loading() {
             Some("Loading messages…")
         } else if chat.messages.is_empty() {
@@ -416,7 +416,9 @@ impl Spk {
         let link_app = app.clone();
         let link_filter = self.chat_spoiler_link.clone();
         let link_prefix = self.chat_spoiler_link.clone();
-        let text = TextView::markdown("message-body", rendered)
+        let share_text = SharedString::from(rendered);
+        let target = MessageTarget::new(&message.channel_id, &message.id);
+        let text = TextView::markdown("message-body", share_text.clone())
             .markdown_extensions(
                 MarkdownExtensions::default()
                     .parser_revision(1)
@@ -438,7 +440,7 @@ impl Spk {
                         });
                     }
                 } else if let Some(url) = safe_link(href) {
-                    cx.open_url(url.as_str());
+                    search::activate_chat_link(&link_app, url, cx);
                 }
             });
         let composer_busy = chat.outgoing.is_some() || !chat.can_send();
@@ -559,6 +561,31 @@ impl Spk {
                                                 });
                                             }),
                                     );
+                                let copy_text = share_text.clone();
+                                let copy_markdown = body.clone();
+                                let menu = menu
+                                    .separator()
+                                    .item(PopupMenuItem::new("Copy text").on_click(
+                                        move |_, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                plain_text(&copy_text),
+                                            ));
+                                        },
+                                    ))
+                                    .item(PopupMenuItem::new("Copy Markdown").on_click(
+                                        move |_, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                copy_markdown.clone(),
+                                            ));
+                                        },
+                                    ))
+                                    .when_some(target.clone(), |menu, target| {
+                                        menu.item(PopupMenuItem::new("Copy link").on_click(
+                                            move |_, _, cx| {
+                                                search::copy_message_link(&target, cx);
+                                            },
+                                        ))
+                                    });
                                 if hidden.is_empty() {
                                     menu
                                 } else {

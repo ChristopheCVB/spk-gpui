@@ -116,12 +116,12 @@ pub(super) struct ChatSession {
 impl ChatSession {
     pub fn view(&self) -> Option<ChatView> {
         let mut view = self.selected.clone()?;
-        // Hide cached DM content until SPK confirms access during a refresh.
+        // Hide cached DM content until SPK confirms access to the conversation.
         if view.direct_message_peer.is_some()
             && view.history != History::Ready
             && matches!(
                 self.history,
-                Some(HistoryRequest::Refresh | HistoryRequest::Latest)
+                Some(HistoryRequest::Refresh | HistoryRequest::Latest | HistoryRequest::Around(_))
             )
         {
             view.messages = Arc::default();
@@ -141,12 +141,25 @@ impl ChatSession {
     }
 
     pub fn open(&mut self, client: &SpkClient, channel: &Channel) {
-        if self
-            .selected
-            .as_ref()
-            .is_some_and(|chat| chat.channel_id == channel.id && !chat.unavailable())
-        {
-            return;
+        if self.select(channel) {
+            self.load(client, HistoryRequest::Refresh);
+        }
+    }
+
+    pub fn open_target(&mut self, client: &SpkClient, channel: &Channel, message_id: String) {
+        self.select(channel);
+        if let Some(view) = &mut self.selected {
+            Arc::make_mut(&mut view.messages).retain(|message| message.id != message_id);
+            view.jump = None;
+        }
+        self.load(client, HistoryRequest::Around(message_id));
+    }
+
+    fn select(&mut self, channel: &Channel) -> bool {
+        if self.selected.as_ref().is_some_and(|chat| {
+            chat.channel_id == channel.id && !chat.unavailable() && !chat.jump_failed
+        }) {
+            return false;
         }
         self.typers.clear();
         self.last_typing = None;
@@ -166,7 +179,7 @@ impl ChatSession {
             outgoing: None,
             history: History::Loading,
         });
-        self.load(client, HistoryRequest::Refresh);
+        true
     }
 
     pub fn close(&mut self) {
@@ -177,6 +190,11 @@ impl ChatSession {
 
     pub fn connected(&mut self, client: &SpkClient, socket: VoiceSocket) {
         self.socket = Some(socket);
+        if matches!(self.history, Some(HistoryRequest::Around(_)))
+            && self.selected.as_ref().is_some_and(ChatView::loading)
+        {
+            return;
+        }
         if self
             .selected
             .as_ref()
@@ -306,9 +324,8 @@ impl ChatSession {
                 view.history = History::Ready;
             }
             Err(error) => {
-                if matches!(request, HistoryRequest::Around(_))
-                    && matches!(error, Failure::Http(reqwest::StatusCode::NOT_FOUND))
-                {
+                let jump = matches!(request, HistoryRequest::Around(_));
+                if jump && matches!(error, Failure::Http(reqwest::StatusCode::NOT_FOUND)) {
                     view.history = History::Ready;
                     view.jump = None;
                     view.jump_failed = true;
@@ -328,6 +345,9 @@ impl ChatSession {
                         self.outgoing.remove(&view.channel_id);
                         self.drafts.remove(&view.channel_id);
                         self.typers.clear();
+                    }
+                    view.jump_failed = jump;
+                    if view.direct_message_peer.is_some() || view.jump_failed {
                         view.history = History::Unavailable;
                         self.buffered.clear();
                         return;

@@ -1,8 +1,8 @@
 use super::*;
-use crate::api::SearchScope;
+use crate::api::{MessageTarget, SearchScope};
 
 #[tokio::test]
-async fn searches_accessible_messages_with_spk_scopes_and_pages() {
+async fn searches_messages_and_opens_authenticated_exact_targets() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let http = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = Url::parse(&format!("http://{}", http.local_addr().unwrap())).unwrap();
@@ -103,6 +103,62 @@ async fn searches_accessible_messages_with_spk_scopes_and_pages() {
                 .eq(["m1", "m2"])
         })
         .await;
+
+        let old = MessageTarget::parse(
+            &Url::parse("https://spk.example.test").unwrap(),
+            &Url::parse("https://spk.example.test/c/general/m/m2").unwrap(),
+        ).unwrap();
+        tx.send(Command::OpenMessageTarget(old.clone())).await.unwrap();
+        let (line, request) = search.recv().await.unwrap();
+        assert_eq!(line, "GET /api/channels/general/messages?around=m2 HTTP/1.1");
+        request.respond(&[], &value!({
+            "messages":[{"id":"m2","channelId":"general","userId":"bob","body":"word","createdAt":12}],
+            "hasMoreBefore":true,
+            "hasMoreAfter":true,
+        }).to_string()).await;
+        wait_for_sidebar(&rx, |view| {
+            view.chat.as_ref().is_some_and(|chat| chat.jump.as_ref().is_some_and(|(id, _)| id == "m2"))
+        }).await;
+
+        // A permalink is checked again, even if the target exists in the current view.
+        tx.send(Command::OpenMessageTarget(old)).await.unwrap();
+        let (line, request) = search.recv().await.unwrap();
+        assert_eq!(line, "GET /api/channels/general/messages?around=m2 HTTP/1.1");
+        request.respond_raw("404 Not Found", &[], b"").await;
+        wait_for_sidebar(&rx, |view| {
+            view.chat.as_ref().is_some_and(|chat| chat.jump_failed && chat.messages.is_empty())
+        }).await;
+
+        let private = MessageTarget::new("dm-1", "private").unwrap();
+        tx.send(Command::OpenMessageTarget(private.clone())).await.unwrap();
+        let (line, request) = search.recv().await.unwrap();
+        assert_eq!(line, "GET /api/channels/dm-1/messages?around=private HTTP/1.1");
+        request.respond(&[], &value!({
+            "messages":[
+                {"id":"neighbor","channelId":"dm-1","userId":"bob","body":"private context","createdAt":12},
+                {"id":"private","channelId":"dm-1","userId":"bob","body":"private text","createdAt":13}
+            ],
+            "hasMoreBefore":false,
+            "hasMoreAfter":false,
+        }).to_string()).await;
+        wait_for_sidebar(&rx, |view| {
+            view.chat.as_ref().is_some_and(|chat| chat.messages.len() == 2)
+        }).await;
+
+        tx.send(Command::OpenMessageTarget(private)).await.unwrap();
+        let (line, request) = search.recv().await.unwrap();
+        assert_eq!(line, "GET /api/channels/dm-1/messages?around=private HTTP/1.1");
+        wait_for_sidebar(&rx, |view| {
+            view.chat.as_ref().is_some_and(|chat| chat.channel_id == "dm-1" && chat.loading() && chat.messages.is_empty())
+        }).await;
+        request.respond_raw("403 Forbidden", &[], b"").await;
+        wait_for_sidebar(&rx, |view| {
+            view.chat.as_ref().is_some_and(|chat| chat.jump_failed && chat.unavailable())
+        }).await;
+
+        let unknown = MessageTarget::new("unknown", "private").unwrap();
+        tx.send(Command::OpenMessageTarget(unknown)).await.unwrap();
+        wait_for_sidebar(&rx, |view| view.chat_notice == Some("Message unavailable.")).await;
 
         tx.close();
         assert!(matches!(session.await.unwrap(), SessionEnd::Closed));

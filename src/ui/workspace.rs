@@ -136,7 +136,20 @@ impl Spk {
                                     )),
                                 )
                                 .child(themed_icon(stage_icon, theme.muted_foreground, 16.0))
-                                .child(Label::new(stage_name.to_owned()).font_semibold()),
+                                .child(Label::new(stage_name.to_owned()).font_semibold())
+                                .child(
+                                    tool_button(
+                                        "message-search",
+                                        IconName::Search,
+                                        "Search messages",
+                                    )
+                                    .ml_auto()
+                                    .on_click(cx.listener(
+                                        |this, _, window, cx| {
+                                            this.open_message_search(window, cx);
+                                        },
+                                    )),
+                                ),
                         )
                     })
                     .when(sidebar.load_failed, |area| {

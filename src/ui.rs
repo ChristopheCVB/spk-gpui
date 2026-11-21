@@ -2,6 +2,7 @@ mod accounts;
 mod chat;
 mod profile;
 mod radio;
+mod search;
 mod settings;
 mod soundboard;
 mod video;
