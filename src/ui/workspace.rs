@@ -332,6 +332,9 @@ impl Spk {
                                     .text_color(theme.muted_foreground),
                             ),
                     )
+                    .when(call.is_participating(), |card| {
+                        card.children(self.voice_media_buttons(false, cx))
+                    })
                     .children(self.leave_voice("sidebar-leave", call, switching, false, cx))
             }))
             .child(
@@ -650,6 +653,7 @@ impl Spk {
                                                 VoiceControls::Channel,
                                                 cx,
                                             ))
+                                            .children(self.voice_media_buttons(true, cx))
                                             .child(self.camera_controls(sidebar, cx))
                                             .child(self.screen_button(call, cx))
                                             .child(super::voice::connection_diagnostics(cx))

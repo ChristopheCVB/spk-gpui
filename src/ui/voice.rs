@@ -167,28 +167,17 @@ impl Spk {
                         })
                 }),
             )
-            .when(
-                sidebar
-                    .voice
-                    .as_ref()
-                    .is_some_and(|voice| voice.is_participating()),
-                |bar| {
-                    bar.child(
-                        tool_button("radio", IconName::Radio, "Channel Radio")
-                            .when(!compact, |button| button.label("Radio"))
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.open_radio(window, cx)),
-                            ),
-                    )
-                    .child(
-                        tool_button("soundboard", IconName::Megaphone, "Soundboard")
-                            .when(!compact, |button| button.label("Soundboard"))
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.open_soundboard(window, cx)),
-                            ),
-                    )
-                },
-            )
+    }
+
+    pub(super) fn voice_media_buttons(&self, labeled: bool, cx: &Context<Self>) -> [Button; 2] {
+        [
+            tool_button("radio", IconName::Radio, "Channel Radio")
+                .when(labeled, |button| button.label("Radio"))
+                .on_click(cx.listener(|this, _, window, cx| this.open_radio(window, cx))),
+            tool_button("soundboard", IconName::Megaphone, "Soundboard")
+                .when(labeled, |button| button.label("Soundboard"))
+                .on_click(cx.listener(|this, _, window, cx| this.open_soundboard(window, cx))),
+        ]
     }
 }
 
