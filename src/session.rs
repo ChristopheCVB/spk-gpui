@@ -2,6 +2,7 @@ mod authentication;
 mod avatars;
 mod presence;
 mod radio;
+mod soundboard;
 mod voice_session;
 
 use std::{collections::HashMap, sync::Arc};
@@ -26,6 +27,7 @@ use authentication::{
 use avatars::AvatarLoads;
 use presence::{Refresh, Resource, VoiceMembership};
 use radio::{RadioSession, RadioView};
+use soundboard::{SoundboardSession, SoundboardView};
 use voice_session::{DeviceSettings, VoiceDestination, VoiceSession, VoiceSettings};
 pub use {presence::Participant, radio::RadioPlayback, voice_session::VoiceView};
 
@@ -52,18 +54,31 @@ pub enum Command {
     PauseRadio,
     ListenToRadio,
     SetRadioVolume(u8),
+    LoadSoundboard,
+    PlaySound(String),
+    PreviewSound(String),
+    SetSoundboardEnabled(bool),
+    SetSoundboardVolume(u8),
     SetCameraEnabled(bool),
     ChooseCamera(Option<String>),
     ChooseCameraResolution(CameraResolution),
     SetWatching(String, bool),
     OpenScreenShare,
     ChooseScreenSource(u64, String),
-    StartScreenShare(u64),
+    StartScreenShare(u64, bool),
     StopScreenShare(u64),
     SetScreenAudio(bool),
     SetScreenQuality(screen::Quality),
     SetOutputVolume(u8),
     SetParticipantVolume(String, ParticipantVolumeChange),
+    SetVoiceProcessing(VoiceProcessingSetting),
+}
+
+pub enum VoiceProcessingSetting {
+    EchoCancellation(bool),
+    NoiseSuppression(bool),
+    AutoGain(bool),
+    Sensitivity(u8),
 }
 
 pub enum View {
@@ -85,6 +100,7 @@ pub struct Sidebar {
     pub load_failed: bool,
     pub voice: Option<VoiceView>,
     pub radio: RadioView,
+    pub soundboard: SoundboardView,
     pub channel_radio: HashMap<String, String>,
     switching_to: Option<VoiceDestination>,
     pub voice_notice: Option<&'static str>,
@@ -107,6 +123,7 @@ impl Sidebar {
             load_failed: false,
             voice: None,
             radio: RadioView::default(),
+            soundboard: SoundboardView::default(),
             channel_radio: HashMap::new(),
             switching_to: None,
             voice_notice: None,
@@ -260,11 +277,13 @@ async fn watch_session(
     sidebar.devices = Arc::new((settings.enumerate_devices)());
     let mut voice = VoiceSession::default();
     let mut radio = RadioSession::default();
+    let mut soundboard = SoundboardSession::default();
     let end = loop {
         if commands.is_closed() {
             break SessionEnd::Closed;
         }
         radio.sync(&mut sidebar, &voice);
+        soundboard.sync(&mut sidebar, &voice);
         voice.start_pending(&mut sidebar, client, &settings.start_call);
         if views
             .send(View::SignedIn(Box::new(sidebar.clone())))
@@ -289,6 +308,9 @@ async fn watch_session(
                     | Command::SetRadioFavorite { .. } | Command::SelectRadio(_) | Command::StopRadio
                     | Command::PauseRadio | Command::ListenToRadio)) => {
                     radio.command(&mut sidebar, &voice, client, command);
+                }
+                Ok(command @ (Command::LoadSoundboard | Command::PlaySound(_) | Command::PreviewSound(_))) => {
+                    soundboard.command(&mut sidebar, &voice, client, command);
                 }
                 Ok(command) => {
                     voice.apply_controls(&mut sidebar, settings, command).await;
@@ -362,6 +384,9 @@ async fn watch_session(
                         }) => {
                         sidebar.radio.command_error = Some(error);
                     }
+                    Frame::VoiceSound { user_id, sound_id } => {
+                        soundboard.relay(&sidebar, client, &user_id, &sound_id);
+                    }
                     Frame::VoiceKicked { sid } => voice.kicked(&mut sidebar, &sid),
                     Frame::VoiceDisconnected { sid } => voice.server_disconnected(&mut sidebar, &sid),
                     _ => {}
@@ -418,6 +443,11 @@ async fn watch_session(
                     sidebar.radio.directory_error = Some("Could not load or update radio stations. Try again.");
                 }
             }
+            Some(Ok((id, result))) = soundboard.tasks.join_next_with_id() => {
+                if soundboard.complete(&mut sidebar.soundboard, id, result).is_err_and(|error| error.unauthorized()) {
+                    break SessionEnd::Invalidated(SESSION_EXPIRED);
+                }
+            }
             Some(result) = avatars.tasks.join_next() => {
                 if let Ok(loaded) = result {
                     avatars.complete(&mut sidebar, loaded);
@@ -459,6 +489,7 @@ async fn watch_session(
             }
         }
     };
+    drop(soundboard);
     drop(radio);
     voice.stop().await;
     end

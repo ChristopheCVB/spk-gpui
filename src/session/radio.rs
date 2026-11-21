@@ -6,10 +6,7 @@ use uuid::Uuid;
 use super::{Command, Sidebar, VoiceSession};
 use crate::{
     api::{Failure, RadioStation, SpkClient, VoiceFrame},
-    voice::{
-        Device,
-        radio::{Output, RadioPlayer},
-    },
+    voice::{Device, MediaOutput, radio::RadioPlayer},
 };
 
 pub use crate::voice::radio::RadioPlayback;
@@ -74,7 +71,7 @@ impl RadioSession {
         }
         let preferences = &sidebar.voice_intent.preferred;
         sidebar.radio.volume = preferences.radio_volume.min(200);
-        let output = Output {
+        let output = MediaOutput {
             device: sidebar
                 .devices
                 .media_outputs
@@ -174,7 +171,7 @@ impl RadioSession {
                 });
             }
             Command::SelectRadio(_) | Command::StopRadio => {
-                let Some((socket, sid)) = voice.radio_socket(sidebar) else {
+                let Some((socket, sid)) = voice.active_socket(sidebar) else {
                     sidebar.radio.command_error =
                         Some("Radio controls are offline. Wait for reconnection.".into());
                     return;

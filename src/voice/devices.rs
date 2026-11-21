@@ -27,8 +27,11 @@ pub struct DevicePreferences {
     pub speakers: Option<Device>,
     pub media_output: Option<Device>,
     pub radio_volume: u8,
+    pub soundboard_enabled: bool,
+    pub soundboard_volume: u8,
     pub screen_audio: bool,
     pub output_volume: u8,
+    pub processing: VoiceProcessing,
     pub participant_volumes: HashMap<String, ParticipantVolume>,
 }
 
@@ -39,9 +42,32 @@ impl Default for DevicePreferences {
             speakers: None,
             media_output: None,
             radio_volume: 100,
+            soundboard_enabled: true,
+            soundboard_volume: 70,
             screen_audio: true,
             output_volume: 100,
             participant_volumes: HashMap::new(),
+            processing: VoiceProcessing::default(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct VoiceProcessing {
+    pub echo_cancellation: bool,
+    pub noise_suppression: bool,
+    pub auto_gain: bool,
+    pub sensitivity: u8,
+}
+
+impl Default for VoiceProcessing {
+    fn default() -> Self {
+        Self {
+            echo_cancellation: true,
+            noise_suppression: true,
+            auto_gain: true,
+            sensitivity: 50,
         }
     }
 }
@@ -218,6 +244,12 @@ fn media_outputs() -> DeviceList {
     }
 }
 
+#[derive(Clone, PartialEq)]
+pub(crate) struct MediaOutput {
+    pub device: Option<Device>,
+    pub volume: f32,
+}
+
 pub(crate) fn open_media_output(
     device: Option<&Device>,
     on_error: impl FnMut(cpal::Error) + Clone + Send + 'static,
@@ -314,6 +346,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn microphone_processing_preserves_old_defaults_and_round_trips_saved_settings() {
+        let mut preferences: DevicePreferences =
+            serde_json::from_str(r#"{"output_volume":75}"#).unwrap();
+        assert_eq!(preferences.processing, VoiceProcessing::default());
+        assert!(preferences.processing.echo_cancellation);
+
+        preferences.processing = VoiceProcessing {
+            echo_cancellation: false,
+            noise_suppression: false,
+            auto_gain: false,
+            sensitivity: 80,
+        };
+        let config = tempfile::tempdir().unwrap();
+        let path = config.path().join("voice-devices.json");
+        preferences.save(&path).unwrap();
+        assert_eq!(DevicePreferences::load(&path).unwrap(), preferences);
+    }
+
+    #[test]
     fn saved_devices_survive_restart_and_fall_back_until_they_return() {
         let config = tempfile::tempdir().unwrap();
         let path = config.path().join("spk-gpui/voice-devices.json");
@@ -337,6 +388,8 @@ mod tests {
                 name: "Headphones".into(),
             }),
             radio_volume: 125,
+            soundboard_enabled: false,
+            soundboard_volume: 25,
             ..Default::default()
         };
         saved.save(&path).unwrap();

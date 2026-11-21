@@ -1,5 +1,6 @@
 mod media;
 mod radio;
+mod soundboard;
 
 use std::{collections::HashSet, time::Duration};
 
@@ -349,6 +350,11 @@ async fn voice_session(
                 "GET /api/users HTTP/1.1" => "[]",
                 line if line.contains(" /api/radio/") => {
                     radio::respond(line, request, &mut radio_favorite).await;
+                    continue;
+                }
+                line if line.starts_with("GET /api/sounds") => {
+                    assert_eq!(request.header("cookie"), Some("session=fixture"));
+                    token_requests.send(request).await.unwrap();
                     continue;
                 }
                 "POST /api/voice/token HTTP/1.1" => {

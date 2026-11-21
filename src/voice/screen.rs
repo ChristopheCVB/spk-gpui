@@ -421,6 +421,7 @@ async fn capture_and_publish(
                     },
                     Some(samples) = audio_samples.recv(), if audio_available => {
                         if audio.is_none() {
+                            // shortcut: LiveKit 0.12 can downmix this stereo source. Use per-track stereo signaling once the SDK exposes it.
                             let source = NativeAudioSource::new(AudioSourceOptions {
                                 echo_cancellation: false,
                                 noise_suppression: false,
@@ -432,6 +433,7 @@ async fn capture_and_publish(
                                 source: TrackSource::ScreenshareAudio,
                                 stream: "screen".into(),
                                 dtx: false,
+                                red: false,
                                 ..Default::default()
                             });
                             if !started.await.unwrap_or(false) {

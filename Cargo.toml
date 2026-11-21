@@ -41,7 +41,7 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["NSAppl
 objc2-av-foundation = { version = "0.3", default-features = false, features = ["AVCaptureDevice", "AVMediaFormat", "block2"] }
 objc2-core-audio = { version = "0.3", default-features = false, features = ["AudioHardware", "AudioHardwareDeprecated"] }
 objc2-core-audio-types = { version = "0.3", default-features = false, features = ["CoreAudioBaseTypes"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["NSProcessInfo"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSProcessInfo"] }
 screencapturekit = { version = "=11.1.2", features = ["macos_15_0"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -59,3 +59,7 @@ windows-wgc = { package = "windows", version = "0.61", features = ["Graphics_Cap
 embed-resource = "3.0"
 url = "2.5"
 
+
+[profile.dev.package.pulseaudio]
+# Keep the protocol reactor responsive to teardown during continuous capture.
+opt-level = 2
