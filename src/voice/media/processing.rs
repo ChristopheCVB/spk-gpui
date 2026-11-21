@@ -7,7 +7,7 @@ use livekit::webrtc::{
     native::{apm::AudioProcessingModule, audio_resampler::AudioResampler},
 };
 use rodio::cpal::{
-    self, FromSample, SampleFormat, SizedSample,
+    self, BufferSize, FromSample, SampleFormat, SizedSample, SupportedBufferSize,
     traits::{DeviceTrait, StreamTrait},
 };
 use tokio::{
@@ -23,6 +23,8 @@ const FRAME: usize = RATE as usize / 100;
 
 pub(super) struct ProcessedInput {
     preferences: watch::Sender<VoiceProcessing>,
+    source: NativeAudioSource,
+    cancel: Option<oneshot::Sender<()>>,
     capture: JoinHandle<Option<()>>,
 }
 
@@ -35,10 +37,20 @@ impl ProcessedInput {
     ) -> (Self, oneshot::Receiver<()>) {
         let (preferences, updates) = watch::channel(preferences);
         let (ready, opened) = oneshot::channel();
-        let capture = tokio::spawn(capture(device, source, track, updates, ready));
+        let (cancel, stopped) = oneshot::channel();
+        let capture = tokio::spawn(capture(
+            device,
+            source.clone(),
+            track,
+            updates,
+            ready,
+            stopped,
+        ));
         (
             Self {
                 preferences,
+                source,
+                cancel: Some(cancel),
                 capture,
             },
             opened,
@@ -55,19 +67,17 @@ impl ProcessedInput {
         });
     }
 
+    pub(super) fn discard_buffer(&self) {
+        self.source.clear_buffer();
+    }
+
     pub(super) fn ended(&self) -> bool {
         self.capture.is_finished()
     }
 
     pub(super) async fn stop(mut self) {
-        self.capture.abort();
+        self.cancel.take();
         let _ = (&mut self.capture).await;
-    }
-}
-
-impl Drop for ProcessedInput {
-    fn drop(&mut self) {
-        self.capture.abort();
     }
 }
 
@@ -77,10 +87,13 @@ async fn capture(
     track: LocalAudioTrack,
     preferences: watch::Receiver<VoiceProcessing>,
     ready: oneshot::Sender<()>,
+    mut stopped: oneshot::Receiver<()>,
 ) -> Option<()> {
     #[cfg(target_os = "macos")]
-    if !super::microphone_permission().await {
-        return None;
+    tokio::select! {
+        biased;
+        _ = &mut stopped => return None,
+        granted = super::microphone_permission() => if !granted { return None; },
     }
     let device = cpal_device(DeviceKind::Microphone, selected.as_ref())?;
     let mut config = device.default_input_config().ok()?;
@@ -93,8 +106,13 @@ async fn capture(
             .find_map(|range| range.try_with_sample_rate(RATE))?;
     }
     let rate = config.sample_rate();
-    let (send, mut blocks) = mpsc::channel(4);
-    let (fail, mut failed) = oneshot::channel();
+    let mut stream_config = config.config();
+    // PulseAudio's default buffering delivers bursts that can drop 10 ms RTC frames.
+    if let SupportedBufferSize::Range { min, max } = *config.buffer_size() {
+        stream_config.buffer_size = BufferSize::Fixed((rate / 50).clamp(min, max));
+    }
+    let (send, blocks) = mpsc::channel(8);
+    let (fail, failed) = oneshot::channel();
     let stream = match config.sample_format() {
         SampleFormat::I8 => input::<i8>,
         SampleFormat::I16 => input::<i16>,
@@ -109,10 +127,28 @@ async fn capture(
         SampleFormat::F32 => input::<f32>,
         SampleFormat::F64 => input::<f64>,
         _ => return None,
-    }(&device, config.config(), send, fail)
+    }(&device, stream_config, send, fail)
     .ok()?;
     stream.play().ok()?;
 
+    let result = tokio::select! {
+        biased;
+        _ = &mut stopped => None,
+        result = send_audio(source, track, preferences, ready, blocks, failed, rate) => result,
+    };
+    let _ = stream.pause();
+    result
+}
+
+async fn send_audio(
+    source: NativeAudioSource,
+    track: LocalAudioTrack,
+    preferences: watch::Receiver<VoiceProcessing>,
+    ready: oneshot::Sender<()>,
+    mut blocks: mpsc::Receiver<Vec<i16>>,
+    mut failed: oneshot::Receiver<()>,
+    rate: u32,
+) -> Option<()> {
     let mut ready = Some(ready);
     let mut resampler = AudioResampler::default();
     let mut controls = None;
@@ -206,7 +242,7 @@ where
                 let _ = fail.send(());
             }
         },
-        None,
+        Some(Duration::from_secs(2)),
     )
 }
 

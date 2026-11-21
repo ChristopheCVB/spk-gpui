@@ -73,6 +73,9 @@ impl Capture {
         if let Some(track) = &self.track {
             track.mute();
         }
+        if let Some(input) = &self.input {
+            input.discard_buffer();
+        }
     }
 
     fn current_publication(&self, room: &Room) -> Option<TrackSid> {
@@ -108,7 +111,7 @@ impl Capture {
             track.mute();
             (track, None)
         } else {
-            let source = NativeAudioSource::new(Default::default(), super::processing::RATE, 1, 0);
+            let source = NativeAudioSource::new(Default::default(), super::processing::RATE, 1, 30);
             let track = LocalAudioTrack::create_audio_track(
                 "microphone",
                 RtcAudioSource::Native(source.clone()),
