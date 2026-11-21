@@ -13,7 +13,7 @@ use tokio::{
 };
 
 use super::{
-    Device, Devices, Issue, Report, Status, Update, Worker,
+    Device, Devices, Intent, Issue, Report, Status, Update, Worker,
     devices::{route_speakers, switch_speakers},
     video::Video,
     wait_until,
@@ -29,6 +29,7 @@ pub(crate) mod fixture;
 mod livekit_audio;
 #[cfg(target_os = "macos")]
 mod macos_audio;
+mod remote_audio;
 
 #[cfg(target_os = "macos")]
 pub(crate) use capture::microphone_permission;
@@ -110,6 +111,7 @@ impl Media {
             audio,
             events,
             capture: &mut media.capture,
+            remote: Default::default(),
         };
         tokio::select! {
             biased;
@@ -141,8 +143,6 @@ impl Media {
             format: playing.and_then(|device| backend.playout_format(device)),
             recording_initialized: false,
         };
-        backend.set_playout(playing.is_some());
-        backend.subscribe_microphones();
         let me = backend.identity();
         let mut speaking = Speaking::default();
         let mut reported = None;
@@ -202,6 +202,7 @@ impl Media {
                     output = next_output;
                 }
                 let playing = output.as_ref().filter(|_| !intent.mute.deafened);
+                backend.sync_remote_audio(&intent, &devices, playing);
                 playout.sync(
                     playing.is_some(),
                     playing.and_then(|device| backend.playout_format(device)),
@@ -254,7 +255,10 @@ impl Media {
                 result = requested.changed() => {
                     result.map_err(|_| Issue::Disconnected)?;
                     let next = requested.borrow_and_update().clone();
-                    if next.refresh_devices != intent.refresh_devices || next.preferred != intent.preferred
+                    if next.refresh_devices != intent.refresh_devices
+                        || next.preferred.microphone != intent.preferred.microphone
+                        || next.preferred.speakers != intent.preferred.speakers
+                        || next.preferred.media_output != intent.preferred.media_output
                         || next.retry_mic != intent.retry_mic || next.retry_speakers != intent.retry_speakers
                     {
                         devices = Arc::new(backend.devices());
@@ -264,7 +268,10 @@ impl Media {
                 }
                 event = backend.next_event(reconnecting) => match backend.handle_event(event).await {
                     MediaEvent::Speaking(active) if !reconnecting => speaking.update(active, Instant::now()),
-                    MediaEvent::ParticipantLeft(id) => speaking.remove(&id),
+                    MediaEvent::ParticipantLeft(id) => {
+                        speaking.remove(&id);
+                        check_routes = true;
+                    }
                     MediaEvent::Reconnecting => {
                         reconnecting = true;
                         diagnostics = Diagnostics::default();
@@ -272,6 +279,7 @@ impl Media {
                         stats_job = JoinSet::new();
                         backend.silence_microphone();
                         backend.set_playout(false);
+                        backend.suspend_remote_audio();
                         playout.format = None;
                         speaking.0.clear();
                     }
@@ -282,10 +290,9 @@ impl Media {
                         intent = requested.borrow_and_update().clone();
                         devices = Arc::new(backend.devices());
                         backend.reconcile_microphone().await;
-                        backend.subscribe_microphones();
                     }
                     MediaEvent::Disconnected(issue) => return Err(issue),
-                    MediaEvent::MicrophoneChanged => check_routes = true,
+                    MediaEvent::MicrophoneChanged | MediaEvent::RemoteAudioChanged => check_routes = true,
                     MediaEvent::Quality(quality) if !reconnecting => diagnostics.quality = Some(quality),
                     _ => {}
                 },
@@ -316,7 +323,8 @@ trait RoomAudio {
     fn devices(&self) -> Devices;
     fn switch_speakers(&self, device: &Device) -> bool;
     fn set_playout(&self, enabled: bool);
-    fn subscribe_microphones(&self);
+    fn sync_remote_audio(&mut self, intent: &Intent, devices: &Devices, speakers: Option<&Device>);
+    fn suspend_remote_audio(&mut self) {}
     fn playout_format(&self, device: &Device) -> Option<Self::PlayoutFormat>;
     fn macos_recording_initialized(&self) -> bool;
     fn selected_microphone(&self) -> Option<&Device>;
@@ -340,6 +348,7 @@ enum MediaEvent {
     Reconnected,
     Disconnected(Issue),
     MicrophoneChanged,
+    RemoteAudioChanged,
     Quality(ConnectionQuality),
     Other,
 }

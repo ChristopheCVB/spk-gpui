@@ -1,4 +1,4 @@
-use std::{fs, io, path::Path};
+use std::{collections::HashMap, fs, io, path::Path};
 
 use livekit::{PlatformAudio, PlayoutDeviceId, RecordingDeviceId};
 use rodio::cpal::{
@@ -28,6 +28,7 @@ pub struct DevicePreferences {
     pub media_output: Option<Device>,
     pub radio_volume: u8,
     pub output_volume: u8,
+    pub participant_volumes: HashMap<String, ParticipantVolume>,
 }
 
 impl Default for DevicePreferences {
@@ -38,11 +39,47 @@ impl Default for DevicePreferences {
             media_output: None,
             radio_volume: 100,
             output_volume: 100,
+            participant_volumes: HashMap::new(),
         }
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct ParticipantVolume {
+    pub mic: u8,
+    pub screen: u8,
+    pub muted: bool,
+}
+
+impl Default for ParticipantVolume {
+    fn default() -> Self {
+        Self {
+            mic: 100,
+            screen: 100,
+            muted: false,
+        }
+    }
+}
+
+pub enum ParticipantVolumeChange {
+    Microphone(u8),
+    Screen(u8),
+    Muted(bool),
+}
+
 impl DevicePreferences {
+    pub fn participant_volume(&self, id: &str) -> ParticipantVolume {
+        let mut volume = self
+            .participant_volumes
+            .get(id)
+            .copied()
+            .unwrap_or_default();
+        volume.mic = volume.mic.min(200);
+        volume.screen = volume.screen.min(200);
+        volume
+    }
+
     pub fn output_gain(&self) -> f32 {
         f32::from(self.output_volume.min(200)) / 100.0
     }

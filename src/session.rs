@@ -17,8 +17,8 @@ use url::Url;
 use crate::api::{Channel, Connection, Failure, Frame, Profile, SocketEvent, SpkClient, User};
 use crate::sounds::{Sound, SoundSettings, VoiceSounds};
 use crate::voice::{
-    Call, Device, DeviceKind, Devices, Intent, Issue as VoiceIssue, Status as VoiceStatus,
-    Update as VoiceUpdate, video::CameraResolution,
+    Call, Device, DeviceKind, Devices, Intent, Issue as VoiceIssue, ParticipantVolumeChange,
+    Status as VoiceStatus, Update as VoiceUpdate, video::CameraResolution,
 };
 use authentication::{
     SESSION_EXPIRED, SavedSession, login, restore, sign_in, sign_in_message, sign_out,
@@ -57,6 +57,7 @@ pub enum Command {
     ChooseCameraResolution(CameraResolution),
     SetWatching(String, bool),
     SetOutputVolume(u8),
+    SetParticipantVolume(String, ParticipantVolumeChange),
 }
 
 pub enum View {

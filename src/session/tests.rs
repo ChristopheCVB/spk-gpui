@@ -1649,6 +1649,12 @@ async fn camera_and_watch_choices_are_scoped_to_the_current_voice_session() {
                 assert_eq!(watch["sid"], *sid);
                 assert_eq!(watch["watching"], value!(["bob"]));
                 observed.send(()).await.unwrap();
+                let stop_watching = receive_voice_frame(&mut socket).await;
+                assert_eq!(stop_watching["watching"], value!([]));
+                observed.send(()).await.unwrap();
+                let watch_again = receive_voice_frame(&mut socket).await;
+                assert_eq!(watch_again["watching"], value!(["bob"]));
+                observed.send(()).await.unwrap();
                 let publish = receive_voice_frame(&mut socket).await;
                 assert_eq!(publish["cam"], true);
                 assert_eq!(publish["watching"], value!(["bob"]));
@@ -1689,6 +1695,33 @@ async fn camera_and_watch_choices_are_scoped_to_the_current_voice_session() {
                     .send(Command::SetWatching("alice".into(), true))
                     .await
                     .unwrap();
+                for change in [
+                    ParticipantVolumeChange::Microphone(125),
+                    ParticipantVolumeChange::Screen(40),
+                    ParticipantVolumeChange::Muted(true),
+                ] {
+                    commands
+                        .send(Command::SetParticipantVolume("bob".into(), change))
+                        .await
+                        .unwrap();
+                }
+                commands
+                    .send(Command::SetParticipantVolume(
+                        "alice".into(),
+                        ParticipantVolumeChange::Muted(true),
+                    ))
+                    .await
+                    .unwrap();
+                let view = wait_for_sidebar(&views, |sidebar| {
+                    sidebar
+                        .voice_intent
+                        .preferred
+                        .participant_volume("bob")
+                        .muted
+                })
+                .await;
+                let volume = view.voice_intent.preferred.participant_volume("bob");
+                assert_eq!((volume.mic, volume.screen), (125, 40));
                 commands
                     .send(Command::SetWatching("bob".into(), true))
                     .await
@@ -1698,6 +1731,23 @@ async fn camera_and_watch_choices_are_scoped_to_the_current_voice_session() {
                 })
                 .await;
                 assert!(!view.voice_intent.watching.contains("alice"));
+                assert!(
+                    !view
+                        .voice_intent
+                        .preferred
+                        .participant_volume("alice")
+                        .muted
+                );
+                observations.recv().await.unwrap();
+                commands
+                    .send(Command::SetWatching("bob".into(), false))
+                    .await
+                    .unwrap();
+                observations.recv().await.unwrap();
+                commands
+                    .send(Command::SetWatching("bob".into(), true))
+                    .await
+                    .unwrap();
                 observations.recv().await.unwrap();
                 commands
                     .send(Command::ChooseCameraResolution(CameraResolution::P720))
@@ -1712,6 +1762,7 @@ async fn camera_and_watch_choices_are_scoped_to_the_current_voice_session() {
                 })
                 .await;
                 assert!(view.viewers("first", "alice").is_empty());
+                assert!(view.voice_intent.preferred.participant_volume("bob").muted);
                 observations.recv().await.unwrap();
                 commands
                     .send(Command::SetCameraEnabled(false))

@@ -390,3 +390,143 @@ pub(super) fn connection_diagnostics(cx: &Context<Spk>) -> Popover {
                 )
         })
 }
+
+impl Spk {
+    pub(super) fn participant_volume_button(
+        &self,
+        participant: &crate::session::Participant<'_>,
+        sidebar: &Sidebar,
+        cx: &Context<Self>,
+    ) -> Button {
+        let id = participant.id.to_owned();
+        let name = participant.name.to_owned();
+        let volume = sidebar.voice_intent.preferred.participant_volume(&id);
+        tool_button(
+            "participant-volume",
+            if volume.muted {
+                IconName::VolumeX
+            } else {
+                IconName::Volume2
+            },
+            format!("Volume for {name}"),
+        )
+        .on_click(cx.listener(move |_, _, window, cx| {
+            let app = cx.entity();
+            let content = cx.new(|cx: &mut Context<ParticipantVolumeDialog>| {
+                use crate::voice::ParticipantVolumeChange;
+                use gpui_kit::component::slider::{SliderEvent, SliderValue};
+
+                cx.observe(&app, |_, _, cx| cx.notify()).detach();
+                let sliders = [
+                    (
+                        volume.mic,
+                        ParticipantVolumeChange::Microphone as fn(u8) -> _,
+                    ),
+                    (
+                        volume.screen,
+                        ParticipantVolumeChange::Screen as fn(u8) -> _,
+                    ),
+                ]
+                .map(|(initial, change)| {
+                    let slider = cx.new(|_| {
+                        gpui_kit::component::slider::SliderState::new()
+                            .max(200.0)
+                            .default_value(f32::from(initial))
+                    });
+                    cx.subscribe(&slider, move |dialog, _, event, cx| {
+                        if let SliderEvent::Release(SliderValue::Single(value)) = event {
+                            dialog.change(change(*value as u8), cx);
+                        }
+                        cx.notify();
+                    })
+                    .detach();
+                    slider
+                });
+                ParticipantVolumeDialog {
+                    app,
+                    id: id.clone(),
+                    sliders,
+                }
+            });
+            let title = format!("Volume for {name}");
+            window.open_dialog(cx, move |dialog, _, _| {
+                dialog
+                    .centered()
+                    .width(px(380.0))
+                    .title(title.clone())
+                    .child(content.clone())
+            });
+        }))
+    }
+}
+
+struct ParticipantVolumeDialog {
+    app: Entity<Spk>,
+    id: String,
+    sliders: [Entity<gpui_kit::component::slider::SliderState>; 2],
+}
+
+impl ParticipantVolumeDialog {
+    fn change(&self, change: crate::voice::ParticipantVolumeChange, cx: &mut Context<Self>) {
+        self.app.update(cx, |app, cx| {
+            app.send(
+                Command::SetParticipantVolume(self.id.clone(), change),
+                None,
+                cx,
+            );
+        });
+    }
+}
+
+impl Render for ParticipantVolumeDialog {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        use gpui_kit::component::{
+            slider::{Slider, SliderValue},
+            switch::Switch,
+        };
+
+        let View::SignedIn(sidebar) = &self.app.read(cx).view else {
+            return div();
+        };
+        let muted = sidebar
+            .voice_intent
+            .preferred
+            .participant_volume(&self.id)
+            .muted;
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(Label::new("Only changes what you hear."))
+            .children(
+                ["Mic volume", "Screen Share volume"]
+                    .into_iter()
+                    .zip(&self.sliders)
+                    .map(|(label, slider)| {
+                        let SliderValue::Single(value) = slider.read(cx).value() else {
+                            unreachable!("single participant volume slider")
+                        };
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(Label::new(format!("{label} {value:.0}%")))
+                            .child(
+                                Slider::new(slider)
+                                    .tab_stop(true)
+                                    .accessibility_label(label),
+                            )
+                    }),
+            )
+            .child(
+                Switch::new("mute-participant")
+                    .label("Mute for me")
+                    .accessibility_label("Mute for me")
+                    .checked(muted)
+                    .tab_stop(true)
+                    .on_change(cx.listener(|dialog, enabled: &bool, _, cx| {
+                        dialog.change(crate::voice::ParticipantVolumeChange::Muted(*enabled), cx);
+                    })),
+            )
+    }
+}

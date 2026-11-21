@@ -491,6 +491,13 @@ impl Spk {
                             .text_color(theme.muted_foreground),
                     )
                     .children(participant_status(flags.muted, flags.deafened, cx))
+                    .when(
+                        sidebar.profile.id.as_deref() != Some(person.id)
+                            && call.is_some_and(|call| {
+                                call.channel_id == channel.id && call.is_participating()
+                            }),
+                        |row| row.child(self.participant_volume_button(&person, sidebar, cx)),
+                    )
                     .when(flags.radio_listening == Some(true), |row| {
                         row.child(radio_badge(cx))
                     })
@@ -819,6 +826,10 @@ impl Spk {
                         )
                     })
                     .children(participant_status(flags.muted, flags.deafened, cx))
+                    .when(
+                        !is_me && call.is_some_and(VoiceView::is_participating),
+                        |row| row.child(self.participant_volume_button(&participant, sidebar, cx)),
+                    )
                     .when(flags.radio_listening == Some(true), |row| {
                         row.child(radio_badge(cx))
                     }),

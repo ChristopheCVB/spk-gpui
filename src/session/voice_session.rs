@@ -7,7 +7,7 @@ use crate::api::{Connection, SpkClient, VoiceSocket};
 use crate::sounds::{Sound, VoiceSounds};
 use crate::voice::{
     self, Call, DeviceKind, DevicePreferences, Devices, Intent, Issue as VoiceIssue,
-    Report as VoiceReport, Status as VoiceStatus, Update as VoiceUpdate,
+    ParticipantVolumeChange, Report as VoiceReport, Status as VoiceStatus, Update as VoiceUpdate,
     video::{CameraStatus, VideoReport},
 };
 
@@ -424,6 +424,10 @@ impl VoiceSession {
         settings: &mut VoiceSettings,
         command: Command,
     ) {
+        let save_volume = matches!(
+            &command,
+            Command::SetOutputVolume(_) | Command::SetParticipantVolume(..)
+        );
         match command {
             Command::ToggleMute => {
                 sidebar.voice_intent.mute.toggle_mic();
@@ -447,12 +451,31 @@ impl VoiceSession {
             }
             Command::SetOutputVolume(volume) => {
                 sidebar.voice_intent.preferred.output_volume = volume.min(200);
-                if let Some(call) = &self.call {
-                    call.apply(&sidebar.voice_intent);
+            }
+            Command::SetParticipantVolume(id, change) => {
+                if sidebar.profile.id.as_ref() == Some(&id)
+                    || !sidebar.voice.as_ref().is_some_and(|voice| {
+                        voice.is_participating()
+                            && sidebar
+                                .voice_presence
+                                .get(&id)
+                                .is_some_and(|member| member.channel_id == voice.channel_id)
+                    })
+                {
+                    return;
                 }
-                settings.devices.save(&sidebar.voice_intent.preferred).await;
-                sidebar.device_notice = settings.devices.notice;
-                return;
+                let preferred = &mut sidebar.voice_intent.preferred;
+                let mut volume = preferred.participant_volume(&id);
+                match change {
+                    ParticipantVolumeChange::Microphone(value) => volume.mic = value.min(200),
+                    ParticipantVolumeChange::Screen(value) => volume.screen = value.min(200),
+                    ParticipantVolumeChange::Muted(muted) => volume.muted = muted,
+                }
+                if volume == Default::default() {
+                    preferred.participant_volumes.remove(&id);
+                } else {
+                    preferred.participant_volumes.insert(id, volume);
+                }
             }
             Command::ChooseDevice(kind, device) => {
                 let choice = sidebar.voice_intent.preferred.get_mut(kind);
@@ -530,6 +553,10 @@ impl VoiceSession {
         }
         if let Some(call) = &self.call {
             call.apply(&sidebar.voice_intent);
+        }
+        if save_volume {
+            settings.devices.save(&sidebar.voice_intent.preferred).await;
+            sidebar.device_notice = settings.devices.notice;
         }
     }
 }

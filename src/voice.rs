@@ -19,7 +19,9 @@ mod media;
 pub(crate) mod radio;
 pub(crate) mod video;
 
-pub use devices::{Device, DeviceKind, DeviceList, DevicePreferences, Devices};
+pub use devices::{
+    Device, DeviceKind, DeviceList, DevicePreferences, Devices, ParticipantVolumeChange,
+};
 pub use media::Diagnostics;
 use media::Media;
 #[cfg(test)]
