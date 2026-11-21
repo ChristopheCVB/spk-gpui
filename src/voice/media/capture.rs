@@ -110,6 +110,7 @@ impl Capture {
     ) {
         let (starting, cancelled) = oneshot::channel();
         let (track, opened) = if processing.echo_cancellation {
+            // shortcut: LiveKit fixes native ADM processing and exposes no processed PCM sink, combine controls once it exposes one.
             let track = LocalAudioTrack::create_audio_track("microphone", audio.rtc_source());
             track.mute();
             (track, None)

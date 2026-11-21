@@ -213,7 +213,6 @@ impl Spk {
             .flatten()
             .any(|channel| channel.kind == "text");
         let name = sidebar.profile.name();
-        let online = matches!(sidebar.connection, Connection::Online);
 
         div()
             .flex()
@@ -376,47 +375,27 @@ impl Spk {
                     .py_2()
                     .rounded_lg()
                     .bg(theme.secondary)
-                    .child(
-                        div()
-                            .id("footer-avatar")
-                            .relative()
-                            .flex_shrink_0()
-                            .child(profile_avatar(
-                                Avatar::new().name(name.to_owned()).small(),
-                                sidebar.avatar(sidebar.profile.id.as_deref()),
-                                28.0,
-                                false,
-                                cx,
-                            ))
-                            .child(
-                                div()
-                                    .absolute()
-                                    .top_0()
-                                    .right_0()
-                                    .size_2()
-                                    .rounded_full()
-                                    .border_1()
-                                    .border_color(theme.background)
-                                    .bg(if online {
-                                        theme.success
-                                    } else {
-                                        theme.muted_foreground
-                                    }),
-                            ),
-                    )
+                    .child(profile_avatar(
+                        Avatar::new().name(name.to_owned()).small(),
+                        sidebar.avatar(sidebar.profile.id.as_deref()),
+                        28.0,
+                        false,
+                        cx,
+                    ))
                     .child(
                         div()
                             .flex()
                             .flex_col()
+                            .items_start()
                             .flex_1()
                             .min_w_0()
                             .ml_1()
                             .child(Label::new(name.to_owned()).font_semibold().truncate())
-                            .child(
-                                Label::new(if online { "Online" } else { "Offline" })
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground),
-                            ),
+                            .child(profile::user_status_picker(
+                                "sidebar-status",
+                                sidebar.user_status,
+                                cx.weak_entity(),
+                            )),
                     )
                     .child(self.voice_controls(sidebar, VoiceControls::Profile, cx))
                     .child(

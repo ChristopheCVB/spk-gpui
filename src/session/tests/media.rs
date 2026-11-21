@@ -1,4 +1,7 @@
-use livekit::prelude::ConnectionQuality;
+use livekit::{
+    prelude::ConnectionQuality,
+    webrtc::stats::{RemoteInboundRtpStats, RtcStats},
+};
 
 use super::*;
 use crate::voice::fixture::{Peer, start_call};
@@ -210,6 +213,32 @@ async fn desktop_voice_routes_samples_and_synchronizes_presence() {
 
             peer.quality(ConnectionQuality::Good);
             assert_call_quality(&views, Some(ConnectionQuality::Good)).await;
+            peer.report_stats(audio_stats(1_000_000, 2_000, 1_000, 90, 10, 0.003));
+            let baseline =
+                wait_for_diagnostics(&views, |report| report.jitter_ms == Some(30)).await;
+            assert_eq!(baseline.upload_kbps, None);
+            assert_eq!(baseline.download_kbps, None);
+            assert_eq!(baseline.loss_percent, None);
+
+            let mut stats = audio_stats(2_000_000, 6_000, 3_500, 108, 12, 0.007);
+            let mut remote = RemoteInboundRtpStats::default();
+            remote.stream.kind = "audio".into();
+            remote.remote_inbound.local_id = "outgoing".into();
+            remote.received.jitter = 0.012;
+            remote.remote_inbound.round_trip_time = 0.052;
+            remote.remote_inbound.round_trip_time_measurements = 1;
+            stats
+                .publisher_stats
+                .push(RtcStats::RemoteInboundRtp(remote));
+            peer.report_stats(stats);
+            let measured =
+                wait_for_diagnostics(&views, |report| report.upload_kbps.is_some()).await;
+            assert_eq!(measured.jitter_ms, Some(120));
+            assert_eq!(measured.round_trip_ms, Some(520));
+            assert_eq!(measured.upload_kbps, Some(320));
+            assert_eq!(measured.download_kbps, Some(200));
+            assert_eq!(measured.loss_percent, Some(100));
+            assert_eq!(measured.quality, Some(ConnectionQuality::Good));
             peer.reconnecting();
             let reconnecting = wait_for_route(
                 &views,
@@ -242,6 +271,12 @@ async fn desktop_voice_routes_samples_and_synchronizes_presence() {
             );
             peer.quality(ConnectionQuality::Excellent);
             assert_call_quality(&views, Some(ConnectionQuality::Excellent)).await;
+            peer.report_stats(audio_stats(3_000_000, 8_000, 5_500, 126, 13, 0.004));
+            let recovered =
+                wait_for_diagnostics(&views, |report| report.jitter_ms == Some(40)).await;
+            assert_eq!(recovered.upload_kbps, None);
+            assert_eq!(recovered.download_kbps, None);
+            assert_eq!(recovered.loss_percent, None);
 
             peer.disconnect();
             let terminal = wait_for_sidebar(&views, |sidebar| {
@@ -567,6 +602,56 @@ async fn serve_active_media_presence(
         value!({"type":"voice:state","sid":sid,"muted":false,"deafened":false,"speaking":false,"cam":false,"screen":false,"watching":[]}),
     );
     publish_media_presence(socket, snapshots, "first", VoiceFlags::default()).await;
+}
+
+fn audio_stats(
+    timestamp: i64,
+    sent: u64,
+    received: u64,
+    packets: u64,
+    lost: i64,
+    jitter: f64,
+) -> livekit::rtc_engine::SessionStats {
+    use livekit::webrtc::stats::{InboundRtpStats, OutboundRtpStats};
+
+    let mut inbound = InboundRtpStats::default();
+    inbound.rtc.id = "incoming".into();
+    inbound.rtc.timestamp = timestamp;
+    inbound.stream.kind = "audio".into();
+    inbound.inbound.bytes_received = received;
+    inbound.received.packets_received = packets;
+    inbound.received.packets_lost = lost;
+    inbound.received.jitter = jitter;
+
+    let mut outbound = OutboundRtpStats::default();
+    outbound.rtc.id = "outgoing".into();
+    outbound.rtc.timestamp = timestamp;
+    outbound.stream.kind = "audio".into();
+    outbound.sent.bytes_sent = sent;
+
+    livekit::rtc_engine::SessionStats {
+        // A single peer connection reports both directions through publisher stats.
+        publisher_stats: vec![
+            RtcStats::InboundRtp(inbound),
+            RtcStats::OutboundRtp(outbound),
+        ],
+        subscriber_stats: Vec::new(),
+    }
+}
+
+async fn wait_for_diagnostics(
+    views: &Receiver<View>,
+    matches: impl Fn(&crate::voice::Diagnostics) -> bool,
+) -> crate::voice::Diagnostics {
+    let sidebar = wait_for_sidebar(views, |sidebar| {
+        sidebar
+            .voice
+            .as_ref()
+            .and_then(|voice| voice.media.as_ref())
+            .is_some_and(|media| matches(&media.diagnostics))
+    })
+    .await;
+    sidebar.voice.unwrap().media.unwrap().diagnostics
 }
 
 async fn assert_call_quality(views: &Receiver<View>, quality: Option<ConnectionQuality>) {

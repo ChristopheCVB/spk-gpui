@@ -8,7 +8,10 @@ mod video;
 mod voice;
 mod workspace;
 
-use std::sync::{Arc, LazyLock};
+use std::{
+    sync::{Arc, LazyLock},
+    time::{Duration, Instant},
+};
 
 use gpui_kit::{
     assets::IconName,
@@ -35,6 +38,8 @@ use settings::Appearance;
 pub(super) use settings::ShortcutKeys;
 use voice::VoiceControls;
 
+const PRESENCE_IDLE_AFTER: Duration = Duration::from_secs(10 * 60);
+
 pub(super) struct Spk {
     email: Entity<InputState>,
     password: Entity<InputState>,
@@ -56,6 +61,8 @@ pub(super) struct Spk {
     shortcuts: Shortcuts,
     sound_settings: tokio::sync::watch::Sender<SoundSettings>,
     signing_out: bool,
+    last_activity: Instant,
+    activity: tokio::sync::watch::Sender<bool>,
 }
 
 impl Spk {
@@ -110,6 +117,7 @@ impl Spk {
         let (commands, requests) = async_channel::bounded(8);
         let (updates, views) = async_channel::bounded(16);
         let shortcuts = Shortcuts::new(window);
+        let (activity, presence_activity) = tokio::sync::watch::channel(window.is_window_active());
         let (sound_settings, sounds) = tokio::sync::watch::channel(shortcuts.sound_settings());
         let global_events = shortcuts.watch_events();
         cx.spawn_in(window, async move |this, cx| {
@@ -140,12 +148,19 @@ impl Spk {
         let window_id = window.window_handle().window_id();
         cx.intercept_keystrokes(move |event, window, cx| {
             if window.window_handle().window_id() == window_id {
-                let _ = app.update(cx, |this, cx| this.capture_shortcut(event, window, cx));
+                let _ = app.update(cx, |this, cx| {
+                    this.record_activity(window);
+                    this.capture_shortcut(event, window, cx);
+                });
             }
         })
         .detach();
         cx.observe_window_activation(window, |this, window, cx| {
-            if !window.is_window_active() {
+            if window.is_window_active() {
+                this.record_activity(window);
+            } else {
+                this.activity
+                    .send_if_modified(|active| std::mem::replace(active, false));
                 this.shortcuts.clear_focused();
                 if this
                     .shortcuts
@@ -155,6 +170,29 @@ impl Spk {
                 {
                     this.cancel_shortcut_editor(cx);
                 }
+            }
+        })
+        .detach();
+
+        let clock = cx.background_executor().clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let mut until_idle = PRESENCE_IDLE_AFTER;
+            loop {
+                clock.timer(until_idle).await;
+                let Ok(remaining) = this.update_in(cx, |this, _, _| {
+                    let remaining =
+                        PRESENCE_IDLE_AFTER.saturating_sub(this.last_activity.elapsed());
+                    if remaining.is_zero() {
+                        this.activity
+                            .send_if_modified(|active| std::mem::replace(active, false));
+                        PRESENCE_IDLE_AFTER
+                    } else {
+                        remaining
+                    }
+                }) else {
+                    break;
+                };
+                until_idle = remaining;
             }
         })
         .detach();
@@ -179,7 +217,7 @@ impl Spk {
                 .enable_all()
                 .build()
             {
-                runtime.block_on(session::run(requests, updates, sounds));
+                runtime.block_on(session::run(requests, updates, sounds, presence_activity));
             }
             let _ = finished.send(());
         });
@@ -247,7 +285,26 @@ impl Spk {
             shortcuts,
             sound_settings,
             signing_out: false,
+            last_activity: Instant::now(),
+            activity,
         }
+    }
+
+    fn record_activity(&mut self, window: &Window) {
+        if window.is_window_active() {
+            self.last_activity = Instant::now();
+            self.activity
+                .send_if_modified(|active| !std::mem::replace(active, true));
+        }
+    }
+
+    fn observe_pointer<Event: MouseEvent>(app: &WeakEntity<Self>, window: &mut Window) {
+        let app = app.clone();
+        window.on_mouse_event(move |_: &Event, phase, window, cx| {
+            if phase.capture() {
+                let _ = app.update(cx, |app, _| app.record_activity(window));
+            }
+        });
     }
 
     fn set_session_view(&mut self, view: View, window: &mut Window, cx: &mut Context<Self>) {
@@ -383,6 +440,7 @@ impl Render for Spk {
                 )
                 .into_any_element(),
         };
+        let app = cx.weak_entity();
         div()
             .id("spk-window")
             .track_focus(&self.workspace_focus)
@@ -397,6 +455,18 @@ impl Render for Spk {
             .when(!matches!(self.view, View::SignedIn(_)), |page| {
                 page.justify_center().items_center().p_6()
             })
+            // Window-wide capture includes input over Profile and Settings dialogs.
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |_, (), window, _| {
+                        Self::observe_pointer::<MouseDownEvent>(&app, window);
+                        Self::observe_pointer::<MouseMoveEvent>(&app, window);
+                        Self::observe_pointer::<ScrollEvent>(&app, window);
+                    },
+                )
+                .absolute(),
+            )
             .child(content)
     }
 }

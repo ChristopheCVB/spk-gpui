@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::{collections::VecDeque, sync::Mutex};
 
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
@@ -48,6 +48,7 @@ struct State {
     hardware_format: Option<(u32, u32)>,
     output_format: Option<(u32, u32)>,
     subscribed: bool,
+    stats: VecDeque<SessionStats>,
 }
 
 impl State {
@@ -118,6 +119,10 @@ impl Peer {
         self.events
             .send(MediaEvent::Quality(quality))
             .unwrap_or_else(|_| panic!("voice fixture closed"));
+    }
+
+    pub(crate) fn report_stats(&self, stats: SessionStats) {
+        self.state.lock().unwrap().stats.push_back(stats);
     }
 
     pub(crate) fn reconnecting(&self) {
@@ -193,6 +198,7 @@ impl TestRoom {
             hardware_format: None,
             output_format: None,
             subscribed: false,
+            stats: VecDeque::new(),
         }));
         let playout_changed = Arc::new(tokio::sync::Notify::new());
         let peer = Peer {
@@ -318,6 +324,12 @@ impl RoomAudio for TestRoom {
     }
 
     async fn reconcile_microphone(&mut self) {}
+
+    fn start_stats(&self, jobs: &mut JoinSet<Option<SessionStats>>) {
+        if let Some(stats) = self.state.lock().unwrap().stats.pop_front() {
+            jobs.spawn(async move { Some(stats) });
+        }
+    }
 
     async fn next_event(&mut self, reconnecting: bool) -> MediaEvent {
         tokio::select! {
