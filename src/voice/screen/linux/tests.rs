@@ -14,7 +14,7 @@ fn padded_bgra_frames_convert_and_obey_the_preset_without_upscaling() {
     let height = 1080;
     let stride = 1930 * 4;
     let mut bytes = vec![0; (stride * height) as usize];
-    for pixel in bytes.chunks_exact_mut(4) {
+    for pixel in bytes.as_chunks_mut::<4>().0 {
         pixel.copy_from_slice(&[0, 0, 255, 255]);
     }
     let frame = video_frame(

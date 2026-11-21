@@ -1767,6 +1767,11 @@ async fn camera_and_watch_choices_are_scoped_to_the_current_voice_session() {
                     .await
                     .unwrap();
                 observations.recv().await.unwrap();
+                commands.send(Command::SetScreenHeight(1440)).await.unwrap();
+                commands.send(Command::SetScreenFps(60)).await.unwrap();
+                commands.send(Command::SetScreenHeight(900)).await.unwrap();
+                commands.send(Command::SetScreenFps(25)).await.unwrap();
+
                 commands
                     .send(Command::ChooseCameraResolution(CameraResolution::P720))
                     .await
@@ -1781,7 +1786,18 @@ async fn camera_and_watch_choices_are_scoped_to_the_current_voice_session() {
                 .await;
                 assert!(view.viewers("first", "alice").is_empty());
                 assert!(view.voice_intent.preferred.participant_volume("bob").muted);
+                assert_eq!(
+                    view.voice_intent.screen.quality,
+                    screen::Quality {
+                        height: 1440,
+                        fps: 60
+                    }
+                );
                 observations.recv().await.unwrap();
+                commands
+                    .send(Command::SetWatching("bob".into(), true))
+                    .await
+                    .unwrap();
                 commands
                     .send(Command::SetCameraEnabled(false))
                     .await

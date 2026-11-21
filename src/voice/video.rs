@@ -21,7 +21,7 @@ use super::{Update, Worker, wait_until};
 use crate::api::VideoPresence;
 
 mod camera;
-pub use camera::{CameraDevice, CameraResolution, run_camera_command};
+pub use camera::{CameraDevice, CameraResolution, devices as camera_devices, run_camera_command};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CameraIntent {
@@ -94,6 +94,48 @@ impl VideoFrameSlot {
     }
 }
 
+pub(crate) fn preview_camera(
+    mut choice: CameraIntent,
+) -> async_channel::Receiver<Result<Arc<RenderImage>, &'static str>> {
+    choice.enabled = false;
+    let (frames, receiver) = async_channel::bounded(1);
+    std::thread::spawn(move || {
+        let result = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(runtime) => runtime.block_on(async {
+                let mut capture = Some(camera::Capture::start(&choice)?);
+                let frame_slot = VideoFrameSlot::default();
+                let mut deadline = tokio::time::Instant::now() + camera::START_TIMEOUT;
+                let result = loop {
+                    tokio::select! {
+                        biased;
+                        () = frames.closed() => break Ok(()),
+                        _ = tokio::time::sleep_until(deadline) => break Err("Camera preview stopped. Check the device and try again."),
+                        frame = camera::next_frame(&mut capture) => {
+                            let Some(frame) = frame else {
+                                break Err(capture.as_mut().expect("camera capture exists").failure().await);
+                            };
+                            deadline = tokio::time::Instant::now() + camera::FRAME_TIMEOUT;
+                            if !frames.is_full() {
+                                frame_slot.update(&frame, true);
+                                if let Some(image) = frame_slot.latest() {
+                                    let _ = frames.try_send(Ok(image));
+                                }
+                            }
+                        }
+                    }
+                };
+                capture.take().expect("camera capture exists").stop().await;
+                result
+            }),
+            Err(_) => Err("Could not start Camera preview."),
+        };
+        if let Err(message) = result {
+            let _ = frames.send_blocking(Err(message));
+        }
+    });
+    receiver
+}
+
 #[derive(Clone, Default)]
 pub struct ParticipantVideo {
     pub live: HashSet<VideoSource>,
@@ -104,7 +146,7 @@ pub struct ParticipantVideo {
 pub struct VideoReport {
     pub devices: Arc<Vec<CameraDevice>>,
     pub camera: CameraStatus,
-    pub watching: HashSet<String>,
+    pub reconnecting: bool,
     pub participants: HashMap<String, ParticipantVideo>,
 }
 
@@ -140,7 +182,6 @@ impl Video {
         let mut requested = worker.requested.clone();
         let mut camera = CameraIntent::default();
         let mut watching = HashSet::new();
-        let mut departed = HashSet::new();
         let mut refresh = tokio::time::interval(std::time::Duration::from_secs(3));
         refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut reconnecting = false;
@@ -149,7 +190,6 @@ impl Video {
 
         loop {
             let intent = requested.borrow_and_update().clone();
-            departed.retain(|id| intent.watching.contains(id));
             if watching != intent.watching {
                 watching = intent.watching;
                 sync = true;
@@ -175,9 +215,9 @@ impl Video {
 
             if sync {
                 sync = false;
-                self.report.watching = watching.difference(&departed).cloned().collect();
-                self.sync_tracks(room, reconnecting);
-                let mut watching: Vec<_> = self.report.watching.iter().cloned().collect();
+                self.report.reconnecting = reconnecting;
+                self.sync_tracks(room, &watching, reconnecting);
+                let mut watching: Vec<_> = watching.iter().cloned().collect();
                 watching.sort_unstable();
                 worker.publish_video_presence(VideoPresence {
                     cam: matches!(self.report.camera, CameraStatus::Live(..)),
@@ -219,15 +259,13 @@ impl Video {
                             let _ = room.local_participant().unpublish_track(&publication.sid()).await;
                         }
                         Some(RoomEvent::ParticipantDisconnected(participant)) if !reconnecting => {
-                            let id = participant.identity().0;
-                            if watching.contains(&id) {
-                                departed.insert(id);
-                            }
+                            worker.update(Update::VideoParticipantLeft(participant.identity().0));
                         }
                         Some(RoomEvent::TrackPublished { .. } | RoomEvent::TrackUnpublished { .. }
                             | RoomEvent::TrackMuted { .. } | RoomEvent::TrackUnmuted { .. }
                             | RoomEvent::TrackSubscribed { .. } | RoomEvent::TrackUnsubscribed { .. }
-                            | RoomEvent::ParticipantConnected(_) | RoomEvent::Connected { .. }) => {}
+                            | RoomEvent::ParticipantConnected(_) | RoomEvent::ParticipantDisconnected(_)
+                            | RoomEvent::Connected { .. }) => {}
                         _ => continue,
                     }
                     sync = true;
@@ -243,7 +281,7 @@ impl Video {
                     if let Some(frame) = frame {
                         deadline = Some(tokio::time::Instant::now() + camera::FRAME_TIMEOUT);
                         if self.publication.is_none() {
-                            self.publish_camera(room, &frame);
+                            self.publish_camera(room, &frame, &requested, &camera);
                             sync = true;
                         }
                         if let Some(camera) = &self.publication {
@@ -284,7 +322,13 @@ impl Video {
         }
     }
 
-    fn publish_camera(&mut self, room: &Room, frame: &VideoFrame<I420Buffer>) {
+    fn publish_camera(
+        &mut self,
+        room: &Room,
+        frame: &VideoFrame<I420Buffer>,
+        requested: &tokio::sync::watch::Receiver<super::Intent>,
+        camera: &CameraIntent,
+    ) {
         let publisher = room.local_participant();
         let source = NativeVideoSource::new(
             VideoResolution {
@@ -299,7 +343,15 @@ impl Video {
         let (ready, started) = tokio::sync::oneshot::channel();
         tokio::spawn({
             let track = track.clone();
+            let requested = requested.clone();
+            let camera = camera.clone();
             async move {
+                let mut stopped = stopped;
+                if requested.borrow().camera != camera
+                    || stopped.try_recv() != Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+                {
+                    return;
+                }
                 let result = publisher
                     .publish_track(
                         LocalTrack::Video(track.clone()),
@@ -309,9 +361,12 @@ impl Video {
                         },
                     )
                     .await;
-                let _ = ready.send(result.as_ref().map(|_| ()).map_err(|_| ()));
-                if result.is_ok() {
+                let published = result.is_ok();
+                let current = requested.borrow().camera == camera;
+                if current && ready.send(result.map(|_| ()).map_err(|_| ())).is_ok() && published {
                     let _ = stopped.await;
+                }
+                if published {
                     let _ = publisher.unpublish_track(&track.sid()).await;
                 }
             }
@@ -334,7 +389,7 @@ impl Video {
         }
     }
 
-    fn sync_tracks(&mut self, room: &Room, reconnecting: bool) {
+    fn sync_tracks(&mut self, room: &Room, watching: &HashSet<String>, reconnecting: bool) {
         let me = room.local_participant().identity().0;
         self.report.participants.retain(|id, _| *id == me);
         let local = self.report.participants.entry(me).or_default();
@@ -348,7 +403,7 @@ impl Video {
         let mut active = HashSet::new();
         for participant in room.remote_participants().values() {
             let id = participant.identity().0;
-            let wanted = self.report.watching.contains(&id);
+            let wanted = watching.contains(&id);
             let video = self.report.participants.entry(id).or_default();
             for publication in participant.track_publications().values() {
                 let Some(source) = VideoSource::from_track(publication.source()) else {
@@ -439,7 +494,8 @@ mod tests {
             I420Buffer::new_black(320, 180),
         );
         let (capture, share) = if video_source == VideoSource::Camera {
-            local.publish_camera(&publisher, &frame);
+            let (intent, requested) = tokio::sync::watch::channel(super::super::Intent::default());
+            local.publish_camera(&publisher, &frame, &requested, &intent.borrow().camera);
             tokio::time::timeout(
                 std::time::Duration::from_secs(5),
                 wait_publication(&mut local.publication),
@@ -485,19 +541,20 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(publication.source(), track_source);
-        remote.sync_tracks(&receiver, false);
+        let mut watching = HashSet::new();
+        remote.sync_tracks(&receiver, &watching, false);
         let remote_tile = &remote.report.participants[&presenter];
         assert!(remote_tile.live.contains(&video_source));
         assert!(remote_tile.frames.is_empty());
         assert!(!publication.is_desired());
 
-        remote.report.watching.insert(presenter.clone());
-        remote.sync_tracks(&receiver, false);
+        watching.insert(presenter.clone());
+        remote.sync_tracks(&receiver, &watching, false);
         assert!(publication.is_desired());
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
                 capture.capture_frame(&frame);
-                remote.sync_tracks(&receiver, false);
+                remote.sync_tracks(&receiver, &watching, false);
                 if remote.report.participants[&presenter]
                     .frames
                     .get(&video_source)
@@ -512,8 +569,8 @@ mod tests {
         .await
         .unwrap();
 
-        remote.report.watching.clear();
-        remote.sync_tracks(&receiver, false);
+        watching.clear();
+        remote.sync_tracks(&receiver, &watching, false);
         assert!(!publication.is_desired());
         assert!(remote.report.participants[&presenter].frames.is_empty());
         if let Some(share) = share {

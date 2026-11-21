@@ -29,12 +29,15 @@ use windows_capture::{
 use windows_wgc::{
     Foundation::TypedEventHandler,
     Graphics::{
-        Capture::{Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession},
+        Capture::{
+            Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCapturePicker,
+            GraphicsCaptureSession,
+        },
         DirectX::{Direct3D11::IDirect3DDevice, DirectXPixelFormat},
         SizeInt32,
     },
     Win32::{
-        Foundation::{E_POINTER, HMODULE},
+        Foundation::{E_ABORT, E_POINTER, HMODULE, HWND as PickerHwnd},
         Graphics::{
             Direct3D::D3D_DRIVER_TYPE_HARDWARE,
             Direct3D11::{
@@ -48,11 +51,53 @@ use windows_wgc::{
         System::WinRT::Direct3D11::{
             CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
         },
+        UI::Shell::IInitializeWithWindow,
     },
     core::Interface,
 };
 
 use super::*;
+
+pub(crate) const SYSTEM_PICKER: &str = "windows-picker";
+
+pub(crate) async fn pick_system_source(hwnd: isize) -> Result<GraphicsCaptureItem, CaptureError> {
+    let picker = GraphicsCapturePicker::new().map_err(graphics_error)?;
+    let owner = picker
+        .cast::<IInitializeWithWindow>()
+        .map_err(graphics_error)?;
+    // GPUI supplies the live owner HWND and runs this operation on its OLE-initialized UI thread.
+    unsafe { owner.Initialize(PickerHwnd(hwnd as *mut _)) }.map_err(graphics_error)?;
+    picker
+        .PickSingleItemAsync()
+        .map_err(graphics_error)?
+        .await
+        .map_err(|error| {
+            if error.code().is_ok() || matches!(error.code(), E_POINTER | E_ABORT) {
+                CaptureError::Cancelled
+            } else {
+                graphics_error(error)
+            }
+        })
+}
+
+pub(super) fn select_system(item: GraphicsCaptureItem) -> Result<Selection, CaptureError> {
+    let apartment = GraphicsApartment::new()?;
+    let label = item
+        .DisplayName()
+        .map_err(graphics_error)?
+        .to_string_lossy();
+    // The system picker exposes a capture item without a stable HWND or playback endpoint.
+    Ok(Selection {
+        label,
+        audio: None,
+        capture: Box::new(Selected {
+            item: SelectedItem(item, apartment),
+            window: None,
+            fps: None,
+            audio: None,
+        }),
+    })
+}
 
 pub(super) async fn choices() -> Result<Vec<Choice>, CaptureError> {
     tokio::task::spawn_blocking(|| {
@@ -60,7 +105,12 @@ pub(super) async fn choices() -> Result<Vec<Choice>, CaptureError> {
         if !GraphicsCaptureSession::IsSupported().unwrap_or(false) {
             return Err(CaptureError::Unavailable);
         }
-        Ok(sources().into_iter().map(|(choice, _)| choice).collect())
+        Ok(std::iter::once(Choice {
+            id: SYSTEM_PICKER.into(),
+            label: "Windows picker (video only)".into(),
+        })
+        .chain(sources().into_iter().map(|(choice, _)| choice))
+        .collect())
     })
     .await
     .map_err(|_| CaptureError::Unavailable)?

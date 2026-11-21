@@ -189,7 +189,12 @@ impl Cue {
         const NOTE_LENGTH: usize = SAMPLE_RATE as usize * 130 / 1000;
         let notes = self.notes();
         let mut samples = vec![0.0; (notes.len() - 1) * SPACING + NOTE_LENGTH];
-        let gain = 0.3 * f32::from(self.volume) / 100.0;
+        let scale = if matches!(self.sound, Sound::Screen | Sound::Watch) {
+            0.12
+        } else {
+            0.3
+        };
+        let gain = scale * f32::from(self.volume) / 100.0;
         let triangle = matches!(self.sound, Sound::Mute | Sound::Deafen);
         for (note, frequency) in notes.iter().enumerate() {
             for (frame, sample) in samples[note * SPACING..][..NOTE_LENGTH]

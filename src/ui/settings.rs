@@ -5,6 +5,7 @@ use std::{
 };
 
 mod audio;
+mod camera;
 mod shortcuts;
 
 use gpui_kit::component::{
@@ -102,6 +103,7 @@ impl Spk {
         let content = cx.new(|cx: &mut Context<Settings>| {
             cx.observe(&spk, |settings, _, cx| {
                 settings.sync_mic_test(cx);
+                settings.sync_camera_preview(cx);
                 cx.notify();
             })
             .detach();
@@ -163,6 +165,7 @@ impl Spk {
                 mic_level: 0,
                 playback_pending: false,
                 audio_test_error: None,
+                camera: camera::Preview::default(),
             }
         });
         cx.observe_release(&content, |this, _, cx| this.cancel_shortcut_editor(cx))
@@ -191,10 +194,12 @@ struct Settings {
     mic_level: u8,
     playback_pending: bool,
     audio_test_error: Option<&'static str>,
+    camera: camera::Preview,
 }
 
 impl Render for Settings {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.camera.release_unused_image(window);
         let theme = cx.theme();
         let app = self.spk.read(cx);
         let View::SignedIn(sidebar) = &app.view else {
@@ -304,7 +309,9 @@ impl Render for Settings {
                                             }
                                             this.tab = tab;
                                             this.sync_mic_test(cx);
+                                            this.sync_camera_preview(cx);
                                             if tab == Tab::Voice {
+                                                this.refresh_cameras(cx);
                                                 this.spk.update(cx, |app, cx| {
                                                     app.send(Command::RefreshDevices, None, cx)
                                                 });

@@ -293,6 +293,7 @@ impl Settings {
                 cx,
             ))
             .child(self.processing(sidebar, cx))
+            .child(self.camera_settings(sidebar, cx))
             .children(
                 self.audio_test_error
                     .map(|error| Label::new(error).text_color(cx.theme().danger)),

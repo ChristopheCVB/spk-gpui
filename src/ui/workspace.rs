@@ -769,7 +769,7 @@ impl Spk {
                     |video| !video.live.is_empty(),
                 )
         };
-        let image = self.video_image(&participant, is_me);
+        let (image, camera_inset) = self.video_images(&participant, is_me);
         div()
             .id(SharedString::from(participant.id.to_owned()))
             .relative()
@@ -799,6 +799,23 @@ impl Spk {
                 ))
             })
             .children(image)
+            .when_some(camera_inset, |tile, camera| {
+                tile.child(
+                    div()
+                        .absolute()
+                        .top_10()
+                        .right_2()
+                        .w(relative(0.26))
+                        .max_w(px(200.0))
+                        .aspect_ratio(16.0 / 9.0)
+                        .overflow_hidden()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.secondary)
+                        .child(camera),
+                )
+            })
             .child(
                 div()
                     .absolute()

@@ -304,6 +304,9 @@ impl VoiceSession {
     }
 
     pub(super) fn presence_refreshed(&mut self, sidebar: &mut Sidebar, loaded: bool) {
+        if loaded {
+            self.prune_watching(sidebar);
+        }
         if self.reclaim.is_some() && loaded {
             self.reclaim = None;
             if sidebar.voice_replaced() {
@@ -415,18 +418,39 @@ impl VoiceSession {
         }
     }
 
-    pub(super) fn participant_changed(
-        &self,
-        sidebar: &mut Sidebar,
-        id: &str,
-        channel: Option<&str>,
-    ) {
-        if let Some(call) = &self.call
-            && sidebar
-                .voice
-                .as_ref()
-                .is_some_and(|voice| channel != Some(&voice.channel_id))
-            && sidebar.voice_intent.watching.remove(id)
+    pub(super) fn video_participant_left(&self, sidebar: &mut Sidebar, id: &str) {
+        if let Some(report) = sidebar
+            .voice
+            .as_mut()
+            .and_then(|voice| voice.video.as_mut())
+        {
+            Arc::make_mut(report).participants.remove(id);
+        }
+        if sidebar.voice_intent.watching.remove(id)
+            && let Some(call) = &self.call
+        {
+            call.apply(&sidebar.voice_intent);
+        }
+    }
+
+    pub(super) fn prune_watching(&self, sidebar: &mut Sidebar) {
+        let Some(voice) = &sidebar.voice else {
+            return;
+        };
+        let watching = &mut sidebar.voice_intent.watching;
+        let count = watching.len();
+        watching.retain(|id| {
+            sidebar
+                .voice_presence
+                .get(id)
+                .is_some_and(|member| member.channel_id == voice.channel_id)
+                && voice
+                    .video
+                    .as_ref()
+                    .is_none_or(|video| video.reconnecting || video.participants.contains_key(id))
+        });
+        if watching.len() != count
+            && let Some(call) = &self.call
         {
             call.apply(&sidebar.voice_intent);
         }
@@ -618,6 +642,20 @@ impl VoiceSession {
                     .screen
                     .advance(attempt, Action::Choose(id, playback));
             }
+            #[cfg(windows)]
+            Command::ChooseWindowsScreenSource(attempt, item) => {
+                if !sidebar.voice.as_ref().is_some_and(|voice| {
+                    voice.is_participating() && voice.screen.as_ref().is_some_and(|report| {
+                        matches!(&report.state, State::Choices(choices) if choices.iter().any(|choice| choice.id == screen::SYSTEM_PICKER))
+                    })
+                }) {
+                    return;
+                }
+                sidebar
+                    .voice_intent
+                    .screen
+                    .advance(attempt, Action::ChooseSystem(item));
+            }
             Command::StartScreenShare(attempt, confirmed_audio) => {
                 if !sidebar.voice.as_ref().is_some_and(|voice| {
                     voice.is_participating()
@@ -645,11 +683,14 @@ impl VoiceSession {
             Command::SetScreenAudio(enabled) => {
                 sidebar.voice_intent.preferred.screen_audio = enabled;
             }
-            Command::SetScreenQuality(quality) => {
-                if screen::Quality::HEIGHTS.contains(&quality.height)
-                    && screen::Quality::FPS.contains(&quality.fps)
-                {
-                    sidebar.voice_intent.screen.quality = quality;
+            Command::SetScreenHeight(height) => {
+                if screen::Quality::HEIGHTS.contains(&height) {
+                    sidebar.voice_intent.screen.quality.height = height;
+                }
+            }
+            Command::SetScreenFps(fps) => {
+                if screen::Quality::FPS.contains(&fps) {
+                    sidebar.voice_intent.screen.quality.fps = fps;
                 }
             }
             Command::SetWatching(id, enabled) => {
@@ -662,6 +703,9 @@ impl VoiceSession {
                 };
                 if enabled {
                     if sidebar.profile.id.as_ref() == Some(&id)
+                        || voice.video.as_ref().is_some_and(|video| {
+                            video.reconnecting || !video.participants.contains_key(&id)
+                        })
                         || !sidebar
                             .voice_presence
                             .get(&id)

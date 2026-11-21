@@ -7,7 +7,7 @@ use crate::{
     session::{Participant, VoiceView},
     voice::{
         screen::{Quality, State as ScreenState},
-        video::{CameraResolution, CameraStatus, ParticipantVideo, VideoSource},
+        video::{CameraDevice, CameraResolution, CameraStatus, ParticipantVideo, VideoSource},
     },
 };
 
@@ -31,11 +31,21 @@ impl Spk {
             }),
             _ => None,
         };
+        let (watching, me) = match &self.view {
+            View::SignedIn(sidebar) => (
+                Some(&sidebar.voice_intent.watching),
+                sidebar.profile.id.as_deref(),
+            ),
+            _ => (None, None),
+        };
         let report = call.and_then(|call| call.video.clone());
         let report = report.as_deref();
         let mut next = report
             .into_iter()
             .flat_map(|report| report.participants.iter())
+            .filter(|(id, _)| {
+                me == Some(id.as_str()) || watching.is_some_and(|ids| ids.contains(*id))
+            })
             .flat_map(|(id, video)| {
                 video.frames.iter().filter_map(move |(&source, frame)| {
                     Some(((id.clone(), source), frame.latest()?))
@@ -66,7 +76,7 @@ impl Spk {
         }
         if self.video_stage.theater.as_ref().is_some_and(|id| {
             report.is_none_or(|report| {
-                !report.watching.contains(id)
+                !watching.is_some_and(|ids| ids.contains(id))
                     && screen.as_ref().is_none_or(|(me, _)| me != id)
                     && report
                         .participants
@@ -167,7 +177,12 @@ impl Spk {
                         let View::SignedIn(sidebar) = &app.read(cx).view else {
                             return div();
                         };
-                        camera_options(sidebar, &app)
+                        let devices = sidebar
+                            .voice
+                            .as_ref()
+                            .and_then(|call| call.video.as_ref())
+                            .map_or(&[][..], |report| report.devices.as_slice());
+                        camera_options(sidebar, &app, devices)
                     }),
             )
     }
@@ -217,7 +232,12 @@ impl Spk {
                             .secondary()
                             .tab_stop(true)
                             .label(choice.label.clone())
-                            .on_click(cx.listener(move |app, _, _, cx| {
+                            .on_click(cx.listener(move |app, _, _window, cx| {
+                                #[cfg(windows)]
+                                if id == crate::voice::screen::SYSTEM_PICKER {
+                                    app.pick_windows_screen(attempt, _window, cx);
+                                    return;
+                                }
                                 app.send(
                                     Command::ChooseScreenSource(attempt, id.clone()),
                                     None,
@@ -268,14 +288,7 @@ impl Spk {
                                     .label(label)
                                     .selected(selected.height == height)
                                     .on_click(cx.listener(move |app, _, _, cx| {
-                                        app.send(
-                                            Command::SetScreenQuality(Quality {
-                                                height,
-                                                ..selected
-                                            }),
-                                            None,
-                                            cx,
-                                        );
+                                        app.send(Command::SetScreenHeight(height), None, cx);
                                     }))
                             }))
                             .children(Quality::FPS.into_iter().map(|fps| {
@@ -287,11 +300,7 @@ impl Spk {
                                     .label(label)
                                     .selected(selected.fps == fps)
                                     .on_click(cx.listener(move |app, _, _, cx| {
-                                        app.send(
-                                            Command::SetScreenQuality(Quality { fps, ..selected }),
-                                            None,
-                                            cx,
-                                        );
+                                        app.send(Command::SetScreenFps(fps), None, cx);
                                     }))
                             })),
                     )
@@ -335,22 +344,58 @@ impl Spk {
         })
     }
 
-    pub(super) fn video_image(&self, participant: &Participant<'_>, is_me: bool) -> Option<Img> {
+    #[cfg(windows)]
+    fn pick_windows_screen(&mut self, attempt: u64, window: &Window, cx: &mut Context<Self>) {
+        use crate::voice::screen::{CaptureError, pick_system_source};
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+        let hwnd = HasWindowHandle::window_handle(window)
+            .ok()
+            .and_then(|window| match window.as_raw() {
+                RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
+                _ => None,
+            });
+        cx.spawn(async move |app, cx| {
+            let result = match hwnd {
+                Some(hwnd) => pick_system_source(hwnd).await,
+                None => Err(CaptureError::Unavailable),
+            };
+            let _ = app.update(cx, |app, cx| {
+                app.send(
+                    Command::ChooseWindowsScreenSource(attempt, result),
+                    None,
+                    cx,
+                );
+            });
+        })
+        .detach();
+    }
+
+    pub(super) fn video_images(
+        &self,
+        participant: &Participant<'_>,
+        is_me: bool,
+    ) -> (Option<Img>, Option<Img>) {
         if is_me && self.video_stage.hide_preview {
-            return None;
+            return (None, None);
         }
-        [VideoSource::Screen, VideoSource::Camera]
-            .into_iter()
-            .find_map(|source| {
-                self.video_stage
-                    .frames
-                    .get(&(participant.id.to_owned(), source))
-                    .map(|image| {
-                        img(image.clone())
-                            .size_full()
-                            .object_fit(ObjectFit::Contain)
-                    })
-            })
+        let image_for = |source| {
+            self.video_stage
+                .frames
+                .get(&(participant.id.to_owned(), source))
+                .map(|image| {
+                    img(image.clone())
+                        .size_full()
+                        .object_fit(ObjectFit::Contain)
+                })
+        };
+        let screen = image_for(VideoSource::Screen);
+        let camera = image_for(VideoSource::Camera);
+        if screen.is_some() {
+            (screen, camera)
+        } else {
+            (camera, None)
+        }
     }
 
     pub(super) fn video_tile_controls(
@@ -372,6 +417,9 @@ impl Spk {
                 .video
                 .is_some_and(|media| !is_me && (media.cam || media.screen));
         let watching = sidebar.voice_intent.watching.contains(participant.id);
+        let can_watch = report.is_none_or(|report| {
+            !report.reconnecting && report.participants.contains_key(participant.id)
+        });
         let theater = self.video_stage.theater.as_deref() == Some(participant.id);
         let fullscreen = self.video_stage.fullscreen;
         let show = live && (is_me || watching);
@@ -400,7 +448,7 @@ impl Spk {
                         .truncate(),
                 )
             })
-            .when(!is_me && (live || watching), |row| {
+            .when(!is_me && ((live && can_watch) || watching), |row| {
                 let label = if watching { "Stop watching" } else { "Watch" };
                 row.child(
                     tool_button(
@@ -498,22 +546,22 @@ fn participant_video(video: Option<&ParticipantVideo>) -> bool {
     video.is_some_and(|video| !video.live.is_empty())
 }
 
-fn camera_options(sidebar: &Sidebar, app: &Entity<Spk>) -> Div {
+pub(super) fn camera_options(
+    sidebar: &Sidebar,
+    app: &Entity<Spk>,
+    devices: &[CameraDevice],
+) -> Div {
     let entity = app.downgrade();
     let default_camera = entity.clone();
     let resolution_entity = entity.clone();
     let choice = &sidebar.voice_intent.camera;
     let report = sidebar.voice.as_ref().and_then(|call| call.video.as_ref());
-    let devices = report
-        .map(|report| report.devices.as_slice())
-        .unwrap_or_default();
     let chosen = choice.device.as_deref();
     let unavailable = chosen.is_some_and(|id| !devices.iter().any(|device| device.id == id));
     div()
         .flex()
         .flex_col()
         .gap_2()
-        .child(Label::new("Camera").font_semibold())
         .child(
             div()
                 .id("camera-devices")

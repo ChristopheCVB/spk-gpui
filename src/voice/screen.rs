@@ -29,6 +29,8 @@ use linux as platform;
 mod windows;
 #[cfg(windows)]
 use self::windows as platform;
+#[cfg(windows)]
+pub(crate) use self::windows::{SYSTEM_PICKER, pick_system_source};
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 mod platform {
@@ -76,8 +78,15 @@ impl Quality {
         (width >= 2 && height >= 2).then_some((width, height))
     }
 
-    fn name(self) -> String {
-        format!("spk:screen:{}:{}", self.height, self.fps)
+    fn publication_name(width: u32, height: u32, fps: u32) -> String {
+        if Self::HEIGHTS.contains(&height)
+            && Self::FPS.contains(&fps)
+            && width == (height * 16 + 4) / 9
+        {
+            format!("spk:screen:{height}:{fps}")
+        } else {
+            "screen".into()
+        }
     }
 }
 
@@ -198,6 +207,8 @@ pub enum Action {
     Stop,
     Open,
     Choose(String, Option<Device>),
+    #[cfg(windows)]
+    ChooseSystem(Result<windows_wgc::Graphics::Capture::GraphicsCaptureItem, CaptureError>),
     Start(bool),
 }
 
@@ -215,14 +226,16 @@ impl Request {
     }
 
     pub fn advance(&mut self, attempt: u64, action: Action) -> bool {
-        if self.attempt != attempt
-            || !matches!(
-                (&self.action, &action),
-                (_, Action::Stop)
-                    | (Action::Open, Action::Choose(..))
-                    | (Action::Choose(..), Action::Start(_))
-            )
-        {
+        let valid = match (&self.action, &action) {
+            (_, Action::Stop)
+            | (Action::Open, Action::Choose(..))
+            | (Action::Choose(..), Action::Start(_)) => true,
+            #[cfg(windows)]
+            (Action::Open, Action::ChooseSystem(..))
+            | (Action::ChooseSystem(..), Action::Start(_)) => true,
+            _ => false,
+        };
+        if self.attempt != attempt || !valid {
             return false;
         }
         self.action = action;
@@ -287,19 +300,26 @@ pub(super) async fn run(worker: &Worker, room: &Room) {
                 return Err(CaptureError::Unavailable);
             }
             report(State::Choices(choices.clone()));
-            let action = wait_for_action(&mut requested, next.attempt, |action| {
-                matches!(action, Action::Choose(..))
+            let action = wait_for_action(&mut requested, next.attempt, |action| match action {
+                Action::Choose(..) => true,
+                #[cfg(windows)]
+                Action::ChooseSystem(..) => true,
+                _ => false,
             })
             .await?;
-            let Action::Choose(id, playback) = action.action else {
-                unreachable!()
-            };
-            let choice = choices
-                .into_iter()
-                .find(|choice| choice.id == id)
-                .ok_or(CaptureError::Unavailable)?;
             report(State::Picking);
-            let selection = platform::select(choice, playback).await?;
+            let selection = match action.action {
+                Action::Choose(id, playback) => {
+                    let choice = choices
+                        .into_iter()
+                        .find(|choice| choice.id == id)
+                        .ok_or(CaptureError::Unavailable)?;
+                    platform::select(choice, playback).await?
+                }
+                #[cfg(windows)]
+                Action::ChooseSystem(item) => platform::select_system(item?)?,
+                _ => unreachable!(),
+            };
             report(State::Confirm {
                 label: selection.label,
                 audio: selection.audio,
@@ -384,7 +404,8 @@ async fn capture_and_publish(
                 .ok().flatten().ok_or(CaptureError::Unavailable)?;
             let (mut width, mut height) = (frame.buffer.width(), frame.buffer.height());
             let source = NativeVideoSource::new(VideoResolution { width, height }, true);
-            let video = LocalVideoTrack::create_video_track(&quality.name(), RtcVideoSource::Native(source.clone()));
+            let name = Quality::publication_name(width, height, fps);
+            let video = LocalVideoTrack::create_video_track(&name, RtcVideoSource::Native(source.clone()));
             let (video, started) = Publication::new(room, LocalTrack::Video(video), TrackPublishOptions {
                 video_encoding: Some(VideoEncoding {
                     max_bitrate: (f64::from(width * height) * 0.458 * f64::from(fps).powf(0.674) / 100_000.0).round() as u64 * 100_000,

@@ -79,6 +79,7 @@ impl Issue {
 pub enum Update {
     Media(Arc<Report>),
     Video(Arc<video::VideoReport>),
+    VideoParticipantLeft(String),
     Screen(screen::Report),
     Finished(Result<(), Issue>),
 }
@@ -261,7 +262,9 @@ impl Call {
     }
 
     pub fn apply(&self, intent: &Intent) {
-        self.intent.send_replace(intent.clone());
+        if self.cancel.is_some() {
+            self.intent.send_replace(intent.clone());
+        }
     }
 
     pub fn set_socket(&self, socket: Option<VoiceSocket>) {
@@ -288,6 +291,11 @@ impl Call {
 
     pub fn cancel(&mut self) {
         if let Some(cancel) = self.cancel.take() {
+            self.intent.send_modify(|intent| {
+                intent.camera.enabled = false;
+                intent.screen.action = screen::Action::Stop;
+                intent.watching.clear();
+            });
             let _ = cancel.send(());
         }
     }

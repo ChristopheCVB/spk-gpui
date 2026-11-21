@@ -91,12 +91,12 @@ impl SoundboardSession {
             return;
         };
         // The relay has no channel or session ID. Ignore senders whose Voice Presence puts them in another room.
-        let from_room = sidebar.profile.id.as_deref() == Some(user_id)
+        let from_voice_channel = sidebar.profile.id.as_deref() == Some(user_id)
             || sidebar
                 .voice_presence
                 .get(user_id)
                 .is_none_or(|member| member.channel_id == voice.channel_id);
-        if from_room
+        if from_voice_channel
             && !sidebar.voice_intent.mute.deafened
             && sidebar.voice_intent.preferred.soundboard_enabled
             && let Ok(id) = Uuid::parse_str(sound_id)

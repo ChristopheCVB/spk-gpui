@@ -71,7 +71,7 @@ impl CameraResolution {
     }
 }
 
-pub(super) fn devices() -> Vec<CameraDevice> {
+pub fn devices() -> Vec<CameraDevice> {
     nokhwa::query(ApiBackend::Auto)
         .unwrap_or_default()
         .into_iter()

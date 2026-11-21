@@ -7,7 +7,14 @@ fn presets_bound_capture_without_upscaling_or_distorting() {
     assert_eq!(quality.dimensions(600, 1200), Some((540, 1080)));
     assert_eq!(quality.dimensions(801, 601), Some((800, 600)));
     assert_eq!(quality.dimensions(1, 480), None);
-    assert_eq!(quality.name(), "spk:screen:1080:30");
+    assert_eq!(
+        Quality::publication_name(1920, 1080, 30),
+        "spk:screen:1080:30"
+    );
+    assert_eq!(Quality::publication_name(1280, 720, 5), "spk:screen:720:5");
+    assert_eq!(Quality::publication_name(320, 180, 25), "screen");
+    assert_eq!(Quality::publication_name(1920, 1080, 25), "screen");
+    assert_eq!(Quality::publication_name(1680, 1080, 30), "screen");
 }
 
 #[test]
@@ -191,7 +198,7 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
             {
                 match publication.source() {
                     TrackSource::Screenshare => {
-                        assert_eq!(publication.name(), "spk:screen:1080:30");
+                        assert_eq!(publication.name(), "screen");
                         video = Some(publication);
                     }
                     TrackSource::ScreenshareAudio => audio = Some(publication),

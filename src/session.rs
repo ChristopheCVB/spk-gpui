@@ -36,7 +36,10 @@ pub use {presence::Participant, radio::RadioPlayback, voice_session::VoiceView};
 pub(crate) mod tests;
 
 pub enum Command {
-    SignIn { email: String, password: String },
+    SignIn {
+        email: String,
+        password: String,
+    },
     Restore,
     SignOut,
     Refresh,
@@ -49,7 +52,10 @@ pub enum Command {
     ChooseDevice(DeviceKind, Option<Device>),
     SearchRadio(String),
     RadioFavorites,
-    SetRadioFavorite { id: String, saved: bool },
+    SetRadioFavorite {
+        id: String,
+        saved: bool,
+    },
     SelectRadio(String),
     StopRadio,
     PauseRadio,
@@ -66,10 +72,16 @@ pub enum Command {
     SetWatching(String, bool),
     OpenScreenShare,
     ChooseScreenSource(u64, String),
+    #[cfg(windows)]
+    ChooseWindowsScreenSource(
+        u64,
+        Result<windows_wgc::Graphics::Capture::GraphicsCaptureItem, screen::CaptureError>,
+    ),
     StartScreenShare(u64, bool),
     StopScreenShare(u64),
     SetScreenAudio(bool),
-    SetScreenQuality(screen::Quality),
+    SetScreenHeight(u32),
+    SetScreenFps(u32),
     SetOutputVolume(u8),
     SetParticipantVolume(String, ParticipantVolumeChange),
     SetVoiceProcessing(VoiceProcessingSetting),
@@ -342,10 +354,10 @@ async fn watch_session(
                     Frame::Presence { user_id, channel_id, flags, video } => {
                         let new_participant = channel_id.is_some() && !sidebar.voice_presence.contains_key(&user_id);
                         let own_update = sidebar.profile.id.as_ref() == Some(&user_id);
-                        voice.participant_changed(&mut sidebar, &user_id, channel_id.as_deref());
                         for (cue, rising) in refresh.update_presence(&mut sidebar, user_id, channel_id, flags, video) {
                             settings.sounds.play(cue, rising);
                         }
+                        voice.prune_watching(&mut sidebar);
                         if own_update {
                             voice.own_presence_updated(&mut sidebar);
                         }
@@ -405,11 +417,15 @@ async fn watch_session(
                     }
                 }
                 VoiceUpdate::Video(report) => {
-                    if let Some(voice) = &mut sidebar.voice
-                        && voice.status != VoiceStatus::Leaving
+                    if let Some(call) = &mut sidebar.voice
+                        && call.status != VoiceStatus::Leaving
                     {
-                        voice.video = Some(report);
+                        call.video = Some(report);
+                        voice.prune_watching(&mut sidebar);
                     }
+                }
+                VoiceUpdate::VideoParticipantLeft(id) => {
+                    voice.video_participant_left(&mut sidebar, &id);
                 }
                 VoiceUpdate::Screen(report) => {
                     let request = &sidebar.voice_intent.screen;
