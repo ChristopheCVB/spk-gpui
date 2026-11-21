@@ -44,6 +44,7 @@ async fn exercise(scenario: Scenario) {
     let endpoint = format!("ws://{address}/_ws");
     let controls = matches!(scenario, Scenario::Controls);
     let (left, departure) = oneshot::channel();
+    let (seen, mut observed) = tokio::sync::mpsc::channel(2);
 
     let server = async {
         Request::read(&listener, "POST /api/auth/sign-in/email HTTP/1.1")
@@ -95,16 +96,21 @@ async fn exercise(scenario: Scenario) {
                 receive_frame(&mut socket).await,
                 json!({"type":"voice:ready","sid":sid})
             );
+            if matches!(scenario, Scenario::MicrophoneFailure) {
+                seen.send(()).await.unwrap();
+            }
         }
         if controls {
             assert_eq!(
                 receive_frame(&mut socket).await,
                 json!({"type":"voice:state","sid":sid,"muted":false,"deafened":false,"speaking":true})
             );
+            seen.send(()).await.unwrap();
             assert_eq!(
                 receive_frame(&mut socket).await,
                 json!({"type":"voice:state","sid":sid,"muted":true,"deafened":true,"speaking":false})
             );
+            seen.send(()).await.unwrap();
         }
         assert_eq!(
             receive_frame(&mut socket).await,
@@ -147,7 +153,11 @@ async fn exercise(scenario: Scenario) {
                         Scenario::Cancelled => panic!("a cancelled call started media"),
                         Scenario::MediaFailure => Err(Issue::Media),
                         Scenario::MicrophoneFailure => {
-                            worker.ready().await?;
+                            worker.publish_flags(VoiceFlags {
+                                muted: true,
+                                ..VoiceFlags::default()
+                            });
+                            observed.recv().await.unwrap();
                             worker.update(Update::Media(Arc::new(Report {
                                 status: Status::ListenOnly,
                                 devices: Arc::default(),
@@ -158,20 +168,17 @@ async fn exercise(scenario: Scenario) {
                             pending().await
                         }
                         Scenario::Controls => {
-                            worker.ready().await?;
-                            worker
-                                .state(VoiceFlags {
-                                    speaking: true,
-                                    ..VoiceFlags::default()
-                                })
-                                .await?;
-                            worker
-                                .state(VoiceFlags {
-                                    muted: true,
-                                    deafened: true,
-                                    speaking: false,
-                                })
-                                .await?;
+                            worker.publish_flags(VoiceFlags {
+                                speaking: true,
+                                ..VoiceFlags::default()
+                            });
+                            observed.recv().await.unwrap();
+                            worker.publish_flags(VoiceFlags {
+                                muted: true,
+                                deafened: true,
+                                speaking: false,
+                            });
+                            observed.recv().await.unwrap();
                             Err(Issue::Disconnected)
                         }
                     }
@@ -289,7 +296,7 @@ async fn apply_acknowledgment(call: &mut Call, updates: &Receiver<SocketEvent>) 
     let SocketEvent::Frame(Frame::VoiceJoined {
         sid,
         channel_id,
-        nonce,
+        nonce: Some(nonce),
     }) = updates.recv().await.unwrap()
     else {
         panic!("expected a voice acknowledgment");
