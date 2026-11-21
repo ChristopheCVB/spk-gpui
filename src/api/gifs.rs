@@ -92,10 +92,6 @@ impl SpkClient {
 
     pub async fn gif_preview(&self, raw: &str) -> Result<Vec<u8>, Failure> {
         let url = gif_media_url(raw).ok_or(Failure::InvalidResponse)?;
-        #[cfg(test)]
-        if url.scheme() == "http" {
-            return self.storage_bytes(url, 2 * 1024 * 1024).await;
-        }
         Self::limited_bytes(self.public_media.get(url), 2 * 1024 * 1024).await
     }
 }

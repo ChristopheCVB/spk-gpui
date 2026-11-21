@@ -589,7 +589,7 @@ impl SpkClient {
             .map_err(|_| Failure::Connection)?;
 
         let public_media = Client::builder()
-            .https_only(true)
+            .https_only(!cfg!(test))
             .no_proxy()
             .referer(false)
             .dns_resolver(Arc::new(PublicDns))
