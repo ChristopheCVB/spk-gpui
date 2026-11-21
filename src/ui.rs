@@ -120,7 +120,7 @@ fn call_status(call: &VoiceView, switching: bool) -> &'static str {
 
 fn can_join_voice(sidebar: &Sidebar, channel_id: &str) -> bool {
     matches!(sidebar.connection, Connection::Online)
-        && sidebar.switching_to.as_deref() != Some(channel_id)
+        && sidebar.switching_to() != Some(channel_id)
         && sidebar
             .voice
             .as_ref()
@@ -381,12 +381,11 @@ impl Spk {
                     ),
             )
             .children(sidebar.voice.as_ref().map(|call| {
-                let switching = sidebar.switching_to.is_some();
+                let switching = sidebar.switching_to().is_some();
                 let id = sidebar
-                    .switching_to
-                    .as_ref()
+                    .switching_to()
                     .unwrap_or(&call.channel_id)
-                    .clone();
+                    .to_owned();
                 let room_name = voice_channels(sidebar)
                     .find(|channel| channel.id == id)
                     .map_or("Voice", channel_name);
@@ -488,7 +487,7 @@ impl Spk {
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
-        let switching_here = sidebar.switching_to.as_deref() == Some(channel.id.as_str());
+        let switching_here = sidebar.switching_to() == Some(channel.id.as_str());
         let call = sidebar
             .voice
             .as_ref()
@@ -654,7 +653,7 @@ impl Spk {
             )
             .when_some(room, |stage, room| {
                 let id = room.id.clone();
-                let switching_here = sidebar.switching_to.as_deref() == Some(id.as_str());
+                let switching_here = sidebar.switching_to() == Some(id.as_str());
                 let departing = if switching_here {
                     sidebar.voice.as_ref()
                 } else {

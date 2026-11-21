@@ -141,6 +141,8 @@ pub enum Frame {
     },
     #[serde(rename = "voice:kicked")]
     VoiceKicked { sid: String },
+    #[serde(rename = "voice:move", rename_all = "camelCase")]
+    VoiceMove { sid: String, channel_id: String },
     #[serde(rename = "voice:disconnect")]
     VoiceDisconnected { sid: String },
     #[serde(rename = "channels:changed")]
