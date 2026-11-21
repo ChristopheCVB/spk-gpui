@@ -1,3 +1,4 @@
+mod account_admin;
 mod attachments;
 mod channel_admin;
 mod chat_actions;
@@ -5,6 +6,9 @@ mod gifs;
 mod public_media;
 mod search;
 
+pub use account_admin::{
+    AccountRole, AdminDirectory, AdminUser, Invite, InviteStatus, IssuedAccountLink,
+};
 pub use attachments::{Attachment, AttachmentRef, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS};
 pub use channel_admin::{ChannelKind, ChannelMutation};
 pub use chat_actions::{LinkPreview, MessageAction, MessageChange, Reaction};

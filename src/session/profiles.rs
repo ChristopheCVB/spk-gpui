@@ -62,7 +62,7 @@ impl Work {
                 });
             }
             Command::InspectProfileEmail(id, reply) => {
-                if sidebar.is_admin() && sidebar.person(&id).is_some() {
+                if sidebar.is_admin() && sidebar.inspect_person(&id).is_some() {
                     tasks.spawn(async move {
                         let result = client.admin_profile_email(&id).await;
                         Self::Email(reply, result)

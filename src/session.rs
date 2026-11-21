@@ -1,3 +1,4 @@
+mod account_admin;
 mod accounts;
 mod authentication;
 mod avatars;
@@ -36,6 +37,7 @@ use crate::voice::{
     ParticipantVolumeChange, Status as VoiceStatus, Update as VoiceUpdate,
     video::{CameraResolution, preview_camera},
 };
+use account_admin::AccountAdmin;
 use accounts::{AccountLinkOutcome, choose_nickname, redeem_link};
 use authentication::{
     SESSION_EXPIRED, SavedSession, login, restore, sign_in, sign_in_message, sign_out,
@@ -51,6 +53,7 @@ use unread::{Mark, UnreadSession};
 use voice_session::{DeviceSettings, StartCall, VoiceDestination, VoiceSession};
 pub use {
     crate::api::{MessageAction, UserStatus},
+    account_admin::{AdminAccountAction, AdminAccountsView, AdminPage},
     accounts::AccountLinkForm,
     avatars::AvatarPhoto,
     channel_admin::{ChannelAction, ChannelAdmin, ChannelKind},
@@ -165,6 +168,7 @@ pub enum Command {
     SaveNickname(String),
     UploadAvatar(PathBuf),
     InspectProfileEmail(String, oneshot::Sender<Option<String>>),
+    AdminAccounts(AdminAccountAction),
     JoinVoice(String),
     LeaveVoice,
     ModerateVoice {
@@ -243,6 +247,7 @@ pub enum View {
 pub struct Sidebar {
     pub profile: Profile,
     pub profile_edit: ProfileEdit,
+    pub admin_accounts: AdminAccountsView,
     pub user_status: UserStatus,
     pub user_status_notice: Option<&'static str>,
     pub channels: Option<Vec<Channel>>,
@@ -279,6 +284,7 @@ impl Sidebar {
         Self {
             profile,
             profile_edit: ProfileEdit::Idle,
+            admin_accounts: AdminAccountsView::default(),
             user_status: UserStatus::default(),
             user_status_notice: None,
             channels: None,
@@ -367,6 +373,24 @@ impl Sidebar {
         self.users.get(id).filter(|user| !user.banned)
     }
 
+    pub fn inspect_person(&self, id: &str) -> Option<&User> {
+        self.users
+            .get(id)
+            .filter(|user| self.is_admin() || !user.banned)
+            .or_else(|| {
+                if !self.is_admin() {
+                    return None;
+                }
+                self.admin_accounts
+                    .users
+                    .as_ref()?
+                    .users
+                    .iter()
+                    .find(|entry| entry.user.id == id)
+                    .map(|entry| &entry.user)
+            })
+    }
+
     pub fn is_admin(&self) -> bool {
         self.profile.role == "admin"
     }
@@ -379,7 +403,7 @@ impl Sidebar {
         if self.profile.id.as_deref() == Some(id) {
             self.profile.avatar_key.as_deref()
         } else {
-            self.person(id)?.avatar_key.as_deref()
+            self.inspect_person(id)?.avatar_key.as_deref()
         }
         .filter(|key| !key.is_empty())
     }
@@ -551,6 +575,7 @@ async fn watch_session(
     let mut channel_mutations = JoinSet::new();
     let mut channel_mutation_result = None;
     let mut profiles = JoinSet::new();
+    let mut account_admin = AccountAdmin::default();
     let end = loop {
         if commands.is_closed() {
             break SessionEnd::Closed;
@@ -797,6 +822,7 @@ async fn watch_session(
                 Ok(command @ (Command::SaveNickname(_) | Command::UploadAvatar(_) | Command::InspectProfileEmail(..))) => {
                     ProfileWork::start(&mut profiles, &mut sidebar, client, command);
                 }
+                Ok(Command::AdminAccounts(action)) => account_admin.command(&mut sidebar, client, action),
                 Ok(Command::JoinVoice(channel_id)) => voice.join(&mut sidebar, channel_id),
                 Ok(Command::LeaveVoice) => voice.leave(&mut sidebar),
                 Ok(Command::ModerateVoice { user_id, action }) if voice_moderation.is_empty() => {
@@ -878,6 +904,7 @@ async fn watch_session(
                     voice.connected(socket);
                     refresh.fetch_all(client);
                     refresh.fetch(client, Resource::UserPresence);
+                    account_admin.refresh(&mut sidebar, client);
                 }
                 Ok(SocketEvent::Connection(state)) => {
                     sidebar.connection = state;
@@ -928,7 +955,10 @@ async fn watch_session(
                         chat.receive_typing(&channel_id, user_id);
                     }
                     Frame::ChannelsChanged => refresh.fetch(client, Resource::Channels),
-                    Frame::UsersChanged => refresh.fetch(client, Resource::Users),
+                    Frame::UsersChanged => {
+                        refresh.fetch(client, Resource::Users);
+                        account_admin.users_changed(&mut sidebar, client);
+                    }
                     Frame::UserPresence { user_id, status } => {
                         refresh.update_user_presence(&mut sidebar, user_id, status);
                     }
@@ -1042,6 +1072,23 @@ async fn watch_session(
                     break SessionEnd::Invalidated(SESSION_EXPIRED);
                 }
             }
+            Some(result) = account_admin.loads.join_next() => {
+                if account_admin.loaded(&mut sidebar, client, result.unwrap_or(Err(Failure::Connection))).is_err() {
+                    break SessionEnd::Invalidated(SESSION_EXPIRED);
+                }
+            }
+            Some(result) = account_admin.mutations.join_next() => {
+                if let Ok((action, result)) = result {
+                    match account_admin.mutated(&mut sidebar, client, action, result) {
+                        Ok(true) => refresh.fetch(client, Resource::Users),
+                        Ok(false) => {}
+                        Err(_) => break SessionEnd::Invalidated(SESSION_EXPIRED),
+                    }
+                } else {
+                    sidebar.admin_accounts.busy = false;
+                    sidebar.admin_accounts.error = Some("Could not complete the Admin action. Try again.");
+                }
+            }
             Some(Ok(work)) = profiles.join_next() => {
                 let edit_finished = match work.complete(&mut sidebar) {
                     Ok(edited) => edited,
@@ -1073,6 +1120,7 @@ async fn watch_session(
                 let listed_voice_channel = matches!(resource, Resource::Channels)
                     && sidebar.voice.as_ref().is_some_and(|voice| sidebar.has_voice_channel(&voice.channel_id));
                 refresh.complete(&mut sidebar, resource, data);
+                account_admin.clear_if_demoted(&mut sidebar);
                 if resource == Resource::Channels && !refresh.dirty.contains(&resource) {
                     if let Some(result) = channel_mutation_result.take() {
                         sidebar.channel_admin.pending = false;
