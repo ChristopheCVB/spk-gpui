@@ -24,7 +24,7 @@ use url::Url;
 
 use crate::api::{
     Channel, Connection, Failure, Frame, MessageChange, MessageTarget, Profile, SocketEvent,
-    SpkClient, UnreadState, User, UserPresence,
+    SpkClient, UnreadState, User, UserPresence, VoiceModeration,
 };
 use crate::notifications::{Alert, LiveAlerts};
 use crate::sounds::{Sound, VoiceSounds};
@@ -52,7 +52,10 @@ pub use {
     crate::api::{MessageAction, UserStatus},
     accounts::AccountLinkForm,
     avatars::AvatarPhoto,
-    chat::{AttachmentInput, ChatView, Delivery, Pins, UploadStatus, image_preview},
+    chat::{
+        AttachmentInput, ChatView, Delivery, GifPickerView, Pins, UploadStatus, image_preview,
+        message_gif_line,
+    },
     presence::Participant,
     profiles::ProfileEdit,
     radio::RadioPlayback,
@@ -108,6 +111,19 @@ pub enum Command {
         channel_id: String,
         body: String,
     },
+    ShowGifs(bool),
+    SearchGifs(String),
+    ShowGifFavorites(bool),
+    MoreGifs,
+    RetryGifs,
+    RetryGifFavorites,
+    ToggleGifFavorite(String),
+    PickGif(String),
+    RemoveDraftGif(String),
+    PreviewMessageGif {
+        message_id: String,
+        url: String,
+    },
     AddChatAttachments {
         channel_id: String,
         files: Vec<AttachmentInput>,
@@ -148,6 +164,10 @@ pub enum Command {
     InspectProfileEmail(String, oneshot::Sender<Option<String>>),
     JoinVoice(String),
     LeaveVoice,
+    ModerateVoice {
+        user_id: String,
+        action: VoiceModeration,
+    },
     ToggleMute,
     ToggleDeafen,
     RetryMicrophone,
@@ -238,6 +258,8 @@ pub struct Sidebar {
     pub channel_radio: HashMap<String, String>,
     switching_to: Option<VoiceDestination>,
     pub voice_notice: Option<&'static str>,
+    pub voice_moderation_notice: Option<&'static str>,
+    pub voice_moderation_pending: bool,
     voice_rejoin: Option<String>,
     pub voice_intent: Intent,
     pub devices: Arc<Devices>,
@@ -271,6 +293,8 @@ impl Sidebar {
             channel_radio: HashMap::new(),
             switching_to: None,
             voice_notice: None,
+            voice_moderation_notice: None,
+            voice_moderation_pending: false,
             voice_rejoin: None,
             voice_intent: Intent::default(),
             devices: Arc::default(),
@@ -518,6 +542,7 @@ async fn watch_session(
     let mut alerts = LiveAlerts::default();
     let mut soundboard = SoundboardSession::default();
     let mut camera_previews = JoinSet::new();
+    let mut voice_moderation = JoinSet::new();
     let mut profiles = JoinSet::new();
     let end = loop {
         if commands.is_closed() {
@@ -525,7 +550,9 @@ async fn watch_session(
         }
         unread.write_next(client);
         chat.fill_previews(client);
+        chat.gifs.fill_previews(client);
         sidebar.chat = chat.view();
+        sidebar.voice_moderation_pending = !voice_moderation.is_empty();
         radio.sync(&mut sidebar, &voice);
         soundboard.sync(&mut sidebar, &voice);
         voice.start_pending(&mut sidebar, client, &settings.start_call);
@@ -571,6 +598,22 @@ async fn watch_session(
                 chat.action_complete(client, result);
             }
             Some(Ok(result)) = chat.preview_tasks.join_next() => chat.preview_complete(result),
+            Some(result) = chat.gifs.browsing.join_next() => {
+                let result = result.unwrap_or(Err(Failure::Connection));
+                if result.as_ref().is_err_and(Failure::unauthorized) {
+                    break SessionEnd::Invalidated(SESSION_EXPIRED);
+                }
+                chat.gifs.browse_complete(result);
+            }
+            Some(result) = chat.gifs.favorites.join_next() => {
+                let result = result.unwrap_or(Err(Failure::Connection));
+                if result.as_ref().is_err_and(Failure::unauthorized) {
+                    break SessionEnd::Invalidated(SESSION_EXPIRED);
+                }
+                chat.gifs.favorites_complete(client, result);
+            }
+            Some(Ok(result)) = chat.gifs.previews.join_next() => chat.gifs.preview_complete(result),
+            Some(Ok(result)) = chat.gifs.message_preview.join_next() => chat.message_gif_complete(result),
             Some(result) = chat.pin_tasks.join_next() => {
                 let result = result.unwrap_or(Err(Failure::Connection));
                 if result.as_ref().is_err_and(Failure::unauthorized) {
@@ -692,6 +735,19 @@ async fn watch_session(
                 Ok(Command::UpdateChatDraft { channel_id, body }) => chat.update_draft(channel_id, body),
                 Ok(Command::SetChatReply { channel_id, message_id }) => chat.set_reply(&channel_id, message_id.as_deref()),
                 Ok(Command::SendChatMessage { channel_id, body }) => chat.send(channel_id, body),
+                Ok(Command::ShowGifs(true)) => chat.open_gifs(client),
+                Ok(Command::ShowGifs(false)) => chat.gifs.close(),
+                Ok(Command::SearchGifs(query)) => chat.gifs.search(client, query),
+                Ok(Command::ShowGifFavorites(show)) => chat.gifs.show_favorites(client, show),
+                Ok(Command::MoreGifs) => chat.gifs.more(client),
+                Ok(Command::RetryGifs) => chat.gifs.retry_browse(client),
+                Ok(Command::RetryGifFavorites) => chat.gifs.load_favorites(client),
+                Ok(Command::ToggleGifFavorite(id)) => chat.gifs.toggle_favorite(client, &id),
+                Ok(Command::PickGif(id)) => chat.set_gif(Some(&id), None),
+                Ok(Command::RemoveDraftGif(channel)) => chat.set_gif(None, Some(&channel)),
+                Ok(Command::PreviewMessageGif { message_id, url }) => {
+                    chat.preview_message_gif(client, message_id, url);
+                }
                 Ok(Command::AddChatAttachments { channel_id, files }) => chat.add_attachments(client, channel_id, files),
                 Ok(Command::CancelChatAttachment { channel_id, key }) => chat.cancel_attachment(client, &channel_id, key),
                 Ok(Command::ToggleChatAttachmentSpoiler { channel_id, key }) => chat.toggle_attachment_spoiler(&channel_id, key),
@@ -720,6 +776,10 @@ async fn watch_session(
                 }
                 Ok(Command::JoinVoice(channel_id)) => voice.join(&mut sidebar, channel_id),
                 Ok(Command::LeaveVoice) => voice.leave(&mut sidebar),
+                Ok(Command::ModerateVoice { user_id, action }) if voice_moderation.is_empty() => {
+                    sidebar.moderate_voice(client, &mut voice_moderation, user_id, action);
+                }
+                Ok(Command::ModerateVoice { .. }) => {}
                 Ok(command @ (Command::SearchRadio(_) | Command::RadioFavorites
                     | Command::SetRadioFavorite { .. } | Command::SelectRadio(_) | Command::StopRadio
                     | Command::PauseRadio | Command::ListenToRadio)) => {
@@ -742,6 +802,26 @@ async fn watch_session(
                 }
             },
             Some(_) = camera_previews.join_next() => {}
+            Some(result) = voice_moderation.join_next() => {
+                let result = result.unwrap_or(Err(Failure::Connection));
+                if result.as_ref().is_err_and(Failure::unauthorized) {
+                    break SessionEnd::Invalidated(SESSION_EXPIRED);
+                }
+                sidebar.voice_moderation_notice = Some(match result {
+                    Ok(VoiceModeration::Move(_)) => "Move requested.",
+                    Ok(VoiceModeration::Disconnect) => "Voice participant disconnected.",
+                    Err(Failure::Http(reqwest::StatusCode::FORBIDDEN)) => {
+                        "You don’t have permission to moderate voice."
+                    }
+                    Err(Failure::Http(reqwest::StatusCode::CONFLICT)) => {
+                        "That participant is no longer in the expected voice channel."
+                    }
+                    Err(Failure::Http(reqwest::StatusCode::NOT_FOUND)) => {
+                        "That voice channel is unavailable."
+                    }
+                    Err(_) => "Could not moderate voice. Try again.",
+                });
+            }
             event = socket.recv() => match event {
                 Err(_) => break SessionEnd::Closed,
                 Ok(SocketEvent::Unauthorized | SocketEvent::Frame(Frame::SignedOut)) => {

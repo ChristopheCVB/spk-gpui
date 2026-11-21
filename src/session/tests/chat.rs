@@ -381,7 +381,7 @@ async fn receive_typing(peer: &mut WebSocketStream<TcpStream>, channel_id: &str)
 }
 
 #[tokio::test]
-async fn direct_message_history_is_visible_only_to_a_participant() {
+async fn direct_message_history_is_visible_only_to_a_participant_even_for_admins() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let http = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = Url::parse(&format!("http://{}", http.local_addr().unwrap())).unwrap();
@@ -394,6 +394,9 @@ async fn direct_message_history_is_visible_only_to_a_participant() {
                 ("GET /api/unread HTTP/1.1", _) => request.respond(&[], "{}").await,
                 ("GET /api/channels HTTP/1.1", "session=alice") => {
                     request.respond(&[], r#"[{"id":"private","type":"dm","name":null,"otherUserId":"bob","lastActivityAt":2}]"#).await
+                }
+                ("GET /api/users HTTP/1.1", "session=charlie") => {
+                    request.respond(&[], r#"[{"id":"charlie","role":"admin"}]"#).await
                 }
                 ("GET /api/channels HTTP/1.1", "session=charlie")
                 | ("GET /api/users HTTP/1.1" | "GET /api/voice HTTP/1.1", _) => {
@@ -427,6 +430,7 @@ async fn direct_message_history_is_visible_only_to_a_participant() {
 
         let (outsider, outsider_views, _, _outsider_peer, charlie) =
             direct_message_session(base.clone(), "charlie").await;
+        wait_for_sidebar(&outsider_views, Sidebar::is_admin).await;
         outsider
             .send(Command::OpenDirectMessage("private".into()))
             .await
@@ -747,6 +751,110 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
     })
     .await
     .expect("loopback private conversation timed out");
+    http.abort();
+}
+
+#[tokio::test]
+async fn admin_message_moderation_is_role_gated_and_updates_a_peer() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let http = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = Url::parse(&format!("http://{}", http.local_addr().unwrap())).unwrap();
+    let (requests_tx, requests) = async_channel::unbounded();
+    let http = tokio::spawn(async move {
+        loop {
+            let (line, request) = Request::receive(&http).await;
+            match line.as_str() {
+                "GET /api/channels HTTP/1.1" => {
+                    request
+                        .respond(&[], r#"[{"id":"general","type":"text"}]"#)
+                        .await;
+                }
+                "GET /api/users HTTP/1.1" => {
+                    request
+                        .respond(
+                            &[],
+                            r#"[{"id":"alice","role":"admin"},{"id":"bob","role":"user"}]"#,
+                        )
+                        .await;
+                }
+                "GET /api/voice HTTP/1.1" => request.respond(&[], "[]").await,
+                "GET /api/unread HTTP/1.1" | "GET /api/users/presence HTTP/1.1" => {
+                    request.respond(&[], "{}").await;
+                }
+                _ => requests_tx.send((line, request)).await.unwrap(),
+            }
+        }
+    });
+
+    timeout(Duration::from_secs(10), async {
+        let (alice, alice_views, _, mut alice_peer, alice_session) =
+            direct_message_session(base.clone(), "alice").await;
+        let (bob, bob_views, _, mut bob_peer, bob_session) =
+            direct_message_session(base.clone(), "bob").await;
+        let url = "https://example.test/moderation";
+        let mut target = message("target", 1, "charlie", url);
+        target["previews"] = value!([{"url":url,"title":"Moderated card","image":false}]);
+        for (commands, views, cookie) in [
+            (&alice, &alice_views, "session=alice"),
+            (&bob, &bob_views, "session=bob"),
+        ] {
+            commands.send(Command::OpenTextChannel("general".into())).await.unwrap();
+            let history = history_request(&requests, "?unread=1").await;
+            assert_eq!(history.header("cookie"), Some(cookie));
+            page(history, std::slice::from_ref(&target), false).await;
+            let view = wait_for_sidebar(views, |view| {
+                view.is_admin() == (cookie == "session=alice")
+                    && view.chat.as_ref().is_some_and(|chat| {
+                        chat.messages.first().is_some_and(|message| message.id == "target")
+                    })
+            }).await;
+            let message = &view.chat.as_ref().unwrap().messages[0];
+            assert_eq!(view.can_remove_message_content(message), cookie == "session=alice");
+            assert_eq!(message.previews.len(), 1);
+        }
+
+        let mutate = |action| Command::MutateChatMessage {
+            channel_id: "general".into(), message_id: "target".into(), action,
+        };
+        bob.send(mutate(MessageAction::Delete)).await.unwrap();
+        let denied = wait_for_sidebar(&bob_views, |view| {
+            view.chat.as_ref().unwrap().action_outcome.as_ref().is_some_and(|outcome| outcome.error.is_some())
+        }).await;
+        assert!(!denied.can_remove_message_content(&denied.chat.as_ref().unwrap().messages[0]));
+        assert!(requests.is_empty());
+
+        alice.send(mutate(MessageAction::RemovePreview(url.into()))).await.unwrap();
+        let remove = chat_action_request(&requests, "DELETE /api/messages/target/previews HTTP/1.1", value!({"url":url})).await;
+        assert_eq!(remove.header("cookie"), Some("session=alice"));
+        remove.respond(&[], r#"{"ok":true}"#).await;
+        let previews = value!({"type":"message:previews","channelId":"general","messageId":"target","previews":[]});
+        for peer in [&mut alice_peer, &mut bob_peer] {
+            peer.send(Message::text(previews.to_string())).await.unwrap();
+        }
+        for views in [&alice_views, &bob_views] {
+            wait_for_sidebar(views, |view| {
+                let chat = view.chat.as_ref().unwrap();
+                !chat.action_pending && chat.messages[0].previews.is_empty()
+            }).await;
+        }
+
+        alice.send(mutate(MessageAction::Delete)).await.unwrap();
+        let (line, delete) = requests.recv().await.unwrap();
+        assert_eq!(line, "DELETE /api/messages/target HTTP/1.1");
+        assert_eq!(delete.header("cookie"), Some("session=alice"));
+        delete.respond(&[], r#"{"ok":true}"#).await;
+        let deleted = value!({"type":"message:delete","channelId":"general","id":"target"});
+        for peer in [&mut alice_peer, &mut bob_peer] {
+            peer.send(Message::text(deleted.to_string())).await.unwrap();
+        }
+        for views in [&alice_views, &bob_views] {
+            wait_for_messages(views, &[]).await;
+        }
+        alice.close();
+        bob.close();
+        assert!(matches!(alice_session.await.unwrap(), SessionEnd::Closed));
+        assert!(matches!(bob_session.await.unwrap(), SessionEnd::Closed));
+    }).await.expect("loopback moderation timed out");
     http.abort();
 }
 

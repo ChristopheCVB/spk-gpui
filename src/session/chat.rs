@@ -1,11 +1,14 @@
 mod actions;
 mod attachments;
+mod gifs;
 mod preview_images;
 
 pub use actions::Pins;
 use actions::{ActionOutcome, PendingAction, change_message};
 pub use attachments::{AttachmentInput, UploadStatus, image_preview};
 use attachments::{AttachmentWork, QueuedAttachment};
+use gifs::{GifPicker, MessageGif, StagedGif};
+pub use gifs::{GifPickerView, message_gif_line};
 use preview_images::{PreviewImages, PreviewResult};
 
 use std::{
@@ -46,6 +49,8 @@ pub struct ChatView {
     pub outgoing: Option<Outgoing>,
     pub pins: Option<Pins>,
     pub preview_images: PreviewImages,
+    pub gifs: Option<GifPickerView>,
+    pub message_gif: Option<MessageGif>,
     pub action_pending: bool,
     pub action_outcome: Option<ActionOutcome>,
     history: History,
@@ -97,6 +102,7 @@ fn position(message: &ChatMessage) -> (i64, &str) {
 #[derive(Clone, Default)]
 pub struct Draft {
     pub body: String,
+    pub gif: Option<StagedGif>,
     pub reply: Option<ReplyRef>,
     pub uploads: Vec<QueuedAttachment>,
     pub upload_notice: Option<&'static str>,
@@ -107,6 +113,7 @@ pub struct Outgoing {
     pub body: String,
     pub status: Delivery,
     nonce: String,
+    gif_url: Option<String>,
     reply: Option<ReplyRef>,
     attachments: Vec<AttachmentRef>,
 }
@@ -145,6 +152,7 @@ pub(super) struct ChatSession {
     deleted_during_load: HashSet<String>,
     pub tasks: JoinSet<Result<MessagePage, Failure>>,
     pub(super) attachments: AttachmentWork,
+    pub(super) gifs: GifPicker,
 }
 
 impl ChatSession {
@@ -161,6 +169,7 @@ impl ChatSession {
             view.messages = Arc::default();
             view.pins = None;
             view.preview_images = PreviewImages::default();
+            view.message_gif = None;
             view.has_more_before = false;
             view.has_more_after = false;
         } else if !view.unavailable() {
@@ -170,6 +179,9 @@ impl ChatSession {
                 .get(&view.channel_id)
                 .cloned()
                 .unwrap_or_default();
+            if view.can_send() {
+                view.gifs = self.gifs.view.clone();
+            }
             view.typing = self.typers.keys().cloned().collect();
             view.typing.sort_unstable();
         }
@@ -200,6 +212,7 @@ impl ChatSession {
         self.typers.clear();
         self.last_typing = None;
         self.reset_actions();
+        self.gifs.reset_conversation();
         self.selected = Some(ChatView {
             channel_id: channel.id.clone(),
             direct_message_peer: channel
@@ -219,6 +232,8 @@ impl ChatSession {
             outgoing: None,
             pins: None,
             preview_images: PreviewImages::default(),
+            gifs: None,
+            message_gif: None,
             action_pending: false,
             action_outcome: None,
             history: History::Loading,
@@ -229,6 +244,7 @@ impl ChatSession {
     pub fn close(&mut self) {
         self.cancel_history();
         self.reset_actions();
+        self.gifs.reset_conversation();
         self.selected = None;
         self.typers.clear();
     }
@@ -399,6 +415,8 @@ impl ChatSession {
                     view.messages = Arc::default();
                     view.pins = None;
                     view.preview_images = PreviewImages::default();
+                    view.message_gif = None;
+                    self.gifs.reset_conversation();
                     self.pin_tasks = JoinSet::new();
                     self.preview_tasks = JoinSet::new();
                     view.has_more_before = false;
@@ -553,28 +571,37 @@ impl ChatSession {
             return;
         }
         let draft = self.drafts.entry(channel_id.clone()).or_default();
-        if draft.attachments_block_send() || (body.trim().is_empty() && !draft.attachments_ready())
+        if draft.attachments_block_send()
+            || (body.trim().is_empty() && draft.gif.is_none() && !draft.attachments_ready())
         {
             return;
         }
         draft.body.clone_from(&body);
         let reply = draft.reply.clone();
         let attachments = draft.attachment_refs();
-        self.send_draft(channel_id, body, reply, attachments);
+        let gif_url = draft.gif.as_ref().map(|gif| gif.item.url.clone());
+        self.gifs.close();
+        self.send_draft(channel_id, body, gif_url, reply, attachments);
     }
 
     fn send_draft(
         &mut self,
         channel_id: String,
         body: String,
+        gif_url: Option<String>,
         reply: Option<ReplyRef>,
         attachments: Vec<AttachmentRef>,
     ) {
+        let wire_body = match (body.trim(), gif_url.as_deref()) {
+            (_, None) => std::borrow::Cow::Borrowed(body.as_str()),
+            ("", Some(url)) => std::borrow::Cow::Borrowed(url),
+            (text, Some(url)) => std::borrow::Cow::Owned(format!("{text}\n{url}")),
+        };
         let nonce = uuid::Uuid::new_v4().to_string();
         let status = if self.socket.as_ref().is_some_and(|socket| {
             socket.send_message(
                 &channel_id,
-                &body,
+                &wire_body,
                 &nonce,
                 reply.as_ref().map(|reply| reply.id.as_str()),
                 &attachments,
@@ -590,6 +617,7 @@ impl ChatSession {
                 body,
                 status,
                 nonce,
+                gif_url,
                 reply,
                 attachments,
             },
@@ -606,7 +634,13 @@ impl ChatSession {
         {
             let channel = view.channel_id.clone();
             let outgoing = self.outgoing.remove(&channel).unwrap();
-            self.send_draft(channel, outgoing.body, outgoing.reply, outgoing.attachments);
+            self.send_draft(
+                channel,
+                outgoing.body,
+                outgoing.gif_url,
+                outgoing.reply,
+                outgoing.attachments,
+            );
         }
     }
 
@@ -631,6 +665,9 @@ impl ChatSession {
             let outgoing = self.outgoing.remove(&message.channel_id).unwrap();
             if let Some(draft) = self.drafts.get_mut(&message.channel_id) {
                 draft.uploads.clear();
+                if draft.gif.as_ref().map(|gif| &gif.item.url) == outgoing.gif_url.as_ref() {
+                    draft.gif = None;
+                }
                 if draft.body == outgoing.body && draft.reply == outgoing.reply {
                     draft.body.clear();
                     draft.reply = None;

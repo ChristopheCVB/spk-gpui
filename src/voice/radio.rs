@@ -1,6 +1,5 @@
 use std::{
     io::{self, Cursor, Read, Seek, SeekFrom},
-    net::IpAddr,
     num::NonZero,
     sync::Arc,
     time::Duration,
@@ -8,11 +7,7 @@ use std::{
 
 use async_channel::{Receiver, Sender};
 use oxideav_aac::{adts::ADTS_SAMPLE_RATES_HZ, asc::AudioSpecificConfig, decode::StreamDecoder};
-use reqwest::{
-    Client,
-    dns::{Addrs, Name, Resolve, Resolving},
-    redirect::Policy,
-};
+use reqwest::{Client, redirect::Policy};
 use rodio::{Player, buffer::SamplesBuffer};
 use symphonia::core::{
     codecs::audio::{AudioCodecParameters, AudioDecoder, well_known::CODEC_ID_AAC},
@@ -22,7 +17,9 @@ use symphonia::core::{
     packet::Packet,
 };
 use tokio::{sync::watch, task::JoinHandle, time};
-use url::{Host, Url};
+use url::Url;
+
+use crate::api::{PublicDns, public_media_url};
 
 use super::devices::{MediaOutput, open_media_output};
 
@@ -46,7 +43,10 @@ impl RadioPlayer {
         let (output, settings) = watch::channel(initial_output);
         let (status, playback) = watch::channel(RadioPlayback::Connecting);
         let task = tokio::spawn(async move {
-            if let Some(url) = url.and_then(|url| Url::parse(&url).ok()).filter(valid_url) {
+            if let Some(url) = url
+                .and_then(|url| Url::parse(&url).ok())
+                .filter(public_media_url)
+            {
                 play(url, settings, &status).await;
             }
             status.send_replace(RadioPlayback::Unavailable);
@@ -101,7 +101,7 @@ async fn download(url: Url, bytes: Sender<bytes::Bytes>) {
         .read_timeout(Duration::from_secs(10))
         .dns_resolver(Arc::new(PublicDns))
         .redirect(Policy::custom(|attempt| {
-            if attempt.previous().len() > 5 || !valid_url(attempt.url()) {
+            if attempt.previous().len() > 5 || !public_media_url(attempt.url()) {
                 attempt.error("Unsupported radio redirect")
             } else {
                 attempt.follow()
@@ -368,65 +368,6 @@ impl Aac {
     }
 }
 
-fn valid_url(url: &Url) -> bool {
-    url.as_str().len() <= 4096
-        && url.scheme() == "https"
-        && url.port().is_none()
-        && url.username().is_empty()
-        && url.password().is_none()
-        && match url.host() {
-            Some(Host::Domain(name)) => {
-                let name = name.trim_end_matches('.');
-                name.contains('.') && !name.ends_with(".local") && !name.ends_with(".localhost")
-            }
-            Some(Host::Ipv4(ip)) => public_ip(ip.into()),
-            Some(Host::Ipv6(ip)) => public_ip(ip.into()),
-            None => false,
-        }
-}
-
-struct PublicDns;
-
-impl Resolve for PublicDns {
-    fn resolve(&self, name: Name) -> Resolving {
-        Box::pin(async move {
-            let addresses = tokio::net::lookup_host((name.as_str(), 0))
-                .await?
-                .collect::<Vec<_>>();
-            if addresses.is_empty() || addresses.iter().any(|address| !public_ip(address.ip())) {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "Radio stream host is not public",
-                )
-                .into());
-            }
-            Ok(Box::new(addresses.into_iter()) as Addrs)
-        })
-    }
-}
-
-fn public_ip(ip: IpAddr) -> bool {
-    match ip.to_canonical() {
-        IpAddr::V4(ip) => !matches!(
-            ip.octets(),
-            [0 | 10 | 127 | 224..=255, ..]
-                | [100, 64..=127, ..]
-                | [169, 254, ..]
-                | [172, 16..=31, ..]
-                | [192, 0, 0 | 2, _]
-                | [192, 168, ..]
-                | [198, 18 | 19, ..]
-                | [198, 51, 100, _]
-                | [203, 0, 113, _]
-        ),
-        IpAddr::V6(ip) => {
-            let [prefix, next, ..] = ip.segments();
-            (0x2000..=0x3fff).contains(&prefix)
-                && !matches!((prefix, next), (0x2001, 0 | 0x0db8) | (0x2002, _))
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,9 +414,9 @@ mod tests {
             "https://[64:ff9b::a00:1]/radio",
             "https://[fc00::1]/radio",
         ] {
-            assert!(!valid_url(&Url::parse(url).unwrap()), "{url}");
+            assert!(!public_media_url(&Url::parse(url).unwrap()), "{url}");
         }
-        assert!(valid_url(
+        assert!(public_media_url(
             &Url::parse("https://example.com:443/music").unwrap()
         ));
     }

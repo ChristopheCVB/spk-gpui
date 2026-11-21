@@ -305,7 +305,9 @@ impl Refresh {
                                 .iter()
                                 .find(|user| sidebar.profile.id.as_ref() == Some(&user.id))
                         {
-                            sidebar.profile.role.clone_from(&me.role);
+                            if matches!(me.role.as_str(), "admin" | "user") {
+                                sidebar.profile.role.clone_from(&me.role);
+                            }
                             if !sidebar.profile_edit.busy() {
                                 sidebar.profile.display_name.clone_from(&me.display_name);
                                 sidebar.profile.avatar_key.clone_from(&me.avatar_key);

@@ -1,9 +1,12 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-use tokio::{task::spawn_blocking, time::Instant};
+use tokio::{
+    task::{JoinSet, spawn_blocking},
+    time::Instant,
+};
 
 use super::{Command, Sidebar, VoiceProcessingSetting};
-use crate::api::{Connection, SpkClient, VoiceSocket};
+use crate::api::{Channel, Connection, Failure, SpkClient, VoiceModeration, VoiceSocket};
 use crate::sounds::Sound;
 use crate::voice::{
     self, Call, DeviceKind, DevicePreferences, Intent, Issue as VoiceIssue,
@@ -91,6 +94,49 @@ impl Sidebar {
             self.camera_status(),
             CameraStatus::Starting | CameraStatus::Live(..)
         )
+    }
+
+    pub fn voice_moderation_channels(&self, user_id: &str) -> Option<Vec<&Channel>> {
+        if !self.is_admin() || !matches!(self.connection, Connection::Online) {
+            return None;
+        }
+        let member = self.voice_presence.get(user_id)?;
+        Some(
+            self.channels
+                .iter()
+                .flatten()
+                .filter(|channel| channel.kind == "voice" && channel.id != member.channel_id)
+                .collect(),
+        )
+    }
+
+    pub(super) fn moderate_voice(
+        &mut self,
+        client: &SpkClient,
+        tasks: &mut JoinSet<Result<VoiceModeration, Failure>>,
+        user_id: String,
+        action: VoiceModeration,
+    ) {
+        if !self.is_admin() {
+            self.voice_moderation_notice = Some("You don’t have permission to moderate voice.");
+            return;
+        }
+        let available = self
+            .voice_moderation_channels(&user_id)
+            .is_some_and(|destinations| match &action {
+                VoiceModeration::Move(id) => destinations.iter().any(|channel| &channel.id == id),
+                VoiceModeration::Disconnect => true,
+            });
+        if !available {
+            self.voice_moderation_notice = Some("This voice moderation action is unavailable.");
+            return;
+        }
+        self.voice_moderation_notice = Some("Moderating voice…");
+        let client = client.clone();
+        tasks.spawn(async move {
+            client.moderate_voice(&user_id, &action).await?;
+            Ok(action)
+        });
     }
 
     pub(super) fn has_voice_channel(&self, channel_id: &str) -> bool {
