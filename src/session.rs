@@ -64,6 +64,7 @@ pub struct Sidebar {
     pub load_failed: bool,
     pub voice: Option<VoiceView>,
     pub voice_notice: Option<&'static str>,
+    voice_rejoin: Option<String>,
     pub voice_intent: Intent,
     pub devices: Arc<Devices>,
     pub device_notice: Option<&'static str>,
@@ -93,7 +94,7 @@ impl VoiceView {
     fn listening(&self) -> bool {
         matches!(
             self.status,
-            VoiceStatus::Connected | VoiceStatus::ListenOnly
+            VoiceStatus::Connected | VoiceStatus::ListenOnly | VoiceStatus::Reconnecting
         )
     }
 
@@ -140,6 +141,7 @@ impl Sidebar {
             load_failed: false,
             voice: None,
             voice_notice: None,
+            voice_rejoin: None,
             voice_intent: Intent::default(),
             devices: Arc::default(),
             device_notice: None,
@@ -156,6 +158,33 @@ impl Sidebar {
             call.cancel();
             self.voice_notice = notice;
         }
+    }
+
+    fn finish_voice(&mut self, result: Result<(), VoiceIssue>) -> bool {
+        let voice = self.voice.take();
+        self.voice_rejoin = voice
+            .as_ref()
+            .filter(|voice| {
+                voice.status != VoiceStatus::Leaving
+                    && matches!(result, Err(VoiceIssue::LiveKitDisconnected))
+            })
+            .map(|voice| voice.channel_id.clone());
+        if let Err(issue) = result {
+            self.voice_notice.get_or_insert_with(|| issue.message());
+        }
+        result.is_ok() && voice.is_some_and(|voice| voice.play_leave)
+    }
+
+    pub fn rejoin_channel(&self) -> Option<&str> {
+        let id = self.voice_rejoin.as_deref()?;
+        (matches!(self.connection, Connection::Online) && self.has_voice_channel(id)).then_some(id)
+    }
+
+    fn has_voice_channel(&self, id: &str) -> bool {
+        self.channels
+            .iter()
+            .flatten()
+            .any(|channel| channel.kind == "voice" && channel.id == id)
     }
 
     pub fn participants(&self, channel: &str) -> Vec<Participant<'_>> {
@@ -681,11 +710,12 @@ async fn watch_session(
                 Ok(Command::Refresh) => refresh.fetch_all(client),
                 Ok(Command::JoinVoice(channel_id)) if call.is_none() => {
                     if let Some(socket) = &voice_socket
-                        && sidebar.channels.iter().flatten().any(|channel| channel.kind == "voice" && channel.id == channel_id)
+                        && sidebar.has_voice_channel(&channel_id)
                     {
                         call = Some((settings.start_call)(channel_id.clone(), client.clone(), socket.clone(), sidebar.voice_intent.clone()));
                         sidebar.voice = Some(VoiceView::joining(channel_id));
                         sidebar.voice_notice = None;
+                        sidebar.voice_rejoin = None;
                     }
                 }
                 Ok(Command::LeaveVoice) => sidebar.cancel_voice(&mut call, None),
@@ -795,14 +825,11 @@ async fn watch_session(
                 }
                 VoiceUpdate::Finished(result) => {
                     call = None;
-                    if sidebar.voice.take().is_some_and(|voice| voice.play_leave) && result.is_ok() {
-                        settings.sounds.play(Sound::Leave, false);
-                    }
                     if matches!(result, Err(VoiceIssue::Unauthorized)) {
                         break SessionEnd::Invalidated(SESSION_EXPIRED);
                     }
-                    if let Err(issue) = result {
-                        sidebar.voice_notice.get_or_insert_with(|| issue.message());
+                    if sidebar.finish_voice(result) {
+                        settings.sounds.play(Sound::Leave, false);
                     }
                 }
             },

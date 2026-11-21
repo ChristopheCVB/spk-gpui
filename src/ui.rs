@@ -112,6 +112,7 @@ fn call_status(call: &VoiceView) -> &'static str {
         Status::Joining => "Joining…",
         Status::Connected => "Connected",
         Status::ListenOnly => "Listen only",
+        Status::Reconnecting => "Reconnecting voice…",
         Status::Leaving => "Leaving…",
     }
 }
@@ -143,10 +144,10 @@ impl Spk {
         let notices = [
             status,
             sidebar.notice,
-            sidebar.voice_notice,
             sidebar.device_notice,
             self.form_error,
         ];
+        let rejoin = sidebar.rejoin_channel().map(str::to_owned);
 
         div()
             .size_full()
@@ -222,6 +223,29 @@ impl Spk {
                             .text_color(theme.muted_foreground)
                             .child(notice)
                     }))
+                    .when_some(sidebar.voice_notice, |area, notice| {
+                        area.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .px_4()
+                                .py_1()
+                                .text_color(theme.muted_foreground)
+                                .child(notice)
+                                .when_some(rejoin, |row, id| {
+                                    row.child(
+                                        Button::new("voice-rejoin")
+                                            .small()
+                                            .tab_stop(true)
+                                            .label("Rejoin voice")
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.join_room(&id, cx)
+                                            })),
+                                    )
+                                }),
+                        )
+                    })
                     .child(self.room_stage(sidebar, room, cx)),
             )
     }
@@ -550,8 +574,12 @@ impl Spk {
                 .as_ref()
                 .filter(|call| call.channel_id == room.id)
         });
-        let in_voice =
-            call.is_some_and(|call| matches!(call.status, Status::Connected | Status::ListenOnly));
+        let in_voice = call.is_some_and(|call| {
+            matches!(
+                call.status,
+                Status::Connected | Status::ListenOnly | Status::Reconnecting
+            )
+        });
         let mut participants = room.map_or_else(Vec::new, |room| sidebar.participants(&room.id));
         if let Some(id) = sidebar.profile.id.as_deref().filter(|_| in_voice)
             && !participants.iter().any(|person| person.id == id)
@@ -634,9 +662,14 @@ impl Spk {
                                 .children(call.and_then(|call| {
                                     self.leave_voice("room-leave", call, true, cx)
                                 }))
-                                .when(
-                                    call.is_some_and(|call| call.status == Status::Leaving),
-                                    |bar| bar.child("Leaving…"),
+                                .when_some(
+                                    call.filter(|call| {
+                                        matches!(
+                                            call.status,
+                                            Status::Reconnecting | Status::Leaving
+                                        )
+                                    }),
+                                    |bar, call| bar.child(call_status(call)),
                                 )
                                 .when(
                                     sidebar.voice.is_none()
@@ -697,7 +730,9 @@ impl Spk {
         let flags = if is_me && call.is_some() {
             crate::api::VoiceFlags {
                 muted: sidebar.voice_intent.mute.effective_muted()
-                    || call.is_some_and(|call| call.status == Status::ListenOnly),
+                    || call.is_some_and(|call| {
+                        matches!(call.status, Status::ListenOnly | Status::Reconnecting)
+                    }),
                 deafened: sidebar.voice_intent.mute.deafened,
                 ..participant.flags
             }
