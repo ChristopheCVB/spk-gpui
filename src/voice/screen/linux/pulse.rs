@@ -100,12 +100,8 @@ impl Monitor {
                 .await
                 .is_ok_and(|result| result.is_ok())
             {
-                sink.audio(
-                    bytes
-                        .chunks_exact(2)
-                        .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
-                        .collect(),
-                );
+                let (samples, _) = bytes.as_chunks();
+                sink.audio(samples.iter().copied().map(i16::from_le_bytes).collect());
             }
         }
         sink.audio_unavailable();
