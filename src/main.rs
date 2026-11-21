@@ -32,7 +32,7 @@ struct Spk {
     view: View,
     form_error: Option<&'static str>,
     device_picker: Option<(VoiceControls, DeviceKind)>,
-    selected_room: Option<String>,
+    selected_voice_channel: Option<String>,
     sidebar_open: bool,
     workspace_focus: FocusHandle,
     appearance: Appearance,
@@ -164,7 +164,7 @@ impl Spk {
                         if signed_in && !matches!(this.view, View::SignedIn(_)) {
                             this.workspace_focus.focus(window, cx);
                         } else if !signed_in {
-                            this.selected_room = None;
+                            this.selected_voice_channel = None;
                             this.device_picker = None;
                             window.close_all_dialogs(cx);
                         }
@@ -207,7 +207,7 @@ impl Spk {
             view: View::Busy("Checking saved session…"),
             form_error: None,
             device_picker: None,
-            selected_room: None,
+            selected_voice_channel: None,
             sidebar_open: true,
             workspace_focus,
             appearance,

@@ -6,9 +6,9 @@ use std::{
 };
 
 use async_channel::{Receiver, Sender};
-use livekit::prelude::*;
 use livekit::rtc_engine::lk_runtime::LkRuntime;
 use livekit::webrtc::peer_connection_factory::native::PeerConnectionFactoryExt;
+use livekit::{DisconnectReason, prelude::*};
 use tokio::{
     sync::{oneshot, watch},
     task::{JoinHandle, JoinSet},
@@ -17,13 +17,13 @@ use tokio::{
 use url::Url;
 use uuid::Uuid;
 
-use crate::api::{SpkClient, VoiceFlags, VoiceFrame, VoiceSocket};
+use crate::api::{Failure, SpkClient, VoiceFlags, VoiceFrame, VoiceJoin, VoiceSocket};
 
 mod devices;
 pub use devices::{Device, DeviceKind, DeviceList, DevicePreferences, Devices};
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 #[cfg(windows)]
 mod windows_audio;
 
@@ -32,6 +32,7 @@ pub enum Status {
     Joining,
     Connected,
     ListenOnly,
+    Reconnecting,
     Leaving,
 }
 
@@ -45,6 +46,7 @@ pub enum Issue {
     Playback,
     Media,
     Disconnected,
+    LiveKitDisconnected,
 }
 
 impl Issue {
@@ -60,6 +62,7 @@ impl Issue {
             Self::Playback => "Could not open speakers. Check your audio settings and try again.",
             Self::Media => "Could not connect to LiveKit. Try joining again.",
             Self::Disconnected => "Disconnected from voice. Join again to continue.",
+            Self::LiveKitDisconnected => "The voice connection was lost.",
         }
     }
 }
@@ -126,6 +129,7 @@ pub struct Call {
     acknowledgment: Option<oneshot::Sender<()>>,
     cancel: Option<oneshot::Sender<()>>,
     intent: watch::Sender<Intent>,
+    socket: watch::Sender<Option<VoiceSocket>>,
     updates: Receiver<Update>,
     worker: JoinHandle<()>,
 }
@@ -139,6 +143,50 @@ impl Call {
     ) -> Self {
         Self::spawn(channel_id, socket, intent, |worker, ack, cancelled| {
             tokio::spawn(worker.run(client, ack, cancelled, Worker::connect_and_listen))
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_for_test(
+        channel_id: String,
+        client: SpkClient,
+        socket: VoiceSocket,
+        intent: Intent,
+    ) -> Self {
+        Self::spawn(channel_id, socket, intent, |worker, ack, cancelled| {
+            tokio::spawn(worker.run(
+                client,
+                ack,
+                cancelled,
+                async |worker: &Worker, _: &mut Media, _| {
+                    let mut requested = worker.requested.clone();
+                    loop {
+                        let intent = requested.borrow_and_update().clone();
+                        let muted = intent.mute.effective_muted();
+                        worker.publish_flags(
+                            VoiceFlags {
+                                muted,
+                                deafened: intent.mute.deafened,
+                                speaking: !muted,
+                            },
+                            true,
+                            false,
+                        );
+                        worker.update(Update::Media(Arc::new(Report {
+                            status: Status::Connected,
+                            devices: Arc::default(),
+                            microphone: None,
+                            speakers: None,
+                            speaking: if muted {
+                                HashSet::new()
+                            } else {
+                                HashSet::from(["alice".to_owned()])
+                            },
+                        })));
+                        requested.changed().await.map_err(|_| Issue::Disconnected)?;
+                    }
+                },
+            ))
         })
     }
 
@@ -161,10 +209,14 @@ impl Call {
         let (cancel, cancelled) = oneshot::channel();
         let (notifications, updates) = async_channel::unbounded();
         let (intent, requested) = watch::channel(initial);
+        let initial_socket = socket.clone();
+        let (socket, connection) = watch::channel(Some(socket));
         let worker = start_worker(
             Worker {
                 join: join.clone(),
-                socket,
+                initial_socket,
+                connection,
+                presence: watch::Sender::new(None),
                 updates: notifications,
                 requested,
             },
@@ -177,6 +229,7 @@ impl Call {
             acknowledgment: Some(acknowledgment),
             cancel: Some(cancel),
             intent,
+            socket,
             updates,
             worker,
         }
@@ -184,6 +237,12 @@ impl Call {
 
     pub fn apply(&self, intent: &Intent) {
         self.intent.send_replace(intent.clone());
+    }
+
+    pub fn set_socket(&self, socket: Option<VoiceSocket>) {
+        if self.cancel.is_some() {
+            self.socket.send_replace(socket);
+        }
     }
 
     pub fn acknowledge(&mut self, sid: &str, channel_id: &str, nonce: &str) {
@@ -222,23 +281,34 @@ pub async fn next_update(call: Option<&Call>) -> Update {
 
 struct Worker {
     join: Join,
-    socket: VoiceSocket,
+    initial_socket: VoiceSocket,
+    connection: watch::Receiver<Option<VoiceSocket>>,
+    presence: watch::Sender<Option<PublishedPresence>>,
     updates: Sender<Update>,
     requested: watch::Receiver<Intent>,
 }
 
 type RoomEvents = tokio::sync::mpsc::UnboundedReceiver<RoomEvent>;
 
+#[derive(Clone, Copy, PartialEq)]
+struct PublishedPresence {
+    flags: VoiceFlags,
+    ready: bool,
+    revision: u64,
+}
+
 #[derive(Default)]
 struct Media {
     audio: Option<PlatformAudio>,
+    capture: Capture,
     connecting: Option<JoinHandle<Result<(Room, RoomEvents), Issue>>>,
     room: Option<Room>,
-    joined_deafened: bool,
 }
 
 impl Media {
-    fn stop_audio(&mut self) {
+    async fn stop_audio(&mut self) {
+        self.capture.silence();
+        self.capture.jobs.shutdown().await;
         if let Some(audio) = self.audio.take() {
             stop_recording(&audio);
             LkRuntime::instance()
@@ -267,24 +337,32 @@ impl Worker {
         start_media: impl AsyncFnOnce(&Self, &mut Media, String) -> Result<(), Issue>,
     ) {
         let mut claimed = false;
+        let mut connection = self.connection.clone();
         let mut media = Media::default();
 
         let result = tokio::select! {
             biased;
             _ = &mut cancelled => Ok(()),
             result = async {
-                let (token, deafened) = self.claim(&client, ack, &mut claimed).await?;
-                media.joined_deafened = deafened;
-                start_media(&self, &mut media, token).await
+                let (token, deafened) = tokio::select! {
+                    biased;
+                    _ = connection.changed() => return Err(Issue::Socket),
+                    result = self.claim(&client, ack, &mut claimed) => result?,
+                };
+                tokio::select! {
+                    biased;
+                    result = start_media(&self, &mut media, token) => result,
+                    () = self.sync_presence(deafened) => Err(Issue::Socket),
+                }
             } => result,
         };
 
-        media.stop_audio();
+        media.stop_audio().await;
         tokio::join!(
             async {
-                if claimed {
-                    let _ = self
-                        .socket
+                let socket = self.connection.borrow().clone();
+                if claimed && let Some(socket) = socket {
+                    let _ = socket
                         .send(VoiceFrame::Leave {
                             sid: &self.join.sid,
                         })
@@ -324,15 +402,17 @@ impl Worker {
         // The write may have reached SPK even if cancellation interrupts its receipt.
         *claimed = true;
         let deafened = self.requested.borrow().mute.deafened;
-        self.send(VoiceFrame::Join {
-            sid,
-            channel_id,
-            nonce,
-            muted: true,
-            deafened,
-            watching: [],
-        })
-        .await?;
+        self.initial_socket
+            .send(VoiceFrame::Join {
+                sid,
+                channel_id,
+                mode: VoiceJoin::Initial { nonce },
+                muted: true,
+                deafened,
+                watching: [],
+            })
+            .await
+            .map_err(|_| Issue::Socket)?;
         timeout(Duration::from_secs(5), ack)
             .await
             .map_err(|_| Issue::Acknowledgment)?
@@ -362,7 +442,7 @@ impl Worker {
             audio,
             events,
             speakers,
-            media.joined_deafened,
+            &mut media.capture,
         )
         .await
     }
@@ -373,7 +453,7 @@ impl Worker {
         audio: &PlatformAudio,
         mut events: RoomEvents,
         speakers: Device,
-        joined_deafened: bool,
+        capture: &mut Capture,
     ) -> Result<(), Issue> {
         let mut requested = self.requested.clone();
         let mut intent = requested.borrow_and_update().clone();
@@ -384,16 +464,9 @@ impl Worker {
         runtime
             .pc_factory()
             .set_adm_playout_enabled(output.is_some() && !intent.mute.deafened);
-        for participant in room.remote_participants().into_values() {
-            for publication in participant.track_publications().into_values() {
-                subscribe_to_microphone(&publication);
-            }
-        }
-        self.ready().await?;
+        subscribe_to_microphones(room);
         let me = room.local_participant().identity();
-        let mut capture = Capture::default();
         let mut speaking = Speaking::default();
-        let mut presence = Presence::new(joined_deafened);
         let mut reported = None;
         // shortcut: a remove and return between scans can be missed, use backend notifications when available.
         let mut scan = interval(Duration::from_secs(1));
@@ -402,9 +475,14 @@ impl Worker {
         let mut check_routes = true;
         let mut retry_mic = intent.retry_mic;
         let mut retry_speakers = intent.retry_speakers;
+        let mut reconnecting = false;
+        let mut resync = false;
 
         loop {
-            if check_routes {
+            if reconnecting && intent.mute.effective_muted() && capture.device.is_some() {
+                capture.stop(room, audio).await;
+            }
+            if check_routes && !reconnecting {
                 check_routes = false;
                 let input = devices
                     .microphones
@@ -431,6 +509,7 @@ impl Worker {
                 }
                 if devices.speakers.resolve(intent.preferred.speakers.as_ref()) != output.as_ref()
                     || retry_speakers != intent.retry_speakers
+                    || resync
                 {
                     retry_speakers = intent.retry_speakers;
                     output = route_speakers(audio, &devices.speakers, &intent, output.as_ref());
@@ -438,10 +517,17 @@ impl Worker {
                 runtime
                     .pc_factory()
                     .set_adm_playout_enabled(output.is_some() && !intent.mute.deafened);
+                if resync
+                    && !intent.mute.effective_muted()
+                    && capture.published.is_some()
+                    && let Some(track) = &capture.track
+                {
+                    track.unmute();
+                }
             }
 
             speaking.expire(Instant::now());
-            let muted = capture.published.is_none();
+            let muted = reconnecting || capture.published.is_none();
             if muted {
                 speaking.remove(me.as_str());
             }
@@ -450,8 +536,11 @@ impl Worker {
                 deafened: intent.mute.deafened,
                 speaking: speaking.0.contains_key(me.as_str()),
             };
+            self.publish_flags(flags, !reconnecting, std::mem::take(&mut resync));
             let report = Report {
-                status: if !intent.mute.effective_muted()
+                status: if reconnecting {
+                    Status::Reconnecting
+                } else if !intent.mute.effective_muted()
                     && (capture.failed || (capture.device.is_none() && capture.jobs.is_empty()))
                 {
                     Status::ListenOnly
@@ -471,10 +560,6 @@ impl Worker {
                 reported = Some(report.clone());
                 self.update(Update::Media(Arc::new(report)));
             }
-            if presence.due(flags).is_some_and(|at| at <= Instant::now()) {
-                self.state(flags).await?;
-                presence.sent(flags, Instant::now());
-            }
 
             tokio::select! {
                 biased;
@@ -489,47 +574,143 @@ impl Worker {
                     intent = next;
                     check_routes = true;
                 }
-                result = capture.jobs.join_next(), if !capture.jobs.is_empty() => {
-                    capture.complete(room, audio, result.and_then(Result::ok).flatten()).await;
-                    check_routes = true;
-                }
                 event = events.recv() => match event {
                     Some(RoomEvent::TrackPublished { publication, .. }) => subscribe_to_microphone(&publication),
-                    Some(RoomEvent::ActiveSpeakersChanged { speakers }) => speaking.update(
+                    Some(RoomEvent::ActiveSpeakersChanged { speakers }) if !reconnecting => speaking.update(
                         speakers.into_iter().map(|speaker| speaker.identity().to_string()).collect(),
                         Instant::now(),
                     ),
                     Some(RoomEvent::ParticipantDisconnected(participant)) => speaking.remove(participant.identity().as_str()),
-                    Some(RoomEvent::Disconnected { .. }) | None => return Err(Issue::Disconnected),
+                    Some(RoomEvent::LocalTrackRepublished { publication, .. })
+                        if capture.track.as_ref().is_none_or(|track| track.sid() != publication.sid()) =>
+                    {
+                        // The SDK can be republishing while mute or deafen removes the old track.
+                        let _ = room.local_participant().unpublish_track(&publication.sid()).await;
+                    }
+                    Some(RoomEvent::Reconnecting) => {
+                        reconnecting = true;
+                        capture.silence();
+                        runtime.pc_factory().set_adm_playout_enabled(false);
+                        speaking.0.clear();
+                    }
+                    Some(RoomEvent::Reconnected) if reconnecting => {
+                        reconnecting = false;
+                        resync = true;
+                        check_routes = true;
+                        intent = requested.borrow_and_update().clone();
+                        devices = Arc::new(Devices::read(audio));
+                        capture.reconcile_publication(room, audio).await;
+                        subscribe_to_microphones(room);
+                    }
+                    Some(RoomEvent::Disconnected { reason }) => return Err(disconnect_issue(reason)),
+                    None => return Err(Issue::LiveKitDisconnected),
                     _ => {}
                 },
+                result = capture.jobs.join_next(), if !reconnecting && !capture.jobs.is_empty() => {
+                    capture.complete(room, audio, result.and_then(Result::ok).flatten()).await;
+                    check_routes = true;
+                }
                 _ = scan.tick() => {
                     devices = Arc::new(Devices::read(audio));
                     check_routes = true;
                 }
                 _ = wait_until(speaking.deadline()) => {},
-                _ = wait_until(presence.due(flags)) => {},
             }
         }
     }
 
-    async fn ready(&self) -> Result<(), Issue> {
-        self.send(VoiceFrame::Ready {
-            sid: &self.join.sid,
-        })
-        .await
+    fn publish_flags(&self, flags: VoiceFlags, ready: bool, resync: bool) {
+        self.presence.send_if_modified(|current| {
+            let revision = current.map_or(0, |current| current.revision) + u64::from(resync);
+            let next = Some(PublishedPresence {
+                flags,
+                ready,
+                revision,
+            });
+            if *current == next {
+                return false;
+            }
+            *current = next;
+            true
+        });
     }
 
-    async fn state(&self, flags: VoiceFlags) -> Result<(), Issue> {
-        self.send(VoiceFrame::State {
-            sid: &self.join.sid,
-            flags,
-        })
-        .await
+    async fn sync_presence(&self, joined_deafened: bool) {
+        let mut connection = self.connection.clone();
+        let mut published = self.presence.subscribe();
+        loop {
+            let socket = connection.borrow_and_update().clone();
+            let changed = match socket {
+                Some(socket) => {
+                    let reclaim = !socket.same_connection(&self.initial_socket);
+                    tokio::select! {
+                        biased;
+                        changed = connection.changed() => changed,
+                        _ = self.sync_socket(&socket, &mut published, reclaim, joined_deafened) => {
+                            connection.changed().await
+                        }
+                    }
+                }
+                None => connection.changed().await,
+            };
+            if changed.is_err() {
+                return;
+            }
+        }
     }
 
-    async fn send(&self, frame: VoiceFrame<'_>) -> Result<(), Issue> {
-        self.socket.send(frame).await.map_err(|_| Issue::Socket)
+    async fn sync_socket(
+        &self,
+        socket: &VoiceSocket,
+        published: &mut watch::Receiver<Option<PublishedPresence>>,
+        reclaim: bool,
+        joined_deafened: bool,
+    ) -> Result<(), Failure> {
+        let sid = &self.join.sid;
+        let first = published
+            .wait_for(Option::is_some)
+            .await
+            .map_err(|_| Failure::Connection)?
+            .expect("presence is ready");
+        let mut revision = first.revision;
+        let mut presence = Presence::new(joined_deafened);
+        if reclaim {
+            socket
+                .send(VoiceFrame::Join {
+                    sid,
+                    channel_id: &self.join.channel_id,
+                    mode: VoiceJoin::Reclaim { ready: first.ready },
+                    muted: first.flags.muted,
+                    deafened: first.flags.deafened,
+                    watching: [],
+                })
+                .await?;
+            presence.resync();
+        } else if first.ready {
+            socket.send(VoiceFrame::Ready { sid }).await?;
+            if revision != 0 {
+                presence.resync();
+            }
+        }
+        loop {
+            let latest = published.borrow_and_update().expect("presence is ready");
+            if latest.ready && latest.revision != revision {
+                socket.send(VoiceFrame::Ready { sid }).await?;
+                revision = latest.revision;
+                presence.resync();
+            }
+            let flags = latest.flags;
+            tokio::select! {
+                biased;
+                changed = published.changed() => {
+                    changed.map_err(|_| Failure::Connection)?;
+                }
+                _ = wait_until(presence.due(flags)) => {
+                    socket.send(VoiceFrame::State { sid, flags }).await?;
+                    presence.sent(flags, Instant::now());
+                }
+            }
+        }
     }
 
     fn update(&self, update: Update) {
@@ -571,29 +752,34 @@ async fn wait_until(deadline: Option<Instant>) {
 }
 
 struct Presence {
-    flags: VoiceFlags,
+    flags: Option<VoiceFlags>,
     next: Instant,
 }
 
 impl Presence {
     fn new(deafened: bool) -> Self {
         Self {
-            flags: VoiceFlags {
+            flags: Some(VoiceFlags {
                 muted: true,
                 deafened,
                 speaking: false,
-            },
+            }),
             next: Instant::now(),
         }
     }
 
     fn due(&self, flags: VoiceFlags) -> Option<Instant> {
-        (flags != self.flags).then_some(self.next)
+        (Some(flags) != self.flags).then_some(self.next)
     }
 
     fn sent(&mut self, flags: VoiceFlags, now: Instant) {
-        self.flags = flags;
+        self.flags = Some(flags);
         self.next = now + Duration::from_millis(50);
+    }
+
+    fn resync(&mut self) {
+        self.flags = None;
+        self.next = Instant::now();
     }
 }
 
@@ -632,6 +818,27 @@ async fn connect(token: String) -> Result<(Room, RoomEvents), Issue> {
         .map_err(|_| Issue::Media)
 }
 
+fn disconnect_issue(reason: DisconnectReason) -> Issue {
+    match reason {
+        DisconnectReason::UnknownReason
+        | DisconnectReason::SignalClose
+        | DisconnectReason::StateMismatch
+        | DisconnectReason::ConnectionTimeout
+        | DisconnectReason::ServerShutdown
+        | DisconnectReason::MediaFailure
+        | DisconnectReason::JoinFailure => Issue::LiveKitDisconnected,
+        _ => Issue::Disconnected,
+    }
+}
+
+fn subscribe_to_microphones(room: &Room) {
+    for participant in room.remote_participants().into_values() {
+        for publication in participant.track_publications().into_values() {
+            subscribe_to_microphone(&publication);
+        }
+    }
+}
+
 fn subscribe_to_microphone(publication: &RemoteTrackPublication) {
     if publication.kind() == TrackKind::Audio && publication.source() == TrackSource::Microphone {
         publication.set_subscribed(true);
@@ -649,6 +856,31 @@ struct Capture {
 }
 
 impl Capture {
+    fn silence(&self) {
+        if let Some(track) = &self.track {
+            track.mute();
+        }
+    }
+
+    fn current_publication(&self, room: &Room) -> Option<TrackSid> {
+        // A full LiveKit reconnect can republish the same track with a new SID.
+        let sid = self.track.as_ref()?.sid();
+        room.local_participant()
+            .track_publications()
+            .contains_key(&sid)
+            .then_some(sid)
+    }
+
+    async fn reconcile_publication(&mut self, room: &Room, audio: &PlatformAudio) {
+        if self.published.is_some() {
+            if let Some(sid) = self.current_publication(room) {
+                self.published = Some(sid);
+            } else {
+                self.stop(room, audio).await;
+            }
+        }
+    }
+
     fn start(&mut self, room: &Room, audio: &PlatformAudio, device: Device) {
         let (starting, cancelled) = oneshot::channel();
         let track = LocalAudioTrack::create_audio_track("microphone", audio.rtc_source());
@@ -669,11 +901,13 @@ impl Capture {
         self.device = None;
         self.failed = false;
         self.starting.take();
+        let published = self.published.take();
+        let sid = self.current_publication(room).or(published);
         if let Some(track) = self.track.take() {
             track.mute();
             stop_recording(audio);
         }
-        if let Some(sid) = self.published.take() {
+        if let Some(sid) = sid {
             let _ = room.local_participant().unpublish_track(&sid).await;
         }
     }
@@ -685,7 +919,7 @@ impl Capture {
             }
             return;
         }
-        self.published = published;
+        self.published = published.and_then(|_| self.current_publication(room));
         if self.published.is_some() {
             if let Some(track) = &self.track {
                 track.unmute();

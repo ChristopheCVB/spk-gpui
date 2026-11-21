@@ -107,11 +107,13 @@ fn section_title(title: &'static str, icon: IconName, cx: &App) -> Div {
         .child(title)
 }
 
-fn call_status(call: &VoiceView) -> &'static str {
+fn call_status(call: &VoiceView, switching: bool) -> &'static str {
     match call.status {
         Status::Joining => "Joining…",
         Status::Connected => "Connected",
         Status::ListenOnly => "Listen only",
+        Status::Leaving if switching => "Switching…",
+        Status::Reconnecting => "Reconnecting voice…",
         Status::Leaving => "Leaving…",
     }
 }
@@ -131,7 +133,7 @@ fn voice_channels(sidebar: &Sidebar) -> impl Iterator<Item = &Channel> {
 impl Spk {
     pub fn workspace(&self, sidebar: &Sidebar, cx: &mut Context<Self>) -> impl IntoElement {
         let room = voice_channels(sidebar)
-            .find(|channel| Some(channel.id.as_str()) == self.selected_room.as_deref())
+            .find(|channel| Some(channel.id.as_str()) == self.selected_voice_channel.as_deref())
             .or_else(|| voice_channels(sidebar).next());
         let theme = cx.theme();
         let status = match sidebar.connection {
@@ -143,10 +145,10 @@ impl Spk {
         let notices = [
             status,
             sidebar.notice,
-            sidebar.voice_notice,
             sidebar.device_notice,
             self.form_error,
         ];
+        let rejoin = sidebar.rejoin_channel().map(str::to_owned);
 
         div()
             .size_full()
@@ -222,7 +224,30 @@ impl Spk {
                             .text_color(theme.muted_foreground)
                             .child(notice)
                     }))
-                    .child(self.room_stage(sidebar, room, cx)),
+                    .when_some(sidebar.voice_notice, |area, notice| {
+                        area.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .px_4()
+                                .py_1()
+                                .text_color(theme.muted_foreground)
+                                .child(notice)
+                                .when_some(rejoin, |row, id| {
+                                    row.child(
+                                        Button::new("voice-rejoin")
+                                            .small()
+                                            .tab_stop(true)
+                                            .label("Rejoin voice")
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.join_voice_channel(&id, cx)
+                                            })),
+                                    )
+                                }),
+                        )
+                    })
+                    .child(self.voice_channel_stage(sidebar, room, cx)),
             )
     }
 
@@ -347,10 +372,14 @@ impl Spk {
                     ),
             )
             .children(sidebar.voice.as_ref().map(|call| {
-                let room_name = voice_channels(sidebar)
-                    .find(|channel| channel.id == call.channel_id)
+                let switching = sidebar.switching_to().is_some();
+                let id = sidebar
+                    .switching_to()
+                    .unwrap_or(&call.channel_id)
+                    .to_owned();
+                let voice_channel_name = voice_channels(sidebar)
+                    .find(|channel| channel.id == id)
                     .map_or("Voice", channel_name);
-                let id = call.channel_id.clone();
                 div()
                     .flex()
                     .items_center()
@@ -364,7 +393,9 @@ impl Spk {
                             IconName::Volume2,
                             "Show current voice channel",
                         )
-                        .on_click(cx.listener(move |this, _, _, cx| this.select_room(&id, cx))),
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.select_voice_channel(&id, cx)),
+                        ),
                     )
                     .child(
                         div()
@@ -372,14 +403,18 @@ impl Spk {
                             .flex_col()
                             .flex_1()
                             .min_w_0()
-                            .child(Label::new(room_name.to_owned()).font_semibold().truncate())
                             .child(
-                                Label::new(call_status(call))
+                                Label::new(voice_channel_name.to_owned())
+                                    .font_semibold()
+                                    .truncate(),
+                            )
+                            .child(
+                                Label::new(call_status(call, switching))
                                     .text_xs()
                                     .text_color(theme.muted_foreground),
                             ),
                     )
-                    .children(self.leave_voice("sidebar-leave", call, false, cx))
+                    .children(self.leave_voice("sidebar-leave", call, switching, false, cx))
             }))
             .child(
                 div()
@@ -449,14 +484,21 @@ impl Spk {
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
+        let switching_here = sidebar.switching_to() == Some(channel.id.as_str());
         let call = sidebar
             .voice
             .as_ref()
-            .filter(|call| call.channel_id == channel.id);
+            .filter(|call| switching_here || call.channel_id == channel.id);
         let active = selected == Some(channel.id.as_str());
         let id = channel.id.clone();
         let join_id = channel.id.clone();
         let name = channel_name(channel).to_owned();
+        let can_join = sidebar.can_join_voice(&id);
+        let join_label = if sidebar.voice.is_some() {
+            format!("Switch to {name}")
+        } else {
+            format!("Join {name}")
+        };
         div()
             .id(SharedString::from(format!("voice-{id}")))
             .child(
@@ -485,20 +527,20 @@ impl Spk {
                                     theme.foreground
                                 },
                             ))
-                            .on_click(cx.listener(move |this, _, _, cx| this.select_room(&id, cx))),
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.select_voice_channel(&id, cx)
+                            })),
                     )
-                    .children(call.and_then(|call| self.leave_voice("leave", call, false, cx)))
-                    .when(
-                        sidebar.voice.is_none() && matches!(sidebar.connection, Connection::Online),
-                        |row| {
-                            row.child(
-                                tool_button("join", IconName::Phone, format!("Join {name}"))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.join_room(&join_id, cx)
-                                    })),
-                            )
-                        },
-                    ),
+                    .children(call.and_then(|call| {
+                        self.leave_voice("leave", call, switching_here, false, cx)
+                    }))
+                    .when(can_join, |row| {
+                        row.child(tool_button("join", IconName::Phone, join_label).on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                this.join_voice_channel(&join_id, cx)
+                            }),
+                        ))
+                    }),
             )
             .children(sidebar.participants(&channel.id).into_iter().map(|person| {
                 let flags = person.flags;
@@ -526,18 +568,18 @@ impl Spk {
             }))
     }
 
-    fn select_room(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.selected_room = Some(id.to_owned());
+    fn select_voice_channel(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.selected_voice_channel = Some(id.to_owned());
         self.device_picker = None;
         cx.notify();
     }
 
-    fn join_room(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.select_room(id, cx);
+    fn join_voice_channel(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.select_voice_channel(id, cx);
         self.send(Command::JoinVoice(id.to_owned()), None, cx);
     }
 
-    fn room_stage(
+    fn voice_channel_stage(
         &self,
         sidebar: &Sidebar,
         room: Option<&Channel>,
@@ -550,13 +592,12 @@ impl Spk {
                 .as_ref()
                 .filter(|call| call.channel_id == room.id)
         });
-        let in_voice =
-            call.is_some_and(|call| matches!(call.status, Status::Connected | Status::ListenOnly));
+        let in_voice = call.is_some_and(VoiceView::is_participating);
         let mut participants = room.map_or_else(Vec::new, |room| sidebar.participants(&room.id));
         if let Some(id) = sidebar.profile.id.as_deref().filter(|_| in_voice)
             && !participants.iter().any(|person| person.id == id)
         {
-            // The local media can connect before SPK echoes our room presence.
+            // The local media can connect before SPK echoes our voice presence.
             participants.insert(
                 0,
                 Participant {
@@ -608,6 +649,12 @@ impl Spk {
             )
             .when_some(room, |stage, room| {
                 let id = room.id.clone();
+                let switching_here = sidebar.switching_to() == Some(id.as_str());
+                let departing = if switching_here {
+                    sidebar.voice.as_ref()
+                } else {
+                    call
+                };
                 stage.child(
                     div()
                         .relative()
@@ -631,30 +678,42 @@ impl Spk {
                                         cx,
                                     ))
                                 })
-                                .children(call.and_then(|call| {
-                                    self.leave_voice("room-leave", call, true, cx)
+                                .children(departing.and_then(|call| {
+                                    self.leave_voice(
+                                        "voice-channel-leave",
+                                        call,
+                                        switching_here,
+                                        true,
+                                        cx,
+                                    )
                                 }))
-                                .when(
-                                    call.is_some_and(|call| call.status == Status::Leaving),
-                                    |bar| bar.child("Leaving…"),
+                                .children(
+                                    departing
+                                        .filter(|call| {
+                                            matches!(
+                                                call.status,
+                                                Status::Reconnecting | Status::Leaving
+                                            )
+                                        })
+                                        .map(|call| call_status(call, switching_here)),
                                 )
-                                .when(
-                                    sidebar.voice.is_none()
-                                        && matches!(sidebar.connection, Connection::Online),
-                                    |bar| {
-                                        bar.child(
-                                            Button::new("room-join")
-                                                .primary()
-                                                .small()
-                                                .tab_stop(true)
-                                                .icon(IconName::Phone)
-                                                .label("Join voice")
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.join_room(&id, cx)
-                                                })),
-                                        )
-                                    },
-                                ),
+                                .when(sidebar.can_join_voice(&id), |bar| {
+                                    bar.child(
+                                        Button::new("voice-channel-join")
+                                            .primary()
+                                            .small()
+                                            .tab_stop(true)
+                                            .icon(IconName::Phone)
+                                            .label(if sidebar.voice.is_some() {
+                                                "Switch voice channel"
+                                            } else {
+                                                "Join voice"
+                                            })
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.join_voice_channel(&id, cx)
+                                            })),
+                                    )
+                                }),
                         ),
                 )
             })
@@ -664,11 +723,13 @@ impl Spk {
         &self,
         id: &'static str,
         call: &VoiceView,
+        switching: bool,
         labeled: bool,
         cx: &Context<Self>,
     ) -> Option<Button> {
         let (icon, label) = match call.status {
             Status::Joining => (IconName::X, "Cancel join"),
+            Status::Leaving if switching => (IconName::X, "Cancel switch"),
             Status::Leaving => return None,
             _ => (IconName::PhoneOff, "Leave voice"),
         };
@@ -697,7 +758,9 @@ impl Spk {
         let flags = if is_me && call.is_some() {
             crate::api::VoiceFlags {
                 muted: sidebar.voice_intent.mute.effective_muted()
-                    || call.is_some_and(|call| call.status == Status::ListenOnly),
+                    || call.is_some_and(|call| {
+                        matches!(call.status, Status::ListenOnly | Status::Reconnecting)
+                    }),
                 deafened: sidebar.voice_intent.mute.deafened,
                 ..participant.flags
             }
