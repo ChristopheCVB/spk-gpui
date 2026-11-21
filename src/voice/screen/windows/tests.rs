@@ -61,17 +61,18 @@ async fn controlled_window_video_audio_and_source_loss() {
         height: 720,
         fps: 5,
     };
+    let (_quality, target) = watch::channel(quality);
     let capture = tokio::spawn(selection.capture.start(
-        quality,
         true,
         CaptureSink {
             video,
+            quality: target,
             audio: Some(audio),
             audio_unavailable,
         },
     ));
     tokio::time::timeout(Duration::from_secs(15), async {
-        let (frame, fps) = frames.recv().await.unwrap();
+        let (frame, _, fps) = frames.recv().await.unwrap();
         assert_eq!(fps, quality.fps);
         assert!(frame.buffer.height() <= quality.height);
         assert!(frame.buffer.width() > 0);
