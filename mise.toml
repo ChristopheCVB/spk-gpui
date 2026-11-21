@@ -3,7 +3,9 @@ rust = { version = "1.100.0", profile = "default" }
 
 [vars]
 clang_major = "21"
+xcode_version = "26.2"
 
 [env]
 _.file = ".env"
 SPK_CLANG_MAJOR = "{{ vars.clang_major }}"
+SPK_XCODE_VERSION = "{{ vars.xcode_version }}"

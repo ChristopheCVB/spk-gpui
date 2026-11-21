@@ -33,6 +33,14 @@ jobs:
         run: echo "::warning::Set the SPK_URL and LIVEKIT_URL repository variables to enable build downloads."
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v5
+      - name: Select Xcode for ScreenCaptureKit
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          xcode_version="$(mise exec -- printenv SPK_XCODE_VERSION)"
+          developer_dir="/Applications/Xcode_$xcode_version.app/Contents/Developer"
+          test -d "$developer_dir"
+          printf 'DEVELOPER_DIR=%s\n' "$developer_dir" >> "$GITHUB_ENV"
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         shell: bash
