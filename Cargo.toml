@@ -55,7 +55,10 @@ webrtc-sys = "=0.3.55"
 x11rb = { version = "0.13", features = ["allow-unsafe-code", "xkb"] }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Win32_Media_Audio", "Win32_System_Com"] }
+wasapi = "=0.27.0"
+windows = { version = "0.62", features = ["Win32_Media_Audio", "Win32_System_Com", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+windows-capture = "=1.5.0"
+windows-wgc = { package = "windows", version = "0.61", features = ["Graphics_Capture", "Graphics_DirectX_Direct3D11", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_System_WinRT_Direct3D11"] }
 
 [build-dependencies]
 embed-resource = "3.0"
