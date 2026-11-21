@@ -10,6 +10,8 @@
     <string>spk-gpui</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <key>NSCameraUsageDescription</key>
+    <string>SPK uses your camera to share video when you turn it on in a voice channel.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>SPK uses your microphone so people in your voice channel can hear you.</string>
 </dict>

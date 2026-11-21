@@ -28,7 +28,7 @@ To enable downloads for your deployment, set the `SPK_URL` HTTPS origin and `LIV
 sudo apt-get update
 sudo apt-get install -y build-essential pkg-config libfontconfig-dev libwayland-dev \
   libxkbcommon-x11-dev libx11-xcb-dev libvulkan1 libglib2.0-dev libjpeg-turbo8-dev \
-  libasound2-dev clang-21
+  libasound2-dev clang-21 libclang-21-dev
 export CC=clang-21 CXX=clang++-21
 ```
 

@@ -160,7 +160,7 @@ impl Spk {
 struct Settings {
     spk: Entity<Spk>,
     tab: Tab,
-    volumes: [Entity<SliderState>; 4],
+    volumes: [Entity<SliderState>; Sound::ALL.len()],
     recorder_focus: FocusHandle,
     output_volume: Entity<SliderState>,
     mic_test: Option<(Option<crate::voice::Device>, Task<()>)>,

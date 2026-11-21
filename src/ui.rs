@@ -1,5 +1,6 @@
 mod radio;
 mod settings;
+mod video;
 mod voice;
 mod workspace;
 
@@ -39,6 +40,7 @@ pub(super) struct Spk {
     device_picker: Option<(VoiceControls, DeviceKind)>,
     selected_voice_channel: Option<String>,
     sidebar_open: bool,
+    video_stage: video::VideoStage,
     workspace_focus: FocusHandle,
     appearance: Appearance,
     appearance_error: bool,
@@ -214,6 +216,7 @@ impl Spk {
             device_picker: None,
             selected_voice_channel: None,
             sidebar_open: true,
+            video_stage: video::VideoStage::default(),
             workspace_focus,
             appearance,
             appearance_error: false,
@@ -411,7 +414,8 @@ impl Spk {
 }
 
 impl Render for Spk {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.prepare_video_stage(window);
         let content = match &self.view {
             View::Busy(label) => Label::new(*label).into_any_element(),
             View::SignIn {
@@ -439,6 +443,7 @@ impl Render for Spk {
         div()
             .id("spk-window")
             .track_focus(&self.workspace_focus)
+            .on_key_down(cx.listener(Self::dismiss_video_fullscreen))
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)

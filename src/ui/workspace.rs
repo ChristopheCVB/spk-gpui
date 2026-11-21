@@ -2,6 +2,7 @@ use super::*;
 use crate::{
     api::{Channel, Connection},
     session::{Participant, VoiceView},
+    voice::video::CameraStatus,
 };
 
 fn section_title(title: &'static str, icon: IconName, cx: &App) -> Div {
@@ -64,7 +65,7 @@ impl Spk {
         div()
             .size_full()
             .flex()
-            .when(self.sidebar_open, |page| {
+            .when(self.sidebar_open && !self.video_stage.fullscreen, |page| {
                 page.child(self.navigation(sidebar, selected_channel, cx))
             })
             .child(
@@ -74,48 +75,50 @@ impl Spk {
                     .flex_1()
                     .min_w_0()
                     .min_h_0()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .h_12()
-                            .flex_shrink_0()
-                            .px_3()
-                            .border_b_1()
-                            .border_color(theme.border)
-                            .child(
-                                tool_button(
-                                    "toggle-sidebar",
-                                    if self.sidebar_open {
-                                        IconName::PanelLeftClose
-                                    } else {
-                                        IconName::PanelLeftOpen
-                                    },
-                                    if self.sidebar_open {
-                                        "Hide sidebar"
-                                    } else {
-                                        "Show sidebar"
-                                    },
+                    .when(!self.video_stage.fullscreen, |area| {
+                        area.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .h_12()
+                                .flex_shrink_0()
+                                .px_3()
+                                .border_b_1()
+                                .border_color(theme.border)
+                                .child(
+                                    tool_button(
+                                        "toggle-sidebar",
+                                        if self.sidebar_open {
+                                            IconName::PanelLeftClose
+                                        } else {
+                                            IconName::PanelLeftOpen
+                                        },
+                                        if self.sidebar_open {
+                                            "Hide sidebar"
+                                        } else {
+                                            "Show sidebar"
+                                        },
+                                    )
+                                    .on_click(cx.listener(
+                                        |this, _, _, cx| {
+                                            this.sidebar_open = !this.sidebar_open;
+                                            this.device_picker = None;
+                                            cx.notify();
+                                        },
+                                    )),
                                 )
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        this.sidebar_open = !this.sidebar_open;
-                                        this.device_picker = None;
-                                        cx.notify();
-                                    },
-                                )),
-                            )
-                            .child(themed_icon(IconName::Volume2, theme.muted_foreground, 16.0))
-                            .child(
-                                Label::new(
-                                    selected_channel
-                                        .map_or("Voice channels", channel_name)
-                                        .to_owned(),
-                                )
-                                .font_semibold(),
-                            ),
-                    )
+                                .child(themed_icon(IconName::Volume2, theme.muted_foreground, 16.0))
+                                .child(
+                                    Label::new(
+                                        selected_channel
+                                            .map_or("Voice channels", channel_name)
+                                            .to_owned(),
+                                    )
+                                    .font_semibold(),
+                                ),
+                        )
+                    })
                     .when(sidebar.load_failed, |area| {
                         area.child(
                             div()
@@ -531,6 +534,7 @@ impl Spk {
                     id,
                     name: sidebar.profile.name(),
                     flags: Default::default(),
+                    video: None,
                 },
             );
         }
@@ -540,6 +544,17 @@ impl Spk {
             (Some(_), _) if participants.is_empty() => Some("Nobody is here yet."),
             _ => None,
         };
+        let theater =
+            self.video_stage.theater.as_deref().filter(|id| {
+                in_voice && participants.iter().any(|participant| participant.id == *id)
+            });
+        let camera_status =
+            call.and_then(|call| call.video.as_ref())
+                .and_then(|report| match report.camera {
+                    CameraStatus::Starting => Some("Starting Camera…"),
+                    CameraStatus::Failed(message) => Some(message),
+                    _ => None,
+                });
         div()
             .id("voice-stage")
             .relative()
@@ -554,7 +569,7 @@ impl Spk {
                     .flex_col()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
+                    .when(theater.is_none(), |tiles| tiles.overflow_y_scroll())
                     .child(
                         div()
                             .flex()
@@ -562,91 +577,113 @@ impl Spk {
                             .items_center()
                             .justify_center()
                             .gap_3()
-                            .p_4()
-                            .my_auto()
+                            .when(theater.is_none(), |tiles| tiles.p_4().my_auto())
+                            .when(theater.is_some(), |tiles| {
+                                tiles
+                                    .flex_1()
+                                    .min_h_0()
+                                    .when(!self.video_stage.fullscreen, |tiles| tiles.p_3())
+                            })
                             .children(message.map(|message| {
                                 Label::new(message).text_color(theme.muted_foreground)
                             }))
                             .children(
                                 participants
                                     .into_iter()
+                                    .filter(|person| theater.is_none_or(|id| person.id == id))
                                     .map(|person| self.voice_tile(person, call, sidebar, cx)),
                             ),
                     ),
             )
-            .when_some(selected_channel, |stage, channel| {
-                let id = channel.id.clone();
-                let switching_here = sidebar.switching_to() == Some(id.as_str());
-                let departing = if switching_here {
-                    sidebar.voice.as_ref()
-                } else {
-                    call
-                };
-                stage.child(
-                    div()
-                        .relative()
-                        .flex()
-                        .justify_center()
-                        .px_2()
-                        .pb_2()
-                        .flex_shrink_0()
-                        .child(
-                            div()
-                                .flex()
-                                .flex_wrap()
-                                .items_center()
-                                .justify_center()
-                                .gap_1()
-                                .rounded_lg()
-                                .when(in_voice, |bar| {
-                                    bar.bg(theme.secondary)
-                                        .p_2()
-                                        .child(self.voice_controls(
-                                            sidebar,
-                                            VoiceControls::Channel,
+            .when_some(
+                camera_status.filter(|_| !self.video_stage.fullscreen),
+                |stage, message| {
+                    stage.child(
+                        Label::new(message)
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .px_4()
+                            .pb_2(),
+                    )
+                },
+            )
+            .when_some(
+                selected_channel.filter(|_| !self.video_stage.fullscreen),
+                |stage, channel| {
+                    let id = channel.id.clone();
+                    let switching_here = sidebar.switching_to() == Some(id.as_str());
+                    let departing = if switching_here {
+                        sidebar.voice.as_ref()
+                    } else {
+                        call
+                    };
+                    stage.child(
+                        div()
+                            .relative()
+                            .flex()
+                            .justify_center()
+                            .px_2()
+                            .pb_2()
+                            .flex_shrink_0()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .justify_center()
+                                    .gap_1()
+                                    .rounded_lg()
+                                    .when(in_voice, |bar| {
+                                        bar.bg(theme.secondary)
+                                            .p_2()
+                                            .child(self.voice_controls(
+                                                sidebar,
+                                                VoiceControls::Channel,
+                                                cx,
+                                            ))
+                                            .child(self.camera_controls(sidebar, cx))
+                                            .child(super::voice::connection_diagnostics(cx))
+                                    })
+                                    .children(departing.and_then(|call| {
+                                        self.leave_voice(
+                                            "voice-channel-leave",
+                                            call,
+                                            switching_here,
+                                            true,
                                             cx,
-                                        ))
-                                        .child(super::voice::connection_diagnostics(cx))
-                                })
-                                .children(departing.and_then(|call| {
-                                    self.leave_voice(
-                                        "voice-channel-leave",
-                                        call,
-                                        switching_here,
-                                        true,
-                                        cx,
-                                    )
-                                }))
-                                .children(
-                                    departing
-                                        .filter(|call| {
-                                            matches!(
-                                                call.status,
-                                                Status::Reconnecting | Status::Leaving
-                                            )
-                                        })
-                                        .map(|call| call_status(call, switching_here)),
-                                )
-                                .when(sidebar.can_join_voice(&id), |bar| {
-                                    bar.child(
-                                        Button::new("voice-channel-join")
-                                            .primary()
-                                            .small()
-                                            .tab_stop(true)
-                                            .icon(IconName::Phone)
-                                            .label(if sidebar.voice.is_some() {
-                                                "Switch voice channel"
-                                            } else {
-                                                "Join voice"
+                                        )
+                                    }))
+                                    .children(
+                                        departing
+                                            .filter(|call| {
+                                                matches!(
+                                                    call.status,
+                                                    Status::Reconnecting | Status::Leaving
+                                                )
                                             })
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.join_voice_channel(&id, cx)
-                                            })),
+                                            .map(|call| call_status(call, switching_here)),
                                     )
-                                }),
-                        ),
-                )
-            })
+                                    .when(sidebar.can_join_voice(&id), |bar| {
+                                        bar.child(
+                                            Button::new("voice-channel-join")
+                                                .primary()
+                                                .small()
+                                                .tab_stop(true)
+                                                .icon(IconName::Phone)
+                                                .label(if sidebar.voice.is_some() {
+                                                    "Switch voice channel"
+                                                } else {
+                                                    "Join voice"
+                                                })
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.join_voice_channel(&id, cx)
+                                                })),
+                                        )
+                                    }),
+                            ),
+                    )
+                },
+            )
     }
 
     fn leave_voice(
@@ -680,7 +717,7 @@ impl Spk {
         participant: Participant<'_>,
         call: Option<&VoiceView>,
         sidebar: &Sidebar,
-        cx: &App,
+        cx: &Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
         let is_me = sidebar.profile.id.as_deref() == Some(participant.id);
@@ -703,6 +740,24 @@ impl Spk {
             && media.map_or(flags.speaking, |media| {
                 media.speaking.contains(participant.id)
             });
+        let theater = self.video_stage.theater.as_deref() == Some(participant.id)
+            && call.is_some_and(VoiceView::is_participating);
+        let camera_live = if is_me {
+            call.and_then(|call| call.video.as_ref())
+                .is_some_and(|video| matches!(video.camera, CameraStatus::Live(..)))
+        } else {
+            call.and_then(|call| call.video.as_ref())
+                .and_then(|video| video.participants.get(participant.id))
+                .map_or_else(
+                    || {
+                        participant
+                            .video
+                            .is_some_and(|video| video.cam || video.screen)
+                    },
+                    |video| !video.live.is_empty(),
+                )
+        };
+        let image = self.video_image(&participant, is_me);
         div()
             .id(SharedString::from(participant.id.to_owned()))
             .relative()
@@ -711,9 +766,9 @@ impl Spk {
             .justify_center()
             .role(Role::Group)
             .when(speaking, |tile| tile.aria_description("Speaking"))
-            .w(px(320.0))
-            .max_w_full()
-            .h(px(180.0))
+            .when(theater, |tile| tile.size_full())
+            .when(!theater, |tile| tile.w(px(320.0)).max_w_full().h(px(180.0)))
+            .overflow_hidden()
             .border_1()
             .border_color(if speaking {
                 theme.success
@@ -722,13 +777,16 @@ impl Spk {
             })
             .rounded_lg()
             .bg(theme.secondary)
-            .child(profile_avatar(
-                Avatar::new().name(participant.name.to_owned()),
-                sidebar.avatar(Some(participant.id)),
-                48.0,
-                false,
-                cx,
-            ))
+            .when(image.is_none(), |tile| {
+                tile.child(profile_avatar(
+                    Avatar::new().name(participant.name.to_owned()),
+                    sidebar.avatar(Some(participant.id)),
+                    48.0,
+                    false,
+                    cx,
+                ))
+            })
+            .children(image)
             .child(
                 div()
                     .absolute()
@@ -751,10 +809,23 @@ impl Spk {
                                     .truncate(),
                             ),
                     )
+                    .when(camera_live, |row| {
+                        row.child(
+                            Label::new("Live")
+                                .text_xs()
+                                .px_2()
+                                .rounded_md()
+                                .bg(theme.background),
+                        )
+                    })
                     .children(participant_status(flags.muted, flags.deafened, cx))
                     .when(flags.radio_listening == Some(true), |row| {
                         row.child(radio_badge(cx))
                     }),
+            )
+            .children(
+                call.filter(|call| call.is_participating())
+                    .map(|call| self.video_tile_controls(&participant, call, sidebar, cx)),
             )
     }
 }

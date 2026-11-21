@@ -150,7 +150,8 @@ impl LiveKitAudio<'_> {
                 MediaEvent::ParticipantLeft(participant.identity().to_string())
             }
             Some(RoomEvent::LocalTrackRepublished { publication, .. })
-                if !self.capture.owns_track(&publication.sid()) =>
+                if publication.source() == TrackSource::Microphone
+                    && !self.capture.owns_track(&publication.sid()) =>
             {
                 // The SDK can be republishing while mute or deafen removes the old track.
                 return Event::Unpublish(publication.sid());

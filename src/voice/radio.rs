@@ -142,8 +142,8 @@ async fn play_samples(
     settings: &mut watch::Receiver<Output>,
     status: &watch::Sender<RadioPlayback>,
 ) {
-    let started = time::sleep(Duration::from_secs(15));
-    tokio::pin!(started);
+    let deadline = time::sleep(Duration::from_secs(15));
+    tokio::pin!(deadline);
     let mut output = settings.borrow_and_update().clone();
     let mut sink = None;
     let mut playing = false;
@@ -176,10 +176,11 @@ async fn play_samples(
                 output = next;
             }
             _ = errors.recv() => return,
-            _ = &mut started, if !playing => return,
+            _ = &mut deadline => return,
             block = samples.recv(), if player.len() < 6 => {
                 let Ok(block) = block else { return };
                 player.append(block);
+                deadline.as_mut().reset(time::Instant::now() + Duration::from_secs(15));
                 if !playing {
                     playing = true;
                     status.send_replace(RadioPlayback::Playing);

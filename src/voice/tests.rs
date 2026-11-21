@@ -140,12 +140,12 @@ async fn exercise(scenario: Scenario) {
         if controls {
             assert_eq!(
                 receive_frame(&mut socket).await,
-                json!({"type":"voice:state","sid":sid,"muted":false,"deafened":false,"speaking":true})
+                json!({"type":"voice:state","sid":sid,"muted":false,"deafened":false,"speaking":true,"cam":false,"screen":false,"watching":[]})
             );
             seen.send(()).await.unwrap();
             assert_eq!(
                 receive_frame(&mut socket).await,
-                json!({"type":"voice:state","sid":sid,"muted":true,"deafened":true,"speaking":false})
+                json!({"type":"voice:state","sid":sid,"muted":true,"deafened":true,"speaking":false,"cam":false,"screen":false,"watching":[]})
             );
             seen.send(()).await.unwrap();
             assert_eq!(
@@ -154,7 +154,7 @@ async fn exercise(scenario: Scenario) {
             );
             assert_eq!(
                 receive_frame(&mut socket).await,
-                json!({"type":"voice:state","sid":sid,"muted":true,"deafened":true,"speaking":false})
+                json!({"type":"voice:state","sid":sid,"muted":true,"deafened":true,"speaking":false,"cam":false,"screen":false,"watching":[]})
             );
             seen.send(()).await.unwrap();
         }
@@ -375,14 +375,15 @@ fn deafen_restores_mute_and_unmuting_undeafens() {
 fn sends_only_the_latest_changed_state() {
     let now = Instant::now();
     let mut presence = Presence::new(false);
+    let video = VideoPresence::default();
     let talking = VoiceFlags {
         speaking: true,
         ..VoiceFlags::default()
     };
-    presence.sent(talking, now);
-    assert_eq!(presence.due(talking), None);
+    presence.sent(talking, video.clone(), now);
+    assert_eq!(presence.due(talking, &video), None);
     assert_eq!(
-        presence.due(VoiceFlags::default()),
+        presence.due(VoiceFlags::default(), &video),
         Some(now + Duration::from_millis(50))
     );
     let deafened = VoiceFlags {
@@ -391,14 +392,14 @@ fn sends_only_the_latest_changed_state() {
         speaking: false,
         radio_listening: None,
     };
-    let due = presence.due(deafened).unwrap();
+    let due = presence.due(deafened, &video).unwrap();
     assert_eq!(due, now + Duration::from_millis(50));
-    presence.sent(deafened, due);
-    assert_eq!(presence.due(deafened), None);
+    presence.sent(deafened, video.clone(), due);
+    assert_eq!(presence.due(deafened, &video), None);
     presence.resync();
     assert!(
         presence
-            .due(deafened)
+            .due(deafened, &video)
             .is_some_and(|at| at <= Instant::now())
     );
 }
@@ -435,4 +436,25 @@ async fn apply_acknowledgment(call: &mut Call, updates: &Receiver<SocketEvent>) 
 async fn receive_frame(socket: &mut WebSocketStream<TcpStream>) -> Value {
     let message = socket.next().await.unwrap().unwrap();
     serde_json::from_str(message.to_text().unwrap()).unwrap()
+}
+
+#[test]
+fn video_presence_round_trips_with_spk() {
+    let incoming = r#"{"type":"voice:presence","userId":"alice","channelId":"room","cam":true,"screen":false,"watching":["bob"]}"#;
+    let Frame::Presence { video, .. } = serde_json::from_str(incoming).unwrap() else {
+        panic!("expected voice presence");
+    };
+    assert!(video.cam);
+    assert!(!video.screen);
+    assert_eq!(video.watching, ["bob"]);
+
+    let outgoing = serde_json::to_value(VoiceFrame::State {
+        sid: "session",
+        flags: VoiceFlags::default(),
+        video: &video,
+    })
+    .unwrap();
+    assert_eq!(outgoing["cam"], true);
+    assert_eq!(outgoing["screen"], false);
+    assert_eq!(outgoing["watching"], json!(["bob"]));
 }
