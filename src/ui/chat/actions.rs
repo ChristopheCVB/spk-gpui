@@ -166,8 +166,7 @@ impl Spk {
                 .when(!matches!(form.kind, ActionForm::Delete), |panel| {
                     panel.child(
                         Textarea::new(&self.message_action_input)
-                            .size_full()
-                            .accessibility_id(title)
+                            .aria_label(title)
                             .disabled(chat.action_pending),
                     )
                 })

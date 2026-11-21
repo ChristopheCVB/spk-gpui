@@ -12,6 +12,7 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
     let sockets = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let socket_url = format!("ws://{}/_ws", sockets.local_addr().unwrap());
     let (history_tx, history) = async_channel::unbounded();
+    let storage = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let http = tokio::spawn(async move {
         loop {
             let (line, request) = Request::receive(&http).await;
@@ -142,13 +143,22 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         })).await;
 
         let url = "https://example.test/story";
-        let card = value!({"url":url,"title":"A story","description":"A preview","siteName":"Example","image":false});
+        let card = value!({"url":url,"title":"A story","description":"A preview","siteName":"Example","image":true});
         peer.send(Message::text(value!({"type":"message:previews","channelId":"general","messageId":"m3","previews":[card]}).to_string())).await.unwrap();
         wait_for_sidebar(&rx, |view| view.chat.as_ref().unwrap().messages.last().is_some_and(|m| {
             m.previews.first().is_some_and(|preview| preview.title.as_deref() == Some("A story"))
         })).await;
+        let (line, preview) = history.recv().await.unwrap();
+        assert_eq!(line, "GET /api/messages/m3/preview-image?url=https%3A%2F%2Fexample.test%2Fstory HTTP/1.1");
+        let location = format!("Location: http://{}/thumbnail.webp", storage.local_addr().unwrap());
+        preview.respond_raw("302 Found", &[&location], b"").await;
+        let thumbnail = Request::read(&storage, "GET /thumbnail.webp HTTP/1.1").await;
+        assert_eq!(thumbnail.header("cookie"), None);
+        const WEBP: &[u8] = b"RIFF\x1e\0\0\0WEBPVP8L\x11\0\0\0/\x01\0\0\0\x07\xd0\x99\x9a\x95\xb9\xff\x81\x88\xe8\x7f\0\0";
+        thumbnail.respond_raw("200 OK", &["Content-Type: image/webp"], WEBP).await;
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().unwrap().preview_images.get("m3", url).is_some()).await;
         tx.send(Command::LoadLatestMessages).await.unwrap();
-        let stale_history = history_request(&history, "").await;
+        let stale_history = history_request(&history, "?unread=1").await;
         tx.send(Command::MutateChatMessage {
             channel_id: "general".into(), message_id: "m3".into(), action: MessageAction::RemovePreview(url.into()),
         }).await.unwrap();
