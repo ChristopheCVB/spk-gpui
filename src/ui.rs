@@ -464,17 +464,17 @@ impl Spk {
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
+        let switching_here = sidebar.switching_to.as_deref() == Some(channel.id.as_str());
         let call = sidebar
             .voice
             .as_ref()
-            .filter(|call| call.channel_id == channel.id);
+            .filter(|call| switching_here || call.channel_id == channel.id);
         let active = selected == Some(channel.id.as_str());
         let id = channel.id.clone();
         let join_id = channel.id.clone();
         let name = channel_name(channel).to_owned();
         let can_join = can_join_voice(sidebar, &id);
-        let switch = can_join && sidebar.voice.is_some();
-        let join_label = if switch {
+        let join_label = if sidebar.voice.is_some() {
             format!("Switch to {name}")
         } else {
             format!("Join {name}")
@@ -507,16 +507,10 @@ impl Spk {
                                     theme.foreground
                                 },
                             ))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if switch {
-                                    this.join_room(&id, cx);
-                                } else {
-                                    this.select_room(&id, cx);
-                                }
-                            })),
+                            .on_click(cx.listener(move |this, _, _, cx| this.select_room(&id, cx))),
                     )
                     .children(call.and_then(|call| {
-                        self.leave_voice("leave", call, sidebar.switching_to.is_some(), false, cx)
+                        self.leave_voice("leave", call, switching_here, false, cx)
                     }))
                     .when(can_join, |row| {
                         row.child(tool_button("join", IconName::Phone, join_label).on_click(
@@ -662,13 +656,7 @@ impl Spk {
                                     ))
                                 })
                                 .children(departing.and_then(|call| {
-                                    self.leave_voice(
-                                        "room-leave",
-                                        call,
-                                        sidebar.switching_to.is_some(),
-                                        true,
-                                        cx,
-                                    )
+                                    self.leave_voice("room-leave", call, switching_here, true, cx)
                                 }))
                                 .children(
                                     departing
