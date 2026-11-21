@@ -496,7 +496,12 @@ async fn establish_voice(
     socket: &mut WebSocketStream<TcpStream>,
 ) -> Value {
     let join = accept_voice_join(requests, socket, "first").await;
-    acknowledge_voice(socket, &join).await;
+    confirm_voice_join(socket, &join).await;
+    join
+}
+
+async fn confirm_voice_join(socket: &mut WebSocketStream<TcpStream>, join: &Value) {
+    acknowledge_voice(socket, join).await;
     let sid = &join["sid"];
     assert_eq!(
         receive_voice_frame(socket).await,
@@ -506,10 +511,14 @@ async fn establish_voice(
         receive_voice_frame(socket).await,
         voice_state(sid, false, false)
     );
-    join
 }
 
 async fn join_test_voice(commands: &Sender<Command>, views: &Receiver<View>) {
+    request_first_voice(commands, views).await;
+    wait_for_sidebar(views, voice_hears_alice).await;
+}
+
+async fn request_first_voice(commands: &Sender<Command>, views: &Receiver<View>) {
     wait_for_sidebar(views, |sidebar| {
         matches!(sidebar.connection, Connection::Online) && sidebar.channels.is_some()
     })
@@ -518,7 +527,6 @@ async fn join_test_voice(commands: &Sender<Command>, views: &Receiver<View>) {
         .send(Command::JoinVoice("first".into()))
         .await
         .unwrap();
-    wait_for_sidebar(views, voice_hears_alice).await;
 }
 
 fn voice_hears_alice(sidebar: &Sidebar) -> bool {
@@ -966,6 +974,121 @@ fn local_cues_follow_first_ready_report_and_explicit_leave() {
     assert!(disconnected.update_media(report(VoiceStatus::Connected)));
     assert!(disconnected.begin_leave(false));
     assert!(!disconnected.play_leave);
+}
+
+#[tokio::test]
+async fn switching_cancels_a_pending_join() {
+    switch_voice(false).await;
+}
+
+#[tokio::test]
+async fn switching_leaves_an_established_call() {
+    switch_voice(true).await;
+}
+
+async fn switch_voice(established: bool) {
+    let (old_joined, old_attempt) = oneshot::channel();
+    let (next_joined, next_attempt) = oneshot::channel();
+    let end = voice_session(
+        Call::start_for_test,
+        async |listener, requests, _| {
+            let mut socket = accept_async(listener.accept().await.unwrap().0)
+                .await
+                .unwrap();
+            let old = accept_voice_join(&requests, &mut socket, "first").await;
+            if established {
+                confirm_voice_join(&mut socket, &old).await;
+            }
+            old_joined.send(()).unwrap();
+            assert_eq!(
+                receive_voice_frame(&mut socket).await,
+                value!({"type":"voice:leave","sid":old["sid"]})
+            );
+
+            let next = accept_voice_join(&requests, &mut socket, "second").await;
+            assert_ne!(next["sid"], old["sid"]);
+            assert_ne!(next["nonce"], old["nonce"]);
+            acknowledge_voice(&mut socket, &old).await;
+            assert!(
+                timeout(Duration::from_millis(60), receive_voice_frame(&mut socket))
+                    .await
+                    .is_err()
+            );
+            confirm_voice_join(&mut socket, &next).await;
+            next_joined.send(()).unwrap();
+            assert_eq!(
+                receive_voice_frame(&mut socket).await,
+                value!({"type":"voice:leave","sid":next["sid"]})
+            );
+        },
+        async |commands, views| {
+            request_first_voice(&commands, &views).await;
+            old_attempt.await.unwrap();
+            if established {
+                wait_for_sidebar(&views, voice_hears_alice).await;
+            }
+            commands
+                .send(Command::JoinVoice("second".into()))
+                .await
+                .unwrap();
+            wait_for_sidebar(&views, |sidebar| {
+                sidebar
+                    .voice
+                    .as_ref()
+                    .is_some_and(|voice| voice.channel_id == "second")
+                    && voice_hears_alice(sidebar)
+            })
+            .await;
+            next_attempt.await.unwrap();
+            commands.send(Command::LeaveVoice).await.unwrap();
+            wait_for_sidebar(&views, |sidebar| sidebar.voice.is_none()).await;
+        },
+    )
+    .await;
+    assert!(matches!(end, SessionEnd::Closed));
+}
+
+#[tokio::test]
+async fn leave_cancels_a_voice_channel_switch() {
+    let (claimed, old_attempt) = oneshot::channel();
+    let (acknowledged, late_ack) = oneshot::channel();
+    let end = voice_session(
+        Call::start_for_test,
+        async |listener, requests, _| {
+            let mut socket = accept_async(listener.accept().await.unwrap().0)
+                .await
+                .unwrap();
+            let old = accept_voice_join(&requests, &mut socket, "first").await;
+            claimed.send(()).unwrap();
+            assert_eq!(
+                receive_voice_frame(&mut socket).await,
+                value!({"type":"voice:leave","sid":old["sid"]})
+            );
+            acknowledge_voice(&mut socket, &old).await;
+            acknowledged.send(()).unwrap();
+            assert!(!matches!(socket.next().await, Some(Ok(Message::Text(_)))));
+        },
+        async |commands, views| {
+            request_first_voice(&commands, &views).await;
+            old_attempt.await.unwrap();
+            commands
+                .send(Command::JoinVoice("second".into()))
+                .await
+                .unwrap();
+            wait_for_sidebar(&views, |sidebar| {
+                sidebar.switching_to.as_deref() == Some("second")
+            })
+            .await;
+            commands.send(Command::LeaveVoice).await.unwrap();
+            wait_for_sidebar(&views, |sidebar| {
+                sidebar.voice.is_none() && sidebar.switching_to.is_none()
+            })
+            .await;
+            late_ack.await.unwrap();
+        },
+    )
+    .await;
+    assert!(matches!(end, SessionEnd::Closed));
 }
 
 #[test]
