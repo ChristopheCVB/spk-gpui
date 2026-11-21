@@ -1,3 +1,10 @@
+mod actions;
+mod preview_images;
+
+pub use actions::Pins;
+use actions::{ActionOutcome, PendingAction, change_message};
+use preview_images::{PreviewImages, PreviewResult};
+
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -6,7 +13,9 @@ use std::{
 
 use tokio::{task::JoinSet, time::Instant};
 
-use crate::api::{Channel, ChatMessage, Failure, MessagePage, ReplyRef, SpkClient, VoiceSocket};
+use crate::api::{
+    Channel, ChatMessage, Failure, MessageChange, MessagePage, ReplyRef, SpkClient, VoiceSocket,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum History {
@@ -31,6 +40,10 @@ pub struct ChatView {
     hold_read: bool,
     pending_unread: Option<u64>,
     pub outgoing: Option<Outgoing>,
+    pub pins: Option<Pins>,
+    pub preview_images: PreviewImages,
+    pub action_pending: bool,
+    pub action_outcome: Option<ActionOutcome>,
     history: History,
 }
 
@@ -117,6 +130,11 @@ pub(super) struct ChatSession {
     history: Option<HistoryRequest>,
     buffered: Vec<ChatMessage>,
     unread_request: u64,
+    buffered_changes: Vec<(String, MessageChange)>,
+    pending_action: Option<PendingAction>,
+    pub action_tasks: JoinSet<Result<MessageChange, Failure>>,
+    pub pin_tasks: JoinSet<Result<Vec<ChatMessage>, Failure>>,
+    pub preview_tasks: JoinSet<PreviewResult>,
     deleted_during_load: HashSet<String>,
     pub tasks: JoinSet<Result<MessagePage, Failure>>,
 }
@@ -133,6 +151,8 @@ impl ChatSession {
             )
         {
             view.messages = Arc::default();
+            view.pins = None;
+            view.preview_images = PreviewImages::default();
             view.has_more_before = false;
             view.has_more_after = false;
         } else if !view.unavailable() {
@@ -171,6 +191,7 @@ impl ChatSession {
         }
         self.typers.clear();
         self.last_typing = None;
+        self.reset_actions();
         self.selected = Some(ChatView {
             channel_id: channel.id.clone(),
             direct_message_peer: channel
@@ -188,6 +209,10 @@ impl ChatSession {
             jump: None,
             jump_failed: false,
             outgoing: None,
+            pins: None,
+            preview_images: PreviewImages::default(),
+            action_pending: false,
+            action_outcome: None,
             history: History::Loading,
         });
         true
@@ -195,6 +220,7 @@ impl ChatSession {
 
     pub fn close(&mut self) {
         self.cancel_history();
+        self.reset_actions();
         self.selected = None;
         self.typers.clear();
     }
@@ -272,6 +298,7 @@ impl ChatSession {
     fn cancel_history(&mut self) {
         self.tasks = JoinSet::new();
         self.buffered.clear();
+        self.buffered_changes.clear();
         self.deleted_during_load.clear();
     }
 
@@ -304,7 +331,7 @@ impl ChatSession {
         });
     }
 
-    pub fn complete(&mut self, result: Result<MessagePage, Failure>) {
+    pub fn complete(&mut self, client: &SpkClient, result: Result<MessagePage, Failure>) {
         let (Some(view), Some(request)) = (&mut self.selected, &self.history) else {
             return;
         };
@@ -334,8 +361,17 @@ impl ChatSession {
                         }
                     }
                 }
+                for (id, change) in self.buffered_changes.drain(..) {
+                    change_message(&mut view.messages, &id, &change);
+                }
                 view.has_more_before = page.has_more_before;
                 view.history = History::Ready;
+                if matches!(request, HistoryRequest::Refresh | HistoryRequest::Latest)
+                    || matches!(view.pins, Some(Pins::Loading))
+                {
+                    self.refresh_pins(client);
+                }
+                self.prune_previews();
             }
             Err(error) => {
                 let jump = matches!(request, HistoryRequest::Around(_));
@@ -353,6 +389,10 @@ impl ChatSession {
                 }
                 if matches!(error, Failure::Http(reqwest::StatusCode::FORBIDDEN)) {
                     view.messages = Arc::default();
+                    view.pins = None;
+                    view.preview_images = PreviewImages::default();
+                    self.pin_tasks = JoinSet::new();
+                    self.preview_tasks = JoinSet::new();
                     view.has_more_before = false;
                     view.has_more_after = false;
                     if view.direct_message_peer.is_some() {
@@ -619,7 +659,6 @@ impl ChatSession {
                 self.deleted_during_load.insert(id.to_owned());
                 remove_message(&mut self.buffered, id);
             }
-            remove_message(Arc::make_mut(&mut view.messages), id);
         }
     }
 

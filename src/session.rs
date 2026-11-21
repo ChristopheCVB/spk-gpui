@@ -23,8 +23,8 @@ use tokio::{
 use url::Url;
 
 use crate::api::{
-    Channel, Connection, Failure, Frame, MessageTarget, Profile, SocketEvent, SpkClient,
-    UnreadState, User, UserPresence,
+    Channel, Connection, Failure, Frame, MessageChange, MessageTarget, Profile, SocketEvent,
+    SpkClient, UnreadState, User, UserPresence,
 };
 use crate::notifications::{Alert, LiveAlerts};
 use crate::sounds::{Sound, VoiceSounds};
@@ -47,10 +47,10 @@ use soundboard::{SoundboardSession, SoundboardView};
 use unread::{Mark, UnreadSession};
 use voice_session::{DeviceSettings, StartCall, VoiceDestination, VoiceSession};
 pub use {
-    crate::api::UserStatus,
+    crate::api::{MessageAction, UserStatus},
     accounts::AccountLinkForm,
     avatars::AvatarPhoto,
-    chat::{ChatView, Delivery},
+    chat::{ChatView, Delivery, Pins},
     presence::Participant,
     profiles::ProfileEdit,
     radio::RadioPlayback,
@@ -114,6 +114,15 @@ pub enum Command {
     OpenMessageTarget(crate::api::MessageTarget),
     RetryChatSend,
     DismissChatSend,
+    MutateChatMessage {
+        channel_id: String,
+        message_id: String,
+        action: MessageAction,
+    },
+    ShowChatPins {
+        channel_id: String,
+        shown: bool,
+    },
     SaveNickname(String),
     UploadAvatar(PathBuf),
     InspectProfileEmail(String, oneshot::Sender<Option<String>>),
@@ -495,6 +504,7 @@ async fn watch_session(
             break SessionEnd::Closed;
         }
         unread.write_next(client);
+        chat.fill_previews(client);
         sidebar.chat = chat.view();
         radio.sync(&mut sidebar, &voice);
         soundboard.sync(&mut sidebar, &voice);
@@ -531,7 +541,22 @@ async fn watch_session(
                 if result.as_ref().is_err_and(Failure::unauthorized) {
                     break SessionEnd::Invalidated(SESSION_EXPIRED);
                 }
-                chat.complete(result);
+                chat.complete(client, result);
+            }
+            Some(result) = chat.action_tasks.join_next() => {
+                let result = result.unwrap_or(Err(Failure::Connection));
+                if result.as_ref().is_err_and(Failure::unauthorized) {
+                    break SessionEnd::Invalidated(SESSION_EXPIRED);
+                }
+                chat.action_complete(client, result);
+            }
+            Some(Ok(result)) = chat.preview_tasks.join_next() => chat.preview_complete(result),
+            Some(result) = chat.pin_tasks.join_next() => {
+                let result = result.unwrap_or(Err(Failure::Connection));
+                if result.as_ref().is_err_and(Failure::unauthorized) {
+                    break SessionEnd::Invalidated(SESSION_EXPIRED);
+                }
+                chat.pins_complete(result);
             }
             Some(result) = direct_message_opens.join_next() => {
                 match result.unwrap_or(Err(Failure::Connection)) {
@@ -654,6 +679,10 @@ async fn watch_session(
                 }
                 Ok(Command::RetryChatSend) => chat.retry_send(),
                 Ok(Command::DismissChatSend) => chat.dismiss_send(),
+                Ok(Command::MutateChatMessage { channel_id, message_id, action }) => {
+                    chat.mutate(client, &sidebar, &channel_id, message_id, action);
+                }
+                Ok(Command::ShowChatPins { channel_id, shown }) => chat.show_pins(client, &channel_id, shown),
                 Ok(command @ (Command::SaveNickname(_) | Command::UploadAvatar(_) | Command::InspectProfileEmail(..))) => {
                     ProfileWork::start(&mut profiles, &mut sidebar, client, command);
                 }
@@ -726,7 +755,22 @@ async fn watch_session(
                     Frame::UnreadUpdate { channel_id, state } => {
                         unread.update(&mut sidebar, channel_id, state);
                     }
-                    Frame::MessageDelete { channel_id, id } => chat.delete_message(&channel_id, &id),
+                    Frame::MessageDelete { channel_id, id } => {
+                        chat.message_changed(client, &channel_id, &id, MessageChange::Delete);
+                    }
+                    Frame::MessageEdit { message } => {
+                        let (channel_id, id) = (message.channel_id.clone(), message.id.clone());
+                        chat.message_changed(client, &channel_id, &id, MessageChange::Edit(message));
+                    }
+                    Frame::MessagePreviews { channel_id, message_id, previews } => {
+                        chat.message_changed(client, &channel_id, &message_id, MessageChange::Previews(previews));
+                    }
+                    Frame::ReactionUpdate { channel_id, message_id, reactions } => {
+                        chat.message_changed(client, &channel_id, &message_id, MessageChange::Reactions(reactions));
+                    }
+                    Frame::PinUpdate { channel_id, message_id, pinned } => {
+                        chat.message_changed(client, &channel_id, &message_id, MessageChange::Pin(pinned));
+                    }
                     Frame::MessageError { nonce: Some(nonce), error } => chat.error(&nonce, error),
                     Frame::Typing { channel_id, user_id } if sidebar.profile.id.as_ref() != Some(&user_id) => {
                         chat.receive_typing(&channel_id, user_id);

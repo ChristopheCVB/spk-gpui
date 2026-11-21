@@ -1,4 +1,7 @@
+mod actions;
 pub(super) mod markdown;
+
+pub(super) use actions::MessageActionForm;
 
 use std::{
     cell::RefCell,
@@ -99,6 +102,7 @@ impl Spk {
     pub(super) fn update_chat(&mut self, next: &View, window: &mut Window, cx: &mut Context<Self>) {
         let previous = chat(&self.view);
         let next = chat(next);
+        Self::update_message_actions(&mut self.message_action_form, previous, next);
         if let Some(next) = next.filter(|chat| chat.latest_ready())
             && previous.is_none_or(|previous| {
                 previous.channel_id != next.channel_id
@@ -234,6 +238,20 @@ impl Spk {
             .flex_col()
             .flex_1()
             .min_h_0()
+            .when(!chat.unavailable(), |area| {
+                area.child(self.pins(sidebar, chat, cx))
+            })
+            .when_some(
+                chat.action_outcome.as_ref().and_then(|result| result.error),
+                |area, error| {
+                    area.child(
+                        div()
+                            .px_4()
+                            .py_2()
+                            .child(Label::new(error).text_color(theme.danger)),
+                    )
+                },
+            )
             .when_some(status, |area, status| {
                 area.child(
                     div()
@@ -558,6 +576,15 @@ impl Spk {
                 }
             });
         let composer_busy = chat.outgoing.is_some() || !chat.can_send();
+        let message_actions = actions::MessageActions {
+            app: app.clone(),
+            channel: channel.clone(),
+            message: message_id.clone(),
+            can_edit: sidebar.profile.id.as_deref() == Some(&message.user_id),
+            can_delete: sidebar.can_remove_message_content(message),
+            pin_to: chat.can_pin(sidebar.is_admin()).then_some(!message.pinned),
+            disabled: chat.action_pending || !chat.can_send(),
+        };
         let pinged = chat.direct_message_peer.is_none()
             && sidebar
                 .profile
@@ -640,6 +667,20 @@ impl Spk {
                                 author.child(Label::new("Ping").text_xs().text_color(theme.primary))
                             }),
                     )
+                    .when(message.pinned, |row| {
+                        row.child(
+                            Label::new("Pinned")
+                                .text_xs()
+                                .text_color(theme.muted_foreground),
+                        )
+                    })
+                    .when(message.edited_at.is_some(), |row| {
+                        row.child(
+                            Label::new("(edited)")
+                                .text_xs()
+                                .text_color(theme.muted_foreground),
+                        )
+                    })
                     .child(
                         Button::new("message-actions")
                             .ghost()
@@ -704,8 +745,9 @@ impl Spk {
                                                     }
                                                 });
                                             }),
-                                    )
-                                    .item(PopupMenuItem::new("Mark as unread").on_click(
+                                    );
+                                let menu = message_actions.menu(menu).separator().item(
+                                    PopupMenuItem::new("Mark as unread").on_click(
                                         move |_, _, cx| {
                                             let _ = mark_app.update(cx, |this, cx| {
                                                 this.send(
@@ -718,7 +760,8 @@ impl Spk {
                                                 );
                                             });
                                         },
-                                    ));
+                                    ),
+                                );
                                 let copy_text = share_text.clone();
                                 let copy_markdown = body.clone();
                                 let menu = menu
@@ -766,6 +809,13 @@ impl Spk {
                     ),
             )
             .child(text)
+            .children(self.message_action_form(chat, message, cx))
+            .when(!message.previews.is_empty(), |row| {
+                row.child(self.link_previews(sidebar, chat, message, cx))
+            })
+            .when(!message.reactions.is_empty(), |row| {
+                row.child(self.reactions(sidebar, chat, message, cx))
+            })
     }
 
     fn composer_tools(
