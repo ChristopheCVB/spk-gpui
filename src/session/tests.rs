@@ -955,6 +955,11 @@ fn local_cues_follow_first_ready_report_and_explicit_leave() {
     let mut call = VoiceView::joining("room".into());
     assert!(call.update_media(report(VoiceStatus::ListenOnly)));
     assert!(!call.update_media(report(VoiceStatus::Connected)));
+    assert!(!call.update_media(report(VoiceStatus::Reconnecting)));
+    assert_eq!(call.status, VoiceStatus::Reconnecting);
+    assert!(!call.update_media(report(VoiceStatus::ListenOnly)));
+    assert_eq!(call.status, VoiceStatus::ListenOnly);
+    assert!(!call.update_media(report(VoiceStatus::Reconnecting)));
     assert!(call.begin_leave(true));
     assert!(call.play_leave);
     assert!(!call.begin_leave(true));
@@ -1083,5 +1088,89 @@ async fn leave_cancels_a_voice_channel_switch() {
         },
     )
     .await;
+    assert!(matches!(end, SessionEnd::Closed));
+}
+
+#[test]
+fn terminal_media_failure_offers_the_affected_voice_channel_for_rejoin() {
+    let profile = serde_json::from_str(r#"{"id":"me","email":"me@example.test"}"#).unwrap();
+    let mut sidebar = Sidebar::new(profile, None);
+    sidebar.channels = Some(vec![Channel {
+        id: "room".into(),
+        kind: "voice".into(),
+        name: None,
+    }]);
+    sidebar.voice = Some(VoiceView::joining("room".into()));
+    sidebar.voice.as_mut().unwrap().status = VoiceStatus::Reconnecting;
+    sidebar.finish_voice(Err(VoiceIssue::LiveKitDisconnected));
+    assert!(sidebar.voice.is_none());
+    assert_eq!(sidebar.rejoin_channel(), None);
+    sidebar.connection = Connection::Online;
+    assert_eq!(sidebar.rejoin_channel(), Some("room"));
+    sidebar.channels = Some(Vec::new());
+    assert_eq!(sidebar.rejoin_channel(), None);
+
+    sidebar.voice = Some(VoiceView::joining("room".into()));
+    sidebar.voice.as_mut().unwrap().begin_leave(true);
+    sidebar.finish_voice(Err(VoiceIssue::LiveKitDisconnected));
+    assert!(sidebar.voice_rejoin.is_none());
+}
+
+#[tokio::test]
+async fn livekit_recovery_and_rejoin_use_the_signed_in_voice_flow() {
+    let (resynced, confirmed) = tokio::sync::oneshot::channel();
+    let end = voice_session(
+        voice::tests::start_recovery_fixture,
+        async |listener, requests, _| {
+            let mut socket = tokio_tungstenite::accept_async(listener.accept().await.unwrap().0)
+                .await
+                .unwrap();
+            let first = accept_voice_join(&requests, &mut socket, "first").await;
+            acknowledge_voice(&mut socket, &first).await;
+            let sid = &first["sid"];
+            let ready = value!({"type":"voice:ready","sid":sid});
+            assert_eq!(receive_voice_frame(&mut socket).await, ready);
+            assert_eq!(receive_voice_frame(&mut socket).await, ready);
+            assert_eq!(
+                receive_voice_frame(&mut socket).await,
+                value!({"type":"voice:state","sid":sid,"muted":true,"deafened":false,"speaking":false})
+            );
+            resynced.send(()).unwrap();
+            assert_eq!(receive_voice_frame(&mut socket).await, value!({"type":"voice:leave","sid":sid}));
+
+            let retry = accept_voice_join(&requests, &mut socket, "first").await;
+            assert_ne!(retry["sid"], *sid);
+            assert_ne!(retry["nonce"], first["nonce"]);
+            acknowledge_voice(&mut socket, &retry).await;
+            let sid = &retry["sid"];
+            assert_eq!(receive_voice_frame(&mut socket).await, value!({"type":"voice:ready","sid":sid}));
+            assert_eq!(receive_voice_frame(&mut socket).await, value!({"type":"voice:leave","sid":sid}));
+        },
+        async |commands, views| {
+            wait_for_sidebar(&views, |sidebar| {
+                matches!(sidebar.connection, Connection::Online) && sidebar.has_voice_channel("first")
+            }).await;
+            commands.send(Command::JoinVoice("first".into())).await.unwrap();
+            let status = |expected| move |sidebar: &Sidebar| {
+                sidebar.voice.as_ref().is_some_and(|voice| voice.status == expected)
+            };
+            wait_for_sidebar(&views, status(VoiceStatus::ListenOnly)).await;
+            commands.send(Command::RefreshDevices).await.unwrap();
+            wait_for_sidebar(&views, status(VoiceStatus::Reconnecting)).await;
+            commands.send(Command::RefreshDevices).await.unwrap();
+            wait_for_sidebar(&views, status(VoiceStatus::ListenOnly)).await;
+            confirmed.await.unwrap();
+            commands.send(Command::RefreshDevices).await.unwrap();
+            let failed = wait_for_sidebar(&views, |sidebar| sidebar.rejoin_channel().is_some()).await;
+            assert!(failed.voice.is_none());
+            assert_eq!(failed.voice_notice, Some(VoiceIssue::LiveKitDisconnected.message()));
+            commands.send(Command::JoinVoice(failed.rejoin_channel().unwrap().into())).await.unwrap();
+            let joined = wait_for_sidebar(&views, status(VoiceStatus::ListenOnly)).await;
+            assert!(joined.voice_notice.is_none());
+            assert!(joined.rejoin_channel().is_none());
+            commands.send(Command::LeaveVoice).await.unwrap();
+            wait_for_sidebar(&views, |sidebar| sidebar.voice.is_none()).await;
+        },
+    ).await;
     assert!(matches!(end, SessionEnd::Closed));
 }

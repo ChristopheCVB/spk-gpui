@@ -14,6 +14,50 @@ use crate::{
 
 use super::*;
 
+pub(crate) fn start_recovery_fixture(
+    channel: String,
+    client: SpkClient,
+    socket: VoiceSocket,
+    intent: Intent,
+) -> Call {
+    Call::spawn(channel, socket, intent, |worker, ack, cancelled| {
+        tokio::spawn(worker.run(
+            client,
+            ack,
+            cancelled,
+            async |worker: &Worker, _: &mut Media, _| {
+                let mut requested = worker.requested.clone();
+                let start = requested.borrow().refresh_devices;
+                loop {
+                    let intent = requested.borrow_and_update().clone();
+                    let phase = intent.refresh_devices - start;
+                    let status = match phase {
+                        0 | 2 => Status::ListenOnly,
+                        1 => Status::Reconnecting,
+                        _ => return Err(disconnect_issue(DisconnectReason::MediaFailure)),
+                    };
+                    worker.publish_flags(
+                        VoiceFlags {
+                            muted: true,
+                            deafened: intent.mute.deafened,
+                            speaking: false,
+                        },
+                        phase == 2,
+                    );
+                    worker.update(Update::Media(Arc::new(Report {
+                        status,
+                        devices: Arc::default(),
+                        microphone: None,
+                        speakers: None,
+                        speaking: HashSet::new(),
+                    })));
+                    requested.changed().await.unwrap();
+                }
+            },
+        ))
+    })
+}
+
 #[derive(Clone, Copy)]
 enum Scenario {
     Cancelled,
@@ -44,7 +88,8 @@ async fn exercise(scenario: Scenario) {
     let endpoint = format!("ws://{address}/_ws");
     let controls = matches!(scenario, Scenario::Controls);
     let (left, departure) = oneshot::channel();
-    let (seen, mut observed) = tokio::sync::mpsc::channel(2);
+    let (release_recovery, recovery) = oneshot::channel();
+    let (seen, mut observed) = tokio::sync::mpsc::channel(1);
 
     let server = async {
         Request::read(&listener, "POST /api/auth/sign-in/email HTTP/1.1")
@@ -54,19 +99,7 @@ async fn exercise(scenario: Scenario) {
         let (tcp, _) = listener.accept().await.unwrap();
         let mut socket = accept_async(tcp).await.unwrap();
 
-        let request = Request::read(&listener, "POST /api/voice/token HTTP/1.1").await;
-        assert_eq!(request.header("origin"), Some(origin.as_str()));
-        assert_eq!(request.header("cookie"), Some("session=fixture"));
-        assert_eq!(
-            serde_json::from_slice::<Value>(&request.body).unwrap(),
-            json!({"channelId":"room"})
-        );
-        request
-            .respond(
-                &[],
-                &json!({"token":"fixture-token","url":env!("LIVEKIT_URL")}).to_string(),
-            )
-            .await;
+        serve_token(&listener, &origin, "fixture-token").await;
 
         let join = receive_frame(&mut socket).await;
         let sid = join["sid"].as_str().unwrap();
@@ -111,6 +144,15 @@ async fn exercise(scenario: Scenario) {
                 json!({"type":"voice:state","sid":sid,"muted":true,"deafened":true,"speaking":false})
             );
             seen.send(()).await.unwrap();
+            assert_eq!(
+                receive_frame(&mut socket).await,
+                json!({"type":"voice:ready","sid":sid})
+            );
+            assert_eq!(
+                receive_frame(&mut socket).await,
+                json!({"type":"voice:state","sid":sid,"muted":true,"deafened":true,"speaking":false})
+            );
+            seen.send(()).await.unwrap();
         }
         assert_eq!(
             receive_frame(&mut socket).await,
@@ -120,6 +162,26 @@ async fn exercise(scenario: Scenario) {
             acknowledge(&mut socket, sid, "room", nonce).await;
         }
         left.send(()).unwrap();
+        if controls {
+            serve_token(&listener, &origin, "fresh-rejoin-token").await;
+            let retry = receive_frame(&mut socket).await;
+            let retry_sid = retry["sid"].as_str().unwrap();
+            let retry_nonce = retry["nonce"].as_str().unwrap();
+            assert_ne!(retry_sid, sid);
+            assert_ne!(retry_nonce, nonce);
+            assert_eq!(
+                retry,
+                json!({
+                    "type":"voice:join", "channelId":"room", "sid":retry_sid, "nonce":retry_nonce,
+                    "muted":true, "deafened":true, "watching":[]
+                })
+            );
+            acknowledge(&mut socket, retry_sid, "room", retry_nonce).await;
+            assert_eq!(
+                receive_frame(&mut socket).await,
+                json!({"type":"voice:leave","sid":retry_sid})
+            );
+        }
     };
 
     let desktop = async {
@@ -142,49 +204,66 @@ async fn exercise(scenario: Scenario) {
             },
             ..Intent::default()
         };
-        let mut call = Call::spawn("room".into(), socket, initial, |worker, ack, cancelled| {
-            tokio::spawn(worker.run(
-                client,
-                ack,
-                cancelled,
-                async move |worker: &Worker, _: &mut Media, token: String| {
-                    assert_eq!(token, "fixture-token");
-                    match scenario {
-                        Scenario::Cancelled => panic!("a cancelled call started media"),
-                        Scenario::MediaFailure => Err(Issue::Media),
-                        Scenario::MicrophoneFailure => {
-                            worker.publish_flags(VoiceFlags {
-                                muted: true,
-                                ..VoiceFlags::default()
-                            });
-                            observed.recv().await.unwrap();
-                            worker.update(Update::Media(Arc::new(Report {
-                                status: Status::ListenOnly,
-                                devices: Arc::default(),
-                                microphone: None,
-                                speakers: None,
-                                speaking: HashSet::new(),
-                            })));
-                            pending().await
+        let mut call = Call::spawn(
+            "room".into(),
+            socket.clone(),
+            initial.clone(),
+            |worker, ack, cancelled| {
+                tokio::spawn(worker.run(
+                    client.clone(),
+                    ack,
+                    cancelled,
+                    async move |worker: &Worker, _: &mut Media, token: String| {
+                        assert_eq!(token, "fixture-token");
+                        match scenario {
+                            Scenario::Cancelled => panic!("a cancelled call started media"),
+                            Scenario::MediaFailure => Err(Issue::Media),
+                            Scenario::MicrophoneFailure => {
+                                worker.publish_flags(
+                                    VoiceFlags {
+                                        muted: true,
+                                        ..VoiceFlags::default()
+                                    },
+                                    false,
+                                );
+                                observed.recv().await.unwrap();
+                                for status in [Status::ListenOnly, Status::Reconnecting] {
+                                    worker.update(Update::Media(Arc::new(Report {
+                                        status,
+                                        devices: Arc::default(),
+                                        microphone: None,
+                                        speakers: None,
+                                        speaking: HashSet::new(),
+                                    })));
+                                }
+                                recovery.await.unwrap();
+                                panic!("cancelled media recovery ran")
+                            }
+                            Scenario::Controls => {
+                                worker.publish_flags(
+                                    VoiceFlags {
+                                        speaking: true,
+                                        ..VoiceFlags::default()
+                                    },
+                                    false,
+                                );
+                                observed.recv().await.unwrap();
+                                let deafened = VoiceFlags {
+                                    muted: true,
+                                    deafened: true,
+                                    speaking: false,
+                                };
+                                worker.publish_flags(deafened, false);
+                                observed.recv().await.unwrap();
+                                worker.publish_flags(deafened, true);
+                                observed.recv().await.unwrap();
+                                Err(disconnect_issue(DisconnectReason::MediaFailure))
+                            }
                         }
-                        Scenario::Controls => {
-                            worker.publish_flags(VoiceFlags {
-                                speaking: true,
-                                ..VoiceFlags::default()
-                            });
-                            observed.recv().await.unwrap();
-                            worker.publish_flags(VoiceFlags {
-                                muted: true,
-                                deafened: true,
-                                speaking: false,
-                            });
-                            observed.recv().await.unwrap();
-                            Err(Issue::Disconnected)
-                        }
-                    }
-                },
-            ))
-        });
+                    },
+                ))
+            },
+        );
         for _ in 0..3 {
             apply_acknowledgment(&mut call, &updates).await;
             assert!(call.acknowledgment.is_some());
@@ -203,6 +282,10 @@ async fn exercise(scenario: Scenario) {
                     next_update(Some(&call)).await,
                     Update::Media(report) if report.status == Status::ListenOnly
                 ));
+                assert!(matches!(
+                    next_update(Some(&call)).await,
+                    Update::Media(report) if report.status == Status::Reconnecting
+                ));
                 call.cancel();
             }
         }
@@ -213,16 +296,54 @@ async fn exercise(scenario: Scenario) {
             }
             Scenario::Controls => assert!(matches!(
                 outcome,
-                Update::Finished(Err(Issue::Disconnected))
+                Update::Finished(Err(Issue::LiveKitDisconnected))
             )),
             _ => assert!(matches!(outcome, Update::Finished(Ok(())))),
         }
         departure.await.unwrap();
         call.stop().await;
+        assert!(release_recovery.send(()).is_err());
+        if controls {
+            let mut retry =
+                Call::spawn("room".into(), socket, initial, |worker, ack, cancelled| {
+                    tokio::spawn(worker.run(
+                        client,
+                        ack,
+                        cancelled,
+                        async move |worker: &Worker, _: &mut Media, token: String| {
+                            assert_eq!(token, "fresh-rejoin-token");
+                            assert!(worker.requested.borrow().mute.effective_muted());
+                            Err(Issue::Media)
+                        },
+                    ))
+                });
+            apply_acknowledgment(&mut retry, &updates).await;
+            assert!(matches!(
+                next_update(Some(&retry)).await,
+                Update::Finished(Err(Issue::Media))
+            ));
+            retry.stop().await;
+        }
         socket_worker.abort();
     };
 
     tokio::join!(server, desktop);
+}
+
+async fn serve_token(listener: &TcpListener, origin: &str, token: &str) {
+    let request = Request::read(listener, "POST /api/voice/token HTTP/1.1").await;
+    assert_eq!(request.header("origin"), Some(origin));
+    assert_eq!(request.header("cookie"), Some("session=fixture"));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&request.body).unwrap(),
+        json!({"channelId":"room"})
+    );
+    request
+        .respond(
+            &[],
+            &json!({"token":token,"url":env!("LIVEKIT_URL")}).to_string(),
+        )
+        .await;
 }
 
 #[test]
@@ -240,6 +361,18 @@ fn deafen_restores_mute_and_unmuting_undeafens() {
         mute.toggle_mic();
         assert_eq!(mute, Mute::default());
     }
+}
+
+#[test]
+fn media_failure_is_retryable_and_session_replacement_is_authoritative() {
+    assert!(matches!(
+        disconnect_issue(DisconnectReason::MediaFailure),
+        Issue::LiveKitDisconnected
+    ));
+    assert!(matches!(
+        disconnect_issue(DisconnectReason::DuplicateIdentity),
+        Issue::Disconnected
+    ));
 }
 
 #[test]
@@ -273,6 +406,12 @@ fn holds_speaking_and_sends_only_the_latest_changed_state() {
     assert_eq!(due, now + Duration::from_millis(50));
     presence.sent(deafened, due);
     assert_eq!(presence.due(deafened), None);
+    presence.resync();
+    assert!(
+        presence
+            .due(deafened)
+            .is_some_and(|at| at <= Instant::now())
+    );
 }
 
 async fn acknowledge(
