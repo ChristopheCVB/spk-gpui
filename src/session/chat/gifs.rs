@@ -93,6 +93,11 @@ impl GifPicker {
         self.previews = JoinSet::new();
     }
 
+    pub fn reset_conversation(&mut self) {
+        self.close();
+        self.message_preview = JoinSet::new();
+    }
+
     pub fn show_favorites(&mut self, client: &SpkClient, show: bool) {
         let Some(view) = &mut self.view else {
             return;

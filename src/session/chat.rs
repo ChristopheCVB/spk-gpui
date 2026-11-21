@@ -212,8 +212,7 @@ impl ChatSession {
         self.typers.clear();
         self.last_typing = None;
         self.reset_actions();
-        self.gifs.close();
-        self.gifs.message_preview = JoinSet::new();
+        self.gifs.reset_conversation();
         self.selected = Some(ChatView {
             channel_id: channel.id.clone(),
             direct_message_peer: channel
@@ -245,8 +244,7 @@ impl ChatSession {
     pub fn close(&mut self) {
         self.cancel_history();
         self.reset_actions();
-        self.gifs.close();
-        self.gifs.message_preview = JoinSet::new();
+        self.gifs.reset_conversation();
         self.selected = None;
         self.typers.clear();
     }
@@ -417,6 +415,8 @@ impl ChatSession {
                     view.messages = Arc::default();
                     view.pins = None;
                     view.preview_images = PreviewImages::default();
+                    view.message_gif = None;
+                    self.gifs.reset_conversation();
                     self.pin_tasks = JoinSet::new();
                     self.preview_tasks = JoinSet::new();
                     view.has_more_before = false;
