@@ -42,6 +42,7 @@ pub enum Command {
     RetryMicrophone,
     RefreshDevices,
     ChooseDevice(DeviceKind, Option<Device>),
+    SetOutputVolume(u8),
 }
 
 pub enum View {

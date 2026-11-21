@@ -15,14 +15,29 @@ pub struct Device {
     pub name: String,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct DevicePreferences {
     pub microphone: Option<Device>,
     pub speakers: Option<Device>,
+    pub output_volume: u8,
+}
+
+impl Default for DevicePreferences {
+    fn default() -> Self {
+        Self {
+            microphone: None,
+            speakers: None,
+            output_volume: 100,
+        }
+    }
 }
 
 impl DevicePreferences {
+    pub fn output_gain(&self) -> f32 {
+        f32::from(self.output_volume.min(200)) / 100.0
+    }
+
     pub fn get_mut(&mut self, kind: DeviceKind) -> &mut Option<Device> {
         match kind {
             DeviceKind::Microphone => &mut self.microphone,
@@ -213,6 +228,7 @@ mod tests {
         let saved = DevicePreferences {
             microphone: Some(mic.clone()),
             speakers: Some(speakers.clone()),
+            ..Default::default()
         };
         saved.save(&path).unwrap();
         assert_eq!(DevicePreferences::load(&path).unwrap(), saved);
@@ -245,4 +261,19 @@ mod tests {
             DevicePreferences::default()
         );
     }
+}
+
+#[cfg(test)]
+#[test]
+fn output_volume_defaults_to_unity_for_saved_device_preferences() {
+    let old: DevicePreferences =
+        serde_json::from_str(r#"{"microphone":null,"speakers":null}"#).unwrap();
+    assert_eq!(old.output_volume, 100);
+    assert_eq!(old.output_gain(), 1.0);
+
+    let saved: DevicePreferences = serde_json::from_str(r#"{"output_volume":175}"#).unwrap();
+    assert_eq!(saved.output_gain(), 1.75);
+
+    let invalid: DevicePreferences = serde_json::from_str(r#"{"output_volume":255}"#).unwrap();
+    assert_eq!(invalid.output_gain(), 2.0);
 }

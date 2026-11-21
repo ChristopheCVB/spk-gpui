@@ -51,6 +51,7 @@ pub(crate) fn start_recovery_fixture(
                         devices: Arc::default(),
                         microphone: None,
                         speakers: None,
+                        diagnostics: Default::default(),
                         speaking: HashSet::new(),
                     })));
                     requested.changed().await.unwrap();
@@ -236,6 +237,7 @@ async fn exercise(scenario: Scenario) {
                                         devices: Arc::default(),
                                         microphone: None,
                                         speakers: None,
+                                        diagnostics: Default::default(),
                                         speaking: HashSet::new(),
                                     })));
                                 }

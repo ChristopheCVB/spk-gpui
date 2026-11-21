@@ -588,11 +588,14 @@ impl Spk {
                                 .gap_1()
                                 .rounded_lg()
                                 .when(in_voice, |bar| {
-                                    bar.bg(theme.secondary).p_2().child(self.voice_controls(
-                                        sidebar,
-                                        VoiceControls::Channel,
-                                        cx,
-                                    ))
+                                    bar.bg(theme.secondary)
+                                        .p_2()
+                                        .child(self.voice_controls(
+                                            sidebar,
+                                            VoiceControls::Channel,
+                                            cx,
+                                        ))
+                                        .child(super::voice::connection_diagnostics(cx))
                                 })
                                 .children(departing.and_then(|call| {
                                     self.leave_voice(

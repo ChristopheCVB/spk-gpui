@@ -1259,6 +1259,7 @@ fn local_cues_follow_first_ready_report_and_explicit_leave() {
             devices: Arc::default(),
             microphone: None,
             speakers: None,
+            diagnostics: Default::default(),
             speaking: HashSet::new(),
         })
     };
