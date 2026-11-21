@@ -1,9 +1,13 @@
 mod attachments;
 mod chat_actions;
+mod gifs;
+mod public_media;
 mod search;
 
 pub use attachments::{Attachment, AttachmentRef, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS};
 pub use chat_actions::{LinkPreview, MessageAction, MessageChange, Reaction};
+pub use gifs::{GifItem, GifPage, gif_message_url};
+pub(crate) use public_media::{PublicDns, public_media_url};
 pub use search::{MessageTarget, SearchHit, SearchPage, SearchScope};
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -556,6 +560,7 @@ impl VoiceSocket {
 pub struct SpkClient {
     http: Client,
     storage: Client,
+    public_media: Client,
     base: Url,
     origin: String,
     cookies: Arc<CookieStoreMutex>,
@@ -577,9 +582,20 @@ impl SpkClient {
             .build()
             .map_err(|_| Failure::Connection)?;
 
+        let public_media = Client::builder()
+            .https_only(true)
+            .no_proxy()
+            .referer(false)
+            .dns_resolver(Arc::new(PublicDns))
+            .redirect(Policy::none())
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .map_err(|_| Failure::Connection)?;
+
         Ok(Self {
             http,
             storage,
+            public_media,
             base,
             origin,
             cookies,

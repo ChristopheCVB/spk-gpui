@@ -46,6 +46,7 @@ pub(super) struct Spk {
     password: Entity<InputState>,
     nickname: Entity<InputState>,
     chat_input: Entity<TextareaState>,
+    gif_input: Entity<InputState>,
     chat_attachments: chat::AttachmentUi,
     message_action_input: Entity<TextareaState>,
     message_action_form: Option<chat::MessageActionForm>,
@@ -96,11 +97,22 @@ impl Spk {
             &chat_input,
             window,
             |this, _, event, window, cx| match event {
-                InputEvent::Change => this.update_chat_draft(cx),
+                InputEvent::Change => this.on_chat_input(window, cx),
                 InputEvent::PressEnter { shift: false, .. } => this.submit_chat(window, cx),
                 _ => {}
             },
         )
+        .detach();
+        let gif_input = cx.new(|cx| InputState::new(window, cx));
+        cx.subscribe(&gif_input, |this, input, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.send(
+                    Command::SearchGifs(input.read(cx).value().to_string()),
+                    None,
+                    cx,
+                );
+            }
+        })
         .detach();
         let message_action_input =
             cx.new(|cx| TextareaState::new(window, cx).rows(2).submit_on_enter(true));
@@ -285,6 +297,7 @@ impl Spk {
             password,
             nickname,
             chat_input,
+            gif_input,
             chat_attachments: Default::default(),
             message_action_input,
             message_action_form: None,
