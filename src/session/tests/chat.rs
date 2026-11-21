@@ -36,7 +36,7 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
     let (tx, commands) = async_channel::unbounded();
     let (views, rx) = async_channel::unbounded();
     let session = tokio::spawn(async move {
-        let (mut saved, _) = SavedSession::with_test_store(Vec::new());
+        let (mut saved, _) = SavedSession::with_test_store(None);
         let mut settings = fixture_settings(socket_url, Call::start_for_test);
         watch_session(
             &client,

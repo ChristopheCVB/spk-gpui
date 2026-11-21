@@ -170,7 +170,7 @@ async fn saved_session_restores_signs_out_and_clears_expired_credentials() {
         }
         let (tx, commands) = async_channel::unbounded();
         let (views, rx) = async_channel::unbounded();
-        let (saved, storage) = SavedSession::with_test_store(bytes.clone());
+        let (saved, storage) = SavedSession::with_test_store(Some(bytes.clone()));
         let settings = fixture_settings(endpoint.clone(), Call::start_for_test);
         let server = async {
             let request = Request::read(&http, "GET /api/profile/me HTTP/1.1").await;
@@ -393,7 +393,7 @@ async fn voice_session(
             .unwrap();
         let mut persisted = Vec::new();
         json::save(&client.cookies().lock().unwrap(), &mut persisted).unwrap();
-        let (mut saved, _) = SavedSession::with_test_store(persisted);
+        let (mut saved, _) = SavedSession::with_test_store(Some(persisted));
         let mut settings = fixture_settings(socket_endpoint, start_call);
         watch_session(
             &client,

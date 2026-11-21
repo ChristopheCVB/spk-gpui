@@ -6,7 +6,7 @@ async fn invite_redemption_requires_a_nickname_and_opens_the_signed_in_session()
     let base = Url::parse(&format!("http://{}", http.local_addr().unwrap())).unwrap();
     let (tx, commands) = async_channel::unbounded();
     let (views, rx) = async_channel::unbounded();
-    let (saved, storage) = SavedSession::with_test_store(b"[]".to_vec());
+    let (saved, storage) = SavedSession::with_test_store(None);
     let settings = fixture_settings("ws://127.0.0.1:1/_ws".into(), Call::start_for_test);
 
     let server = async {
@@ -189,7 +189,7 @@ async fn reset_link_rechecks_unavailability_and_returns_to_sign_in() {
     let base = Url::parse(&format!("http://{}", http.local_addr().unwrap())).unwrap();
     let (tx, commands) = async_channel::unbounded();
     let (views, rx) = async_channel::unbounded();
-    let (saved, _) = SavedSession::with_test_store(b"[]".to_vec());
+    let (saved, _) = SavedSession::with_test_store(None);
     let settings = fixture_settings("ws://127.0.0.1:1/_ws".into(), Call::start_for_test);
 
     let server = async {
