@@ -527,6 +527,11 @@ fn local_cues_follow_first_ready_report_and_explicit_leave() {
     let mut call = VoiceView::joining("room".into());
     assert!(call.update_media(report(VoiceStatus::ListenOnly)));
     assert!(!call.update_media(report(VoiceStatus::Connected)));
+    assert!(!call.update_media(report(VoiceStatus::Reconnecting)));
+    assert_eq!(call.status, VoiceStatus::Reconnecting);
+    assert!(!call.update_media(report(VoiceStatus::ListenOnly)));
+    assert_eq!(call.status, VoiceStatus::ListenOnly);
+    assert!(!call.update_media(report(VoiceStatus::Reconnecting)));
     assert!(call.begin_leave(true));
     assert!(call.play_leave);
     assert!(!call.begin_leave(true));
@@ -541,4 +546,29 @@ fn local_cues_follow_first_ready_report_and_explicit_leave() {
     assert!(disconnected.update_media(report(VoiceStatus::Connected)));
     assert!(disconnected.begin_leave(false));
     assert!(!disconnected.play_leave);
+}
+
+#[test]
+fn terminal_media_failure_offers_the_affected_voice_channel_for_rejoin() {
+    let profile = serde_json::from_str(r#"{"id":"me","email":"me@example.test"}"#).unwrap();
+    let mut sidebar = Sidebar::new(profile, None);
+    sidebar.channels = Some(vec![Channel {
+        id: "room".into(),
+        kind: "voice".into(),
+        name: None,
+    }]);
+    sidebar.voice = Some(VoiceView::joining("room".into()));
+    sidebar.voice.as_mut().unwrap().status = VoiceStatus::Reconnecting;
+    sidebar.finish_voice(Err(VoiceIssue::LiveKitDisconnected));
+    assert!(sidebar.voice.is_none());
+    assert_eq!(sidebar.rejoin_channel(), None);
+    sidebar.connection = Connection::Online;
+    assert_eq!(sidebar.rejoin_channel(), Some("room"));
+    sidebar.channels = Some(Vec::new());
+    assert_eq!(sidebar.rejoin_channel(), None);
+
+    sidebar.voice = Some(VoiceView::joining("room".into()));
+    sidebar.voice.as_mut().unwrap().begin_leave(true);
+    sidebar.finish_voice(Err(VoiceIssue::LiveKitDisconnected));
+    assert!(sidebar.voice_rejoin.is_none());
 }
