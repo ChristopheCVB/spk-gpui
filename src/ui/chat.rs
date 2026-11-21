@@ -93,12 +93,89 @@ impl Spk {
         }
     }
 
-    pub(super) fn dismiss_unread_marker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if window.has_active_dialog(cx) || self.video_stage.fullscreen {
-            return;
-        }
-        if let Some(chat) = chat(&self.view).filter(|chat| chat.first_unread_id.is_some()) {
+    pub(super) fn escape_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(chat) = chat(&self.view) else {
+            return false;
+        };
+        if self.message_action_form.take().is_some() {
+            self.chat_input
+                .update(cx, |input, cx| input.focus(window, cx));
+            cx.notify();
+        } else if chat.draft.reply.is_some() {
+            self.send(
+                Command::SetChatReply {
+                    channel_id: chat.channel_id.clone(),
+                    message_id: None,
+                },
+                None,
+                cx,
+            );
+        } else if chat.first_unread_id.is_some() {
             self.send(Command::MarkChatRead(chat.channel_id.clone()), None, cx);
+        } else {
+            return false;
+        }
+        true
+    }
+
+    pub(super) fn edit_last_message(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.chat_input.read(cx).value().is_empty() || self.message_action_form.is_some() {
+            return false;
+        }
+        let View::SignedIn(sidebar) = &self.view else {
+            return false;
+        };
+        let Some(chat) = sidebar
+            .chat
+            .as_ref()
+            .filter(|chat| chat.can_send() && !chat.action_pending)
+        else {
+            return false;
+        };
+        let Some(me) = sidebar.profile.id.as_deref() else {
+            return false;
+        };
+        let Some(message) = chat
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.user_id == me)
+        else {
+            return false;
+        };
+        let channel_id = chat.channel_id.clone();
+        let message_id = message.id.clone();
+        self.begin_message_action(
+            &channel_id,
+            &message_id,
+            actions::ActionForm::Edit,
+            window,
+            cx,
+        );
+        true
+    }
+
+    pub(super) fn format_chat_input(
+        &mut self,
+        before: &str,
+        after: &str,
+        editing: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if editing {
+            self.message_action_input.update(cx, |input, cx| {
+                let selected = input.selected_value();
+                let start = input.selected_range().start + before.len();
+                input.replace(format!("{before}{selected}{after}"), window, cx);
+                input.set_selected_range(start..start + selected.len(), cx);
+            });
+        } else {
+            self.insert_chat_text(before, after, window, cx);
         }
     }
 
@@ -364,7 +441,7 @@ impl Spk {
                 div()
                     .id("chat-composer")
                     .px_4()
-                    .py_3()
+                    .py(if self.compact() { px(6.0) } else { px(12.0) })
                     .border_t_1()
                     .border_color(theme.border)
                     .flex_shrink_0()
@@ -631,10 +708,27 @@ impl Spk {
                 .id
                 .as_deref()
                 .is_some_and(|id| message.pings(id));
+        let reply_channel = channel.clone();
+        let reply_id = message_id.clone();
         div()
             .id(SharedString::from(format!("message-{}", message.id)))
+            .focusable()
+            .tab_index(0)
+            .focus_visible(|row| row.bg(theme.secondary))
+            .on_key_down(cx.listener(move |app, event: &KeyDownEvent, window, cx| {
+                if !event.is_held
+                    && !event.keystroke.modifiers.modified()
+                    && event.keystroke.key == "r"
+                    && !window.has_focused_input(cx)
+                    && !composer_busy
+                {
+                    app.reply_to_message(reply_channel.clone(), reply_id.clone(), window, cx);
+                    cx.stop_propagation();
+                    window.prevent_default();
+                }
+            }))
             .px_4()
-            .py_2()
+            .py(if self.compact() { px(4.0) } else { px(8.0) })
             .flex_shrink_0()
             .when(
                 pinged || chat.jump.as_ref().is_some_and(|(id, _)| id == &message.id),
@@ -747,17 +841,12 @@ impl Spk {
                                             .disabled(composer_busy)
                                             .on_click(move |_, window, cx| {
                                                 let _ = reply_app.update(cx, |this, cx| {
-                                                    this.send(
-                                                        Command::SetChatReply {
-                                                            channel_id: channel_id.clone(),
-                                                            message_id: Some(message_id.clone()),
-                                                        },
-                                                        None,
+                                                    this.reply_to_message(
+                                                        channel_id.clone(),
+                                                        message_id.clone(),
+                                                        window,
                                                         cx,
                                                     );
-                                                    this.chat_input.update(cx, |input, cx| {
-                                                        input.focus(window, cx)
-                                                    });
                                                 });
                                             }),
                                     )
@@ -860,6 +949,25 @@ impl Spk {
             .when(!message.reactions.is_empty(), |row| {
                 row.child(self.reactions(sidebar, chat, message, cx))
             })
+    }
+
+    fn reply_to_message(
+        &mut self,
+        channel_id: String,
+        message_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.send(
+            Command::SetChatReply {
+                channel_id,
+                message_id: Some(message_id),
+            },
+            None,
+            cx,
+        );
+        self.chat_input
+            .update(cx, |input, cx| input.focus(window, cx));
     }
 
     fn composer_tools(

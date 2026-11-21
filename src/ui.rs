@@ -6,9 +6,11 @@ mod radio;
 mod search;
 mod settings;
 mod soundboard;
+mod switcher;
 mod video;
 mod voice;
 mod workspace;
+mod workspace_keys;
 
 use std::{
     sync::{Arc, LazyLock},
@@ -36,8 +38,8 @@ use crate::{
     voice::{DeviceKind, Status},
 };
 
-use settings::Appearance;
 pub(super) use settings::ShortcutKeys;
+use settings::{Appearance, Density};
 use voice::VoiceControls;
 
 const PRESENCE_IDLE_AFTER: Duration = Duration::from_secs(10 * 60);
@@ -60,10 +62,13 @@ pub(super) struct Spk {
     device_picker: Option<(VoiceControls, DeviceKind)>,
     selected_voice_channel: Option<String>,
     sidebar_open: bool,
+    quick_switcher: Option<WeakEntity<gpui_kit::component::command::CommandState>>,
     video_stage: video::VideoStage,
     workspace_focus: FocusHandle,
     appearance: Appearance,
     appearance_error: bool,
+    density: Density,
+    density_error: bool,
     shortcuts: Shortcuts,
     sound_settings: tokio::sync::watch::Sender<SoundSettings>,
     cues: VoiceSounds,
@@ -188,10 +193,12 @@ impl Spk {
             if window.window_handle().window_id() == window_id {
                 let _ = app.update(cx, |this, cx| {
                     this.record_activity(window);
-                    if event.keystroke.key == "escape" && this.shortcuts.editor.is_none() {
-                        this.dismiss_unread_marker(window, cx);
+                    if this.shortcuts.editor.is_some() {
+                        this.capture_shortcut(event, window, cx);
+                    } else if this.workspace_key(event, window, cx) {
+                        cx.stop_propagation();
+                        window.prevent_default();
                     }
-                    this.capture_shortcut(event, window, cx);
                 });
             }
         })
@@ -331,10 +338,13 @@ impl Spk {
             device_picker: None,
             selected_voice_channel: None,
             sidebar_open: true,
+            quick_switcher: None,
             video_stage: video::VideoStage::default(),
             workspace_focus,
             appearance,
             appearance_error: false,
+            density: Density::load(),
+            density_error: false,
             shortcuts,
             sound_settings,
             cues,
@@ -516,6 +526,7 @@ impl Render for Spk {
             .id("spk-window")
             .track_focus(&self.workspace_focus)
             .on_key_down(cx.listener(Self::dismiss_video_fullscreen))
+            .on_key_down(cx.listener(Self::hovered_video_key))
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
