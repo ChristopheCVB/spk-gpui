@@ -25,9 +25,11 @@ impl ChatView {
     pub fn can_pin(&self, is_admin: bool) -> bool {
         self.direct_message_peer.is_some() || is_admin
     }
+}
 
-    pub fn can_remove_message_content(&self, message: &ChatMessage, user_id: Option<&str>) -> bool {
-        user_id == Some(message.user_id.as_str())
+impl Sidebar {
+    pub fn can_remove_message_content(&self, message: &ChatMessage) -> bool {
+        self.is_admin() || self.profile.id.as_deref() == Some(message.user_id.as_str())
     }
 }
 
@@ -62,7 +64,7 @@ impl ChatSession {
         let allowed = match &action {
             MessageAction::Edit(_) => own,
             MessageAction::Delete | MessageAction::RemovePreview(_) => {
-                view.can_remove_message_content(message, sidebar.profile.id.as_deref())
+                sidebar.can_remove_message_content(message)
             }
             MessageAction::Pin(_) => view.can_pin(sidebar.is_admin()),
             MessageAction::React { .. } => true,
@@ -175,7 +177,15 @@ impl ChatSession {
             Some(Pins::Loading | Pins::Failed) => true,
             None => false,
         };
-        self.prune_previews();
+        if matches!(
+            change,
+            MessageChange::Edit(_)
+                | MessageChange::Delete
+                | MessageChange::Previews(_)
+                | MessageChange::RemovePreview(_)
+        ) {
+            self.prune_previews();
+        }
         if refresh {
             self.refresh_pins(client);
         }

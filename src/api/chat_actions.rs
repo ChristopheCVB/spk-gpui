@@ -17,6 +17,17 @@ pub struct LinkPreview {
     pub image: bool,
 }
 
+impl LinkPreview {
+    pub fn link(&self) -> Option<Url> {
+        let url = Url::parse(&self.url).ok()?;
+        (matches!(url.scheme(), "http" | "https")
+            && url.has_host()
+            && url.username().is_empty()
+            && url.password().is_none())
+        .then_some(url)
+    }
+}
+
 pub enum MessageAction {
     Edit(String),
     Delete,

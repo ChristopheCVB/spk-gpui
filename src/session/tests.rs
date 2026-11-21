@@ -3,7 +3,9 @@ mod chat;
 mod media;
 mod profile;
 mod radio;
+mod search;
 mod soundboard;
+mod unread;
 mod user_presence;
 
 use std::{collections::HashSet, time::Duration};
@@ -216,6 +218,7 @@ async fn saved_session_restores_signs_out_and_clears_expired_credentials() {
                 let (line, request) = Request::receive(&http).await;
                 assert_eq!(request.header("cookie"), Some("session=saved"));
                 match line.as_str() {
+                    "GET /api/unread HTTP/1.1" => request.respond(&[], "{}").await,
                     "GET /api/channels HTTP/1.1"
                     | "GET /api/voice HTTP/1.1"
                     | "GET /api/users HTTP/1.1" => request.respond(&[], "[]").await,
@@ -382,6 +385,7 @@ async fn voice_session_with_activity(
                     r#"[{"id":"first","type":"voice"},{"id":"second","type":"voice"}]"#
                 }
                 "GET /api/users HTTP/1.1" => "[]",
+                "GET /api/unread HTTP/1.1" => "{}",
                 "GET /api/users/presence HTTP/1.1"
                     if matches!(snapshot, SidebarSnapshot::DelayUserPresence) =>
                 {

@@ -255,14 +255,14 @@ impl Spk {
         message: &ChatMessage,
         cx: &Context<Self>,
     ) -> impl IntoElement {
-        let can_remove = chat.can_remove_message_content(message, sidebar.profile.id.as_deref());
+        let can_remove = sidebar.can_remove_message_content(message);
         let theme = cx.theme();
         div()
             .flex()
             .flex_col()
             .gap_1()
             .children(message.previews.iter().filter_map(|preview| {
-                let url = safe_link(&preview.url)?;
+                let url = preview.link()?;
                 let site = preview
                     .site_name
                     .as_deref()
@@ -272,6 +272,7 @@ impl Spk {
                 let message_id = message.id.clone();
                 let image = chat.preview_images.get(&message_id, &preview.url);
                 let preview_url = preview.url.clone();
+                let app = cx.weak_entity();
                 Some(
                     div()
                         .id(SharedString::from(format!("link-preview-{preview_url}")))
@@ -297,7 +298,9 @@ impl Spk {
                                         .tab_stop(true)
                                         .label(site.to_owned())
                                         .accessibility_label(format!("Open link to {site}"))
-                                        .on_click(move |_, _, cx| cx.open_url(url.as_str())),
+                                        .on_click(move |_, _, cx| {
+                                            search::activate_chat_link(&app, url.clone(), cx)
+                                        }),
                                 )
                                 .when(can_remove, |row| {
                                     row.child(

@@ -25,6 +25,7 @@ async fn profile_changes_reach_another_session_and_failed_edits_keep_the_profile
             let (line, request) = Request::receive(&http).await;
             let cookie = request.header("cookie");
             match line.as_str() {
+                "GET /api/unread HTTP/1.1" => request.respond(&[], "{}").await,
                 "GET /api/channels HTTP/1.1" | "GET /api/voice HTTP/1.1" => {
                     request.respond(&[], "[]").await;
                 }

@@ -2,7 +2,7 @@ use std::{borrow::Cow, cmp::Reverse, ops::Range};
 
 use ::markdown::{ParseOptions, mdast::Node};
 
-pub(super) fn message_markdown<'a, 'b>(
+pub(in crate::ui) fn message_markdown<'a, 'b>(
     source: &'a str,
     name_of: impl Fn(&str) -> &'b str,
     revealed: impl Fn(usize) -> bool,
@@ -15,10 +15,7 @@ pub(super) fn message_markdown<'a, 'b>(
     {
         return Cow::Borrowed(source);
     }
-    let mut options = ParseOptions::gfm();
-    options.constructs.html_flow = false;
-    options.constructs.html_text = false;
-    let Ok(document) = ::markdown::to_mdast(source, &options) else {
+    let Ok(document) = ::markdown::to_mdast(source, &parse_options()) else {
         return Cow::Borrowed("Message preview unavailable.");
     };
     let mut edits = Vec::new();
@@ -163,6 +160,39 @@ pub(super) fn safe_link(raw: &str) -> Option<url::Url> {
     let url = base.join(raw).ok()?;
     matches!(url.scheme(), "https" | "http" | "mailto").then_some(url)
 }
+
+fn parse_options() -> ParseOptions {
+    let mut options = ParseOptions::gfm();
+    options.constructs.html_flow = false;
+    options.constructs.html_text = false;
+    options
+}
+
+pub(in crate::ui) fn plain_text(source: &str) -> String {
+    ::markdown::to_mdast(source, &parse_options())
+        .map_or_else(|_| source.to_owned(), |document| node_text(&document))
+}
+
+fn node_text(node: &Node) -> String {
+    if let Some(children) = node.children() {
+        let separator = match node {
+            Node::Root(_) | Node::Blockquote(_) | Node::ListItem(_) => "\n\n",
+            Node::List(_) | Node::Table(_) => "\n",
+            Node::TableRow(_) => "\t",
+            _ => "",
+        };
+        children
+            .iter()
+            .map(node_text)
+            .collect::<Vec<_>>()
+            .join(separator)
+    } else if matches!(node, Node::Break(_)) {
+        "\n".to_owned()
+    } else {
+        node.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,6 +228,14 @@ mod tests {
         assert_eq!(
             message_markdown("<@alice> ||truncated spoiler", name, |_| false, None),
             "@Alice *here* ▒▒▒",
+        );
+    }
+
+    #[test]
+    fn copied_text_strips_markdown_preserving_readable_line_breaks() {
+        assert_eq!(
+            plain_text("**First** [link](https://example.test)  \nline\n\n- item A\n- item B"),
+            "First link\nline\n\nitem A\nitem B",
         );
     }
 }

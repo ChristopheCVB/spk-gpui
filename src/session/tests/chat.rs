@@ -17,6 +17,7 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
             let (line, request) = Request::receive(&http).await;
             assert_eq!(request.header("cookie"), Some("session=chat"));
             match line.as_str() {
+                "GET /api/unread HTTP/1.1" => request.respond(&[], "{}").await,
                 "GET /api/channels HTTP/1.1" => {
                     request.respond(&[], r#"[{"id":"general","type":"text","name":"general"},{"id":"quiet","type":"text","name":"quiet"}]"#).await
                 }
@@ -73,7 +74,7 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
             view.chat.as_ref().is_some_and(|chat| chat.loading())
         })
         .await;
-        history_request(&history, "")
+        history_request(&history, "?unread=1")
             .await
             .respond_raw("503 Unavailable", &[], b"")
             .await;
@@ -84,7 +85,7 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         tx.send(Command::RetryChatHistory).await.unwrap();
         let latest = message("m2", 2, "bob", "Hi from web");
         page(
-            history_request(&history, "").await,
+            history_request(&history, "?unread=1").await,
             std::slice::from_ref(&latest),
             true,
         )
@@ -146,13 +147,23 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         wait_for_sidebar(&rx, |view| view.chat.as_ref().unwrap().messages.last().is_some_and(|m| {
             m.previews.first().is_some_and(|preview| preview.title.as_deref() == Some("A story"))
         })).await;
+        tx.send(Command::LoadLatestMessages).await.unwrap();
+        let stale_history = history_request(&history, "").await;
         tx.send(Command::MutateChatMessage {
             channel_id: "general".into(), message_id: "m3".into(), action: MessageAction::RemovePreview(url.into()),
         }).await.unwrap();
         let remove = chat_action_request(&history, "DELETE /api/messages/m3/previews HTTP/1.1", value!({"url":url})).await;
         peer.send(Message::text(value!({"type":"message:previews","channelId":"general","messageId":"m3","previews":[]}).to_string())).await.unwrap();
         remove.respond(&[], r#"{"ok":true}"#).await;
-        wait_for_sidebar(&rx, |view| view.chat.as_ref().unwrap().messages.last().is_some_and(|m| m.previews.is_empty())).await;
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
+            chat.loading() && chat.messages.last().is_some_and(|message| message.previews.is_empty())
+        })).await;
+        let mut stale = edited.clone();
+        stale["previews"] = value!([card]);
+        page(stale_history, &[older.clone(), latest.clone(), stale], false).await;
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
+            !chat.loading() && chat.messages.last().is_some_and(|message| message.previews.is_empty())
+        })).await;
 
         tx.send(Command::RetryChatSend).await.unwrap();
         tx.send(Command::SendChatMessage {
@@ -167,7 +178,7 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         let mut peer = accept_async(sockets.accept().await.unwrap().0)
             .await
             .unwrap();
-        let latest_request = history_request(&history, "").await;
+        let latest_request = history_request(&history, "?unread=1").await;
         let committed_without_ack = message("m4", 4, "alice", "Closed before confirmation");
         let while_loading = message("m5", 5, "bob", "While catching up");
         live(&mut peer, &while_loading, None).await;
@@ -199,7 +210,7 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         history_request(&history, "?around=removed").await.respond_raw("404 Not Found", &[], b"").await;
         wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| chat.jump_failed)).await;
         tx.send(Command::LoadLatestMessages).await.unwrap();
-        page(history_request(&history, "").await, &[message("m6", 6, "bob", "After history was read")], true).await;
+        page(history_request(&history, "?unread=1").await, &[message("m6", 6, "bob", "After history was read")], true).await;
         wait_for_messages(&rx, &["m6"]).await;
 
         tx.send(Command::RetryChatSend).await.unwrap();
@@ -216,7 +227,7 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
             .await
             .unwrap();
         let (line, request) = history.recv().await.unwrap();
-        assert_eq!(line, "GET /api/channels/quiet/messages HTTP/1.1");
+        assert_eq!(line, "GET /api/channels/quiet/messages?unread=1 HTTP/1.1");
         page(request, &[], false).await;
         wait_for_sidebar(&rx, |view| {
             view.chat.as_ref().is_some_and(|chat| {
@@ -231,13 +242,13 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         tx.send(Command::UpdateChatDraft { channel_id: "quiet".into(), body: "Quiet draft".into() }).await.unwrap();
         receive_typing(&mut peer, "quiet").await;
         tx.send(Command::OpenTextChannel("general".into())).await.unwrap();
-        page(history_request(&history, "").await, &[], false).await;
+        page(history_request(&history, "?unread=1").await, &[], false).await;
         wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
             chat.channel_id == "general" && !chat.loading() && chat.draft.body == "Still here"
         })).await;
         tx.send(Command::OpenTextChannel("quiet".into())).await.unwrap();
         let (line, request) = history.recv().await.unwrap();
-        assert_eq!(line, "GET /api/channels/quiet/messages HTTP/1.1");
+        assert_eq!(line, "GET /api/channels/quiet/messages?unread=1 HTTP/1.1");
         page(request, &[], false).await;
         wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
             chat.channel_id == "quiet" && !chat.loading() && chat.draft.body == "Quiet draft"
@@ -344,6 +355,7 @@ async fn direct_message_history_is_visible_only_to_a_participant() {
             let (line, request) = Request::receive(&http).await;
             let account = request.header("cookie").unwrap();
             match (line.as_str(), account) {
+                ("GET /api/unread HTTP/1.1", _) => request.respond(&[], "{}").await,
                 ("GET /api/channels HTTP/1.1", "session=alice") => {
                     request.respond(&[], r#"[{"id":"private","type":"dm","name":null,"otherUserId":"bob","lastActivityAt":2}]"#).await
                 }
@@ -365,7 +377,7 @@ async fn direct_message_history_is_visible_only_to_a_participant() {
             .await
             .unwrap();
         let (line, request) = history.recv().await.unwrap();
-        assert_eq!(line, "GET /api/channels/private/messages HTTP/1.1");
+        assert_eq!(line, "GET /api/channels/private/messages?unread=1 HTTP/1.1");
         assert_eq!(request.header("cookie"), Some("session=alice"));
         let message = value!({"id":"private-2","channelId":"private","userId":"bob","body":"Private content","createdAt":2});
         page(request, std::slice::from_ref(&message), true).await;
@@ -402,7 +414,7 @@ async fn direct_message_history_is_visible_only_to_a_participant() {
         .await;
         assert!(pending.chat.unwrap().messages.is_empty());
         live(&mut peer, &message, None).await;
-        assert_eq!(line, "GET /api/channels/private/messages HTTP/1.1");
+        assert_eq!(line, "GET /api/channels/private/messages?unread=1 HTTP/1.1");
         request.respond_raw("403 Forbidden", &[], b"").await;
         let denied = wait_for_sidebar(&views, |view| {
             view.chat.as_ref().is_some_and(ChatView::unavailable)
@@ -423,7 +435,7 @@ async fn direct_message_history_is_visible_only_to_a_participant() {
     clippy::result_large_err,
     reason = "Tungstenite defines the handshake callback type"
 )]
-async fn direct_message_session(
+pub(super) async fn direct_message_session(
     base: Url,
     account: &str,
 ) -> (
@@ -487,6 +499,7 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
             let (line, request) = Request::receive(&http).await;
             let account = request.header("cookie").unwrap();
             match line.as_str() {
+                "GET /api/unread HTTP/1.1" => request.respond(&[], "{}").await,
                 "GET /api/channels HTTP/1.1" => {
                     let other = if account == "session=alice" {
                         "bob"
@@ -539,6 +552,16 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
         page(private_history(&requests, "session=bob").await, std::slice::from_ref(&first), false).await;
         wait_for_messages(&bob_views, &["private-1"]).await;
 
+        bob.send(Command::MutateChatMessage {
+            channel_id: "private".into(), message_id: "private-1".into(),
+            action: MessageAction::Edit("Changed by another member".into()),
+        }).await.unwrap();
+        let denied = wait_for_sidebar(&bob_views, |view| {
+            view.chat.as_ref().unwrap().action_outcome.as_ref().is_some_and(|outcome| outcome.error.is_some())
+        }).await;
+        assert_eq!(denied.chat.unwrap().messages[0].body, "Hello Bob");
+        assert!(requests.is_empty());
+
         // A standard member can pin another participant's message in a DM.
         bob.send(Command::ShowChatPins { channel_id: "private".into(), shown: true }).await.unwrap();
         let (line, empty) = requests.recv().await.unwrap();
@@ -565,7 +588,10 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
         let mut pinned_message = first.clone();
         pinned_message["pinned"] = value!(true);
         pins.respond(&[], &value!([pinned_message]).to_string()).await;
-        wait_for_sidebar(&bob_views, |view| matches!(&view.chat.as_ref().unwrap().pins, Some(Pins::Ready(pins)) if pins.iter().any(|m| m.id == "private-1"))).await;
+        wait_for_sidebar(&bob_views, |view| {
+            let chat = view.chat.as_ref().unwrap();
+            !chat.action_pending && matches!(&chat.pins, Some(Pins::Ready(pins)) if pins.iter().any(|m| m.id == "private-1"))
+        }).await;
 
         // An HTTP refusal leaves both participants' current pin state unchanged.
         bob.send(Command::MutateChatMessage {
@@ -576,6 +602,21 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
         let denied = wait_for_sidebar(&bob_views, |view| view.chat.as_ref().unwrap().action_outcome.as_ref().is_some_and(|outcome| outcome.error.is_some())).await;
         assert!(denied.chat.unwrap().messages[0].pinned);
         bob.send(Command::ShowChatPins { channel_id: "private".into(), shown: false }).await.unwrap();
+        bob.send(Command::MutateChatMessage {
+            channel_id: "private".into(), message_id: "private-1".into(), action: MessageAction::Pin(false),
+        }).await.unwrap();
+        let unpin = chat_action_request(&requests, "POST /api/messages/private-1/pin HTTP/1.1", value!({"on":false})).await;
+        let update = value!({"type":"pin:update","channelId":"private","messageId":"private-1","pinned":false});
+        for peer in [&mut alice_peer, &mut bob_peer] {
+            peer.send(Message::text(update.to_string())).await.unwrap();
+        }
+        unpin.respond(&[], &update.to_string()).await;
+        for views in [&alice_views, &bob_views] {
+            wait_for_sidebar(views, |view| {
+                let chat = view.chat.as_ref().unwrap();
+                !chat.action_pending && !chat.messages[0].pinned
+            }).await;
+        }
 
         for on in [true, false] {
             bob.send(Command::MutateChatMessage {
@@ -675,7 +716,7 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
 
 async fn private_history(requests: &Receiver<(String, Request)>, cookie: &str) -> Request {
     let (line, request) = requests.recv().await.unwrap();
-    assert_eq!(line, "GET /api/channels/private/messages HTTP/1.1");
+    assert_eq!(line, "GET /api/channels/private/messages?unread=1 HTTP/1.1");
     assert_eq!(request.header("cookie"), Some(cookie));
     request
 }

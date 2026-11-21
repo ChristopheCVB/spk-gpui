@@ -5,8 +5,6 @@ use std::io::Cursor;
 use gpui_kit::{Image, ImageFormat, RenderImage, SvgRenderer};
 use image_webp::WebPDecoder;
 
-use crate::api::LinkPreview;
-
 type PreviewKey = (String, String);
 pub(in crate::session) type PreviewResult = (PreviewKey, Result<Arc<RenderImage>, Failure>);
 
@@ -29,15 +27,14 @@ impl ChatSession {
             return;
         };
         for message in view.messages.iter().rev() {
-            for LinkPreview { url, .. } in message.previews.iter().filter(|card| card.image) {
+            for preview in message.previews.iter().filter(|card| card.image) {
                 if self.preview_tasks.len() >= 4 {
                     return;
                 }
-                if !matches!(url::Url::parse(url), Ok(url) if matches!(url.scheme(), "http" | "https") && url.has_host())
-                {
+                if preview.link().is_none() {
                     continue;
                 }
-                let key = (message.id.clone(), url.clone());
+                let key = (message.id.clone(), preview.url.clone());
                 if view.preview_images.0.contains_key(&key) {
                     continue;
                 }
