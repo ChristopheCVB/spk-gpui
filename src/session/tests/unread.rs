@@ -5,6 +5,8 @@ async fn sidebar_shows_shared_unread_counts_and_pings() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let http = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = Url::parse(&format!("http://{}", http.local_addr().unwrap())).unwrap();
+    let (pause_snapshot, paused) = watch::channel(false);
+    let (held_snapshots, snapshots) = async_channel::unbounded();
     let http = tokio::spawn(async move {
         loop {
             let (line, request) = Request::receive(&http).await;
@@ -14,6 +16,10 @@ async fn sidebar_shows_shared_unread_counts_and_pings() {
                     r#"[{"id":"general","type":"text","name":"general"},{"id":"private","type":"dm","otherUserId":"bob","lastActivityAt":1}]"#
                 }
                 "GET /api/users HTTP/1.1" | "GET /api/voice HTTP/1.1" => "[]",
+                "GET /api/unread HTTP/1.1" if *paused.borrow() => {
+                    held_snapshots.send(request).await.unwrap();
+                    continue;
+                }
                 "GET /api/unread HTTP/1.1" => r#"{"general":{"unread":3,"mentions":2}}"#,
                 _ => panic!("unexpected request {line}"),
             };
@@ -36,6 +42,25 @@ async fn sidebar_shows_shared_unread_counts_and_pings() {
         let view = wait_for_sidebar(&views, |view| view.unread("private").unread == 2).await;
         assert_eq!(view.unread("private").mentions, 1);
         assert_eq!(view.unread("general").unread, 3);
+
+        pause_snapshot.send_replace(true);
+        commands.send(Command::Refresh).await.unwrap();
+        let snapshot = snapshots.recv().await.unwrap();
+        peer.send(Message::text(
+            r#"{"type":"unread:update","channelId":"private","unread":4,"mentions":2}"#,
+        ))
+        .await
+        .unwrap();
+        wait_for_sidebar(&views, |view| view.unread("private").unread == 4).await;
+        snapshot
+            .respond(
+                &[],
+                r#"{"general":{"unread":5,"mentions":2},"private":{"unread":2,"mentions":1}}"#,
+            )
+            .await;
+        let view = wait_for_sidebar(&views, |view| view.unread("general").unread == 5).await;
+        assert_eq!(view.unread("private").unread, 4);
+        assert_eq!(view.unread("private").mentions, 2);
 
         commands.close();
         assert!(matches!(session.await.unwrap(), SessionEnd::Closed));
