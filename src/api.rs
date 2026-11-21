@@ -45,6 +45,12 @@ impl Failure {
     }
 }
 
+#[derive(Deserialize)]
+pub struct AccountLinkCheck {
+    pub valid: bool,
+    pub reason: Option<String>,
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Profile {
@@ -367,6 +373,67 @@ impl SpkClient {
         )
         .await?;
         Ok(())
+    }
+
+    pub async fn check_invite(&self, token: &str) -> Result<AccountLinkCheck, Failure> {
+        self.check_account_link("/api/invites/check", token).await
+    }
+
+    pub async fn check_password_reset(&self, token: &str) -> Result<AccountLinkCheck, Failure> {
+        self.check_account_link("/api/reset-password/check", token)
+            .await
+    }
+
+    async fn check_account_link(
+        &self,
+        path: &str,
+        token: &str,
+    ) -> Result<AccountLinkCheck, Failure> {
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("token", token)
+            .finish();
+        self.get(&format!("{path}?{query}")).await
+    }
+
+    pub async fn sign_up(&self, token: &str, email: &str, password: &str) -> Result<(), Failure> {
+        let name = email.split('@').next().unwrap_or_default();
+        let mut token =
+            header::HeaderValue::from_str(token).map_err(|_| Failure::InvalidResponse)?;
+        token.set_sensitive(true);
+        Self::send(
+            self.request(Method::POST, "/api/auth/sign-up/email")
+                .header("x-invite-token", token)
+                .json(&serde_json::json!({"email": email, "password": password, "name": name})),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn reset_password(&self, token: &str, password: &str) -> Result<(), Failure> {
+        Self::send(
+            self.request(Method::POST, "/api/reset-password")
+                .json(&serde_json::json!({"token": token, "password": password})),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn set_nickname(&self, nickname: &str) -> Result<String, Failure> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Nickname {
+            display_name: String,
+        }
+
+        Self::send(
+            self.request(Method::POST, "/api/profile/nickname")
+                .json(&serde_json::json!({"displayName": nickname})),
+        )
+        .await?
+        .json::<Nickname>()
+        .await
+        .map(|result| result.display_name)
+        .map_err(|_| Failure::InvalidResponse)
     }
 
     pub async fn sign_out(&self) -> Result<(), Failure> {

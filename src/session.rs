@@ -1,3 +1,4 @@
+mod accounts;
 mod authentication;
 mod avatars;
 mod presence;
@@ -22,6 +23,7 @@ use crate::voice::{
     ParticipantVolumeChange, Status as VoiceStatus, Update as VoiceUpdate, screen,
     video::{CameraResolution, preview_camera},
 };
+use accounts::{AccountLinkOutcome, choose_nickname, redeem_link};
 use authentication::{
     SESSION_EXPIRED, SavedSession, login, restore, sign_in, sign_in_message, sign_out,
 };
@@ -30,7 +32,10 @@ use presence::{Refresh, Resource, VoiceMembership};
 use radio::{RadioSession, RadioView};
 use soundboard::{SoundboardSession, SoundboardView};
 use voice_session::{DeviceSettings, VoiceDestination, VoiceSession, VoiceSettings};
-pub use {presence::Participant, radio::RadioPlayback, voice_session::VoiceView};
+pub use {
+    accounts::AccountLinkForm, presence::Participant, radio::RadioPlayback,
+    voice_session::VoiceView,
+};
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -40,6 +45,14 @@ pub enum Command {
         email: String,
         password: String,
     },
+    OpenAccountLink,
+    SubmitAccountLink(String),
+    RedeemAccountLink {
+        email: String,
+        password: String,
+    },
+    BackToSignIn,
+    SetInitialNickname(String),
     Restore,
     SignOut,
     Refresh,
@@ -100,6 +113,14 @@ pub enum View {
     SignIn {
         message: Option<&'static str>,
         retry_restore: bool,
+    },
+    AccountLink {
+        form: AccountLinkForm,
+        message: Option<&'static str>,
+    },
+    ChooseNickname {
+        message: Option<&'static str>,
+        notice: Option<&'static str>,
     },
     SignedIn(Box<Sidebar>),
     RetrySignOut,
@@ -205,6 +226,7 @@ async fn run_session(
 ) {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let mut next = Command::Restore;
+    let mut sign_in_prompt = None;
     loop {
         let auth = match next {
             Command::Restore => restore(&base, &mut saved).await,
@@ -212,22 +234,45 @@ async fn run_session(
                 .await
                 .map(Some)
                 .map_err(|failure| (false, sign_in_message(failure))),
+            Command::OpenAccountLink => match redeem_link(&base, &commands, &views).await {
+                None => return,
+                Some(AccountLinkOutcome::Cancelled) => sign_in_prompt.map_or(Ok(None), Err),
+                Some(AccountLinkOutcome::PasswordChanged) => Err((
+                    false,
+                    "Password changed. You were signed out everywhere. Sign in with the new password.",
+                )),
+                Some(AccountLinkOutcome::SignedUp(client)) => match client.profile().await {
+                    Ok(profile) => Ok(Some((client, profile))),
+                    Err(_) => {
+                        let saved_session = saved.save(&client).await.is_ok();
+                        Err((
+                            saved_session,
+                            "Account created. Sign in to finish setting up your profile.",
+                        ))
+                    }
+                },
+            },
             _ => return,
         };
 
         let (message, retry_restore) = match auth {
             Ok(Some((client, profile))) => {
                 let notice = saved.save(&client).await.err();
-                let end = watch_session(
-                    &client,
-                    profile,
-                    notice,
-                    &mut saved,
-                    &mut settings,
-                    &commands,
-                    &views,
-                )
-                .await;
+                let end = match choose_nickname(&client, profile, notice, &commands, &views).await {
+                    Ok(profile) => {
+                        watch_session(
+                            &client,
+                            profile,
+                            notice,
+                            &mut saved,
+                            &mut settings,
+                            &commands,
+                            &views,
+                        )
+                        .await
+                    }
+                    Err(end) => end,
+                };
                 let warning = match end {
                     SessionEnd::Closed => return,
                     SessionEnd::Invalidated(reason) => {
@@ -253,6 +298,7 @@ async fn run_session(
             Ok(None) => (None, false),
             Err((retry_restore, message)) => (Some(message), retry_restore),
         };
+        sign_in_prompt = message.map(|message| (retry_restore, message));
         let Some(command) = login(&commands, &views, message, retry_restore).await else {
             return;
         };
