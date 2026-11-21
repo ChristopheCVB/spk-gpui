@@ -1090,14 +1090,15 @@ async fn watch_session(
                             _ => result,
                         });
                     }
-                    if presence_loaded
-                        && let Some(id) = chat.selected_text_channel()
-                        && !sidebar.channels_of_kind(ChannelKind::Text).any(|channel| channel.id == id)
-                    {
-                        chat.close();
-                        if pending_message_target.is_none() {
-                            sidebar.chat_notice = Some("That channel no longer exists.");
-                        }
+                }
+                if resource == Resource::Channels
+                    && presence_loaded
+                    && let Some(id) = chat.selected_text_channel()
+                    && !sidebar.channels_of_kind(ChannelKind::Text).any(|channel| channel.id == id)
+                {
+                    chat.close();
+                    if pending_message_target.is_none() {
+                        sidebar.chat_notice = Some("That channel no longer exists.");
                     }
                 }
                 if resource == Resource::Channels

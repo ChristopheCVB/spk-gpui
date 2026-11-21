@@ -23,6 +23,7 @@ async fn channel_changes_reach_another_session_and_close_removed_channels() {
                 value!({"id":"lobby","type":"voice","name":"Lobby"}),
             ];
             let mut reject_reorder = true;
+            let mut reject_rename = true;
             loop {
                 let (line, request) = Request::receive(&listener).await;
                 let cookie = request.header("cookie");
@@ -80,6 +81,10 @@ async fn channel_changes_reach_another_session_and_close_removed_channels() {
                                     ("new-voice", "Renamed voice")
                                 };
                                 assert_eq!(body(), value!({"name":name}));
+                                if std::mem::take(&mut reject_rename) {
+                                    request.respond_raw("403 Forbidden", &[], b"").await;
+                                    continue;
+                                }
                                 let channel = channels
                                     .iter_mut()
                                     .find(|channel| channel["id"] == id)
@@ -210,6 +215,29 @@ async fn channel_changes_reach_another_session_and_close_removed_channels() {
                     view.chat.as_ref().is_some_and(|chat| chat.latest_ready())
                 })
                 .await;
+            }
+            if kind == ChannelKind::Text {
+                alice
+                    .send(Command::ManageChannel(ChannelAction::Rename(
+                        id.into(),
+                        renamed.into(),
+                    )))
+                    .await
+                    .unwrap();
+                let denied = wait_for_sidebar(&alice_views, |view| {
+                    view.channel_admin.result
+                        == Some(Err("You don’t have permission to manage channels."))
+                })
+                .await;
+                assert_eq!(
+                    denied
+                        .channels_of_kind(kind)
+                        .find(|channel| channel.id == id)
+                        .unwrap()
+                        .name
+                        .as_deref(),
+                    Some(name)
+                );
             }
             alice
                 .send(Command::ManageChannel(ChannelAction::Rename(
