@@ -138,9 +138,9 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
     )
     .await
     .unwrap();
-    let (native, scope, quality) = (None, AudioScope::Application, (1920, 1080, 30));
+    let (native, scope) = (None, AudioScope::Application);
     #[cfg(target_os = "linux")]
-    let (native, scope, quality) = if let Ok(output) = std::env::var("SPK_TEST_PULSE_OUTPUT") {
+    let (native, scope) = if let Ok(output) = std::env::var("SPK_TEST_PULSE_OUTPUT") {
         let choice = linux::choices()
             .await
             .unwrap()
@@ -157,13 +157,37 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
         .await
         .unwrap();
         assert_eq!(selected.audio, Some(AudioScope::PlaybackMix));
-        (
-            Some(selected.capture),
-            AudioScope::PlaybackMix,
-            (640, 480, 30),
-        )
+        (Some(selected.capture), AudioScope::PlaybackMix)
     } else {
-        (native, scope, quality)
+        (native, scope)
+    };
+    #[cfg(windows)]
+    let (native, scope) = if let Ok(title) = std::env::var("SPK_TEST_SCREEN_WINDOW") {
+        let choice = windows::choices()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|choice| choice.label == format!("Window · {title}"))
+            .expect("synthetic Windows fixture");
+        let selected = windows::select(choice, None).await.unwrap();
+        assert_eq!(selected.audio, Some(AudioScope::Application));
+        (Some(selected.capture), AudioScope::Application)
+    } else {
+        (native, scope)
+    };
+    let synthetic = native.is_none();
+    let audio_threshold = if !synthetic && scope == AudioScope::Application {
+        100
+    } else {
+        500
+    };
+    let check_peer_dimensions = |actual: (u32, u32), expected: (u32, u32)| {
+        if !synthetic && scope == AudioScope::Application {
+            // WebRTC aligns native capture dimensions for the encoder.
+            assert!(actual.0.abs_diff(expected.0) <= 4 && actual.1.abs_diff(expected.1) <= 4);
+        } else {
+            assert_eq!(actual, expected);
+        }
     };
     let (stop, stopped) = oneshot::channel();
     let (report_tx, mut report_rx) = tokio::sync::watch::channel(State::Starting);
@@ -184,14 +208,27 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
         (publisher, result)
     });
 
-    timeout(Duration::from_secs(8), async {
+    let initial_size = timeout(Duration::from_secs(8), async {
         let state = report_rx.wait_for(State::active).await.unwrap();
-        assert!(matches!(
-            *state,
-            State::Live {
-                width, height, fps, audio: Some(audio), ..
-            } if (width, height, fps) == quality && audio == scope
-        ));
+        let State::Live {
+            width,
+            height,
+            fps,
+            audio,
+            ..
+        } = *state
+        else {
+            unreachable!();
+        };
+        assert_eq!((fps, audio), (30, Some(scope)));
+        if synthetic {
+            assert_eq!((width, height), (1920, 1080));
+        } else if scope == AudioScope::PlaybackMix {
+            assert_eq!((width, height), (640, 480));
+        } else {
+            assert!((600..640).contains(&width) && (400..460).contains(&height));
+        }
+        (width, height)
     })
     .await
     .unwrap();
@@ -207,7 +244,7 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
                     TrackSource::Screenshare => {
                         assert_eq!(
                             publication.name(),
-                            if scope == AudioScope::Application {
+                            if synthetic {
                                 "spk:screen:1080:30"
                             } else {
                                 "screen"
@@ -251,14 +288,15 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
     .unwrap();
     timeout(Duration::from_secs(8), async {
         let frame = frames.next().await.unwrap();
-        assert_eq!(
-            (frame.buffer.width(), frame.buffer.height()),
-            (quality.0, quality.1)
-        );
+        check_peer_dimensions((frame.buffer.width(), frame.buffer.height()), initial_size);
         loop {
             let sample = samples.next().await.unwrap();
             assert_eq!(sample.sample_rate, 48_000);
-            if sample.data.iter().any(|value| value.unsigned_abs() > 500) {
+            if sample
+                .data
+                .iter()
+                .any(|value| value.unsigned_abs() > audio_threshold)
+            {
                 break;
             }
         }
@@ -270,11 +308,7 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
         height: 720,
         fps: 5,
     };
-    let replacement_size = if scope == AudioScope::Application {
-        (1280, 720)
-    } else {
-        (640, 480)
-    };
+    let replacement_size = if synthetic { (1280, 720) } else { initial_size };
     requests.send_modify(|intent| intent.screen.quality = preset);
     timeout(Duration::from_secs(8), async {
         let state = report_rx
@@ -311,7 +345,7 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
     assert_ne!(replacement.sid(), video.sid());
     assert_eq!(
         replacement.name(),
-        if scope == AudioScope::Application {
+        if synthetic {
             "spk:screen:720:5"
         } else {
             "screen"
@@ -348,7 +382,7 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
     .await
     .unwrap();
 
-    if scope == AudioScope::Application {
+    if synthetic {
         let rejected = Quality {
             height: 1440,
             fps: 60,
@@ -370,13 +404,17 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
 
     timeout(Duration::from_secs(8), async {
         let frame = replacement_frames.next().await.unwrap();
-        assert_eq!(
+        check_peer_dimensions(
             (frame.buffer.width(), frame.buffer.height()),
-            replacement_size
+            replacement_size,
         );
         loop {
             let sample = samples.next().await.unwrap();
-            if sample.data.iter().any(|value| value.unsigned_abs() > 500) {
+            if sample
+                .data
+                .iter()
+                .any(|value| value.unsigned_abs() > audio_threshold)
+            {
                 break;
             }
         }
@@ -408,6 +446,7 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
             .track_publications()
             .is_empty()
     );
+    assert_eq!(publisher.connection_state(), ConnectionState::Connected);
     receiver.close().await.unwrap();
     publisher.close().await.unwrap();
 }

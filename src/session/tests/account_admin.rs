@@ -308,6 +308,12 @@ async fn a_ban_or_redeemed_password_reset_ends_the_affected_session() {
                     .unwrap();
                 ready.recv().await.unwrap();
                 socket.send(Message::text(frame)).await.unwrap();
+                // Keep the connection open until the desktop processes the terminal frame.
+                while let Some(Ok(message)) = socket.next().await {
+                    if message.is_close() {
+                        break;
+                    }
+                }
             },
             async |commands, views| {
                 wait_for_sidebar(&views, |view| matches!(view.connection, Connection::Online))
