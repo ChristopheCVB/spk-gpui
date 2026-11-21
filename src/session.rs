@@ -1,6 +1,8 @@
 mod authentication;
 mod avatars;
 mod presence;
+mod radio;
+mod soundboard;
 mod voice_session;
 
 use std::{collections::HashMap, sync::Arc};
@@ -16,22 +18,28 @@ use url::Url;
 use crate::api::{Channel, Connection, Failure, Frame, Profile, SocketEvent, SpkClient, User};
 use crate::sounds::{Sound, SoundSettings, VoiceSounds};
 use crate::voice::{
-    Call, Device, DeviceKind, Devices, Intent, Issue as VoiceIssue, Status as VoiceStatus,
-    Update as VoiceUpdate,
+    Call, Device, DeviceKind, Devices, Intent, Issue as VoiceIssue, NoiseSuppression,
+    ParticipantVolumeChange, Status as VoiceStatus, Update as VoiceUpdate, screen,
+    video::{CameraResolution, preview_camera},
 };
 use authentication::{
     SESSION_EXPIRED, SavedSession, login, restore, sign_in, sign_in_message, sign_out,
 };
 use avatars::AvatarLoads;
 use presence::{Refresh, Resource, VoiceMembership};
+use radio::{RadioSession, RadioView};
+use soundboard::{SoundboardSession, SoundboardView};
 use voice_session::{DeviceSettings, VoiceDestination, VoiceSession, VoiceSettings};
-pub use {presence::Participant, voice_session::VoiceView};
+pub use {presence::Participant, radio::RadioPlayback, voice_session::VoiceView};
 
 #[cfg(test)]
 pub(crate) mod tests;
 
 pub enum Command {
-    SignIn { email: String, password: String },
+    SignIn {
+        email: String,
+        password: String,
+    },
     Restore,
     SignOut,
     Refresh,
@@ -42,6 +50,49 @@ pub enum Command {
     RetryMicrophone,
     RefreshDevices,
     ChooseDevice(DeviceKind, Option<Device>),
+    SearchRadio(String),
+    RadioFavorites,
+    SetRadioFavorite {
+        id: String,
+        saved: bool,
+    },
+    SelectRadio(String),
+    StopRadio,
+    PauseRadio,
+    ListenToRadio,
+    SetRadioVolume(u8),
+    LoadSoundboard,
+    PlaySound(String),
+    PreviewSound(String),
+    SetSoundboardEnabled(bool),
+    SetSoundboardVolume(u8),
+    SetCameraEnabled(bool),
+    PreviewCamera(Sender<Result<Arc<RenderImage>, &'static str>>),
+    ChooseCamera(Option<String>),
+    ChooseCameraResolution(CameraResolution),
+    SetWatching(String, bool),
+    OpenScreenShare,
+    ChooseScreenSource(u64, String),
+    #[cfg(windows)]
+    ChooseWindowsScreenSource(
+        u64,
+        Result<windows_wgc::Graphics::Capture::GraphicsCaptureItem, screen::CaptureError>,
+    ),
+    StartScreenShare(u64, bool),
+    StopScreenShare(u64),
+    SetScreenAudio(bool),
+    SetScreenHeight(u32),
+    SetScreenFps(u32),
+    SetOutputVolume(u8),
+    SetParticipantVolume(String, ParticipantVolumeChange),
+    SetVoiceProcessing(VoiceProcessingSetting),
+}
+
+pub enum VoiceProcessingSetting {
+    EchoCancellation(bool),
+    NoiseSuppression(NoiseSuppression),
+    AutoGain(bool),
+    Sensitivity(u8),
 }
 
 pub enum View {
@@ -62,6 +113,9 @@ pub struct Sidebar {
     pub notice: Option<&'static str>,
     pub load_failed: bool,
     pub voice: Option<VoiceView>,
+    pub radio: RadioView,
+    pub soundboard: SoundboardView,
+    pub channel_radio: HashMap<String, String>,
     switching_to: Option<VoiceDestination>,
     pub voice_notice: Option<&'static str>,
     voice_rejoin: Option<String>,
@@ -82,6 +136,9 @@ impl Sidebar {
             notice,
             load_failed: false,
             voice: None,
+            radio: RadioView::default(),
+            soundboard: SoundboardView::default(),
+            channel_radio: HashMap::new(),
             switching_to: None,
             voice_notice: None,
             voice_rejoin: None,
@@ -233,10 +290,15 @@ async fn watch_session(
     sidebar.device_notice = settings.devices.notice;
     sidebar.devices = Arc::new((settings.enumerate_devices)());
     let mut voice = VoiceSession::default();
+    let mut radio = RadioSession::default();
+    let mut soundboard = SoundboardSession::default();
+    let mut camera_previews = JoinSet::new();
     let end = loop {
         if commands.is_closed() {
             break SessionEnd::Closed;
         }
+        radio.sync(&mut sidebar, &voice);
+        soundboard.sync(&mut sidebar, &voice);
         voice.start_pending(&mut sidebar, client, &settings.start_call);
         if views
             .send(View::SignedIn(Box::new(sidebar.clone())))
@@ -257,10 +319,28 @@ async fn watch_session(
                 Ok(Command::Refresh) => refresh.fetch_all(client),
                 Ok(Command::JoinVoice(channel_id)) => voice.join(&mut sidebar, channel_id),
                 Ok(Command::LeaveVoice) => voice.leave(&mut sidebar),
+                Ok(command @ (Command::SearchRadio(_) | Command::RadioFavorites
+                    | Command::SetRadioFavorite { .. } | Command::SelectRadio(_) | Command::StopRadio
+                    | Command::PauseRadio | Command::ListenToRadio)) => {
+                    radio.command(&mut sidebar, &voice, client, command);
+                }
+                Ok(command @ (Command::LoadSoundboard | Command::PlaySound(_) | Command::PreviewSound(_))) => {
+                    soundboard.command(&mut sidebar, &voice, client, command);
+                }
+                Ok(Command::PreviewCamera(frames)) => {
+                    if !sidebar.camera_publishing() {
+                        camera_previews.shutdown().await;
+                        camera_previews.spawn(preview_camera(sidebar.voice_intent.camera.clone(), frames));
+                    }
+                }
                 Ok(command) => {
+                    if matches!(command, Command::SetCameraEnabled(true)) {
+                        camera_previews.shutdown().await;
+                    }
                     voice.apply_controls(&mut sidebar, settings, command).await;
                 }
             },
+            Some(_) = camera_previews.join_next() => {}
             event = socket.recv() => match event {
                 Err(_) => break SessionEnd::Closed,
                 Ok(SocketEvent::Unauthorized | SocketEvent::Frame(Frame::SignedOut)) => {
@@ -276,18 +356,20 @@ async fn watch_session(
                 }
                 Ok(SocketEvent::Connection(state)) => {
                     sidebar.connection = state;
+                    sidebar.channel_radio.clear();
                     refresh.presence_ready = false;
                     voice.disconnected();
                 }
                 Ok(SocketEvent::Frame(frame)) => match frame {
                     Frame::ChannelsChanged => refresh.fetch(client, Resource::Channels),
                     Frame::UsersChanged => refresh.fetch(client, Resource::Users),
-                    Frame::Presence { user_id, channel_id, flags } => {
+                    Frame::Presence { user_id, channel_id, flags, video } => {
                         let new_participant = channel_id.is_some() && !sidebar.voice_presence.contains_key(&user_id);
                         let own_update = sidebar.profile.id.as_ref() == Some(&user_id);
-                        if let Some(cue) = refresh.update_presence(&mut sidebar, user_id, channel_id, flags) {
-                            settings.sounds.play(cue, cue == Sound::Join);
+                        for (cue, rising) in refresh.update_presence(&mut sidebar, user_id, channel_id, flags, video) {
+                            settings.sounds.play(cue, rising);
                         }
+                        voice.prune_watching(&mut sidebar);
                         if own_update {
                             voice.own_presence_updated(&mut sidebar);
                         }
@@ -305,6 +387,31 @@ async fn watch_session(
                         }
                         voice.move_to(&mut sidebar, channel_id);
                     }
+                    Frame::RadioSnapshot { channels } => {
+                        sidebar.channel_radio = channels.into_iter()
+                            .filter_map(|channel| Some((channel.channel_id, channel.station?.name)))
+                            .collect();
+                    }
+                    Frame::RadioUpdate(channel) => {
+                        if let Some(station) = channel.station {
+                            sidebar.channel_radio.insert(channel.channel_id, station.name);
+                        } else {
+                            sidebar.channel_radio.remove(&channel.channel_id);
+                        }
+                    }
+                    Frame::RadioState { sid, channel_id, revision, station }
+                        if voice.radio_scope(&sidebar) == Some((sid.as_str(), channel_id.as_str())) => {
+                        radio.state(&mut sidebar, revision, station);
+                    }
+                    Frame::RadioError { sid, channel_id, error }
+                        if voice.radio_scope(&sidebar).is_some_and(|(current_sid, current_channel)| {
+                            sid == current_sid && channel_id.as_deref().is_none_or(|channel| channel == current_channel)
+                        }) => {
+                        sidebar.radio.command_error = Some(error);
+                    }
+                    Frame::VoiceSound { user_id, sound_id } => {
+                        soundboard.relay(&sidebar, client, &user_id, &sound_id);
+                    }
                     Frame::VoiceKicked { sid } => voice.kicked(&mut sidebar, &sid),
                     Frame::VoiceDisconnected { sid } => voice.server_disconnected(&mut sidebar, &sid),
                     _ => {}
@@ -321,6 +428,31 @@ async fn watch_session(
                         }
                     }
                 }
+                VoiceUpdate::Video(report) => {
+                    if let Some(call) = &mut sidebar.voice
+                        && call.status != VoiceStatus::Leaving
+                    {
+                        call.video = Some(report);
+                        voice.prune_watching(&mut sidebar);
+                    }
+                }
+                VoiceUpdate::VideoParticipantLeft(id) => {
+                    voice.video_participant_left(&mut sidebar, &id);
+                }
+                VoiceUpdate::Screen(report) => {
+                    let request = &sidebar.voice_intent.screen;
+                    if let Some(voice) = &mut sidebar.voice
+                        && voice.is_participating()
+                        && report.attempt == request.attempt
+                        && request.action != screen::Action::Stop
+                    {
+                        let was_live = voice.screen.as_ref().is_some_and(|screen| screen.state.active());
+                        if was_live != report.state.active() {
+                            settings.sounds.play(Sound::Screen, report.state.active());
+                        }
+                        voice.screen = Some(report);
+                    }
+                }
                 VoiceUpdate::Finished(result) => {
                     voice.finished();
                     if matches!(result, Err(VoiceIssue::Unauthorized)) {
@@ -331,6 +463,20 @@ async fn watch_session(
                     }
                 }
             },
+            () = RadioSession::playback_changed(&mut radio.player) => {}
+            Some(Ok((id, result))) = radio.tasks.join_next_with_id() => {
+                if let Err(error) = radio.complete(&mut sidebar.radio, id, result) {
+                    if error.unauthorized() {
+                        break SessionEnd::Invalidated(SESSION_EXPIRED);
+                    }
+                    sidebar.radio.directory_error = Some("Could not load or update radio stations. Try again.");
+                }
+            }
+            Some(Ok((id, result))) = soundboard.tasks.join_next_with_id() => {
+                if soundboard.complete(&mut sidebar.soundboard, id, result).is_err_and(|error| error.unauthorized()) {
+                    break SessionEnd::Invalidated(SESSION_EXPIRED);
+                }
+            }
             Some(result) = avatars.tasks.join_next() => {
                 if let Ok(loaded) = result {
                     avatars.complete(&mut sidebar, loaded);
@@ -372,6 +518,9 @@ async fn watch_session(
             }
         }
     };
+    camera_previews.shutdown().await;
+    drop(soundboard);
+    drop(radio);
     voice.stop().await;
     end
 }

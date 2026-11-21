@@ -1,11 +1,14 @@
 use livekit::prelude::*;
 use livekit::rtc_engine::lk_runtime::LkRuntime;
+use livekit::webrtc::audio_source::{RtcAudioSource, native::NativeAudioSource};
 use livekit::webrtc::peer_connection_factory::native::PeerConnectionFactoryExt;
 use tokio::{sync::oneshot, task::JoinSet};
 
 #[cfg(windows)]
 use crate::voice::windows_audio;
-use crate::voice::{Device, devices::select_microphone};
+use crate::voice::{Device, VoiceProcessing, devices::select_microphone};
+
+use super::processing::ProcessedInput;
 
 #[derive(Default)]
 pub(super) struct Capture {
@@ -15,6 +18,7 @@ pub(super) struct Capture {
     starting: Option<oneshot::Sender<()>>,
     jobs: JoinSet<Option<TrackSid>>,
     failed: bool,
+    input: Option<ProcessedInput>,
 }
 
 impl Capture {
@@ -46,12 +50,18 @@ impl Capture {
         if self.has_publication()
             && let Some(track) = &self.track
         {
+            if let Some(input) = &self.input {
+                input.discard_buffer();
+            }
             track.unmute();
         }
     }
 
     pub(super) async fn shutdown(&mut self) {
         self.silence();
+        if let Some(input) = self.input.take() {
+            input.stop().await;
+        }
         self.jobs.shutdown().await;
     }
 
@@ -65,6 +75,9 @@ impl Capture {
     pub(super) fn silence(&self) {
         if let Some(track) = &self.track {
             track.mute();
+        }
+        if let Some(input) = &self.input {
+            input.discard_buffer();
         }
     }
 
@@ -87,10 +100,32 @@ impl Capture {
         }
     }
 
-    pub(super) fn start(&mut self, room: &Room, audio: &PlatformAudio, device: Device) {
+    pub(super) fn start(
+        &mut self,
+        room: &Room,
+        audio: &PlatformAudio,
+        device: Device,
+        processing: VoiceProcessing,
+        use_system_default: bool,
+    ) {
         let (starting, cancelled) = oneshot::channel();
-        let track = LocalAudioTrack::create_audio_track("microphone", audio.rtc_source());
-        track.mute();
+        let (track, opened) = if processing.echo_cancellation {
+            let track = LocalAudioTrack::create_audio_track("microphone", audio.rtc_source());
+            track.mute();
+            (track, None)
+        } else {
+            let source = NativeAudioSource::new(Default::default(), super::processing::RATE, 1, 30);
+            let track = LocalAudioTrack::create_audio_track(
+                "microphone",
+                RtcAudioSource::Native(source.clone()),
+            );
+            track.mute();
+            let selected = (!use_system_default).then(|| device.clone());
+            let (input, opened) =
+                ProcessedInput::start(selected, processing, source, track.clone());
+            self.input = Some(input);
+            (track, Some(opened))
+        };
         self.track = Some(track.clone());
         self.device = Some(device.clone());
         self.starting = Some(starting);
@@ -100,6 +135,7 @@ impl Capture {
             device,
             track,
             cancelled,
+            opened,
         ));
     }
 
@@ -109,10 +145,13 @@ impl Capture {
         self.starting.take();
         let published = self.published.take();
         let sid = self.current_publication(room).or(published);
-        if let Some(track) = self.track.take() {
-            track.mute();
+        self.silence();
+        if let Some(input) = self.input.take() {
+            input.stop().await;
+        } else if self.track.is_some() {
             stop_recording(audio);
         }
+        self.track = None;
         if let Some(sid) = sid {
             let _ = room.local_participant().unpublish_track(&sid).await;
         }
@@ -134,10 +173,31 @@ impl Capture {
         if self.has_publication() {
             self.resume();
         } else {
-            self.track = None;
-            self.failed = true;
-            stop_recording(audio);
+            let device = self.device.clone();
+            self.fail(room, audio, device).await;
         }
+    }
+
+    pub(super) async fn sync_processing(
+        &mut self,
+        room: &Room,
+        audio: &PlatformAudio,
+        processing: VoiceProcessing,
+    ) {
+        if let Some(input) = &self.input {
+            if input.ended() {
+                let device = self.device.clone();
+                self.fail(room, audio, device).await;
+            } else {
+                input.update(processing);
+            }
+        }
+    }
+
+    async fn fail(&mut self, room: &Room, audio: &PlatformAudio, device: Option<Device>) {
+        self.stop(room, audio).await;
+        self.device = device;
+        self.failed = true;
     }
 }
 
@@ -154,25 +214,36 @@ async fn publish_microphone(
     device: Device,
     track: LocalAudioTrack,
     mut cancelled: oneshot::Receiver<()>,
+    opened: Option<oneshot::Receiver<()>>,
 ) -> Option<TrackSid> {
-    #[cfg(target_os = "macos")]
-    tokio::select! {
-        biased;
-        _ = &mut cancelled => return None,
-        granted = microphone_permission() => if !granted { return None; },
+    #[cfg(windows)]
+    let verify_wasapi = opened.is_none();
+    if let Some(opened) = opened {
+        tokio::select! {
+            biased;
+            _ = &mut cancelled => return None,
+            ready = opened => ready.ok()?,
+        }
+    } else {
+        #[cfg(target_os = "macos")]
+        tokio::select! {
+            biased;
+            _ = &mut cancelled => return None,
+            granted = microphone_permission() => if !granted { return None; },
+        }
+        if !matches!(
+            cancelled.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ) || !select_microphone(&audio, &device)
+        {
+            return None;
+        }
+        LkRuntime::instance()
+            .pc_factory()
+            .set_adm_recording_enabled(true);
+        #[cfg(not(windows))]
+        audio.start_recording().ok()?;
     }
-    if !matches!(
-        cancelled.try_recv(),
-        Err(oneshot::error::TryRecvError::Empty)
-    ) || !select_microphone(&audio, &device)
-    {
-        return None;
-    }
-    LkRuntime::instance()
-        .pc_factory()
-        .set_adm_recording_enabled(true);
-    #[cfg(not(windows))]
-    audio.start_recording().ok()?;
 
     let publication = participant
         .publish_track(
@@ -187,11 +258,13 @@ async fn publish_microphone(
 
     // WASAPI capture starts through LiveKit's track negotiation on Windows.
     #[cfg(windows)]
-    if !tokio::select! {
-        biased;
-        _ = &mut cancelled => false,
-        captured = windows_audio::wait_for_capture(&track) => captured,
-    } {
+    if verify_wasapi
+        && !tokio::select! {
+            biased;
+            _ = &mut cancelled => false,
+            captured = windows_audio::wait_for_capture(&track) => captured,
+        }
+    {
         stop_recording(&audio);
         let _ = participant.unpublish_track(&publication.sid()).await;
         return None;
@@ -200,7 +273,7 @@ async fn publish_microphone(
 }
 
 #[cfg(target_os = "macos")]
-async fn microphone_permission() -> bool {
+pub(crate) async fn microphone_permission() -> bool {
     use block2::RcBlock;
     use objc2::runtime::Bool;
     use objc2_av_foundation::{AVCaptureDevice, AVMediaTypeAudio};

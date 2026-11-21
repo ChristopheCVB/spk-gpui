@@ -1,10 +1,11 @@
-use super::*;
+use super::{remote_audio::RemoteAudio, *};
 
 pub(super) struct LiveKitAudio<'a> {
-    pub(super) room: &'a Room,
+    pub(super) room: &'a Arc<Room>,
     pub(super) audio: &'a PlatformAudio,
     pub(super) events: RoomEvents,
     pub(super) capture: &'a mut Capture,
+    pub(super) remote: RemoteAudio,
 }
 
 pub(super) enum Event {
@@ -38,12 +39,12 @@ impl RoomAudio for LiveKitAudio<'_> {
             .set_adm_playout_enabled(enabled);
     }
 
-    fn subscribe_microphones(&self) {
-        for participant in self.room.remote_participants().into_values() {
-            for publication in participant.track_publications().into_values() {
-                subscribe_to_microphone(&publication);
-            }
-        }
+    fn sync_remote_audio(&mut self, intent: &Intent, devices: &Devices, speakers: Option<&Device>) {
+        self.remote.sync(self.room, intent, devices, speakers);
+    }
+
+    fn suspend_remote_audio(&mut self) {
+        self.remote.suspend();
     }
 
     #[cfg(target_os = "macos")]
@@ -76,8 +77,25 @@ impl RoomAudio for LiveKitAudio<'_> {
         self.capture.unavailable()
     }
 
-    fn start_microphone(&mut self, device: Device) {
-        self.capture.start(self.room, self.audio, device);
+    fn start_microphone(
+        &mut self,
+        device: Device,
+        processing: VoiceProcessing,
+        use_system_default: bool,
+    ) {
+        self.capture.start(
+            self.room,
+            self.audio,
+            device,
+            processing,
+            use_system_default,
+        );
+    }
+
+    async fn sync_microphone_processing(&mut self, processing: VoiceProcessing) {
+        self.capture
+            .sync_processing(self.room, self.audio, processing)
+            .await;
     }
 
     async fn stop_microphone(&mut self) {
@@ -96,6 +114,16 @@ impl RoomAudio for LiveKitAudio<'_> {
         self.capture
             .reconcile_publication(self.room, self.audio)
             .await;
+    }
+
+    fn start_stats(&self, jobs: &mut JoinSet<Option<SessionStats>>) {
+        let room = self.room.clone();
+        jobs.spawn(async move {
+            tokio::time::timeout(Duration::from_secs(1), room.get_stats())
+                .await
+                .ok()?
+                .ok()
+        });
     }
 
     async fn next_event(&mut self, reconnecting: bool) -> Event {
@@ -124,12 +152,27 @@ impl RoomAudio for LiveKitAudio<'_> {
 }
 
 impl LiveKitAudio<'_> {
-    fn room_event(&self, event: Option<RoomEvent>) -> Event {
+    fn room_event(&mut self, event: Option<RoomEvent>) -> Event {
         let event = match event {
-            Some(RoomEvent::TrackPublished { publication, .. }) => {
-                subscribe_to_microphone(&publication);
-                MediaEvent::Other
+            Some(RoomEvent::TrackSubscribed {
+                track: RemoteTrack::Audio(track),
+                publication,
+                ..
+            }) => {
+                if publication.source() == TrackSource::ScreenshareAudio {
+                    track.disable();
+                }
+                self.remote.forget(&publication.sid());
+                MediaEvent::RemoteAudioChanged
             }
+            Some(
+                RoomEvent::TrackPublished { .. }
+                | RoomEvent::TrackUnpublished { .. }
+                | RoomEvent::TrackUnsubscribed { .. }
+                | RoomEvent::TrackMuted { .. }
+                | RoomEvent::TrackUnmuted { .. }
+                | RoomEvent::ParticipantConnected(_),
+            ) => MediaEvent::RemoteAudioChanged,
             Some(RoomEvent::ActiveSpeakersChanged { speakers }) => MediaEvent::Speaking(
                 speakers
                     .into_iter()
@@ -140,11 +183,16 @@ impl LiveKitAudio<'_> {
                 MediaEvent::ParticipantLeft(participant.identity().to_string())
             }
             Some(RoomEvent::LocalTrackRepublished { publication, .. })
-                if !self.capture.owns_track(&publication.sid()) =>
+                if publication.source() == TrackSource::Microphone
+                    && !self.capture.owns_track(&publication.sid()) =>
             {
                 // The SDK can be republishing while mute or deafen removes the old track.
                 return Event::Unpublish(publication.sid());
             }
+            Some(RoomEvent::ConnectionQualityChanged {
+                quality,
+                participant: Participant::Local(_),
+            }) => MediaEvent::Quality(quality),
             Some(RoomEvent::Reconnecting) => MediaEvent::Reconnecting,
             Some(RoomEvent::Reconnected) => MediaEvent::Reconnected,
             Some(RoomEvent::Disconnected { reason }) => {
@@ -154,11 +202,5 @@ impl LiveKitAudio<'_> {
             _ => MediaEvent::Other,
         };
         Event::Media(event)
-    }
-}
-
-fn subscribe_to_microphone(publication: &RemoteTrackPublication) {
-    if publication.kind() == TrackKind::Audio && publication.source() == TrackSource::Microphone {
-        publication.set_subscribed(true);
     }
 }

@@ -114,6 +114,12 @@ impl Peer {
             .unwrap();
     }
 
+    pub(crate) fn quality(&self, quality: ConnectionQuality) {
+        self.events
+            .send(MediaEvent::Quality(quality))
+            .unwrap_or_else(|_| panic!("voice fixture closed"));
+    }
+
     pub(crate) fn reconnecting(&self) {
         self.events.send(MediaEvent::Reconnecting).ok().unwrap();
     }
@@ -179,6 +185,7 @@ impl TestRoom {
                     default: Some(device("default-speakers")),
                     choices: vec![Peer::preferred_speakers()],
                 },
+                ..Devices::default()
             },
             capture: None,
             muted: true,
@@ -264,7 +271,7 @@ impl RoomAudio for TestRoom {
         }
     }
 
-    fn subscribe_microphones(&self) {
+    fn sync_remote_audio(&mut self, _: &Intent, _: &Devices, _: Option<&Device>) {
         self.state.lock().unwrap().subscribed = true;
     }
 
@@ -292,7 +299,7 @@ impl RoomAudio for TestRoom {
         !self.starting && !self.active
     }
 
-    fn start_microphone(&mut self, device: Device) {
+    fn start_microphone(&mut self, device: Device, _: VoiceProcessing, _: bool) {
         self.selected = Some(device);
         self.starting = true;
     }

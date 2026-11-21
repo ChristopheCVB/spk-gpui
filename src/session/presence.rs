@@ -6,22 +6,37 @@ use std::{
 use tokio::task::JoinSet;
 
 use super::Sidebar;
-use crate::api::{Channel, Failure, Member, SpkClient, User, VoiceFlags};
+use crate::api::{Channel, Failure, Member, SpkClient, User, VideoPresence, VoiceFlags};
 use crate::sounds::Sound;
 
 #[derive(Clone)]
 pub(super) struct VoiceMembership {
     pub(super) channel_id: String,
     flags: VoiceFlags,
+    video: VideoPresence,
 }
 
 pub struct Participant<'a> {
     pub id: &'a str,
     pub name: &'a str,
     pub flags: VoiceFlags,
+    pub video: Option<&'a VideoPresence>,
 }
 
 impl Sidebar {
+    pub fn viewers(&self, channel: &str, presenter: &str) -> Vec<&str> {
+        self.participants(channel)
+            .into_iter()
+            .filter(|user| {
+                user.id != presenter
+                    && user
+                        .video
+                        .is_some_and(|video| video.watching.iter().any(|id| id == presenter))
+            })
+            .map(|user| user.name)
+            .collect()
+    }
+
     pub fn participants(&self, channel: &str) -> Vec<Participant<'_>> {
         let mut people = self
             .voice_presence
@@ -36,6 +51,7 @@ impl Sidebar {
                     .and_then(User::name)
                     .unwrap_or("Unknown user"),
                 flags: member.flags,
+                video: Some(&member.video),
             })
             .collect::<Vec<_>>();
         people.sort_unstable_by(|left, right| (left.name, left.id).cmp(&(right.name, right.id)));
@@ -100,36 +116,56 @@ impl Refresh {
         user_id: String,
         channel_id: Option<String>,
         flags: VoiceFlags,
-    ) -> Option<Sound> {
-        let cue = sidebar
+        video: VideoPresence,
+    ) -> Vec<(Sound, bool)> {
+        let mut cues = Vec::new();
+        if let Some(voice) = sidebar
             .voice
             .as_ref()
             .filter(|voice| self.presence_ready && voice.is_participating())
-            .filter(|_| {
-                sidebar
-                    .profile
-                    .id
-                    .as_deref()
-                    .is_some_and(|me| me != user_id)
-            })
-            .and_then(|voice| {
-                let was_here = sidebar
-                    .voice_presence
-                    .get(&user_id)
-                    .is_some_and(|member| member.channel_id == voice.channel_id);
-                let is_here = channel_id.as_deref() == Some(voice.channel_id.as_str());
-                match (was_here, is_here) {
-                    (false, true) => Some(Sound::Join),
-                    (true, false) => Some(Sound::Leave),
-                    _ => None,
+            && let Some(me) = sidebar.profile.id.as_deref()
+        {
+            let previous = sidebar
+                .voice_presence
+                .get(&user_id)
+                .filter(|member| member.channel_id == voice.channel_id);
+            let here = channel_id.as_deref() == Some(voice.channel_id.as_str());
+            match (previous, here) {
+                (None, true) if user_id != me => cues.push((Sound::Join, true)),
+                (Some(_), false) if user_id != me => cues.push((Sound::Leave, false)),
+                (Some(previous), true) => {
+                    if previous.video.cam != video.cam {
+                        cues.push((Sound::Camera, video.cam));
+                    }
+                    if user_id != me && previous.video.screen != video.screen {
+                        cues.push((Sound::Screen, video.screen));
+                    }
+                    if user_id != me
+                        && voice
+                            .screen
+                            .as_ref()
+                            .is_some_and(|screen| screen.state.active())
+                    {
+                        let was = previous.video.watching.iter().any(|id| id == me);
+                        let now = video.watching.iter().any(|id| id == me);
+                        if was != now {
+                            cues.push((Sound::Watch, now));
+                        }
+                    }
                 }
-            });
-        let member = channel_id.map(|channel_id| VoiceMembership { channel_id, flags });
+                _ => {}
+            }
+        }
+        let member = channel_id.map(|channel_id| VoiceMembership {
+            channel_id,
+            flags,
+            video,
+        });
         if let Some(updates) = &mut self.presence_updates {
             updates.insert(user_id.clone(), member.clone());
         }
         apply_presence(&mut sidebar.voice_presence, user_id, member);
-        cue
+        cues
     }
 
     pub(super) fn complete(
@@ -162,6 +198,7 @@ impl Refresh {
                                     VoiceMembership {
                                         channel_id: member.channel_id,
                                         flags: member.flags,
+                                        video: member.video,
                                     },
                                 )
                             })

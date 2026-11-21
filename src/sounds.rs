@@ -10,10 +10,21 @@ pub enum Sound {
     Leave,
     Mute,
     Deafen,
+    Camera,
+    Screen,
+    Watch,
 }
 
 impl Sound {
-    pub const ALL: [Self; 4] = [Self::Join, Self::Leave, Self::Mute, Self::Deafen];
+    pub const ALL: [Self; 7] = [
+        Self::Join,
+        Self::Leave,
+        Self::Mute,
+        Self::Deafen,
+        Self::Camera,
+        Self::Screen,
+        Self::Watch,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -21,6 +32,9 @@ impl Sound {
             Self::Leave => "Leave sound",
             Self::Mute => "Mute sound",
             Self::Deafen => "Deafen sound",
+            Self::Camera => "Camera sound",
+            Self::Screen => "Screen Share sound",
+            Self::Watch => "Watch sound",
         }
     }
 }
@@ -48,6 +62,9 @@ pub struct SoundSettings {
     pub leave: SoundSetting,
     pub mute: SoundSetting,
     pub deafen: SoundSetting,
+    pub camera: SoundSetting,
+    pub screen: SoundSetting,
+    pub watch: SoundSetting,
 }
 
 impl SoundSettings {
@@ -57,6 +74,9 @@ impl SoundSettings {
             Sound::Leave => &mut self.leave,
             Sound::Mute => &mut self.mute,
             Sound::Deafen => &mut self.deafen,
+            Sound::Camera => &mut self.camera,
+            Sound::Screen => &mut self.screen,
+            Sound::Watch => &mut self.watch,
         }
     }
 
@@ -125,6 +145,20 @@ impl VoiceSounds {
 
 const SAMPLE_RATE: u32 = 48_000;
 
+pub(crate) fn test_tone(volume: u8) -> (u32, Vec<f32>) {
+    let mut samples = Cue {
+        sound: Sound::Join,
+        rising: true,
+        volume: 100,
+    }
+    .samples();
+    let gain = f32::from(volume.min(200)) / 100.0;
+    for sample in &mut samples {
+        *sample *= gain;
+    }
+    (SAMPLE_RATE, samples)
+}
+
 struct Cue {
     sound: Sound,
     rising: bool,
@@ -141,6 +175,12 @@ impl Cue {
             (Sound::Mute, false) => &[415.0, 262.0],
             (Sound::Deafen, true) => &[262.0, 330.0, 392.0],
             (Sound::Deafen, false) => &[392.0, 294.0, 196.0],
+            (Sound::Camera, true) => &[494.0, 622.0, 740.0],
+            (Sound::Camera, false) => &[740.0, 622.0, 494.0],
+            (Sound::Screen, true) => &[349.0, 523.0, 698.0],
+            (Sound::Screen, false) => &[698.0, 523.0, 349.0],
+            (Sound::Watch, true) => &[466.0, 622.0],
+            (Sound::Watch, false) => &[622.0, 466.0],
         }
     }
 
@@ -149,7 +189,12 @@ impl Cue {
         const NOTE_LENGTH: usize = SAMPLE_RATE as usize * 130 / 1000;
         let notes = self.notes();
         let mut samples = vec![0.0; (notes.len() - 1) * SPACING + NOTE_LENGTH];
-        let gain = 0.3 * f32::from(self.volume) / 100.0;
+        let scale = if matches!(self.sound, Sound::Screen | Sound::Watch) {
+            0.12
+        } else {
+            0.3
+        };
+        let gain = scale * f32::from(self.volume) / 100.0;
         let triangle = matches!(self.sound, Sound::Mute | Sound::Deafen);
         for (note, frequency) in notes.iter().enumerate() {
             for (frame, sample) in samples[note * SPACING..][..NOTE_LENGTH]
@@ -160,6 +205,10 @@ impl Cue {
                 let wave = (TAU * frequency * time).sin();
                 let wave = if triangle {
                     wave.asin() * (4.0 / TAU)
+                } else if self.sound == Sound::Screen {
+                    wave.signum()
+                } else if self.sound == Sound::Watch {
+                    2.0 * (time * frequency).fract() - 1.0
                 } else {
                     wave
                 };
@@ -173,6 +222,20 @@ impl Cue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn speaker_test_scales_the_tone_from_silent_to_double_gain() {
+        let (sample_rate, unity) = test_tone(100);
+        assert_eq!(sample_rate, SAMPLE_RATE);
+        let (_, silent) = test_tone(0);
+        let (_, amplified) = test_tone(200);
+        assert!(silent.iter().all(|sample| *sample == 0.0));
+        assert!(unity.iter().any(|sample| sample.abs() > 0.1));
+        for (sample, double) in unity.into_iter().zip(amplified) {
+            assert_eq!(sample * 2.0, double);
+            assert!(double.abs() < 1.0);
+        }
+    }
 
     #[test]
     fn cues_have_web_pitch_order_duration_and_headroom() {

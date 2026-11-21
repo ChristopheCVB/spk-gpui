@@ -4,6 +4,8 @@ use std::{
     path::PathBuf,
 };
 
+mod audio;
+mod camera;
 mod shortcuts;
 
 use gpui_kit::component::{
@@ -11,9 +13,11 @@ use gpui_kit::component::{
     slider::{SliderEvent, SliderState, SliderValue},
 };
 
-use super::voice::device_options;
 use super::*;
-use crate::{session::View, sounds::Sound, voice::DeviceKind};
+use crate::{
+    session::{View, VoiceProcessingSetting},
+    sounds::Sound,
+};
 
 pub use shortcuts::ShortcutKeys;
 
@@ -92,8 +96,50 @@ impl Spk {
         self.device_picker = None;
         let spk = cx.entity();
         let sounds = self.shortcuts.sound_settings();
+        let preferences = match &self.view {
+            View::SignedIn(sidebar) => sidebar.voice_intent.preferred.clone(),
+            _ => Default::default(),
+        };
         let content = cx.new(|cx: &mut Context<Settings>| {
-            cx.observe(&spk, |_, _, cx| cx.notify()).detach();
+            cx.observe(&spk, |settings, _, cx| {
+                settings.sync_mic_test(cx);
+                settings.sync_camera_preview(cx);
+                cx.notify();
+            })
+            .detach();
+            let output_volume = cx.new(|_| {
+                SliderState::new()
+                    .max(200.0)
+                    .default_value(f32::from(preferences.output_volume.min(200)))
+            });
+            cx.subscribe(&output_volume, |settings, _, event, cx| {
+                if let SliderEvent::Release(SliderValue::Single(value)) = event {
+                    settings.spk.update(cx, |app, cx| {
+                        app.send(Command::SetOutputVolume(*value as u8), None, cx)
+                    });
+                }
+                cx.notify();
+            })
+            .detach();
+            let sensitivity = cx.new(|_| {
+                SliderState::new()
+                    .default_value(f32::from(preferences.processing.sensitivity.min(100)))
+            });
+            cx.subscribe(&sensitivity, |settings, _, event, cx| {
+                if let SliderEvent::Release(SliderValue::Single(value)) = event {
+                    settings.spk.update(cx, |app, cx| {
+                        app.send(
+                            Command::SetVoiceProcessing(VoiceProcessingSetting::Sensitivity(
+                                *value as u8,
+                            )),
+                            None,
+                            cx,
+                        );
+                    });
+                }
+                cx.notify();
+            })
+            .detach();
             let volumes = Sound::ALL.map(|sound| {
                 let volume = cx
                     .new(|_| SliderState::new().default_value(f32::from(sounds.get(sound).volume)));
@@ -113,10 +159,20 @@ impl Spk {
                 tab: Tab::Profile,
                 volumes,
                 recorder_focus: cx.focus_handle(),
+                output_volume,
+                sensitivity,
+                mic_test: None,
+                mic_level: 0,
+                playback_pending: false,
+                audio_test_error: None,
+                camera: camera::Preview::default(),
             }
         });
-        cx.observe_release(&content, |this, _, cx| this.cancel_shortcut_editor(cx))
-            .detach();
+        cx.observe_release_in(&content, window, |this, settings, window, cx| {
+            this.cancel_shortcut_editor(cx);
+            settings.camera.release(window);
+        })
+        .detach();
         window.open_dialog(cx, move |dialog, window, _| {
             dialog
                 .centered()
@@ -133,12 +189,20 @@ impl Spk {
 struct Settings {
     spk: Entity<Spk>,
     tab: Tab,
-    volumes: [Entity<SliderState>; 4],
+    volumes: [Entity<SliderState>; Sound::ALL.len()],
     recorder_focus: FocusHandle,
+    output_volume: Entity<SliderState>,
+    sensitivity: Entity<SliderState>,
+    mic_test: Option<(Option<crate::voice::Device>, Task<()>)>,
+    mic_level: u8,
+    playback_pending: bool,
+    audio_test_error: Option<&'static str>,
+    camera: camera::Preview,
 }
 
 impl Render for Settings {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.camera.release_unused_image(window);
         let theme = cx.theme();
         let app = self.spk.read(cx);
         let View::SignedIn(sidebar) = &app.view else {
@@ -247,7 +311,10 @@ impl Render for Settings {
                                                 });
                                             }
                                             this.tab = tab;
+                                            this.sync_mic_test(cx);
+                                            this.sync_camera_preview(cx);
                                             if tab == Tab::Voice {
+                                                this.refresh_cameras(cx);
                                                 this.spk.update(cx, |app, cx| {
                                                     app.send(Command::RefreshDevices, None, cx)
                                                 });
@@ -399,29 +466,6 @@ impl Settings {
                 }),
             cx,
         )
-    }
-
-    fn audio(&self, sidebar: &Sidebar, cx: &App) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_col()
-            .gap_5()
-            .child(card(
-                "Microphone",
-                device_options(sidebar, DeviceKind::Microphone, &self.spk, cx),
-                cx,
-            ))
-            .child(card(
-                "Speakers",
-                device_options(sidebar, DeviceKind::Speakers, &self.spk, cx),
-                cx,
-            ))
-            .child(self.voice_sounds(cx))
-            .children(
-                sidebar
-                    .device_notice
-                    .map(|notice| Label::new(notice).text_color(cx.theme().danger)),
-            )
     }
 }
 

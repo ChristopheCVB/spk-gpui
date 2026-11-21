@@ -2,12 +2,14 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use tokio::{task::spawn_blocking, time::Instant};
 
-use super::{Command, Sidebar};
+use super::{Command, Sidebar, VoiceProcessingSetting};
 use crate::api::{Connection, SpkClient, VoiceSocket};
 use crate::sounds::{Sound, VoiceSounds};
 use crate::voice::{
     self, Call, DeviceKind, DevicePreferences, Devices, Intent, Issue as VoiceIssue,
-    Report as VoiceReport, Status as VoiceStatus, Update as VoiceUpdate,
+    ParticipantVolumeChange, Report as VoiceReport, Status as VoiceStatus, Update as VoiceUpdate,
+    screen::{self, Action, State},
+    video::{CameraStatus, VideoReport},
 };
 
 pub(super) const VOICE_REPLACED: &str = "You joined voice from another tab or device.";
@@ -24,6 +26,8 @@ pub struct VoiceView {
     pub channel_id: String,
     pub status: VoiceStatus,
     pub media: Option<Arc<VoiceReport>>,
+    pub video: Option<Arc<VideoReport>>,
+    pub screen: Option<screen::Report>,
     pub(super) play_leave: bool,
 }
 
@@ -33,6 +37,8 @@ impl VoiceView {
             channel_id,
             status: VoiceStatus::Joining,
             media: None,
+            video: None,
+            screen: None,
             play_leave: false,
         }
     }
@@ -51,6 +57,8 @@ impl VoiceView {
         self.play_leave = explicit && self.is_participating();
         self.status = VoiceStatus::Leaving;
         self.media = None;
+        self.video = None;
+        self.screen = None;
         true
     }
 
@@ -66,6 +74,25 @@ impl VoiceView {
 }
 
 impl Sidebar {
+    pub fn camera_status(&self) -> CameraStatus {
+        let camera = &self.voice_intent.camera;
+        if !camera.enabled {
+            return CameraStatus::Off;
+        }
+        self.voice
+            .as_ref()
+            .and_then(|voice| voice.video.as_ref())
+            .filter(|report| report.camera_revision == camera.revision)
+            .map_or(CameraStatus::Starting, |report| report.camera)
+    }
+
+    pub fn camera_publishing(&self) -> bool {
+        matches!(
+            self.camera_status(),
+            CameraStatus::Starting | CameraStatus::Live(..)
+        )
+    }
+
     pub(super) fn has_voice_channel(&self, channel_id: &str) -> bool {
         self.channels
             .iter()
@@ -104,6 +131,9 @@ impl Sidebar {
 
     pub(super) fn finish_voice(&mut self, result: Result<(), VoiceIssue>) -> bool {
         let voice = self.voice.take();
+        self.voice_intent.camera.enabled = false;
+        self.voice_intent.watching.clear();
+        self.voice_intent.screen.action = Action::Stop;
         self.voice_rejoin = voice
             .as_ref()
             .filter(|voice| {
@@ -158,7 +188,7 @@ impl DeviceSettings {
             .await
             .unwrap_or(false);
         self.notice = (!saved).then_some(
-            "Could not save audio devices. Your choices will only last until you close SPK.",
+            "Could not save audio settings. Your choices will only last until you close SPK.",
         );
     }
 }
@@ -237,6 +267,43 @@ impl VoiceSession {
         }
     }
 
+    pub(super) fn active_call_sid<'a>(&'a self, sidebar: &Sidebar) -> Option<&'a str> {
+        sidebar
+            .voice
+            .as_ref()
+            .filter(|voice| voice.is_participating())?;
+        self.call.as_ref().map(Call::sid)
+    }
+
+    pub(super) fn radio_scope<'a>(&'a self, sidebar: &'a Sidebar) -> Option<(&'a str, &'a str)> {
+        let voice = sidebar.voice.as_ref()?;
+        (self.socket.is_some() && voice.status != VoiceStatus::Leaving)
+            .then_some((self.call.as_ref()?.sid(), voice.channel_id.as_str()))
+    }
+
+    pub(super) fn active_socket(&self, sidebar: &Sidebar) -> Option<(VoiceSocket, String)> {
+        let (sid, _) = self.radio_scope(sidebar)?;
+        sidebar.voice.as_ref()?.is_participating().then(|| {
+            (
+                self.socket
+                    .as_ref()
+                    .expect("scope has a voice socket")
+                    .clone(),
+                sid.to_owned(),
+            )
+        })
+    }
+
+    pub(super) fn set_radio_listening(&self, sidebar: &mut Sidebar, listening: bool) {
+        let current = &mut sidebar.voice_intent.radio_listening;
+        if listening != current.unwrap_or(false) {
+            *current = Some(listening);
+            if let Some(call) = &self.call {
+                call.apply(&sidebar.voice_intent);
+            }
+        }
+    }
+
     pub(super) fn retry_at(&self) -> Option<Instant> {
         match self.reclaim {
             Some(VoiceReclaim::RetryAt(deadline)) => Some(deadline),
@@ -256,6 +323,9 @@ impl VoiceSession {
     }
 
     pub(super) fn presence_refreshed(&mut self, sidebar: &mut Sidebar, loaded: bool) {
+        if loaded {
+            self.prune_watching(sidebar);
+        }
         if self.reclaim.is_some() && loaded {
             self.reclaim = None;
             if sidebar.voice_replaced() {
@@ -345,6 +415,9 @@ impl VoiceSession {
             && voice.begin_leave(notice.is_none())
         {
             call.cancel();
+            sidebar.voice_intent.camera.enabled = false;
+            sidebar.voice_intent.watching.clear();
+            sidebar.voice_intent.screen.action = Action::Stop;
             sidebar.voice_notice = notice;
         }
     }
@@ -364,12 +437,58 @@ impl VoiceSession {
         }
     }
 
+    pub(super) fn video_participant_left(&self, sidebar: &mut Sidebar, id: &str) {
+        if let Some(report) = sidebar
+            .voice
+            .as_mut()
+            .and_then(|voice| voice.video.as_mut())
+        {
+            Arc::make_mut(report).participants.remove(id);
+        }
+        if sidebar.voice_intent.watching.remove(id)
+            && let Some(call) = &self.call
+        {
+            call.apply(&sidebar.voice_intent);
+        }
+    }
+
+    pub(super) fn prune_watching(&self, sidebar: &mut Sidebar) {
+        let Some(voice) = &sidebar.voice else {
+            return;
+        };
+        let watching = &mut sidebar.voice_intent.watching;
+        let count = watching.len();
+        watching.retain(|id| {
+            sidebar
+                .voice_presence
+                .get(id)
+                .is_some_and(|member| member.channel_id == voice.channel_id)
+                && voice
+                    .video
+                    .as_ref()
+                    .is_none_or(|video| video.reconnecting || video.participants.contains_key(id))
+        });
+        if watching.len() != count
+            && let Some(call) = &self.call
+        {
+            call.apply(&sidebar.voice_intent);
+        }
+    }
+
     pub(super) async fn apply_controls(
         &self,
         sidebar: &mut Sidebar,
         settings: &mut VoiceSettings,
         command: Command,
     ) {
+        let save_preferences = matches!(
+            &command,
+            Command::SetOutputVolume(_)
+                | Command::SetParticipantVolume(..)
+                | Command::SetSoundboardEnabled(_)
+                | Command::SetSoundboardVolume(_)
+                | Command::SetScreenAudio(_)
+        );
         match command {
             Command::ToggleMute => {
                 sidebar.voice_intent.mute.toggle_mic();
@@ -391,6 +510,58 @@ impl VoiceSession {
                     sidebar.voice_intent.refresh_devices += 1;
                 }
             }
+            Command::SetVoiceProcessing(setting) => {
+                let processing = &mut sidebar.voice_intent.preferred.processing;
+                match setting {
+                    VoiceProcessingSetting::EchoCancellation(enabled) => {
+                        if processing.echo_cancellation != enabled {
+                            sidebar.voice_intent.retry_mic += 1;
+                        }
+                        processing.echo_cancellation = enabled;
+                    }
+                    VoiceProcessingSetting::NoiseSuppression(mode) => {
+                        processing.noise_suppression = mode;
+                    }
+                    VoiceProcessingSetting::AutoGain(enabled) => processing.auto_gain = enabled,
+                    VoiceProcessingSetting::Sensitivity(value) => {
+                        processing.sensitivity = value.min(100)
+                    }
+                }
+                if let Some(call) = &self.call {
+                    call.apply(&sidebar.voice_intent);
+                }
+                settings.devices.save(&sidebar.voice_intent.preferred).await;
+                sidebar.device_notice = settings.devices.notice;
+                return;
+            }
+            Command::SetOutputVolume(volume) => {
+                sidebar.voice_intent.preferred.output_volume = volume.min(200);
+            }
+            Command::SetParticipantVolume(id, change) => {
+                if sidebar.profile.id.as_ref() == Some(&id)
+                    || !sidebar.voice.as_ref().is_some_and(|voice| {
+                        voice.is_participating()
+                            && sidebar
+                                .voice_presence
+                                .get(&id)
+                                .is_some_and(|member| member.channel_id == voice.channel_id)
+                    })
+                {
+                    return;
+                }
+                let preferred = &mut sidebar.voice_intent.preferred;
+                let mut volume = preferred.participant_volume(&id);
+                match change {
+                    ParticipantVolumeChange::Microphone(value) => volume.mic = value.min(200),
+                    ParticipantVolumeChange::Screen(value) => volume.screen = value.min(200),
+                    ParticipantVolumeChange::Muted(muted) => volume.muted = muted,
+                }
+                if volume == Default::default() {
+                    preferred.participant_volumes.remove(&id);
+                } else {
+                    preferred.participant_volumes.insert(id, volume);
+                }
+            }
             Command::ChooseDevice(kind, device) => {
                 let choice = sidebar.voice_intent.preferred.get_mut(kind);
                 let changed = *choice != device;
@@ -398,6 +569,7 @@ impl VoiceSession {
                 match kind {
                     DeviceKind::Microphone => sidebar.voice_intent.retry_mic += 1,
                     DeviceKind::Speakers => sidebar.voice_intent.retry_speakers += 1,
+                    DeviceKind::MediaOutput => {}
                 }
                 if let Some(call) = &self.call {
                     call.apply(&sidebar.voice_intent);
@@ -408,10 +580,172 @@ impl VoiceSession {
                 }
                 return;
             }
+            Command::SetRadioVolume(volume) => {
+                let volume = volume.min(200);
+                if sidebar.voice_intent.preferred.radio_volume != volume {
+                    sidebar.voice_intent.preferred.radio_volume = volume;
+                    settings.devices.save(&sidebar.voice_intent.preferred).await;
+                    sidebar.device_notice = settings.devices.notice;
+                }
+                return;
+            }
+            Command::SetSoundboardEnabled(enabled) => {
+                sidebar.voice_intent.preferred.soundboard_enabled = enabled;
+            }
+            Command::SetSoundboardVolume(volume) => {
+                sidebar.voice_intent.preferred.soundboard_volume = volume.min(100);
+            }
+            Command::SetCameraEnabled(enabled) => {
+                if !sidebar
+                    .voice
+                    .as_ref()
+                    .is_some_and(VoiceView::is_participating)
+                {
+                    return;
+                }
+                sidebar.voice_intent.camera.enabled = enabled;
+                sidebar.voice_intent.camera.revision += 1;
+            }
+            Command::ChooseCamera(device) => {
+                if matches!(sidebar.camera_status(), CameraStatus::Failed(_)) {
+                    sidebar.voice_intent.camera.enabled = false;
+                }
+                sidebar.voice_intent.camera.device = device;
+            }
+            Command::ChooseCameraResolution(resolution) => {
+                if matches!(sidebar.camera_status(), CameraStatus::Failed(_)) {
+                    sidebar.voice_intent.camera.enabled = false;
+                }
+                sidebar.voice_intent.camera.resolution = resolution;
+            }
+            Command::OpenScreenShare => {
+                let Some(voice) = sidebar
+                    .voice
+                    .as_mut()
+                    .filter(|voice| voice.is_participating())
+                else {
+                    return;
+                };
+                if voice
+                    .screen
+                    .as_ref()
+                    .is_some_and(|report| !matches!(report.state, State::Ended(_)))
+                {
+                    return;
+                }
+                sidebar.voice_intent.screen.open();
+                voice.screen = Some(screen::Report {
+                    attempt: sidebar.voice_intent.screen.attempt,
+                    state: State::Picking,
+                });
+            }
+            Command::ChooseScreenSource(attempt, id) => {
+                let Some(voice) = sidebar
+                    .voice
+                    .as_mut()
+                    .filter(|voice| voice.is_participating())
+                else {
+                    return;
+                };
+                if !voice.screen.as_ref().is_some_and(|report| {
+                    matches!(&report.state, State::Choices(choices) if choices.iter().any(|choice| choice.id == id))
+                }) {
+                    return;
+                }
+                let playback = voice
+                    .media
+                    .as_ref()
+                    .and_then(|media| media.speakers.clone());
+                sidebar
+                    .voice_intent
+                    .screen
+                    .advance(attempt, Action::Choose(id, playback));
+            }
+            #[cfg(windows)]
+            Command::ChooseWindowsScreenSource(attempt, item) => {
+                if !sidebar.voice.as_ref().is_some_and(|voice| {
+                    voice.is_participating() && voice.screen.as_ref().is_some_and(|report| {
+                        matches!(&report.state, State::Choices(choices) if choices.iter().any(|choice| choice.id == screen::SYSTEM_PICKER))
+                    })
+                }) {
+                    return;
+                }
+                sidebar
+                    .voice_intent
+                    .screen
+                    .advance(attempt, Action::ChooseSystem(item));
+            }
+            Command::StartScreenShare(attempt, confirmed_audio) => {
+                if !sidebar.voice.as_ref().is_some_and(|voice| {
+                    voice.is_participating()
+                        && voice
+                            .screen
+                            .as_ref()
+                            .is_some_and(|report| matches!(report.state, State::Confirm { .. }))
+                }) {
+                    return;
+                }
+                let audio = confirmed_audio && sidebar.voice_intent.preferred.screen_audio;
+                sidebar
+                    .voice_intent
+                    .screen
+                    .advance(attempt, Action::Start(audio));
+            }
+            Command::StopScreenShare(attempt) => {
+                if sidebar.voice_intent.screen.advance(attempt, Action::Stop)
+                    && let Some(voice) = &mut sidebar.voice
+                    && let Some(report) = voice.screen.take()
+                    && report.state.active()
+                {
+                    settings.sounds.play(Sound::Screen, false);
+                }
+            }
+            Command::SetScreenAudio(enabled) => {
+                sidebar.voice_intent.preferred.screen_audio = enabled;
+            }
+            Command::SetScreenHeight(height) => {
+                if screen::Quality::HEIGHTS.contains(&height) {
+                    sidebar.voice_intent.screen.quality.height = height;
+                }
+            }
+            Command::SetScreenFps(fps) => {
+                if screen::Quality::FPS.contains(&fps) {
+                    sidebar.voice_intent.screen.quality.fps = fps;
+                }
+            }
+            Command::SetWatching(id, enabled) => {
+                let Some(voice) = sidebar
+                    .voice
+                    .as_ref()
+                    .filter(|voice| voice.is_participating())
+                else {
+                    return;
+                };
+                if enabled {
+                    if sidebar.profile.id.as_ref() == Some(&id)
+                        || voice.video.as_ref().is_some_and(|video| {
+                            video.reconnecting || !video.participants.contains_key(&id)
+                        })
+                        || !sidebar
+                            .voice_presence
+                            .get(&id)
+                            .is_some_and(|member| member.channel_id == voice.channel_id)
+                    {
+                        return;
+                    }
+                    sidebar.voice_intent.watching.insert(id);
+                } else {
+                    sidebar.voice_intent.watching.remove(&id);
+                }
+            }
             _ => return,
         }
         if let Some(call) = &self.call {
             call.apply(&sidebar.voice_intent);
+        }
+        if save_preferences {
+            settings.devices.save(&sidebar.voice_intent.preferred).await;
+            sidebar.device_notice = settings.devices.notice;
         }
     }
 }

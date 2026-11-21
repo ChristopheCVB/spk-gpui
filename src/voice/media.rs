@@ -4,28 +4,37 @@ use std::{
     time::Duration,
 };
 
-use livekit::rtc_engine::lk_runtime::LkRuntime;
+use livekit::rtc_engine::{SessionStats, lk_runtime::LkRuntime};
 use livekit::webrtc::peer_connection_factory::native::PeerConnectionFactoryExt;
 use livekit::{DisconnectReason, prelude::*};
 use tokio::{
-    task::JoinHandle,
+    task::{JoinHandle, JoinSet},
     time::{Instant, MissedTickBehavior, interval},
 };
 
 use super::{
-    Device, Devices, Issue, Report, Status, Update, Worker,
+    Device, Devices, Intent, Issue, Report, Status, Update, VoiceProcessing, Worker,
     devices::{route_speakers, switch_speakers},
+    screen,
+    video::Video,
     wait_until,
 };
 use crate::api::VoiceFlags;
 
 mod capture;
+mod diagnostics;
+pub use diagnostics::Diagnostics;
+use diagnostics::Sampler;
 #[cfg(test)]
 pub(crate) mod fixture;
 mod livekit_audio;
 #[cfg(target_os = "macos")]
 mod macos_audio;
+mod processing;
+mod remote_audio;
 
+#[cfg(target_os = "macos")]
+pub(crate) use capture::microphone_permission;
 use capture::{Capture, stop_recording};
 use livekit_audio::LiveKitAudio;
 
@@ -35,8 +44,9 @@ type RoomEvents = tokio::sync::mpsc::UnboundedReceiver<RoomEvent>;
 pub(super) struct Media {
     audio: Option<PlatformAudio>,
     capture: Capture,
+    video: Video,
     connecting: Option<JoinHandle<Result<(Room, RoomEvents), Issue>>>,
-    room: Option<Room>,
+    room: Option<Arc<Room>>,
     #[cfg(test)]
     fixture: Option<fixture::TestRoom>,
 }
@@ -47,6 +57,7 @@ impl Media {
         if let Some(fixture) = &mut self.fixture {
             fixture.stop_audio();
         }
+        self.video.stop_camera().await;
         self.capture.shutdown().await;
         if let Some(audio) = self.audio.take() {
             stop_recording(&audio);
@@ -96,13 +107,22 @@ impl Media {
         let connected = connection.await.map_err(|_| Issue::Media)?;
         media.connecting.take();
         let (room, events) = connected?;
+        let room: &Arc<Room> = media.room.insert(Arc::new(room));
         let mut backend = LiveKitAudio {
-            room: media.room.insert(room),
+            room,
             audio,
             events,
             capture: &mut media.capture,
+            remote: Default::default(),
         };
-        Self::listen(worker, &mut backend, &speakers).await
+        tokio::select! {
+            biased;
+            result = Self::listen(worker, &mut backend, &speakers) => result,
+            () = async {
+                tokio::join!(media.video.run(worker, room), screen::run(worker, room));
+                std::future::pending::<()>().await;
+            } => unreachable!(),
+        }
     }
 
     async fn listen(
@@ -125,8 +145,6 @@ impl Media {
             format: playing.and_then(|device| backend.playout_format(device)),
             recording_initialized: false,
         };
-        backend.set_playout(playing.is_some());
-        backend.subscribe_microphones();
         let me = backend.identity();
         let mut speaking = Speaking::default();
         let mut reported = None;
@@ -139,6 +157,10 @@ impl Media {
         let mut retry_speakers = intent.retry_speakers;
         let mut reconnecting = false;
         let mut resync = false;
+
+        let mut diagnostics = Diagnostics::default();
+        let mut stats = Sampler::default();
+        let mut stats_job = JoinSet::new();
 
         loop {
             if reconnecting
@@ -182,6 +204,7 @@ impl Media {
                     output = next_output;
                 }
                 let playing = output.as_ref().filter(|_| !intent.mute.deafened);
+                backend.sync_remote_audio(&intent, &devices, playing);
                 playout.sync(
                     playing.is_some(),
                     playing.and_then(|device| backend.playout_format(device)),
@@ -191,8 +214,17 @@ impl Media {
                 if let Some(device) = wanted
                     && backend.can_start_microphone()
                 {
-                    backend.start_microphone(device.clone());
+                    let use_system_default =
+                        !cfg!(windows) && Some(device) == devices.microphones.default.as_ref();
+                    backend.start_microphone(
+                        device.clone(),
+                        intent.preferred.processing,
+                        use_system_default,
+                    );
                 }
+                backend
+                    .sync_microphone_processing(intent.preferred.processing)
+                    .await;
                 if resync && !intent.mute.effective_muted() {
                     backend.resume_microphone();
                 }
@@ -207,6 +239,7 @@ impl Media {
                 muted,
                 deafened: intent.mute.deafened,
                 speaking: speaking.0.contains_key(me.as_str()),
+                radio_listening: None,
             };
             worker.publish_flags(flags, !reconnecting, std::mem::take(&mut resync));
             let report = Report {
@@ -221,6 +254,7 @@ impl Media {
                 microphone: backend.active_microphone().cloned(),
                 speakers: output.clone(),
                 speaking: speaking.0.keys().cloned().collect(),
+                diagnostics,
             };
             if reported.as_ref() != Some(&report) {
                 reported = Some(report.clone());
@@ -232,7 +266,10 @@ impl Media {
                 result = requested.changed() => {
                     result.map_err(|_| Issue::Disconnected)?;
                     let next = requested.borrow_and_update().clone();
-                    if next.refresh_devices != intent.refresh_devices || next.preferred != intent.preferred
+                    if next.refresh_devices != intent.refresh_devices
+                        || next.preferred.microphone != intent.preferred.microphone
+                        || next.preferred.speakers != intent.preferred.speakers
+                        || next.preferred.media_output != intent.preferred.media_output
                         || next.retry_mic != intent.retry_mic || next.retry_speakers != intent.retry_speakers
                     {
                         devices = Arc::new(backend.devices());
@@ -242,11 +279,18 @@ impl Media {
                 }
                 event = backend.next_event(reconnecting) => match backend.handle_event(event).await {
                     MediaEvent::Speaking(active) if !reconnecting => speaking.update(active, Instant::now()),
-                    MediaEvent::ParticipantLeft(id) => speaking.remove(&id),
+                    MediaEvent::ParticipantLeft(id) => {
+                        speaking.remove(&id);
+                        check_routes = true;
+                    }
                     MediaEvent::Reconnecting => {
                         reconnecting = true;
+                        diagnostics = Diagnostics::default();
+                        stats = Sampler::default();
+                        stats_job = JoinSet::new();
                         backend.silence_microphone();
                         backend.set_playout(false);
+                        backend.suspend_remote_audio();
                         playout.format = None;
                         speaking.0.clear();
                     }
@@ -257,15 +301,24 @@ impl Media {
                         intent = requested.borrow_and_update().clone();
                         devices = Arc::new(backend.devices());
                         backend.reconcile_microphone().await;
-                        backend.subscribe_microphones();
                     }
                     MediaEvent::Disconnected(issue) => return Err(issue),
-                    MediaEvent::MicrophoneChanged => check_routes = true,
+                    MediaEvent::MicrophoneChanged | MediaEvent::RemoteAudioChanged => check_routes = true,
+                    MediaEvent::Quality(quality) if !reconnecting => diagnostics.quality = Some(quality),
                     _ => {}
                 },
                 _ = scan.tick() => {
                     devices = Arc::new(backend.devices());
                     check_routes = true;
+                    if !reconnecting && stats_job.is_empty() {
+                        backend.start_stats(&mut stats_job);
+                    }
+                }
+                Some(result) = stats_job.join_next() => {
+                    let sample = result.ok().flatten();
+                    let quality = diagnostics.quality;
+                    diagnostics = stats.room(sample.as_ref());
+                    diagnostics.quality = quality;
                 }
                 _ = wait_until(speaking.deadline()) => {},
             }
@@ -281,18 +334,26 @@ trait RoomAudio {
     fn devices(&self) -> Devices;
     fn switch_speakers(&self, device: &Device) -> bool;
     fn set_playout(&self, enabled: bool);
-    fn subscribe_microphones(&self);
+    fn sync_remote_audio(&mut self, intent: &Intent, devices: &Devices, speakers: Option<&Device>);
+    fn suspend_remote_audio(&mut self) {}
     fn playout_format(&self, device: &Device) -> Option<Self::PlayoutFormat>;
     fn macos_recording_initialized(&self) -> bool;
     fn selected_microphone(&self) -> Option<&Device>;
     fn active_microphone(&self) -> Option<&Device>;
     fn can_start_microphone(&self) -> bool;
     fn microphone_unavailable(&self) -> bool;
-    fn start_microphone(&mut self, device: Device);
+    fn start_microphone(
+        &mut self,
+        device: Device,
+        processing: VoiceProcessing,
+        use_system_default: bool,
+    );
+    async fn sync_microphone_processing(&mut self, _: VoiceProcessing) {}
     async fn stop_microphone(&mut self);
     fn silence_microphone(&self);
     fn resume_microphone(&self);
     async fn reconcile_microphone(&mut self);
+    fn start_stats(&self, _: &mut JoinSet<Option<SessionStats>>) {}
     async fn next_event(&mut self, reconnecting: bool) -> Self::Event;
     async fn handle_event(&mut self, event: Self::Event) -> MediaEvent;
 }
@@ -304,6 +365,8 @@ enum MediaEvent {
     Reconnected,
     Disconnected(Issue),
     MicrophoneChanged,
+    RemoteAudioChanged,
+    Quality(ConnectionQuality),
     Other,
 }
 

@@ -9,12 +9,24 @@ use tokio::{
 use url::Url;
 use uuid::Uuid;
 
-use crate::api::{Failure, SpkClient, VoiceFlags, VoiceFrame, VoiceJoin, VoiceSocket};
+use crate::api::{
+    Failure, SpkClient, VideoPresence, VoiceFlags, VoiceFrame, VoiceJoin, VoiceSocket,
+};
 
+pub(crate) mod audio_preview;
 mod devices;
 mod media;
+pub(crate) mod radio;
+pub(crate) mod screen;
+pub(crate) mod soundboard;
+pub(crate) mod video;
 
-pub use devices::{Device, DeviceKind, DeviceList, DevicePreferences, Devices};
+pub(crate) use devices::MediaOutput;
+pub use devices::{
+    Device, DeviceKind, DeviceList, DevicePreferences, Devices, NoiseSuppression,
+    ParticipantVolumeChange, VoiceProcessing,
+};
+pub use media::Diagnostics;
 use media::Media;
 #[cfg(test)]
 pub(crate) use media::fixture;
@@ -66,6 +78,9 @@ impl Issue {
 
 pub enum Update {
     Media(Arc<Report>),
+    Video(Arc<video::VideoReport>),
+    VideoParticipantLeft(String),
+    Screen(screen::Report),
     Finished(Result<(), Issue>),
 }
 
@@ -97,6 +112,10 @@ pub struct Intent {
     pub retry_mic: u64,
     pub retry_speakers: u64,
     pub refresh_devices: u64,
+    pub radio_listening: Option<bool>,
+    pub camera: video::CameraIntent,
+    pub screen: screen::Request,
+    pub watching: HashSet<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -106,6 +125,7 @@ pub struct Report {
     pub microphone: Option<Device>,
     pub speakers: Option<Device>,
     pub speaking: HashSet<String>,
+    pub diagnostics: Diagnostics,
 }
 
 #[derive(Clone)]
@@ -165,15 +185,24 @@ impl Call {
                                 muted,
                                 deafened: intent.mute.deafened,
                                 speaking: !muted,
+                                radio_listening: None,
                             },
                             true,
                             false,
                         );
+                        let mut watching: Vec<_> = intent.watching.iter().cloned().collect();
+                        watching.sort_unstable();
+                        worker.publish_video_presence(VideoPresence {
+                            cam: intent.camera.enabled,
+                            watching,
+                            ..VideoPresence::default()
+                        });
                         worker.update(Update::Media(Arc::new(Report {
                             status: Status::Connected,
                             devices: Arc::default(),
                             microphone: None,
                             speakers: None,
+                            diagnostics: Diagnostics::default(),
                             speaking: if muted {
                                 HashSet::new()
                             } else {
@@ -233,7 +262,9 @@ impl Call {
     }
 
     pub fn apply(&self, intent: &Intent) {
-        self.intent.send_replace(intent.clone());
+        if self.cancel.is_some() {
+            self.intent.send_replace(intent.clone());
+        }
     }
 
     pub fn set_socket(&self, socket: Option<VoiceSocket>) {
@@ -250,12 +281,21 @@ impl Call {
         }
     }
 
+    pub fn sid(&self) -> &str {
+        &self.join.sid
+    }
+
     pub fn owns(&self, sid: &str) -> bool {
         self.join.sid == sid
     }
 
     pub fn cancel(&mut self) {
         if let Some(cancel) = self.cancel.take() {
+            self.intent.send_modify(|intent| {
+                intent.camera.enabled = false;
+                intent.screen.action = screen::Action::Stop;
+                intent.watching.clear();
+            });
             let _ = cancel.send(());
         }
     }
@@ -285,9 +325,10 @@ struct Worker {
     requested: watch::Receiver<Intent>,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, PartialEq)]
 struct PublishedPresence {
     flags: VoiceFlags,
+    video: VideoPresence,
     ready: bool,
     revision: u64,
 }
@@ -373,7 +414,7 @@ impl Worker {
                 mode: VoiceJoin::Initial { nonce },
                 muted: true,
                 deafened,
-                watching: [],
+                watching: &[],
             })
             .await
             .map_err(|_| Issue::Socket)?;
@@ -386,9 +427,14 @@ impl Worker {
 
     fn publish_flags(&self, flags: VoiceFlags, ready: bool, resync: bool) {
         self.presence.send_if_modified(|current| {
-            let revision = current.map_or(0, |current| current.revision) + u64::from(resync);
+            let revision =
+                current.as_ref().map_or(0, |current| current.revision) + u64::from(resync);
             let next = Some(PublishedPresence {
                 flags,
+                video: current
+                    .as_ref()
+                    .map(|state| state.video.clone())
+                    .unwrap_or_default(),
                 ready,
                 revision,
             });
@@ -396,6 +442,36 @@ impl Worker {
                 return false;
             }
             *current = next;
+            true
+        });
+    }
+
+    fn publish_video_presence(&self, video: VideoPresence) {
+        self.presence.send_if_modified(|current| {
+            let Some(state) = current else {
+                return false;
+            };
+            let video = VideoPresence {
+                screen: state.video.screen,
+                ..video
+            };
+            if state.video == video {
+                return false;
+            }
+            state.video = video;
+            true
+        });
+    }
+
+    fn publish_screen_presence(&self, screen: bool) {
+        self.presence.send_if_modified(|current| {
+            let Some(state) = current else {
+                return false;
+            };
+            if state.video.screen == screen {
+                return false;
+            }
+            state.video.screen = screen;
             true
         });
     }
@@ -436,6 +512,7 @@ impl Worker {
             .wait_for(Option::is_some)
             .await
             .map_err(|_| Failure::Connection)?
+            .clone()
             .expect("presence is ready");
         let mut revision = first.revision;
         let mut presence = Presence::new(joined_deafened);
@@ -447,7 +524,7 @@ impl Worker {
                     mode: VoiceJoin::Reclaim { ready: first.ready },
                     muted: first.flags.muted,
                     deafened: first.flags.deafened,
-                    watching: [],
+                    watching: &first.video.watching,
                 })
                 .await?;
             presence.resync();
@@ -457,22 +534,33 @@ impl Worker {
                 presence.resync();
             }
         }
+        let mut requested = self.requested.clone();
         loop {
-            let latest = published.borrow_and_update().expect("presence is ready");
+            let latest = published
+                .borrow_and_update()
+                .clone()
+                .expect("presence is ready");
             if latest.ready && latest.revision != revision {
                 socket.send(VoiceFrame::Ready { sid }).await?;
                 revision = latest.revision;
                 presence.resync();
             }
-            let flags = latest.flags;
+            let flags = VoiceFlags {
+                radio_listening: requested.borrow_and_update().radio_listening,
+                ..latest.flags
+            };
+            let video = latest.video;
             tokio::select! {
                 biased;
                 changed = published.changed() => {
                     changed.map_err(|_| Failure::Connection)?;
                 }
-                _ = wait_until(presence.due(flags)) => {
-                    socket.send(VoiceFrame::State { sid, flags }).await?;
-                    presence.sent(flags, Instant::now());
+                changed = requested.changed() => {
+                    changed.map_err(|_| Failure::Connection)?;
+                }
+                _ = wait_until(presence.due(flags, &video)) => {
+                    socket.send(VoiceFrame::State { sid, flags, video: &video }).await?;
+                    presence.sent(flags, video, Instant::now());
                 }
             }
         }
@@ -492,33 +580,43 @@ async fn wait_until(deadline: Option<Instant>) {
 }
 
 struct Presence {
-    flags: Option<VoiceFlags>,
+    state: Option<(VoiceFlags, VideoPresence)>,
     next: Instant,
 }
 
 impl Presence {
     fn new(deafened: bool) -> Self {
         Self {
-            flags: Some(VoiceFlags {
-                muted: true,
-                deafened,
-                speaking: false,
-            }),
+            state: Some((
+                VoiceFlags {
+                    muted: true,
+                    deafened,
+                    speaking: false,
+                    radio_listening: None,
+                },
+                VideoPresence::default(),
+            )),
             next: Instant::now(),
         }
     }
 
-    fn due(&self, flags: VoiceFlags) -> Option<Instant> {
-        (Some(flags) != self.flags).then_some(self.next)
+    fn due(&self, flags: VoiceFlags, video: &VideoPresence) -> Option<Instant> {
+        (!self
+            .state
+            .as_ref()
+            .is_some_and(|(previous_flags, previous_video)| {
+                *previous_flags == flags && previous_video == video
+            }))
+        .then_some(self.next)
     }
 
-    fn sent(&mut self, flags: VoiceFlags, now: Instant) {
-        self.flags = Some(flags);
+    fn sent(&mut self, flags: VoiceFlags, video: VideoPresence, now: Instant) {
+        self.state = Some((flags, video));
         self.next = now + Duration::from_millis(50);
     }
 
     fn resync(&mut self) {
-        self.flags = None;
+        self.state = None;
         self.next = Instant::now();
     }
 }

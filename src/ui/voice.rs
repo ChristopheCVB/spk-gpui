@@ -16,6 +16,7 @@ fn device_label(kind: DeviceKind) -> &'static str {
     match kind {
         DeviceKind::Microphone => "Microphone",
         DeviceKind::Speakers => "Speakers",
+        DeviceKind::MediaOutput => "Media Output",
     }
 }
 
@@ -166,6 +167,28 @@ impl Spk {
                         })
                 }),
             )
+            .when(
+                sidebar
+                    .voice
+                    .as_ref()
+                    .is_some_and(|voice| voice.is_participating()),
+                |bar| {
+                    bar.child(
+                        tool_button("radio", IconName::Radio, "Channel Radio")
+                            .when(!compact, |button| button.label("Radio"))
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.open_radio(window, cx)),
+                            ),
+                    )
+                    .child(
+                        tool_button("soundboard", IconName::Megaphone, "Soundboard")
+                            .when(!compact, |button| button.label("Soundboard"))
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.open_soundboard(window, cx)),
+                            ),
+                    )
+                },
+            )
     }
 }
 
@@ -276,6 +299,11 @@ fn devices(sidebar: &Sidebar, kind: DeviceKind) -> (&DeviceList, Option<&Device>
                 media.map_or_else(|| list.resolve(preferred), |media| media.speakers.as_ref());
             (list, active, preferred)
         }
+        DeviceKind::MediaOutput => {
+            let list = &sidebar.devices.media_outputs;
+            let preferred = preferred.media_output.as_ref();
+            (list, list.resolve(preferred), preferred)
+        }
     }
 }
 
@@ -298,5 +326,214 @@ fn device_status(active: Option<&Device>, preferred: Option<&Device>, list: &Dev
         format!("{label} ({} unavailable)", preferred.name)
     } else {
         label.to_owned()
+    }
+}
+
+pub(super) fn connection_diagnostics(cx: &Context<Spk>) -> Popover {
+    let app = cx.weak_entity();
+    Popover::new("voice-connection")
+        .anchor(Anchor::BottomRight)
+        .w(px(300.0))
+        .trigger(tool_button(
+            "voice-connection-diagnostics",
+            IconName::Activity,
+            "Voice connection diagnostics",
+        ))
+        .content(move |_, _, cx| {
+            let Some(app) = app.upgrade() else {
+                return div();
+            };
+            let View::SignedIn(sidebar) = &app.read(cx).view else {
+                return div();
+            };
+            let Some(call) = &sidebar.voice else {
+                return div();
+            };
+            let diagnostics = call
+                .media
+                .as_ref()
+                .map_or_else(Default::default, |media| media.diagnostics);
+            use livekit::prelude::ConnectionQuality;
+            let quality = match diagnostics.quality {
+                Some(ConnectionQuality::Excellent) => "Excellent",
+                Some(ConnectionQuality::Good) => "Good",
+                Some(ConnectionQuality::Poor) => "Poor",
+                Some(ConnectionQuality::Lost) => "Lost",
+                None => "Unavailable",
+            };
+            let metric = |value: Option<u32>, unit| {
+                value.map_or_else(
+                    || "Unavailable".to_owned(),
+                    |value| format!("{}.{:01} {unit}", value / 10, value % 10),
+                )
+            };
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(Label::new("Voice connection").font_semibold())
+                .children(
+                    [
+                        ("Connection quality", quality.to_owned()),
+                        ("Media round-trip", metric(diagnostics.round_trip_ms, "ms")),
+                        (
+                            "Audio jitter (worst track)",
+                            metric(diagnostics.jitter_ms, "ms"),
+                        ),
+                        (
+                            "Incoming audio packet loss",
+                            metric(diagnostics.loss_percent, "%"),
+                        ),
+                    ]
+                    .into_iter()
+                    .map(|(label, value)| {
+                        div()
+                            .flex()
+                            .justify_between()
+                            .gap_2()
+                            .child(Label::new(label).text_color(cx.theme().muted_foreground))
+                            .child(Label::new(value))
+                    }),
+                )
+        })
+}
+
+impl Spk {
+    pub(super) fn participant_volume_button(
+        &self,
+        participant: &crate::session::Participant<'_>,
+        sidebar: &Sidebar,
+        cx: &Context<Self>,
+    ) -> Button {
+        let id = participant.id.to_owned();
+        let name = participant.name.to_owned();
+        let volume = sidebar.voice_intent.preferred.participant_volume(&id);
+        tool_button(
+            "participant-volume",
+            if volume.muted {
+                IconName::VolumeX
+            } else {
+                IconName::Volume2
+            },
+            format!("Volume for {name}"),
+        )
+        .on_click(cx.listener(move |_, _, window, cx| {
+            let app = cx.entity();
+            let content = cx.new(|cx: &mut Context<ParticipantVolumeDialog>| {
+                use crate::voice::ParticipantVolumeChange;
+                use gpui_kit::component::slider::{SliderEvent, SliderValue};
+
+                cx.observe(&app, |_, _, cx| cx.notify()).detach();
+                let sliders = [
+                    (
+                        volume.mic,
+                        ParticipantVolumeChange::Microphone as fn(u8) -> _,
+                    ),
+                    (
+                        volume.screen,
+                        ParticipantVolumeChange::Screen as fn(u8) -> _,
+                    ),
+                ]
+                .map(|(initial, change)| {
+                    let slider = cx.new(|_| {
+                        gpui_kit::component::slider::SliderState::new()
+                            .max(200.0)
+                            .default_value(f32::from(initial))
+                    });
+                    cx.subscribe(&slider, move |dialog, _, event, cx| {
+                        if let SliderEvent::Release(SliderValue::Single(value)) = event {
+                            dialog.change(change(*value as u8), cx);
+                        }
+                        cx.notify();
+                    })
+                    .detach();
+                    slider
+                });
+                ParticipantVolumeDialog {
+                    app,
+                    id: id.clone(),
+                    sliders,
+                }
+            });
+            let title = format!("Volume for {name}");
+            window.open_dialog(cx, move |dialog, _, _| {
+                dialog
+                    .centered()
+                    .width(px(380.0))
+                    .title(title.clone())
+                    .child(content.clone())
+            });
+        }))
+    }
+}
+
+struct ParticipantVolumeDialog {
+    app: Entity<Spk>,
+    id: String,
+    sliders: [Entity<gpui_kit::component::slider::SliderState>; 2],
+}
+
+impl ParticipantVolumeDialog {
+    fn change(&self, change: crate::voice::ParticipantVolumeChange, cx: &mut Context<Self>) {
+        self.app.update(cx, |app, cx| {
+            app.send(
+                Command::SetParticipantVolume(self.id.clone(), change),
+                None,
+                cx,
+            );
+        });
+    }
+}
+
+impl Render for ParticipantVolumeDialog {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        use gpui_kit::component::{
+            slider::{Slider, SliderValue},
+            switch::Switch,
+        };
+
+        let View::SignedIn(sidebar) = &self.app.read(cx).view else {
+            return div();
+        };
+        let muted = sidebar
+            .voice_intent
+            .preferred
+            .participant_volume(&self.id)
+            .muted;
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(Label::new("Only changes what you hear."))
+            .children(
+                ["Mic volume", "Screen Share volume"]
+                    .into_iter()
+                    .zip(&self.sliders)
+                    .map(|(label, slider)| {
+                        let SliderValue::Single(value) = slider.read(cx).value() else {
+                            unreachable!("single participant volume slider")
+                        };
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(Label::new(format!("{label} {value:.0}%")))
+                            .child(
+                                Slider::new(slider)
+                                    .tab_stop(true)
+                                    .accessibility_label(label),
+                            )
+                    }),
+            )
+            .child(
+                Switch::new("mute-participant")
+                    .label("Mute for me")
+                    .accessibility_label("Mute for me")
+                    .checked(muted)
+                    .tab_stop(true)
+                    .on_change(cx.listener(|dialog, enabled: &bool, _, cx| {
+                        dialog.change(crate::voice::ParticipantVolumeChange::Muted(*enabled), cx);
+                    })),
+            )
     }
 }

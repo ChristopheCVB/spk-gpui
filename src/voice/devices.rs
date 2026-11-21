@@ -1,12 +1,17 @@
-use std::{fs, io, path::Path};
+use std::{collections::HashMap, fs, io, path::Path};
 
 use livekit::{PlatformAudio, PlayoutDeviceId, RecordingDeviceId};
-use serde::{Deserialize, Serialize};
+use rodio::cpal::{
+    self,
+    traits::{DeviceTrait, HostTrait},
+};
+use serde::{Deserialize, Deserializer, Serialize};
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum DeviceKind {
     Microphone,
     Speakers,
+    MediaOutput,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -15,18 +20,129 @@ pub struct Device {
     pub name: String,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct DevicePreferences {
     pub microphone: Option<Device>,
     pub speakers: Option<Device>,
+    pub media_output: Option<Device>,
+    pub radio_volume: u8,
+    pub soundboard_enabled: bool,
+    pub soundboard_volume: u8,
+    pub screen_audio: bool,
+    pub output_volume: u8,
+    pub processing: VoiceProcessing,
+    pub participant_volumes: HashMap<String, ParticipantVolume>,
+}
+
+impl Default for DevicePreferences {
+    fn default() -> Self {
+        Self {
+            microphone: None,
+            speakers: None,
+            media_output: None,
+            radio_volume: 100,
+            soundboard_enabled: true,
+            soundboard_volume: 70,
+            screen_audio: true,
+            output_volume: 100,
+            participant_volumes: HashMap::new(),
+            processing: VoiceProcessing::default(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct VoiceProcessing {
+    pub echo_cancellation: bool,
+    #[serde(deserialize_with = "deserialize_noise_suppression")]
+    pub noise_suppression: NoiseSuppression,
+    pub auto_gain: bool,
+    pub sensitivity: u8,
+}
+
+impl Default for VoiceProcessing {
+    fn default() -> Self {
+        Self {
+            echo_cancellation: true,
+            noise_suppression: NoiseSuppression::Standard,
+            auto_gain: true,
+            sensitivity: 50,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NoiseSuppression {
+    Off,
+    Standard,
+    Enhanced,
+}
+
+fn deserialize_noise_suppression<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<NoiseSuppression, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum SavedMode {
+        Mode(NoiseSuppression),
+        Legacy(bool),
+    }
+
+    Ok(match SavedMode::deserialize(deserializer)? {
+        SavedMode::Mode(mode) => mode,
+        SavedMode::Legacy(false) => NoiseSuppression::Off,
+        SavedMode::Legacy(true) => NoiseSuppression::Standard,
+    })
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct ParticipantVolume {
+    pub mic: u8,
+    pub screen: u8,
+    pub muted: bool,
+}
+
+impl Default for ParticipantVolume {
+    fn default() -> Self {
+        Self {
+            mic: 100,
+            screen: 100,
+            muted: false,
+        }
+    }
+}
+
+pub enum ParticipantVolumeChange {
+    Microphone(u8),
+    Screen(u8),
+    Muted(bool),
 }
 
 impl DevicePreferences {
+    pub fn participant_volume(&self, id: &str) -> ParticipantVolume {
+        let mut volume = self
+            .participant_volumes
+            .get(id)
+            .copied()
+            .unwrap_or_default();
+        volume.mic = volume.mic.min(200);
+        volume.screen = volume.screen.min(200);
+        volume
+    }
+
+    pub fn output_gain(&self) -> f32 {
+        f32::from(self.output_volume.min(200)) / 100.0
+    }
+
     pub fn get_mut(&mut self, kind: DeviceKind) -> &mut Option<Device> {
         match kind {
             DeviceKind::Microphone => &mut self.microphone,
             DeviceKind::Speakers => &mut self.speakers,
+            DeviceKind::MediaOutput => &mut self.media_output,
         }
     }
 
@@ -88,11 +204,18 @@ impl DeviceList {
 pub struct Devices {
     pub microphones: DeviceList,
     pub speakers: DeviceList,
+    pub media_outputs: DeviceList,
 }
 
 impl Devices {
     pub fn enumerate() -> Self {
-        PlatformAudio::new().map_or_else(|_| Self::default(), |audio| Self::read(&audio))
+        PlatformAudio::new().map_or_else(
+            |_| Self {
+                media_outputs: media_outputs(),
+                ..Self::default()
+            },
+            |audio| Self::read(&audio),
+        )
     }
 
     pub(super) fn read(audio: &PlatformAudio) -> Self {
@@ -109,6 +232,7 @@ impl Devices {
                     )
                 }),
             ),
+            media_outputs: media_outputs(),
             speakers: list(
                 DeviceKind::Speakers,
                 audio.playout_devices().map(|device| {
@@ -123,6 +247,59 @@ impl Devices {
             ),
         }
     }
+}
+
+fn media_outputs() -> DeviceList {
+    fn describe(device: cpal::Device) -> Option<Device> {
+        Some(Device {
+            id: device.id().ok()?.to_string(),
+            name: device.description().ok()?.name().to_owned(),
+        })
+    }
+
+    let host = cpal::default_host();
+    DeviceList {
+        default: host.default_output_device().and_then(describe),
+        choices: host
+            .output_devices()
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(describe)
+            .collect(),
+    }
+}
+
+#[derive(Clone, PartialEq)]
+pub(crate) struct MediaOutput {
+    pub device: Option<Device>,
+    pub volume: f32,
+}
+
+pub(crate) fn open_media_output(
+    device: Option<&Device>,
+    on_error: impl FnMut(cpal::Error) + Clone + Send + 'static,
+) -> Result<rodio::MixerDeviceSink, rodio::DeviceSinkError> {
+    use rodio::DeviceSinkBuilder;
+
+    let open = |device| {
+        DeviceSinkBuilder::from_device(device)?
+            .with_error_callback(on_error.clone())
+            .open_stream()
+    };
+    let host = cpal::default_host();
+    let sink = device
+        .and_then(|device| device.id.parse().ok())
+        .and_then(|id| host.device_by_id(&id))
+        .and_then(|device| open(device).ok());
+    let mut sink = match sink {
+        Some(sink) => sink,
+        None => DeviceSinkBuilder::from_default_device()?
+            .with_error_callback(on_error)
+            .open_stream()?,
+    };
+    sink.log_on_drop(false);
+    Ok(sink)
 }
 
 fn list(kind: DeviceKind, devices: impl Iterator<Item = (usize, Device)>) -> DeviceList {
@@ -195,6 +372,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn microphone_processing_preserves_old_defaults_and_round_trips_saved_settings() {
+        let mut preferences: DevicePreferences =
+            serde_json::from_str(r#"{"output_volume":75}"#).unwrap();
+        assert_eq!(preferences.processing, VoiceProcessing::default());
+        assert!(preferences.processing.echo_cancellation);
+
+        for (legacy, mode) in [
+            ("false", NoiseSuppression::Off),
+            ("true", NoiseSuppression::Standard),
+        ] {
+            let processing: VoiceProcessing =
+                serde_json::from_str(&format!(r#"{{"noise_suppression":{legacy}}}"#)).unwrap();
+            assert_eq!(processing.noise_suppression, mode);
+        }
+
+        preferences.processing = VoiceProcessing {
+            echo_cancellation: false,
+            noise_suppression: NoiseSuppression::Enhanced,
+            auto_gain: false,
+            sensitivity: 80,
+        };
+        let config = tempfile::tempdir().unwrap();
+        let path = config.path().join("voice-devices.json");
+        preferences.save(&path).unwrap();
+        assert_eq!(DevicePreferences::load(&path).unwrap(), preferences);
+    }
+
+    #[test]
     fn saved_devices_survive_restart_and_fall_back_until_they_return() {
         let config = tempfile::tempdir().unwrap();
         let path = config.path().join("spk-gpui/voice-devices.json");
@@ -213,6 +418,14 @@ mod tests {
         let saved = DevicePreferences {
             microphone: Some(mic.clone()),
             speakers: Some(speakers.clone()),
+            media_output: Some(Device {
+                id: "pulse:headphones".into(),
+                name: "Headphones".into(),
+            }),
+            radio_volume: 125,
+            soundboard_enabled: false,
+            soundboard_volume: 25,
+            ..Default::default()
         };
         saved.save(&path).unwrap();
         assert_eq!(DevicePreferences::load(&path).unwrap(), saved);
@@ -245,4 +458,19 @@ mod tests {
             DevicePreferences::default()
         );
     }
+}
+
+#[cfg(test)]
+#[test]
+fn output_volume_defaults_to_unity_for_saved_device_preferences() {
+    let old: DevicePreferences =
+        serde_json::from_str(r#"{"microphone":null,"speakers":null}"#).unwrap();
+    assert_eq!(old.output_volume, 100);
+    assert_eq!(old.output_gain(), 1.0);
+
+    let saved: DevicePreferences = serde_json::from_str(r#"{"output_volume":175}"#).unwrap();
+    assert_eq!(saved.output_gain(), 1.75);
+
+    let invalid: DevicePreferences = serde_json::from_str(r#"{"output_volume":255}"#).unwrap();
+    assert_eq!(invalid.output_gain(), 2.0);
 }

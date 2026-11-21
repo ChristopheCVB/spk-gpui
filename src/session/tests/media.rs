@@ -1,3 +1,5 @@
+use livekit::prelude::ConnectionQuality;
+
 use super::*;
 use crate::voice::fixture::{Peer, start_call};
 
@@ -40,7 +42,12 @@ async fn desktop_voice_routes_samples_and_synchronizes_presence() {
             allow_ack.send(()).unwrap();
 
             let peer = arrivals.recv().await.unwrap();
-            wait_for_route(&views, VoiceStatus::ListenOnly, None, "default-speakers").await;
+            let first =
+                wait_for_route(&views, VoiceStatus::ListenOnly, None, "default-speakers").await;
+            assert_eq!(
+                first.voice.unwrap().media.unwrap().diagnostics,
+                Default::default()
+            );
             wait_for_flags(&views, true, false, false).await;
             assert_eq!(peer.exchange(71, -28), (None, Some(-28)));
 
@@ -162,6 +169,29 @@ async fn desktop_voice_routes_samples_and_synchronizes_presence() {
             commands.send(Command::ToggleMute).await.unwrap();
             wait_for_flags(&views, true, false, false).await;
             assert_eq!(peer.exchange(74, -31), (None, Some(-31)));
+            for setting in [
+                VoiceProcessingSetting::EchoCancellation(false),
+                VoiceProcessingSetting::NoiseSuppression(NoiseSuppression::Enhanced),
+                VoiceProcessingSetting::AutoGain(false),
+                VoiceProcessingSetting::Sensitivity(80),
+            ] {
+                commands
+                    .send(Command::SetVoiceProcessing(setting))
+                    .await
+                    .unwrap();
+            }
+            let tuned = wait_for_sidebar(&views, |sidebar| {
+                sidebar.voice_intent.preferred.processing.sensitivity == 80
+            })
+            .await;
+            let processing = tuned.voice_intent.preferred.processing;
+            assert!(
+                !processing.echo_cancellation
+                    && processing.noise_suppression == NoiseSuppression::Enhanced
+                    && !processing.auto_gain
+            );
+            assert!(tuned.voice_intent.mute.effective_muted());
+            assert_eq!(peer.exchange(74, -31), (None, Some(-31)));
             for was_muted in [true, false] {
                 commands.send(Command::ToggleDeafen).await.unwrap();
                 wait_for_flags(&views, true, true, false).await;
@@ -178,8 +208,10 @@ async fn desktop_voice_routes_samples_and_synchronizes_presence() {
                 }
             }
 
+            peer.quality(ConnectionQuality::Good);
+            assert_call_quality(&views, Some(ConnectionQuality::Good)).await;
             peer.reconnecting();
-            wait_for_route(
+            let reconnecting = wait_for_route(
                 &views,
                 VoiceStatus::Reconnecting,
                 Some("preferred-mic"),
@@ -187,10 +219,15 @@ async fn desktop_voice_routes_samples_and_synchronizes_presence() {
             )
             .await;
             wait_for_flags(&views, true, false, false).await;
+            assert_eq!(
+                reconnecting.voice.unwrap().media.unwrap().diagnostics,
+                Default::default()
+            );
+            peer.quality(ConnectionQuality::Lost);
             peer.set_hardware_format(Some((24_000, 1)));
             assert_eq!(peer.exchange(75, -32), (None, None));
             peer.reconnected();
-            wait_for_route(
+            let reconnected = wait_for_route(
                 &views,
                 VoiceStatus::Connected,
                 Some("preferred-mic"),
@@ -199,6 +236,12 @@ async fn desktop_voice_routes_samples_and_synchronizes_presence() {
             .await;
             wait_for_flags(&views, false, false, false).await;
             assert_eq!(peer.exchange(75, -32), (Some(75), Some(-32)));
+            assert_eq!(
+                reconnected.voice.unwrap().media.unwrap().diagnostics,
+                Default::default()
+            );
+            peer.quality(ConnectionQuality::Excellent);
+            assert_call_quality(&views, Some(ConnectionQuality::Excellent)).await;
 
             peer.disconnect();
             let terminal = wait_for_sidebar(&views, |sidebar| {
@@ -258,6 +301,7 @@ async fn wait_for_flags(views: &Receiver<View>, muted: bool, deafened: bool, spe
                         muted,
                         deafened,
                         speaking,
+                        radio_listening: None,
                     }
         })
     })
@@ -284,6 +328,7 @@ async fn mirror_presence_until_leave(
                     muted: true,
                     deafened: join["deafened"].as_bool().unwrap(),
                     speaking: false,
+                    radio_listening: None,
                 }
             }
             "voice:state" => {
@@ -519,7 +564,21 @@ async fn serve_active_media_presence(
     .await;
     assert_eq!(
         receive_voice_frame(socket).await,
-        value!({"type":"voice:state","sid":sid,"muted":false,"deafened":false,"speaking":false}),
+        value!({"type":"voice:state","sid":sid,"muted":false,"deafened":false,"speaking":false,"cam":false,"screen":false,"watching":[]}),
     );
     publish_media_presence(socket, snapshots, "first", VoiceFlags::default()).await;
+}
+
+async fn assert_call_quality(views: &Receiver<View>, quality: Option<ConnectionQuality>) {
+    let snapshot = wait_for_sidebar(views, |sidebar| {
+        sidebar
+            .voice
+            .as_ref()
+            .and_then(|voice| voice.media.as_ref())
+            .is_some_and(|media| media.diagnostics.quality == quality)
+    })
+    .await;
+    let diagnostics = snapshot.voice.unwrap().media.unwrap().diagnostics;
+    assert_eq!(diagnostics.jitter_ms, None);
+    assert_eq!(diagnostics.loss_percent, None);
 }

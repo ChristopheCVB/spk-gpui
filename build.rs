@@ -9,7 +9,16 @@ fn main() {
     println!("cargo::rerun-if-env-changed=SPK_URL");
     println!("cargo::rerun-if-env-changed=LIVEKIT_URL");
     match env::var("CARGO_CFG_TARGET_OS").as_deref() {
-        Ok("macos") => println!("cargo::rustc-link-arg=-ObjC"),
+        Ok("macos") => {
+            println!("cargo::rustc-link-arg=-ObjC");
+            // The Swift bridge is a library, so its linker arguments do not reach the executable.
+            println!("cargo::rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
+        }
+        Ok("linux") => {
+            for library in ["gio-2.0", "gobject-2.0", "glib-2.0"] {
+                println!("cargo::rustc-link-lib=dylib={library}");
+            }
+        }
         Ok("windows") => {
             println!("cargo::rerun-if-changed=build/windows.rc");
             println!("cargo::rerun-if-changed=assets/logo.ico");
