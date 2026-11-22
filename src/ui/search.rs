@@ -1,8 +1,9 @@
-use std::cell::Cell;
-
-use gpui_kit::component::{
-    Disableable,
-    menu::{DropdownMenu, PopupMenuItem},
+use gpui_kit::{
+    base::FocusTrapElement,
+    component::{
+        Disableable,
+        menu::{DropdownMenu, PopupMenuItem},
+    },
 };
 use url::Url;
 
@@ -15,8 +16,10 @@ use crate::{
 static SPK_BASE: LazyLock<Url> =
     LazyLock::new(|| Url::parse(env!("SPK_URL")).expect("validated SPK URL"));
 
-struct SearchPanel {
-    spk: Entity<Spk>,
+pub(super) struct SearchPanel {
+    spk: WeakEntity<Spk>,
+    focus: FocusHandle,
+    return_focus: FocusHandle,
     query: Entity<InputState>,
     scopes: Vec<(SearchScope, &'static str)>,
     selected: usize,
@@ -39,6 +42,17 @@ impl Spk {
         let View::SignedIn(sidebar) = &self.view else {
             return;
         };
+        if self.video_stage.fullscreen {
+            return;
+        }
+        if let Some(panel) = &self.search_panel {
+            panel.read(cx).query.focus_handle(cx).focus(window, cx);
+            return;
+        }
+        let return_focus = window
+            .focused(cx)
+            .filter(|focus| focus != &self.workspace_focus)
+            .unwrap_or_else(|| self.search_button_focus.clone());
         let scopes = sidebar
             .chat
             .as_ref()
@@ -103,7 +117,9 @@ impl Spk {
                 }
             });
             SearchPanel {
-                spk,
+                spk: spk.downgrade(),
+                focus: cx.focus_handle().tab_stop(false),
+                return_focus,
                 query: panel_query,
                 scopes,
                 selected,
@@ -121,17 +137,107 @@ impl Spk {
             cx,
         );
 
-        let initial_focus = Cell::new(true);
-        window.open_dialog(cx, move |dialog, window, cx| {
-            if initial_focus.replace(false) {
-                query.focus_handle(cx).focus(window, cx);
+        query.focus_handle(cx).focus(window, cx);
+        self.search_panel = Some(panel);
+    }
+
+    pub(super) fn close_message_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(panel) = self.search_panel.take() {
+            let panel = panel.read(cx);
+            if panel.focus.contains_focused(window, cx) {
+                let return_focus = if self.workspace_focus.contains(&panel.return_focus, window) {
+                    panel.return_focus.clone()
+                } else {
+                    self.search_button_focus.clone()
+                };
+                return_focus.focus(window, cx);
             }
-            dialog
-                .centered()
-                .width(px(500.0))
-                .title("Search")
-                .child(panel.clone())
-        });
+            cx.notify();
+        }
+    }
+
+    pub(super) fn dismiss_search_on_escape(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.search_panel.is_some()
+            && !self.video_stage.fullscreen
+            && event.keystroke.key == "escape"
+            && !event.keystroke.modifiers.modified()
+        {
+            self.close_message_search(window, cx);
+            cx.stop_propagation();
+        }
+    }
+
+    pub(super) fn focus_search_slideover(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(panel) = &self.search_panel
+            && !self.video_stage.fullscreen
+            && !window.has_active_dialog(cx)
+        {
+            let panel = panel.read(cx);
+            if !panel.focus.contains_focused(window, cx) {
+                panel.query.focus_handle(cx).focus(window, cx);
+            }
+        }
+    }
+
+    pub(super) fn search_surface(
+        &self,
+        wide: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let mut layer = div();
+        let Some(panel) = &self.search_panel else {
+            return layer;
+        };
+        let theme = cx.theme();
+        let search = div()
+            .id("search-surface")
+            .role(if wide {
+                Role::Complementary
+            } else {
+                Role::Dialog
+            })
+            .aria_label("Search")
+            .h_full()
+            .w((window.viewport_size().width * 0.3).clamp(px(304.0), px(384.0)))
+            .flex_shrink_0()
+            .border_l_1()
+            .border_color(theme.border)
+            .bg(theme.background)
+            .occlude()
+            .child(panel.clone());
+        if wide {
+            layer = layer.h_full().child(search);
+        } else {
+            layer = layer
+                .absolute()
+                .inset_0()
+                .child(
+                    div()
+                        .id("search-backdrop")
+                        .absolute()
+                        .inset_0()
+                        .bg(black().opacity(0.35))
+                        .occlude()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.close_message_search(window, cx);
+                        })),
+                )
+                .child(
+                    search
+                        .absolute()
+                        .right_0()
+                        .top_0()
+                        .max_w_full()
+                        .focus_trap("search-surface", &cx.focus_handle().tab_stop(false)),
+                );
+        }
+        layer
     }
 }
 
@@ -140,13 +246,16 @@ impl SearchPanel {
         self.selected_result = None;
         let query = self.query.read(cx).value().to_string();
         let scope = self.scopes[self.selected].0.clone();
-        self.spk.update(cx, |spk, cx| {
+        let _ = self.spk.update(cx, |spk, cx| {
             spk.send(Command::SearchMessages { query, scope }, None, cx)
         });
     }
 
     fn step_result(&mut self, backwards: bool, cx: &mut Context<Self>) -> bool {
-        let View::SignedIn(sidebar) = &self.spk.read(cx).view else {
+        let Some(spk) = self.spk.upgrade() else {
+            return false;
+        };
+        let View::SignedIn(sidebar) = &spk.read(cx).view else {
             return false;
         };
         let results = &sidebar.search.results;
@@ -171,10 +280,13 @@ impl SearchPanel {
     }
 
     fn open_result(&self, target: MessageTarget, window: &mut Window, cx: &mut Context<Self>) {
-        self.spk.update(cx, |spk, cx| {
-            spk.send(Command::OpenMessageTarget(target), None, cx)
+        let spk = self.spk.clone();
+        window.defer(cx, move |window, cx| {
+            let _ = spk.update(cx, |spk, cx| {
+                spk.close_message_search(window, cx);
+                spk.send(Command::OpenMessageTarget(target), None, cx);
+            });
         });
-        window.close_dialog(cx);
     }
 
     fn result_row(
@@ -272,8 +384,11 @@ impl SearchPanel {
 }
 
 impl Render for SearchPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let View::SignedIn(sidebar) = &self.spk.read(cx).view else {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(spk) = self.spk.upgrade() else {
+            return div();
+        };
+        let View::SignedIn(sidebar) = &spk.read(cx).view else {
             return div();
         };
         let search = &sidebar.search;
@@ -285,6 +400,7 @@ impl Render for SearchPanel {
             .map(|(_, label)| *label)
             .collect::<Vec<_>>();
         let panel = cx.weak_entity();
+        let app = self.spk.clone();
         let status = if search.failed {
             Some("Could not search messages. Try again.")
         } else if search.loading {
@@ -298,9 +414,28 @@ impl Render for SearchPanel {
         };
 
         div()
+            .track_focus(&self.focus)
+            .size_full()
             .flex()
             .flex_col()
+            .p_3()
             .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(Label::new("Search").font_semibold())
+                    .child(
+                        tool_button("close-search", IconName::X, "Close search").on_click(
+                            move |_, window, cx| {
+                                let _ = app.update(cx, |app, cx| {
+                                    app.close_message_search(window, cx);
+                                });
+                            },
+                        ),
+                    ),
+            )
             .child(
                 div()
                     .flex()
@@ -355,7 +490,7 @@ impl Render for SearchPanel {
                     .flex()
                     .flex_col()
                     .min_h_0()
-                    .max_h(window.viewport_size().height * 0.44)
+                    .flex_1()
                     .overflow_y_scroll()
                     .children(
                         search
@@ -371,7 +506,7 @@ impl Render for SearchPanel {
                                 .label("Load more")
                                 .disabled(search.loading)
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    this.spk.update(cx, |spk, cx| {
+                                    let _ = this.spk.update(cx, |spk, cx| {
                                         spk.send(Command::MoreSearchResults, None, cx)
                                     });
                                 })),

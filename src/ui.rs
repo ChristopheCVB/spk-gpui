@@ -76,6 +76,9 @@ pub(super) struct Spk {
     sidebar_toggle_focus: FocusHandle,
     new_text_channel_focus: FocusHandle,
     new_voice_channel_focus: FocusHandle,
+    search_button_focus: FocusHandle,
+    search_panel: Option<Entity<search::SearchPanel>>,
+    voice_strip_toggle_focus: FocusHandle,
     quick_switcher: Option<WeakEntity<gpui_kit::component::command::CommandState>>,
     video_stage: video::VideoStage,
     workspace_focus: FocusHandle,
@@ -240,6 +243,8 @@ impl Spk {
         cx.observe_window_bounds(window, |this, window, cx| {
             if workspace::wide_workspace(window) {
                 this.close_sidebar_drawer(window, cx);
+            } else {
+                this.focus_search_slideover(window, cx);
             }
         })
         .detach();
@@ -315,6 +320,7 @@ impl Spk {
                             this.selected_voice_channel = None;
                             this.device_picker = None;
                             this.close_sidebar_drawer(window, cx);
+                            this.search_panel = None;
                             window.close_all_dialogs(cx);
                         }
                         this.focus_account_input(&view, window, cx);
@@ -329,6 +335,7 @@ impl Spk {
             let _ = this.update_in(cx, |this, window, cx| {
                 this.shortcuts.signed_in(false);
                 this.close_sidebar_drawer(window, cx);
+                this.search_panel = None;
                 window.close_all_dialogs(cx);
                 this.set_session_view(
                     View::SignIn {
@@ -373,6 +380,9 @@ impl Spk {
             sidebar_toggle_focus: cx.focus_handle(),
             new_text_channel_focus: cx.focus_handle(),
             new_voice_channel_focus: cx.focus_handle(),
+            search_button_focus: cx.focus_handle(),
+            search_panel: None,
+            voice_strip_toggle_focus: cx.focus_handle(),
             quick_switcher: None,
             video_stage: video::VideoStage::default(),
             workspace_focus,
@@ -539,7 +549,7 @@ impl Spk {
 
 impl Render for Spk {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.prepare_video_stage(window);
+        self.prepare_video_stage(window, cx);
         let content = match &self.view {
             View::Busy(label) => Label::new(*label).into_any_element(),
             View::SignIn {
@@ -574,6 +584,7 @@ impl Render for Spk {
         div()
             .id("spk-window")
             .track_focus(&self.workspace_focus)
+            .on_key_down(cx.listener(Self::dismiss_search_on_escape))
             .on_key_down(cx.listener(Self::dismiss_video_fullscreen))
             .on_key_down(cx.listener(Self::hovered_video_key))
             .size_full()
