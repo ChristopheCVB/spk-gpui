@@ -25,7 +25,7 @@ const OBJECT_PATH: &str = "/dev/meeehdi/spk/desktop";
 const OPEN_ACTION: &str = "app.open";
 
 pub struct Notifications {
-    portal: Option<Proxy<'static>>,
+    portal: Option<(Proxy<'static>, bool)>,
     // Keep the exported application object alive even if the portal is unavailable.
     _connection: zbus::Connection,
 }
@@ -59,11 +59,11 @@ impl Notifications {
             )
             .await
             .ok()?;
-            // Only version 2 can guarantee silent notifications while SPK plays its own cue.
-            if portal.get_property::<u32>("version").await.ok()? < 2 {
+            let explicit_silence = portal.get_property::<u32>("version").await.ok()? >= 2;
+            if !explicit_silence && !notifications_are_silent_without_hints(&connection).await {
                 return None;
             }
-            Some(portal)
+            Some((portal, explicit_silence))
         }
         .await;
         Some(Self {
@@ -73,7 +73,7 @@ impl Notifications {
     }
 
     pub fn show(notification: &SystemNotification, cx: &mut Context<Spk>) -> bool {
-        let Some(portal) = cx
+        let Some((portal, explicit_silence)) = cx
             .try_global::<Self>()
             .and_then(|state| state.portal.clone())
         else {
@@ -87,20 +87,39 @@ impl Notifications {
                 ("action", Value::from(OPEN_ACTION)),
                 ("target", Value::from(tag)),
             ]);
-            let payload = HashMap::from([
+            let mut payload = HashMap::from([
                 ("title", Value::from(notification.title.as_ref())),
                 ("body", Value::from(notification.body.as_ref())),
-                ("sound", Value::from("silent")),
                 ("default-action", Value::from(OPEN_ACTION)),
                 ("default-action-target", Value::from(tag)),
                 ("buttons", Value::from(vec![action])),
             ]);
+            if explicit_silence {
+                payload.insert("sound", Value::from("silent"));
+            }
             // A portal denial must not bypass the user's permission through the fallback.
             let _: zbus::Result<()> = portal.call("AddNotification", &(tag, payload)).await;
         })
         .detach();
         true
     }
+}
+
+async fn notifications_are_silent_without_hints(connection: &zbus::Connection) -> bool {
+    let Ok(notifier) = Proxy::new(
+        connection,
+        "org.freedesktop.Notifications",
+        "/org/freedesktop/Notifications",
+        "org.freedesktop.Notifications",
+    )
+    .await
+    else {
+        return false;
+    };
+    let server: zbus::Result<(String, String, String, String)> =
+        notifier.call("GetServerInformation", &()).await;
+    // GNOME Shell only plays sounds when the notification carries a sound hint.
+    server.is_ok_and(|(name, vendor, _, _)| name == "gnome-shell" && vendor == "GNOME")
 }
 
 struct Application {
@@ -219,7 +238,7 @@ fn register_desktop(root: &Path, executable: &Path) -> io::Result<()> {
         (
             root.join("applications"),
             format!("{APP_ID}.desktop"),
-            "[Desktop Entry]\nType=Application\nName=SPK\nDBusActivatable=true\n".into(),
+            "[Desktop Entry]\nType=Application\nName=SPK\nDBusActivatable=true\nX-GNOME-UsesNotifications=true\n".into(),
         ),
     ] {
         let path = directory.join(filename);
@@ -237,6 +256,15 @@ fn register_desktop(root: &Path, executable: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct GnomeNotificationServer;
+
+    #[zbus::interface(name = "org.freedesktop.Notifications")]
+    impl GnomeNotificationServer {
+        fn get_server_information(&self) -> (&str, &str, &str, &str) {
+            ("gnome-shell", "GNOME", "46", "1.2")
+        }
+    }
 
     #[test]
     fn desktop_registration_points_to_the_running_executable() {
@@ -256,6 +284,7 @@ mod tests {
         )
         .unwrap();
         assert!(desktop.contains("DBusActivatable=true\n"));
+        assert!(desktop.contains("X-GNOME-UsesNotifications=true\n"));
         assert!(service.contains("Exec=\"/opt/SPK's 100%/spk-gpui\"\n"));
 
         assert!(register_desktop(root.path(), Path::new("/opt/SPK\nName=other")).is_err());
@@ -294,6 +323,16 @@ mod tests {
         let target = crate::api::MessageTarget::new("channel", "message").unwrap();
         let tag = crate::notifications::activation_tag(&base, &target);
         let connection = zbus::Connection::session().await.unwrap();
+        let _server = Builder::session()
+            .unwrap()
+            .name("org.freedesktop.Notifications")
+            .unwrap()
+            .serve_at("/org/freedesktop/Notifications", GnomeNotificationServer)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        assert!(notifications_are_silent_without_hints(&connection).await);
         let application = Proxy::new(
             &connection,
             APP_ID,
