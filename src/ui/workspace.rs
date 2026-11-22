@@ -791,6 +791,11 @@ impl Spk {
             })
         });
         let show_strip = !fullscreen && !self.video_stage.participants_hidden;
+        let strip_size = if window.viewport_size().height < px(500.0) {
+            size(px(144.0), px(81.0))
+        } else {
+            size(px(192.0), px(108.0))
+        };
         let tile_size = if window.viewport_size().width < px(640.0) {
             size(px(244.0), px(137.25))
         } else {
@@ -803,20 +808,23 @@ impl Spk {
             .flex_col()
             .flex_1()
             .min_h_0()
-            .when_some(departing.filter(|_| !fullscreen), |stage, call| {
-                stage.child(
-                    div()
-                        .id("stage-connection-status")
-                        .role(Role::Status)
-                        .text_center()
-                        .flex_shrink_0()
-                        .px_3()
-                        .py_1()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child(call_status(call, switching)),
-                )
-            })
+            .when_some(
+                departing.filter(|call| !fullscreen && call.status != Status::Connected),
+                |stage, call| {
+                    stage.child(
+                        div()
+                            .id("stage-connection-status")
+                            .role(Role::Status)
+                            .text_center()
+                            .flex_shrink_0()
+                            .px_3()
+                            .py_1()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(call_status(call, switching)),
+                    )
+                },
+            )
             .child(if let Some((focused, call)) = theater {
                 let others = || participants.iter().filter(|person| person.id != focused.id);
                 div()
@@ -849,13 +857,7 @@ impl Spk {
                                 .overflow_x_scroll()
                                 .track_scroll(&self.video_stage.participant_scroll)
                                 .children(others().map(|person| {
-                                    self.voice_tile(
-                                        person,
-                                        call,
-                                        sidebar,
-                                        Some(size(px(192.0), px(108.0))),
-                                        cx,
-                                    )
+                                    self.voice_tile(person, call, sidebar, Some(strip_size), cx)
                                 })),
                         )
                     })
@@ -972,8 +974,10 @@ impl Spk {
                                                 participants_label,
                                             )
                                             .label(participants_label)
+                                            .track_focus(&self.voice_strip_toggle_focus)
                                             .on_click(
-                                                cx.listener(|this, _, _, cx| {
+                                                cx.listener(|this, _, window, cx| {
+                                                    this.voice_strip_toggle_focus.focus(window, cx);
                                                     this.video_stage.participants_hidden =
                                                         !this.video_stage.participants_hidden;
                                                     cx.notify();
