@@ -11,6 +11,7 @@ use std::{
     hash::{DefaultHasher, Hash, Hasher},
 };
 
+use gpui_kit::base::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::{
     Disableable,
     menu::{DropdownMenu, PopupMenuItem},
@@ -88,18 +89,70 @@ fn chat_jump_index(jump: Option<&ChatJump>, messages: &[ChatMessage]) -> Option<
         .position(|message| message.id == jump.message_id)
 }
 
-fn scroll_to_chat_jump(
-    history: Div,
-    jump_row: Rc<Cell<Option<usize>>>,
-    scroll: ScrollHandle,
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum HistoryPosition {
+    Opening,
+    Jump(usize),
+    Anchor(usize, Pixels),
+}
+
+fn chat_history_viewport(
+    rows: impl IntoIterator<Item = impl IntoElement>,
+    scroll: &ScrollHandle,
+    position: &Rc<Cell<Option<HistoryPosition>>>,
+    latest_ready: bool,
 ) -> Div {
-    // GPUI can align a row only after the history viewport has been measured.
-    history.on_children_prepainted(move |_, window, _| {
-        if let Some(index) = jump_row.take() {
-            scroll.scroll_to_top_of_item(index);
-            window.request_animation_frame();
-        }
-    })
+    let history = div().when(
+        position
+            .get()
+            .is_some_and(|position| position != HistoryPosition::Opening || latest_ready),
+        |history| {
+            let position = position.clone();
+            let scroll = scroll.clone();
+            // The viewport and the target row have their current bounds after layout.
+            history.on_children_prepainted(move |_, window, _| {
+                let Some(position) = position.take() else {
+                    return;
+                };
+                let bottom = -scroll.max_offset().y;
+                let row = match position {
+                    HistoryPosition::Opening => None,
+                    HistoryPosition::Jump(index) => Some((index, px(0.))),
+                    HistoryPosition::Anchor(index, offset) => Some((index, offset)),
+                };
+                let offset = if let Some((index, offset)) = row {
+                    let Some(row) = scroll.bounds_for_item(index) else {
+                        return;
+                    };
+                    (scroll.bounds().top() - row.top() + offset).clamp(bottom, px(0.))
+                } else {
+                    bottom
+                };
+                if scroll.offset().y != offset {
+                    scroll.set_offset(point(scroll.offset().x, offset));
+                    window.request_animation_frame();
+                }
+            })
+        },
+    );
+    div()
+        .relative()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .child(
+            history
+                .id("chat-history")
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .track_scroll(scroll)
+                .children(rows),
+        )
+        .child(Scrollbar::vertical(scroll).mode(ScrollbarMode::Always))
 }
 
 fn chat_images(chat: &ChatView) -> impl Iterator<Item = &Arc<RenderImage>> {
@@ -332,7 +385,8 @@ impl Spk {
             });
             self.chat_spoilers.clear();
             self.chat_scroll_anchor = None;
-            self.chat_jump_row.set(None);
+            self.chat_history_position
+                .set(next.map(|_| HistoryPosition::Opening));
             self.chat_scroll = ScrollHandle::new();
         } else if let (Some(previous), Some(next)) = (previous, next) {
             if previous.has_more_after
@@ -340,10 +394,11 @@ impl Spk {
                 && next.loading()
                 && next.messages.is_empty()
             {
+                let (row, offset) = self.chat_scroll.logical_scroll_top();
                 self.chat_scroll_anchor = previous
                     .messages
-                    .get(self.chat_scroll.top_item())
-                    .map(|message| message.id.clone());
+                    .get(row)
+                    .map(|message| (message.id.clone(), offset));
             }
             let acknowledged = previous.outgoing.as_ref().is_some_and(|pending| {
                 next.outgoing.is_none()
@@ -365,26 +420,39 @@ impl Spk {
             .filter(|_| !reset)
             .and_then(|chat| chat.jump.as_ref());
         let next_jump = next.and_then(|chat| chat.jump.as_ref());
-        if previous_jump != next_jump || self.chat_jump_row.get().is_some() {
+        let jump_pending = matches!(
+            self.chat_history_position.get(),
+            Some(HistoryPosition::Jump(_))
+        );
+        if previous_jump != next_jump || jump_pending {
             let row = next.and_then(|chat| chat_jump_index(next_jump, &chat.messages));
-            self.chat_jump_row.set(row);
-            if row.is_some() {
+            if let Some(row) = row {
+                self.chat_history_position
+                    .set(Some(HistoryPosition::Jump(row)));
                 self.chat_scroll_anchor = None;
                 return;
             }
+            if jump_pending {
+                self.chat_history_position.set(None);
+            }
         }
-        if reset {
-            self.chat_scroll.scroll_to_bottom();
-        } else if let (Some(previous), Some(next)) = (previous, next) {
+        if self.chat_history_position.get() == Some(HistoryPosition::Opening) {
+            if next.is_some_and(|chat| chat.jump_failed) {
+                self.chat_history_position.set(None);
+            }
+            return;
+        }
+        if let (Some(previous), Some(next)) = (previous, next) {
             if next.history_ready()
-                && let Some(anchor) = self.chat_scroll_anchor.take()
+                && let Some((anchor, offset)) = self.chat_scroll_anchor.take()
                 && (next.has_more_after || next.paging_forward)
                 && let Some(index) = next
                     .messages
                     .iter()
                     .position(|message| message.id == anchor)
             {
-                self.chat_scroll.scroll_to_top_of_item(index);
+                self.chat_history_position
+                    .set(Some(HistoryPosition::Anchor(index, offset)));
                 return;
             }
             if next.history_ready() && next.paging_forward && previous.loading() {
@@ -397,16 +465,18 @@ impl Spk {
             if Arc::ptr_eq(&previous.messages, &next.messages) {
                 return;
             }
+            let (row, offset) = self.chat_scroll.logical_scroll_top();
             if previous.messages.first().map(|message| &message.id)
                 != next.messages.first().map(|message| &message.id)
-                && let Some(anchor) = previous.messages.get(self.chat_scroll.top_item())
+                && let Some(anchor) = previous.messages.get(row)
                 && let Some(index) = next
                     .messages
                     .iter()
                     .position(|message| message.id == anchor.id)
             {
-                self.chat_scroll.scroll_to_top_of_item(index);
-            } else if self.chat_scroll.max_offset().y + self.chat_scroll.offset().y < px(32.)
+                self.chat_history_position
+                    .set(Some(HistoryPosition::Anchor(index, offset)));
+            } else if self.chat_scroll.offset().y == -self.chat_scroll.max_offset().y
                 || previous.messages.is_empty()
             {
                 self.chat_scroll.scroll_to_bottom();
@@ -558,28 +628,14 @@ impl Spk {
                     )
                 },
             )
-            .child(
-                div()
-                    .when(self.chat_jump_row.get().is_some(), |history| {
-                        scroll_to_chat_jump(
-                            history,
-                            self.chat_jump_row.clone(),
-                            self.chat_scroll.clone(),
-                        )
-                    })
-                    .id("chat-history")
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.chat_scroll)
-                    .children(
-                        chat.messages
-                            .iter()
-                            .map(|message| self.chat_message(sidebar, chat, message, cx)),
-                    ),
-            )
+            .child(chat_history_viewport(
+                chat.messages
+                    .iter()
+                    .map(|message| self.chat_message(sidebar, chat, message, cx)),
+                &self.chat_scroll,
+                &self.chat_history_position,
+                chat.latest_ready(),
+            ))
             .when(chat.has_more_after && !chat.loading(), |area| {
                 area.child(
                     div().px_4().py_2().flex().gap_2().child(
@@ -1308,27 +1364,185 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     #[ignore = "requires a graphical session or Xvfb"]
+    fn delayed_history_opens_at_the_latest_message_and_shares_scrollbar_position() {
+        use std::{cell::Cell, rc::Rc, time::Duration};
+
+        use gpui_kit::*;
+
+        use super::{HistoryPosition, chat_history_viewport};
+
+        struct ChatLayout {
+            rows: usize,
+            height: Pixels,
+            scroll: ScrollHandle,
+            position: Rc<Cell<Option<HistoryPosition>>>,
+        }
+
+        impl Render for ChatLayout {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .h(self.height)
+                    .flex()
+                    .flex_col()
+                    .child(chat_history_viewport(
+                        (0..self.rows).map(|_| div().h(px(24.)).flex_shrink_0()),
+                        &self.scroll,
+                        &self.position,
+                        self.rows > 1,
+                    ))
+            }
+        }
+
+        let outcome = Rc::new(Cell::new(None));
+        let result = outcome.clone();
+        application().run(move |cx| {
+            gpui_kit::init(cx);
+            let scroll = ScrollHandle::new();
+            let handle = cx
+                .open_window(WindowOptions::default(), |_, cx| {
+                    cx.new(|_| ChatLayout {
+                        rows: 1,
+                        height: px(120.),
+                        scroll: scroll.clone(),
+                        position: Rc::new(Cell::new(Some(HistoryPosition::Opening))),
+                    })
+                })
+                .unwrap();
+            cx.spawn(async move |cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(250))
+                    .await;
+                handle
+                    .update(cx, |view, _, cx| {
+                        view.rows = 20;
+                        cx.notify();
+                    })
+                    .unwrap();
+                cx.background_executor()
+                    .timer(Duration::from_millis(250))
+                    .await;
+                let aligned = handle
+                    .update(cx, |_, window, cx| {
+                        let aligned = (scroll.bottom_item(), scroll.logical_scroll_bottom().1);
+                        window.dispatch_event(
+                            ScrollEvent {
+                                position: scroll.bounds().center(),
+                                delta: ScrollDelta::Pixels(point(px(0.), px(20.))),
+                                ..Default::default()
+                            }
+                            .to_platform_input(),
+                            cx,
+                        );
+                        aligned
+                    })
+                    .unwrap();
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+                let after_wheel = scroll.offset().y;
+                handle
+                    .update(cx, |view, _, cx| {
+                        view.rows = 21;
+                        cx.notify();
+                    })
+                    .unwrap();
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+                let after_append = handle
+                    .update(cx, |_, window, cx| {
+                        let offset = scroll.offset().y;
+                        let bounds = scroll.bounds();
+                        let thumb = point(bounds.right() - px(8.), bounds.bottom() - px(25.));
+                        let top = point(thumb.x, bounds.top());
+                        for event in [
+                            MouseDownEvent {
+                                position: thumb,
+                                button: MouseButton::Left,
+                                click_count: 1,
+                                ..Default::default()
+                            }
+                            .to_platform_input(),
+                            MouseMoveEvent {
+                                position: top,
+                                pressed_button: Some(MouseButton::Left),
+                                ..Default::default()
+                            }
+                            .to_platform_input(),
+                            MouseUpEvent {
+                                position: top,
+                                button: MouseButton::Left,
+                                click_count: 1,
+                                ..Default::default()
+                            }
+                            .to_platform_input(),
+                        ] {
+                            window.dispatch_event(event, cx);
+                        }
+                        offset
+                    })
+                    .unwrap();
+                let after_drag = scroll.offset().y;
+                handle
+                    .update(cx, |view, _, cx| {
+                        view.height = px(530.);
+                        cx.notify();
+                    })
+                    .unwrap();
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+                handle
+                    .update(cx, |_, _, cx| {
+                        result.set(Some((
+                            aligned,
+                            after_wheel,
+                            after_append,
+                            after_drag,
+                            scroll.max_offset().y,
+                        )));
+                        cx.quit();
+                    })
+                    .unwrap();
+            })
+            .detach();
+        });
+        let (aligned, after_wheel, after_append, after_drag, max_after_resize) =
+            outcome.take().expect("history must finish layout");
+        assert_eq!(aligned, (19, px(0.)));
+        assert_eq!(after_wheel, px(-340.));
+        assert_eq!(after_append, after_wheel);
+        assert_eq!(after_drag, px(0.));
+        assert_eq!(max_after_resize, px(0.));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires a graphical session or Xvfb"]
     fn first_chat_jump_aligns_the_row_below_the_header() {
         use std::{cell::Cell, rc::Rc, time::Duration};
 
         use gpui_kit::*;
 
+        use super::{HistoryPosition, chat_history_viewport};
+
         struct ChatLayout {
             scroll: ScrollHandle,
-            jump_row: Rc<Cell<Option<usize>>>,
+            position: Rc<Cell<Option<HistoryPosition>>>,
         }
 
         impl Render for ChatLayout {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                let history =
-                    super::scroll_to_chat_jump(div(), self.jump_row.clone(), self.scroll.clone())
-                        .id("chat-history")
-                        .flex()
-                        .flex_col()
-                        .h(px(120.))
-                        .overflow_y_scroll()
-                        .track_scroll(&self.scroll)
-                        .children((0..20).map(|_| div().h(px(24.)).flex_shrink_0()));
+                let history = div()
+                    .h(px(120.))
+                    .flex()
+                    .flex_col()
+                    .child(chat_history_viewport(
+                        (0..20).map(|_| div().h(px(24.)).flex_shrink_0()),
+                        &self.scroll,
+                        &self.position,
+                        true,
+                    ));
                 div()
                     .flex()
                     .flex_col()
@@ -1340,12 +1554,13 @@ mod tests {
         let outcome = Rc::new(Cell::new(None));
         let result = outcome.clone();
         application().run(move |cx| {
+            gpui_kit::init(cx);
             let scroll = ScrollHandle::new();
             let handle = cx
                 .open_window(WindowOptions::default(), |_, cx| {
                     cx.new(|_| ChatLayout {
                         scroll: scroll.clone(),
-                        jump_row: Rc::new(Cell::new(Some(8))),
+                        position: Rc::new(Cell::new(Some(HistoryPosition::Jump(8)))),
                     })
                 })
                 .unwrap();
