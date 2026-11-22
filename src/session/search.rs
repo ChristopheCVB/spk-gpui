@@ -89,7 +89,7 @@ pub(super) fn open_chat_target(
     if let Some(message_id) = message_id {
         chat.open_target(client, channel, message_id.to_owned());
     } else {
-        chat.open(client, channel);
+        chat.open_conversation_target(client, channel);
     }
     sidebar.chat_notice = None;
     true

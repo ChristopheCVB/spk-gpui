@@ -116,8 +116,7 @@ async fn attachment_queue_cancels_in_flight_uploads_and_sends_only_ready_files()
                 "GET /api/unread HTTP/1.1" | "GET /api/users/presence HTTP/1.1" => {
                     request.respond(&[], "{}").await
                 }
-                "GET /api/channels/general/messages?unread=1 HTTP/1.1"
-                | "GET /api/channels/private/messages?unread=1 HTTP/1.1" => {
+                "GET /api/channels/general/messages?unread=1 HTTP/1.1" => {
                     request
                         .respond(&[], r#"{"messages":[],"hasMoreBefore":false}"#)
                         .await;
@@ -180,6 +179,8 @@ async fn attachment_queue_cancels_in_flight_uploads_and_sends_only_ready_files()
         drop(in_flight);
 
         tx.send(Command::OpenDirectMessage("private".into())).await.unwrap();
+        request("GET /api/channels/private/messages?unread=1").await
+            .respond(&[], r#"{"messages":[],"hasMoreBefore":false}"#).await;
         wait_for_sidebar(&rx, |s| s.chat.as_ref().is_some_and(|chat| chat.channel_id == "private" && chat.latest_ready())).await;
 
         tx.send(queue("private", "fail.txt")).await.unwrap();
@@ -213,12 +214,14 @@ async fn attachment_queue_cancels_in_flight_uploads_and_sends_only_ready_files()
         assert_eq!(frame["channelId"], "private");
         assert_eq!(frame["body"], "");
         assert_eq!(frame["attachments"], value!([{"id":"ready","spoiler":true}]));
-        peer.send(Message::text(value!({
-            "type":"message:new", "nonce":frame["nonce"], "message": {
+        peer.close(None).await.unwrap();
+        let _peer = accept_async(sockets.accept().await.unwrap().0).await.unwrap();
+        request("GET /api/channels/private/messages?unread=1").await.respond(&[], &value!({
+            "hasMoreBefore":false, "messages": [{
                 "id":"message","channelId":"private","userId":"alice","createdAt":1,"body":"",
                 "attachments":[{"id":"ready","filename":"ready.txt","mime":"text/plain","size":5,"spoiler":true}]
-            }
-        }).to_string())).await.unwrap();
+            }]
+        }).to_string()).await;
         let received = wait_for_sidebar(&rx, |s| s.chat.as_ref().is_some_and(|chat|
             chat.messages.iter().any(|message| message.id == "message"))).await;
         let chat = received.chat.unwrap();

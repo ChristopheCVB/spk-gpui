@@ -278,7 +278,7 @@ impl Spk {
             }
             if next.history_ready()
                 && let Some(anchor) = self.chat_scroll_anchor.take()
-                && next.has_more_after
+                && (next.has_more_after || next.paging_forward)
                 && let Some(index) = next
                     .messages
                     .iter()
@@ -287,7 +287,10 @@ impl Spk {
                 self.chat_scroll.scroll_to_top_of_item(index);
                 return;
             }
-            if previous.has_more_after && !next.has_more_after {
+            if next.history_ready() && next.paging_forward && previous.loading() {
+                return;
+            }
+            if next.history_ready() && previous.has_more_after && !next.has_more_after {
                 self.chat_scroll.scroll_to_bottom();
                 return;
             }

@@ -243,11 +243,11 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         let mut peer = accept_async(sockets.accept().await.unwrap().0).await.unwrap();
         let request = history_request(&history, "?around=m0").await;
         request.respond(&[], &value!({
-            "messages":[message("m0", 0, "bob", "Edited reply target"), message("m1", 1, "bob", "Earlier message"), message("m2", 2, "bob", "Outside the window")],
+            "messages":[message("older", -1, "bob", "Outside the old start"), message("m0", 0, "bob", "Edited reply target"), message("m1", 1, "bob", "Earlier message"), message("m2", 2, "bob", "Outside the window")],
             "hasMoreBefore":false,"hasMoreAfter":true
         }).to_string()).await;
         wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
-            chat.history_ready() && chat.has_more_after && chat.messages.len() == 2
+            chat.history_ready() && chat.has_more_before && chat.has_more_after && chat.messages.len() == 2
                 && chat.messages[0].body == "Edited reply target"
         })).await;
         tx.send(Command::LoadNewerMessages).await.unwrap();
@@ -258,6 +258,15 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         }).to_string()).await;
         wait_for_messages(&rx, &["m0", "m1", "m2"]).await;
         tx.send(Command::LoadNewerMessages).await.unwrap();
+        let interrupted = history_request(&history, "?after=m2").await;
+        peer.close(None).await.unwrap();
+        let mut peer = accept_async(sockets.accept().await.unwrap().0).await.unwrap();
+        let request = history_request(&history, "?around=m0").await;
+        drop(interrupted);
+        request.respond(&[], &value!({
+            "messages":[message("m0", 0, "bob", "Edited reply target"), message("m1", 1, "bob", "Earlier message"), message("m2", 2, "bob", "Outside the window")],
+            "hasMoreBefore":false,"hasMoreAfter":true
+        }).to_string()).await;
         let request = history_request(&history, "?after=m2").await;
         live(&mut peer, &message("m7", 7, "bob", "Arrived during pagination"), None).await;
         request.respond(&[], &value!({
@@ -274,7 +283,14 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         }).await.unwrap();
         history_request(&history, "?around=removed").await.respond_raw("404 Not Found", &[], b"").await;
         wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| chat.jump_failed)).await;
-        tx.send(Command::LoadLatestMessages).await.unwrap();
+        tx.send(Command::OpenMessageTarget(MessageTarget::new("general", "m0").unwrap()))
+            .await.unwrap();
+        history_request(&history, "?around=m0").await.respond(&[], &value!({
+            "messages":[message("m0", 0, "bob", "Edited reply target")],
+            "hasMoreBefore":false,"hasMoreAfter":true
+        }).to_string()).await;
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| chat.history_ready() && chat.has_more_after)).await;
+        tx.send(Command::OpenConversationTarget("general".into())).await.unwrap();
         page(history_request(&history, "?unread=1").await, &[message("m6", 6, "bob", "After history was read")], true).await;
         wait_for_messages(&rx, &["m6"]).await;
 

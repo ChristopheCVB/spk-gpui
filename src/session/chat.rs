@@ -53,6 +53,7 @@ pub struct ChatView {
     pub message_image: Option<MessageImage>,
     pub action_pending: bool,
     pub action_outcome: Option<ActionOutcome>,
+    pub paging_forward: bool,
     history: History,
 }
 
@@ -122,6 +123,15 @@ pub struct Outgoing {
     attachments: Vec<AttachmentRef>,
 }
 
+impl Outgoing {
+    fn matches_attachment(&self, message: &ChatMessage) -> bool {
+        // SPK claims each uploaded attachment for a single message in the send transaction.
+        self.attachments
+            .first()
+            .is_some_and(|sent| message.attachments.iter().any(|file| file.id == sent.id))
+    }
+}
+
 #[derive(Clone)]
 pub enum Delivery {
     Sending(Instant),
@@ -131,7 +141,7 @@ pub enum Delivery {
 
 #[derive(Clone)]
 enum HistoryRequest {
-    Refresh,
+    Refresh { load_newer: bool },
     Older(String),
     Newer(String),
     Around(String),
@@ -169,7 +179,11 @@ impl ChatSession {
             && view.history != History::Ready
             && matches!(
                 self.history,
-                Some(HistoryRequest::Refresh | HistoryRequest::Latest | HistoryRequest::Around(_))
+                Some(
+                    HistoryRequest::Refresh { .. }
+                        | HistoryRequest::Latest
+                        | HistoryRequest::Around(_)
+                )
             )
         {
             view.messages = Arc::default();
@@ -196,8 +210,13 @@ impl ChatSession {
 
     pub fn open(&mut self, client: &SpkClient, channel: &Channel) {
         if self.select(channel) {
-            self.load(client, HistoryRequest::Refresh);
+            self.load(client, HistoryRequest::Refresh { load_newer: false });
         }
+    }
+
+    pub fn open_conversation_target(&mut self, client: &SpkClient, channel: &Channel) {
+        self.select(channel);
+        self.latest(client);
     }
 
     pub fn open_target(&mut self, client: &SpkClient, channel: &Channel, message_id: String) {
@@ -243,6 +262,7 @@ impl ChatSession {
             message_image: None,
             action_pending: false,
             action_outcome: None,
+            paging_forward: false,
             history: History::Loading,
         });
         true
@@ -273,7 +293,11 @@ impl ChatSession {
         {
             return;
         }
-        self.load(client, HistoryRequest::Refresh);
+        let load_newer = self
+            .selected
+            .as_ref()
+            .is_some_and(|view| view.loading() && view.paging_forward);
+        self.load(client, HistoryRequest::Refresh { load_newer });
     }
 
     pub fn disconnected(&mut self) {
@@ -351,6 +375,10 @@ impl ChatSession {
             return;
         };
         view.history = History::Loading;
+        view.paging_forward = matches!(
+            request,
+            HistoryRequest::Newer(_) | HistoryRequest::Refresh { load_newer: true }
+        );
         view.jump_failed = false;
         let channel = view.channel_id.clone();
         let messages = view.messages.clone();
@@ -359,10 +387,10 @@ impl ChatSession {
         self.history = Some(request.clone());
         self.tasks.spawn(async move {
             match request {
-                HistoryRequest::Refresh if historical && !messages.is_empty() => {
-                    refresh_window(&client, &channel, &messages).await
+                HistoryRequest::Refresh { load_newer } if historical && !messages.is_empty() => {
+                    refresh_window(&client, &channel, &messages, load_newer).await
                 }
-                HistoryRequest::Refresh => {
+                HistoryRequest::Refresh { .. } => {
                     refresh_history(&client, &channel, messages.first()).await
                 }
                 HistoryRequest::Older(before) => client.messages(&channel, Some(&before)).await,
@@ -379,7 +407,23 @@ impl ChatSession {
         });
     }
 
-    pub fn complete(&mut self, client: &SpkClient, result: Result<MessagePage, Failure>) {
+    pub fn complete(
+        &mut self,
+        client: &SpkClient,
+        own_id: Option<&str>,
+        result: Result<MessagePage, Failure>,
+    ) {
+        if let (Some(view), Some(own_id), Ok(page)) = (&self.selected, own_id, &result)
+            && let Some(outgoing) = self.outgoing.get(&view.channel_id)
+            && !outgoing.attachments.is_empty()
+            && page.messages.iter().any(|message| {
+                message.channel_id == view.channel_id
+                    && message.user_id == own_id
+                    && outgoing.matches_attachment(message)
+            })
+        {
+            self.clear_delivered_send(&view.channel_id.clone());
+        }
         let (Some(view), Some(request)) = (&mut self.selected, &self.history) else {
             return;
         };
@@ -419,8 +463,10 @@ impl ChatSession {
                     view.has_more_before = page.has_more_before;
                 }
                 view.history = History::Ready;
-                if matches!(request, HistoryRequest::Refresh | HistoryRequest::Latest)
-                    || matches!(view.pins, Some(Pins::Loading))
+                if matches!(
+                    request,
+                    HistoryRequest::Refresh { .. } | HistoryRequest::Latest
+                ) || matches!(view.pins, Some(Pins::Loading))
                 {
                     self.refresh_pins(client);
                 }
@@ -438,7 +484,9 @@ impl ChatSession {
                 if matches!(error, Failure::Http(reqwest::StatusCode::NOT_FOUND))
                     && matches!(request, HistoryRequest::Older(_) | HistoryRequest::Newer(_))
                 {
-                    self.history = Some(HistoryRequest::Refresh);
+                    self.history = Some(HistoryRequest::Refresh {
+                        load_newer: view.paging_forward,
+                    });
                 }
                 if matches!(error, Failure::Http(reqwest::StatusCode::FORBIDDEN)) {
                     view.messages = Arc::default();
@@ -719,7 +767,9 @@ impl ChatSession {
             && self
                 .outgoing
                 .get(&message.channel_id)
-                .is_some_and(|pending| Some(pending.nonce.as_str()) == nonce)
+                .is_some_and(|pending| {
+                    Some(pending.nonce.as_str()) == nonce || pending.matches_attachment(&message)
+                })
         {
             self.clear_delivered_send(&message.channel_id);
         }
@@ -730,7 +780,7 @@ impl ChatSession {
             if matches!(
                 self.history,
                 Some(
-                    HistoryRequest::Refresh
+                    HistoryRequest::Refresh { .. }
                         | HistoryRequest::Around(_)
                         | HistoryRequest::Latest
                         | HistoryRequest::Newer(_)
@@ -743,7 +793,7 @@ impl ChatSession {
                 if view.direct_message_peer.is_some()
                     && matches!(
                         self.history,
-                        Some(HistoryRequest::Refresh | HistoryRequest::Latest)
+                        Some(HistoryRequest::Refresh { .. } | HistoryRequest::Latest)
                     )
                 {
                     return;
@@ -856,7 +906,9 @@ async fn refresh_window(
     client: &SpkClient,
     channel: &str,
     messages: &[ChatMessage],
+    load_newer: bool,
 ) -> Result<MessagePage, Failure> {
+    let first = position(&messages[0]);
     let last = position(messages.last().expect("loaded history window"));
     for anchor in messages {
         let mut page = match client.messages_around(channel, &anchor.id).await {
@@ -868,24 +920,42 @@ async fn refresh_window(
             if position(cursor) >= last {
                 break;
             }
-            let next = client.messages_after(channel, &cursor.id).await?;
-            if next
-                .messages
-                .first()
-                .is_some_and(|message| position(message) <= position(cursor))
-                || (next.has_more_after && next.messages.is_empty())
-            {
-                return Err(Failure::InvalidResponse);
-            }
-            page.has_more_after = next.has_more_after;
-            page.messages.extend(next.messages);
+            append_newer(client, channel, &mut page).await?;
         }
+        let start = page
+            .messages
+            .partition_point(|message| position(message) < first);
         let end = page
             .messages
             .partition_point(|message| position(message) <= last);
+        page.has_more_before |= start > 0;
         page.has_more_after |= end < page.messages.len();
         page.messages.truncate(end);
+        page.messages.drain(..start);
+        if load_newer && page.has_more_after {
+            append_newer(client, channel, &mut page).await?;
+        }
         return Ok(page);
     }
     refresh_history(client, channel, messages.first()).await
+}
+
+async fn append_newer(
+    client: &SpkClient,
+    channel: &str,
+    page: &mut MessagePage,
+) -> Result<(), Failure> {
+    let cursor = page.messages.last().ok_or(Failure::InvalidResponse)?;
+    let next = client.messages_after(channel, &cursor.id).await?;
+    if next
+        .messages
+        .first()
+        .is_some_and(|message| position(message) <= position(cursor))
+        || (next.has_more_after && next.messages.is_empty())
+    {
+        return Err(Failure::InvalidResponse);
+    }
+    page.has_more_after = next.has_more_after;
+    page.messages.extend(next.messages);
+    Ok(())
 }
