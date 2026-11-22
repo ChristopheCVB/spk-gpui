@@ -125,6 +125,9 @@ impl Spk {
                 return true;
             }
         }
+        if count == 0 && self.reaction_picker_key(key_name, window, cx) {
+            return true;
+        }
         match (primary, modifiers.alt, modifiers.shift, count, key_name) {
             (false, true, shift, 1 | 2, "up" | "down") => {
                 self.close_sidebar_drawer(window, cx);

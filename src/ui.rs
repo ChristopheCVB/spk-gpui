@@ -61,6 +61,8 @@ pub(super) struct Spk {
     message_action_input: Entity<TextareaState>,
     message_action_form: Option<chat::MessageActionForm>,
     message_menu_focus: Option<(String, String, FocusHandle)>,
+    reaction_input: Entity<InputState>,
+    reaction_picker: Option<chat::ReactionPicker>,
     chat_history_keyboard_focus: Cell<Option<FocusHandle>>,
     chat_row_focus: std::cell::RefCell<std::collections::HashMap<String, FocusHandle>>,
     chat_scroll: ScrollHandle,
@@ -154,6 +156,13 @@ impl Spk {
         cx.subscribe_in(&message_action_input, window, |this, _, event, _, cx| {
             if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
                 this.submit_message_action(cx);
+            }
+        })
+        .detach();
+        let reaction_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search emoji…"));
+        cx.subscribe(&reaction_input, |this, _, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.update_reaction_search(cx);
             }
         })
         .detach();
@@ -370,6 +379,8 @@ impl Spk {
             message_action_input,
             message_action_form: None,
             message_menu_focus: None,
+            reaction_input,
+            reaction_picker: None,
             chat_history_keyboard_focus: Cell::default(),
             chat_row_focus: Default::default(),
             chat_scroll: ScrollHandle::new(),

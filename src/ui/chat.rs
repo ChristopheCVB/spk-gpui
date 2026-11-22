@@ -2,9 +2,11 @@ mod actions;
 mod attachments;
 mod gifs;
 mod history;
+mod reaction_picker;
 
 pub(super) use actions::{MessageActionForm, PinPanel};
 pub(super) use attachments::AttachmentUi;
+pub(super) use reaction_picker::ReactionPicker;
 
 use std::{
     cell::RefCell,
@@ -265,6 +267,9 @@ impl Spk {
     }
 
     pub(super) fn escape_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.close_reaction_picker(window, cx) {
+            return true;
+        }
         if self.chat_pins_focus.contains_focused(window, cx) && self.close_pins(window, cx) {
             return true;
         }
@@ -399,6 +404,18 @@ impl Spk {
         }
         self.update_gif_input(previous, next, window, cx);
         Self::update_message_actions(&mut self.message_action_form, previous, next);
+        if self.reaction_picker.as_ref().is_some_and(|picker| {
+            !next.is_some_and(|chat| {
+                chat.channel_id == picker.channel_id
+                    && chat.can_send()
+                    && chat
+                        .messages
+                        .iter()
+                        .any(|message| message.id == picker.message_id)
+            })
+        }) {
+            self.reaction_picker = None;
+        }
         if let Some(next) = next.filter(|chat| chat.latest_ready())
             && previous.is_none_or(|previous| {
                 previous.channel_id != next.channel_id
@@ -1041,11 +1058,18 @@ impl Spk {
                     search::activate_chat_link(&link_app, url, cx);
                 }
             });
+        let row_focus = self
+            .chat_row_focus
+            .borrow_mut()
+            .entry(message.id.clone())
+            .or_insert_with(|| cx.focus_handle().tab_stop(true))
+            .clone();
         let composer_busy = chat.outgoing.is_some() || !chat.can_send();
         let message_actions = Rc::new(actions::MessageActions {
             app: app.clone(),
             channel: channel.clone(),
             message: message_id.clone(),
+            row_focus: row_focus.clone(),
             can_edit: sidebar.profile.id.as_deref() == Some(&message.user_id),
             can_delete: sidebar.can_remove_message_content(message),
             pin_to: chat.can_pin(sidebar.is_admin()).then_some(!message.pinned),
@@ -1059,12 +1083,6 @@ impl Spk {
         });
         let reply_channel = channel.clone();
         let reply_id = message_id.clone();
-        let row_focus = self
-            .chat_row_focus
-            .borrow_mut()
-            .entry(message.id.clone())
-            .or_insert_with(|| cx.focus_handle().tab_stop(true))
-            .clone();
         let keyboard_focused = row_focus.is_focused(window) && window.last_input_was_keyboard();
         let row_focused = row_focus.contains_focused(window, cx);
         let author = sidebar.message_author(&message.user_id);
@@ -1077,8 +1095,14 @@ impl Spk {
             .is_some_and(|(channel, id, focus)| {
                 channel == &chat.channel_id && id == &message.id && focus.is_focused(window)
             });
-        let toolbar =
-            message_actions.toolbar(sidebar, chat, message, row_focused || menu_focused, cx);
+        let toolbar = message_actions.toolbar(
+            self,
+            sidebar,
+            chat,
+            message,
+            row_focused || menu_focused,
+            cx,
+        );
         let content = div()
             .flex_1()
             .min_w_0()
