@@ -1965,6 +1965,76 @@ fn failed_screen_quality_restores_the_previous_preset_for_the_current_share() {
     );
 }
 
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_picker_failures_allow_retry_in_the_same_voice_session() {
+    let mut sidebar = Sidebar::new(
+        serde_json::from_str(r#"{"id":"alice","email":"alice@example.test"}"#).unwrap(),
+        None,
+    );
+    let mut view = VoiceView::joining("first".into());
+    view.status = VoiceStatus::Connected;
+    sidebar.voice = Some(view);
+    let session = VoiceSession::default();
+    let mut settings = fixture_settings(String::new(), Call::start_for_test);
+    session
+        .apply_controls(&mut sidebar, &mut settings, Command::OpenScreenShare)
+        .await;
+
+    for (error, notice) in [
+        (
+            screen::CaptureError::Cancelled,
+            "Screen Share selection cancelled.",
+        ),
+        (
+            screen::CaptureError::Permission,
+            "Allow screen capture in system settings, then select a source again.",
+        ),
+    ] {
+        let attempt = sidebar.voice_intent.screen.attempt;
+        session.screen_report(
+            &mut sidebar,
+            &settings,
+            screen::Report {
+                attempt,
+                state: screen::State::Choices(vec![screen::Choice {
+                    id: screen::SYSTEM_PICKER.into(),
+                    label: "Windows picker (video only)".into(),
+                }]),
+            },
+        );
+        session
+            .apply_controls(
+                &mut sidebar,
+                &mut settings,
+                Command::ChooseWindowsScreenSource(attempt, Err(error)),
+            )
+            .await;
+        assert_eq!(
+            sidebar.voice_intent.screen.action,
+            screen::Action::ChooseSystem(Err(error))
+        );
+        session.screen_report(
+            &mut sidebar,
+            &settings,
+            screen::Report {
+                attempt,
+                state: screen::State::Ended(notice),
+            },
+        );
+        let voice = sidebar.voice.as_ref().unwrap();
+        assert_eq!(voice.channel_id, "first");
+        assert_eq!(voice.status, VoiceStatus::Connected);
+        assert!(
+            matches!(voice.screen.as_ref().unwrap().state, screen::State::Ended(message) if message == notice)
+        );
+        session
+            .apply_controls(&mut sidebar, &mut settings, Command::OpenScreenShare)
+            .await;
+        assert_eq!(sidebar.voice_intent.screen.attempt, attempt + 1);
+    }
+}
+
 #[tokio::test]
 async fn camera_and_watch_choices_are_scoped_to_the_current_voice_session() {
     let (observed, observations) = async_channel::bounded(1);
