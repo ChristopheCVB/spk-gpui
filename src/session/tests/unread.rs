@@ -91,6 +91,7 @@ async fn marking_read_and_unread_changes_the_shared_read_point() {
                 "GET /api/unread HTTP/1.1" => {
                     value!({"general":{"unread":count,"mentions":count.saturating_sub(1)}})
                 }
+                "GET /api/channels/general/pins HTTP/1.1" => value!([]),
                 "GET /api/channels/general/messages?unread=1 HTTP/1.1" => value!({
                     "messages":[
                         {"id":"first","channelId":"general","userId":"bob","createdAt":1,"body":"Hi <@alice>"},

@@ -31,6 +31,14 @@ impl Spk {
         if event.input_preference == InputPreference::CharacterInput {
             return false;
         }
+        let everything_search = primary && modifiers.shift && count == 2 && key_name == "f";
+        if self.search_panel.is_some()
+            && !everything_search
+            && !self.video_stage.fullscreen
+            && !workspace::wide_workspace(window)
+        {
+            return false;
+        }
         if primary && count == 1 && key_name == "k" {
             if window.has_active_dialog(cx) {
                 if self
@@ -44,6 +52,7 @@ impl Spk {
                 self.quick_switcher = None;
                 window.close_dialog(cx);
             } else {
+                self.close_sidebar_drawer(window, cx);
                 self.open_quick_switcher(window, cx);
             }
             return true;
@@ -118,22 +127,30 @@ impl Spk {
         }
         match (primary, modifiers.alt, modifiers.shift, count, key_name) {
             (false, true, shift, 1 | 2, "up" | "down") => {
+                self.close_sidebar_drawer(window, cx);
                 self.navigate_channel(key_name == "up", shift, window, cx);
             }
             (true, false, false, 1, "b") if !typing => {
-                self.toggle_sidebar(cx);
+                self.toggle_sidebar(window, cx);
             }
             (true, false, true, 2, "f") => {
+                self.close_sidebar_drawer(window, cx);
                 self.open_search(true, window, cx);
             }
             (false, false, false, 0, "/") if !typing => {
+                self.close_sidebar_drawer(window, cx);
                 self.open_message_search(window, cx);
             }
             (false, false, _, 0 | 1, "?") | (false, false, true, 1, "/") if !typing => {
+                self.close_sidebar_drawer(window, cx);
                 self.open_shortcut_reference(window, cx)
             }
             (false, false, false, 0, "up") if composer && self.edit_last_message(window, cx) => {}
-            (false, false, false, 0, "escape") if !self.video_stage.fullscreen => {
+            (false, false, false, 0, "escape")
+                if !self.video_stage.fullscreen
+                    && !self.sidebar_drawer_open
+                    && self.search_panel.is_none() =>
+            {
                 return self.escape_chat(window, cx);
             }
             _ => return false,

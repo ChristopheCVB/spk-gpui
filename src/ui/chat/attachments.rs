@@ -452,10 +452,11 @@ impl Spk {
                             .object_fit(ObjectFit::Contain),
                     ),
                     Some(Preview::Text(text)) => row.child(
-                        div()
-                            .max_w_full()
-                            .p_2()
-                            .child(Label::new(text.clone()).text_xs().font_family("monospace")),
+                        div().max_w_full().p_2().child(
+                            Label::new(text.clone())
+                                .text_xs()
+                                .font_family(cx.theme().mono_font_family.clone()),
+                        ),
                     ),
                     Some(Preview::Audio(clip)) => row
                         .child(self.attachment_media_controls(file, "audio", pending, cx))

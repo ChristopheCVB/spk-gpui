@@ -20,6 +20,7 @@ async fn gif_picker_searches_saves_and_shares_across_conversations() {
                 "GET /api/channels HTTP/1.1" => request.respond(&[], r#"[{"id":"general","type":"text","name":"general"},{"id":"private","type":"dm","otherUserId":"bob","name":null}]"#).await,
                 "GET /api/voice HTTP/1.1" | "GET /api/users HTTP/1.1" => request.respond(&[], "[]").await,
                 "GET /api/unread HTTP/1.1" | "GET /api/users/presence HTTP/1.1" => request.respond(&[], "{}").await,
+                "GET /api/channels/general/pins HTTP/1.1" | "GET /api/channels/private/pins HTTP/1.1" => request.respond(&[], "[]").await,
                 "GET /api/channels/general/messages?unread=1 HTTP/1.1"
                 | "GET /api/channels/private/messages?unread=1 HTTP/1.1" => {
                     request.respond(&[], r#"{"messages":[],"hasMoreBefore":false}"#).await;

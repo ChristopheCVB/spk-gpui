@@ -2,7 +2,13 @@ use super::*;
 
 use gpui_kit::component::menu::PopupMenu;
 
-use crate::session::{MessageAction, Pins};
+use crate::{chat_markdown::notification_preview, session::MessageAction};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::ui) enum PinPanel {
+    Latest,
+    All,
+}
 
 #[derive(Clone, Copy)]
 pub(super) enum ActionForm {
@@ -343,99 +349,183 @@ impl Spk {
             }))
     }
 
+    pub(super) fn close_pins(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let opener = match self.chat_pins.take() {
+            Some(PinPanel::Latest) => &self.latest_pin_focus,
+            Some(PinPanel::All) => &self.all_pins_focus,
+            None => return false,
+        };
+        opener.focus(window, cx);
+        cx.notify();
+        true
+    }
+
     pub(super) fn pins(
         &self,
         sidebar: &Sidebar,
         view: &ChatView,
         cx: &Context<Self>,
     ) -> impl IntoElement {
-        let channel_id = view.channel_id.clone();
-        let shown = view.pins.is_some();
-        let can_pin = view.can_pin(sidebar.is_admin());
         let theme = cx.theme();
-        div()
-            .flex()
-            .flex_col()
-            .px_4()
-            .py_2()
-            .border_b_1()
+        let bar = div()
+            .id("chat-pins")
+            .track_focus(&self.chat_pins_focus)
+            .min_w_0()
+            .flex_shrink_0();
+        let pins = match &view.pins {
+            Some(Pins::Failed) => {
+                let channel_id = view.channel_id.clone();
+                return bar.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_4()
+                        .child(
+                            Label::new("Could not load Pins.").text_color(theme.muted_foreground),
+                        )
+                        .child(
+                            Button::new("retry-pins")
+                                .small()
+                                .tab_stop(true)
+                                .label("Retry")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.send(Command::RetryChatPins(channel_id.clone()), None, cx);
+                                })),
+                        ),
+                );
+            }
+            Some(Pins::Ready(pins)) if !pins.is_empty() => pins,
+            _ => return bar,
+        };
+        let latest = &pins[0];
+        let author = sidebar.message_author(&latest.user_id);
+        let snippet = pin_snippet(latest, sidebar);
+        let latest_open = self.chat_pins == Some(PinPanel::Latest);
+        let all_open = self.chat_pins == Some(PinPanel::All);
+        let visible = if all_open {
+            pins.as_slice()
+        } else {
+            &pins[..1]
+        };
+        let can_pin = view.can_pin(sidebar.is_admin());
+        bar.border_b_1()
             .border_color(theme.border)
             .child(
-                div().flex().child(
-                    Button::new("show-pins")
-                        .small()
-                        .ghost()
-                        .tab_stop(true)
-                        .label(if shown { "Close Pins" } else { "Pins" })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.send(
-                                Command::ShowChatPins {
-                                    channel_id: channel_id.clone(),
-                                    shown: !shown,
-                                },
-                                None,
-                                cx,
-                            );
-                        })),
-                ),
-            )
-            .when_some(view.pins.as_ref(), |area, pins| {
-                area.child(match pins {
-                    Pins::Loading => Label::new("Loading Pins…").into_any_element(),
-                    Pins::Failed => {
-                        let channel_id = view.channel_id.clone();
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(Label::new("Could not load Pins."))
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_4()
+                    .py_1()
+                    .child(
+                        Button::new("latest-pin")
+                            .small()
+                            .ghost()
+                            .selected(latest_open)
+                            .toggled(latest_open)
+                            .track_focus(&self.latest_pin_focus)
+                            .tab_stop(true)
+                            .flex_1()
+                            .min_w_0()
+                            .accessibility_label(format!(
+                                "{} latest pinned message from {author}: {snippet}",
+                                if latest_open { "Hide" } else { "Show" }
+                            ))
                             .child(
-                                Button::new("retry-pins")
-                                    .small()
-                                    .tab_stop(true)
-                                    .label("Retry")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.send(
-                                            Command::ShowChatPins {
-                                                channel_id: channel_id.clone(),
-                                                shown: true,
-                                            },
-                                            None,
-                                            cx,
-                                        );
-                                    })),
+                                div()
+                                    .flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        Icon::new(IconName::Pin)
+                                            .small()
+                                            .flex_shrink_0()
+                                            .text_color(theme.primary),
+                                    )
+                                    .child(Label::new(format!("{author} · {snippet}")).truncate()),
                             )
-                            .into_any_element()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.latest_pin_focus.focus(window, cx);
+                                this.chat_pins = (!latest_open).then_some(PinPanel::Latest);
+                                cx.notify();
+                            })),
+                    )
+                    .when(pins.len() > 1, |row| {
+                        row.child(
+                            Button::new("all-pins")
+                                .small()
+                                .ghost()
+                                .selected(all_open)
+                                .toggled(all_open)
+                                .track_focus(&self.all_pins_focus)
+                                .tab_stop(true)
+                                .flex_shrink_0()
+                                .label(format!("+{}", pins.len() - 1))
+                                .accessibility_label(if all_open {
+                                    "Close pinned messages".to_owned()
+                                } else {
+                                    format!("Show all {} pinned messages", pins.len())
+                                })
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.all_pins_focus.focus(window, cx);
+                                    this.chat_pins = (!all_open).then_some(PinPanel::All);
+                                    cx.notify();
+                                })),
+                        )
+                    }),
+            )
+            .when(self.chat_pins.is_some(), |bar| {
+                bar.on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    if event.button == MouseButton::Left {
+                        this.chat_pins = None;
+                        cx.notify();
                     }
-                    Pins::Ready(pins) if pins.is_empty() => {
-                        Label::new("No pinned messages.").into_any_element()
-                    }
-                    Pins::Ready(pins) => div()
+                }))
+                .child(
+                    div()
                         .id("pins-list")
-                        .max_h(px(240.))
+                        .max_h(px(144.))
                         .overflow_y_scroll()
-                        .children(pins.iter().map(|message| {
-                            let (channel_id, message_id) =
-                                (view.channel_id.clone(), message.id.clone());
-                            let (unpin_channel, unpin_id) =
-                                (channel_id.clone(), message_id.clone());
-                            let preview = message_markdown(
-                                &message.body,
-                                |id| sidebar.message_author(id),
-                                |_| false,
-                                None,
-                            );
-                            let preview: String = preview.chars().take(180).collect();
+                        .children(visible.iter().map(|message| {
+                            let channel_id = view.channel_id.clone();
+                            let message_id = message.id.clone();
+                            let unpin_channel = channel_id.clone();
+                            let unpin_id = message_id.clone();
+                            let preview = if all_open {
+                                let author = sidebar.message_author(&message.user_id);
+                                let snippet = pin_snippet(message, sidebar);
+                                Label::new(format!("{author} · {snippet}"))
+                                    .truncate()
+                                    .into_any_element()
+                            } else {
+                                let body = plain_text(&message_markdown(
+                                    &message.body,
+                                    |id| sidebar.message_author(id),
+                                    |_| false,
+                                    None,
+                                ));
+                                let body = if body.trim().is_empty() {
+                                    pin_snippet(message, sidebar)
+                                } else {
+                                    body
+                                };
+                                div()
+                                    .id("preview")
+                                    .max_h(px(72.))
+                                    .overflow_y_scroll()
+                                    .child(Label::new(body))
+                                    .into_any_element()
+                            };
                             div()
                                 .id(SharedString::from(message.id.clone()))
-                                .py_1()
+                                .px_4()
+                                .py_2()
                                 .border_t_1()
                                 .border_color(theme.border)
-                                .child(
-                                    Label::new(sidebar.message_author(&message.user_id).to_owned())
-                                        .font_semibold(),
-                                )
-                                .child(Label::new(preview))
+                                .child(preview)
                                 .child(
                                     div()
                                         .flex()
@@ -445,24 +535,19 @@ impl Spk {
                                                 .small()
                                                 .tab_stop(true)
                                                 .label("Go to message")
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.send(
-                                                        Command::ShowChatPins {
-                                                            channel_id: channel_id.clone(),
-                                                            shown: false,
-                                                        },
-                                                        None,
-                                                        cx,
-                                                    );
-                                                    this.send(
-                                                        Command::JumpToChatMessage {
-                                                            channel_id: channel_id.clone(),
-                                                            message_id: message_id.clone(),
-                                                        },
-                                                        None,
-                                                        cx,
-                                                    );
-                                                })),
+                                                .on_click(cx.listener(
+                                                    move |this, _, window, cx| {
+                                                        this.close_pins(window, cx);
+                                                        this.send(
+                                                            Command::JumpToChatMessage {
+                                                                channel_id: channel_id.clone(),
+                                                                message_id: message_id.clone(),
+                                                            },
+                                                            None,
+                                                            cx,
+                                                        );
+                                                    },
+                                                )),
                                         )
                                         .when(can_pin, |row| {
                                             row.child(
@@ -491,11 +576,16 @@ impl Spk {
                                             )
                                         }),
                                 )
-                        }))
-                        .into_any_element(),
-                })
+                        })),
+                )
             })
     }
+}
+
+fn pin_snippet(message: &ChatMessage, sidebar: &Sidebar) -> String {
+    notification_preview(&message.body, !message.attachments.is_empty(), |id| {
+        sidebar.message_author(id)
+    })
 }
 
 pub(super) struct MessageActions {

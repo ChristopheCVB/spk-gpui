@@ -53,6 +53,10 @@ pub(super) struct Spk {
     chat_input: Entity<TextareaState>,
     gif_input: Entity<InputState>,
     gif_button_focus: FocusHandle,
+    chat_pins: Option<chat::PinPanel>,
+    chat_pins_focus: FocusHandle,
+    latest_pin_focus: FocusHandle,
+    all_pins_focus: FocusHandle,
     chat_attachments: chat::AttachmentUi,
     message_action_input: Entity<TextareaState>,
     message_action_form: Option<chat::MessageActionForm>,
@@ -67,9 +71,18 @@ pub(super) struct Spk {
     device_picker: Option<(VoiceControls, DeviceKind)>,
     selected_voice_channel: Option<String>,
     sidebar_open: bool,
+    sidebar_width: Pixels,
+    sidebar_drawer_open: bool,
+    sidebar_toggle_focus: FocusHandle,
+    new_text_channel_focus: FocusHandle,
+    new_voice_channel_focus: FocusHandle,
+    search_button_focus: FocusHandle,
+    search_panel: Option<Entity<search::SearchPanel>>,
+    voice_strip_toggle_focus: FocusHandle,
     quick_switcher: Option<WeakEntity<gpui_kit::component::command::CommandState>>,
     video_stage: video::VideoStage,
     workspace_focus: FocusHandle,
+    settings_button_focus: FocusHandle,
     appearance: Appearance,
     appearance_error: bool,
     density: Density,
@@ -227,6 +240,14 @@ impl Spk {
             }
         })
         .detach();
+        cx.observe_window_bounds(window, |this, window, cx| {
+            if workspace::wide_workspace(window) {
+                this.close_sidebar_drawer(window, cx);
+            } else {
+                this.focus_search_slideover(window, cx);
+            }
+        })
+        .detach();
 
         let clock = cx.background_executor().clone();
         cx.spawn_in(window, async move |this, cx| {
@@ -298,6 +319,8 @@ impl Spk {
                         } else if !signed_in {
                             this.selected_voice_channel = None;
                             this.device_picker = None;
+                            this.close_sidebar_drawer(window, cx);
+                            this.search_panel = None;
                             window.close_all_dialogs(cx);
                         }
                         this.focus_account_input(&view, window, cx);
@@ -311,6 +334,8 @@ impl Spk {
             }
             let _ = this.update_in(cx, |this, window, cx| {
                 this.shortcuts.signed_in(false);
+                this.close_sidebar_drawer(window, cx);
+                this.search_panel = None;
                 window.close_all_dialogs(cx);
                 this.set_session_view(
                     View::SignIn {
@@ -332,6 +357,10 @@ impl Spk {
             chat_input,
             gif_input,
             gif_button_focus: cx.focus_handle(),
+            chat_pins: None,
+            chat_pins_focus: cx.focus_handle().tab_stop(false),
+            latest_pin_focus: cx.focus_handle(),
+            all_pins_focus: cx.focus_handle(),
             chat_attachments: Default::default(),
             message_action_input,
             message_action_form: None,
@@ -346,9 +375,18 @@ impl Spk {
             device_picker: None,
             selected_voice_channel: None,
             sidebar_open: true,
+            sidebar_width: workspace::SIDEBAR_WIDTH,
+            sidebar_drawer_open: false,
+            sidebar_toggle_focus: cx.focus_handle(),
+            new_text_channel_focus: cx.focus_handle(),
+            new_voice_channel_focus: cx.focus_handle(),
+            search_button_focus: cx.focus_handle(),
+            search_panel: None,
+            voice_strip_toggle_focus: cx.focus_handle(),
             quick_switcher: None,
             video_stage: video::VideoStage::default(),
             workspace_focus,
+            settings_button_focus: cx.focus_handle(),
             appearance,
             appearance_error: false,
             density: Density::load(),
@@ -424,6 +462,7 @@ impl Spk {
             for alert in std::mem::take(&mut sidebar.alerts) {
                 self.show_alert(alert, sidebar, window, cx);
             }
+            self.sync_search_conversation(sidebar, cx);
         } else if matches!(self.view, View::SignedIn(_)) {
             window.clear_notifications(cx);
         }
@@ -511,7 +550,7 @@ impl Spk {
 
 impl Render for Spk {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.prepare_video_stage(window);
+        self.prepare_video_stage(window, cx);
         let content = match &self.view {
             View::Busy(label) => Label::new(*label).into_any_element(),
             View::SignIn {
@@ -524,7 +563,7 @@ impl Render for Spk {
             View::ChooseNickname { message, notice } => self
                 .choose_nickname(*message, *notice, cx)
                 .into_any_element(),
-            View::SignedIn(sidebar) => self.workspace(sidebar, cx).into_any_element(),
+            View::SignedIn(sidebar) => self.workspace(sidebar, window, cx).into_any_element(),
             View::RetrySignOut => div()
                 .flex()
                 .flex_col()
@@ -546,6 +585,7 @@ impl Render for Spk {
         div()
             .id("spk-window")
             .track_focus(&self.workspace_focus)
+            .on_key_down(cx.listener(Self::dismiss_search_on_escape))
             .on_key_down(cx.listener(Self::dismiss_video_fullscreen))
             .on_key_down(cx.listener(Self::hovered_video_key))
             .size_full()

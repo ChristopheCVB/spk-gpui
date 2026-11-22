@@ -2,7 +2,7 @@ mod actions;
 mod attachments;
 mod gifs;
 
-pub(super) use actions::MessageActionForm;
+pub(super) use actions::{MessageActionForm, PinPanel};
 pub(super) use attachments::AttachmentUi;
 
 use std::{
@@ -22,7 +22,7 @@ use super::*;
 use crate::{
     api::{ChatMessage, MessageTarget, UnreadState},
     chat_markdown::{image_preview_links, message_markdown, plain_text, safe_link},
-    session::{ChatJump, ChatView, Delivery},
+    session::{ChatJump, ChatView, Delivery, Pins},
 };
 
 pub(super) const BOLD: (&str, &str) = ("**", "**");
@@ -181,6 +181,9 @@ impl Spk {
     }
 
     pub(super) fn escape_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.chat_pins_focus.contains_focused(window, cx) && self.close_pins(window, cx) {
+            return true;
+        }
         let Some(chat) = chat(&self.view) else {
             return false;
         };
@@ -313,6 +316,12 @@ impl Spk {
         }
         let reset = previous.map(|chat| (&chat.channel_id, chat.unavailable()))
             != next.map(|chat| (&chat.channel_id, chat.unavailable()));
+        if reset
+            || matches!(next.and_then(|chat| chat.pins.as_ref()), Some(Pins::Ready(pins))
+                if pins.is_empty() || pins.len() == 1 && self.chat_pins == Some(PinPanel::All))
+        {
+            self.chat_pins = None;
+        }
         if reset {
             self.chat_input.update(cx, |input, cx| {
                 input.set_value(
@@ -765,7 +774,7 @@ impl Spk {
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
-        let surface = theme.secondary;
+        let surface = theme.popover;
         let disabled = chat.outgoing.is_some() || !chat.can_send();
         let can_send = !disabled && chat.draft.can_send(&self.chat_input.read(cx).value());
         let app = cx.weak_entity();
@@ -907,7 +916,9 @@ impl Spk {
             .id(SharedString::from(format!("message-{}", message.id)))
             .focusable()
             .tab_index(0)
-            .focus_visible(|row| row.bg(theme.secondary))
+            .border_l_2()
+            .border_color(theme.transparent)
+            .focus_visible(|row| row.border_color(theme.ring))
             .on_key_down(cx.listener(move |app, event: &KeyDownEvent, window, cx| {
                 if !event.is_held
                     && !event.keystroke.modifiers.modified()

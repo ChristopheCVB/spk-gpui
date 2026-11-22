@@ -167,10 +167,7 @@ pub enum Command {
         message_id: String,
         action: MessageAction,
     },
-    ShowChatPins {
-        channel_id: String,
-        shown: bool,
-    },
+    RetryChatPins(String),
     LoadChangelog {
         page: u32,
         head: Option<String>,
@@ -627,6 +624,14 @@ async fn watch_session(
         chat.fill_previews(client);
         chat.gifs.fill_previews(client);
         sidebar.chat = chat.view();
+        search.retain_conversation(
+            &mut sidebar.search,
+            sidebar
+                .chat
+                .as_ref()
+                .filter(|chat| !chat.unavailable())
+                .map(|chat| chat.channel_id.as_str()),
+        );
         sidebar.voice_moderation_pending = !voice_moderation.is_empty();
         radio.sync(&mut sidebar, &voice);
         soundboard.sync(&mut sidebar, &voice);
@@ -917,7 +922,7 @@ async fn watch_session(
                 Ok(Command::MutateChatMessage { channel_id, message_id, action }) => {
                     chat.mutate(client, &sidebar, &channel_id, message_id, action);
                 }
-                Ok(Command::ShowChatPins { channel_id, shown }) => chat.show_pins(client, &channel_id, shown),
+                Ok(Command::RetryChatPins(channel_id)) => chat.retry_pins(client, &channel_id),
                 Ok(command @ (Command::SaveNickname(_) | Command::UploadAvatar(_) | Command::InspectProfileEmail(..))) => {
                     ProfileWork::start(&mut profiles, &mut sidebar, client, command);
                 }

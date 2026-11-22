@@ -116,6 +116,7 @@ async fn attachment_queue_cancels_in_flight_uploads_and_sends_only_ready_files()
                 "GET /api/unread HTTP/1.1" | "GET /api/users/presence HTTP/1.1" => {
                     request.respond(&[], "{}").await
                 }
+                "GET /api/channels/general/pins HTTP/1.1" | "GET /api/channels/private/pins HTTP/1.1" => request.respond(&[], "[]").await,
                 "GET /api/channels/general/messages?unread=1 HTTP/1.1" => {
                     request
                         .respond(&[], r#"{"messages":[],"hasMoreBefore":false}"#)
