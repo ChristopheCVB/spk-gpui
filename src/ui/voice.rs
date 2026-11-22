@@ -16,6 +16,7 @@ use gpui_kit::component::{
 pub enum VoiceControls {
     Profile,
     Channel,
+    BottomBar,
 }
 
 fn device_label(kind: DeviceKind) -> &'static str {
@@ -65,14 +66,14 @@ impl Spk {
         } else {
             "Mute"
         };
-        let compact = location == VoiceControls::Profile;
+        let compact = location != VoiceControls::Channel;
         let theme = cx.theme();
 
         div()
-            .id(if compact {
-                "profile-voice-controls"
-            } else {
-                "room-voice-controls"
+            .id(match location {
+                VoiceControls::Profile => "profile-voice-controls",
+                VoiceControls::Channel => "room-voice-controls",
+                VoiceControls::BottomBar => "bottom-bar-voice-controls",
             })
             .flex()
             .items_center()
@@ -124,14 +125,17 @@ impl Spk {
                             )
                             .when(!compact, |button| button.label(label))
                             .when_some(binding, |button, binding| {
-                                button
-                                    .tooltip(format!("{label} ({})", binding.chord))
-                                    .child(
-                                        gpui_kit::component::kbd::Kbd::new(
-                                            binding.chord.keystroke(),
+                                button.tooltip(format!("{label} ({})", binding.chord)).when(
+                                    location != VoiceControls::BottomBar,
+                                    |button| {
+                                        button.child(
+                                            gpui_kit::component::kbd::Kbd::new(
+                                                binding.chord.keystroke(),
+                                            )
+                                            .outline(),
                                         )
-                                        .outline(),
-                                    )
+                                    },
+                                )
                             })
                             .on_click(
                                 cx.listener(move |this, _, _, cx| this.voice_action(action, cx)),

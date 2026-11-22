@@ -71,6 +71,9 @@ pub(super) struct Spk {
     device_picker: Option<(VoiceControls, DeviceKind)>,
     selected_voice_channel: Option<String>,
     sidebar_open: bool,
+    sidebar_width: Pixels,
+    sidebar_drawer_open: bool,
+    sidebar_toggle_focus: FocusHandle,
     quick_switcher: Option<WeakEntity<gpui_kit::component::command::CommandState>>,
     video_stage: video::VideoStage,
     workspace_focus: FocusHandle,
@@ -232,6 +235,12 @@ impl Spk {
             }
         })
         .detach();
+        cx.observe_window_bounds(window, |this, window, cx| {
+            if workspace::wide_workspace(window) {
+                this.close_sidebar_drawer(window, cx);
+            }
+        })
+        .detach();
 
         let clock = cx.background_executor().clone();
         cx.spawn_in(window, async move |this, cx| {
@@ -303,6 +312,7 @@ impl Spk {
                         } else if !signed_in {
                             this.selected_voice_channel = None;
                             this.device_picker = None;
+                            this.close_sidebar_drawer(window, cx);
                             window.close_all_dialogs(cx);
                         }
                         this.focus_account_input(&view, window, cx);
@@ -316,6 +326,7 @@ impl Spk {
             }
             let _ = this.update_in(cx, |this, window, cx| {
                 this.shortcuts.signed_in(false);
+                this.close_sidebar_drawer(window, cx);
                 window.close_all_dialogs(cx);
                 this.set_session_view(
                     View::SignIn {
@@ -355,6 +366,9 @@ impl Spk {
             device_picker: None,
             selected_voice_channel: None,
             sidebar_open: true,
+            sidebar_width: workspace::SIDEBAR_WIDTH,
+            sidebar_drawer_open: false,
+            sidebar_toggle_focus: cx.focus_handle(),
             quick_switcher: None,
             video_stage: video::VideoStage::default(),
             workspace_focus,
@@ -534,7 +548,7 @@ impl Render for Spk {
             View::ChooseNickname { message, notice } => self
                 .choose_nickname(*message, *notice, cx)
                 .into_any_element(),
-            View::SignedIn(sidebar) => self.workspace(sidebar, cx).into_any_element(),
+            View::SignedIn(sidebar) => self.workspace(sidebar, window, cx).into_any_element(),
             View::RetrySignOut => div()
                 .flex()
                 .flex_col()
