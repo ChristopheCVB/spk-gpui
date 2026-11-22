@@ -76,6 +76,7 @@ pub(super) struct Spk {
     sidebar_toggle_focus: FocusHandle,
     search_button_focus: FocusHandle,
     search_panel: Option<Entity<search::SearchPanel>>,
+    voice_strip_toggle_focus: FocusHandle,
     quick_switcher: Option<WeakEntity<gpui_kit::component::command::CommandState>>,
     video_stage: video::VideoStage,
     workspace_focus: FocusHandle,
@@ -377,6 +378,7 @@ impl Spk {
             sidebar_toggle_focus: cx.focus_handle(),
             search_button_focus: cx.focus_handle(),
             search_panel: None,
+            voice_strip_toggle_focus: cx.focus_handle(),
             quick_switcher: None,
             video_stage: video::VideoStage::default(),
             workspace_focus,
@@ -543,7 +545,7 @@ impl Spk {
 
 impl Render for Spk {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.prepare_video_stage(window);
+        self.prepare_video_stage(window, cx);
         let content = match &self.view {
             View::Busy(label) => Label::new(*label).into_any_element(),
             View::SignIn {
