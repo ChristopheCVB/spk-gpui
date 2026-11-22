@@ -151,7 +151,7 @@ impl Spk {
             if !self.video_stage.tile_focus.contains_key(person.id) {
                 self.video_stage
                     .tile_focus
-                    .insert(person.id.to_owned(), cx.focus_handle());
+                    .insert(person.id.to_owned(), cx.focus_handle().tab_stop(true));
             }
         }
         if self

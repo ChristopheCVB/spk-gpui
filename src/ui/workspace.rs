@@ -1114,7 +1114,6 @@ impl Spk {
         div()
             .id(SharedString::from(participant.id.to_owned()))
             .track_focus(&self.video_stage.tile_focus[participant.id])
-            .tab_index(0)
             .focus_visible(|tile| tile.border_color(theme.ring))
             .on_hover(cx.listener(move |app, hovered: &bool, _, _| {
                 if *hovered {
@@ -1152,7 +1151,11 @@ impl Spk {
                 tile.child(profile_avatar(
                     Avatar::new().name(participant.name.to_owned()),
                     sidebar.avatar(Some(participant.id)),
-                    48.0,
+                    if tile_size.is_some_and(|size| size.height < px(100.0)) {
+                        32.0
+                    } else {
+                        48.0
+                    },
                     false,
                     cx,
                 ))
