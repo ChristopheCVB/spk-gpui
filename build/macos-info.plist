@@ -8,6 +8,8 @@
     <string>SPK</string>
     <key>CFBundleExecutable</key>
     <string>spk-gpui</string>
+    <key>CFBundleIconFile</key>
+    <string>logo.icns</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>NSCameraUsageDescription</key>

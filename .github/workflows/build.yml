@@ -114,7 +114,11 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           sh build/macos-bundle.sh
-          codesign --verify --strict target/debug/SPK.app
+          app=target/debug/SPK.app
+          icon=$(plutil -extract CFBundleIconFile raw -expect string -o - "$app/Contents/Info.plist")
+          test -f "$app/Contents/Resources/$icon"
+          test -s "$app/Contents/Resources/$icon"
+          codesign --verify --strict "$app"
       - name: Package macOS app
         if: env.UPLOAD_BINARIES == 'true' && runner.os == 'macOS'
         run: ditto -c -k --sequesterRsrc --keepParent target/debug/SPK.app "target/debug/${{ matrix.artifact }}"
