@@ -77,6 +77,13 @@ impl VoiceView {
 }
 
 impl Sidebar {
+    pub(crate) fn echo_reference_unavailable(&self) -> bool {
+        self.voice
+            .as_ref()
+            .and_then(|voice| voice.media.as_ref())
+            .is_some_and(|report| report.echo_reference_unavailable)
+    }
+
     pub(crate) fn media_output(&self) -> MediaOutput {
         let preferred = &self.voice_intent.preferred;
         MediaOutput {

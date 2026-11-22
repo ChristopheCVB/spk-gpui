@@ -83,6 +83,14 @@ impl AudioClip {
         })
     }
 
+    pub(super) fn decode_webm(bytes: Vec<u8>) -> Result<Self, &'static str> {
+        futures::executor::block_on(Self::decode_opus(
+            &MemorySource::new(bytes),
+            Duration::from_secs(MAX_SECONDS as u64),
+            Limits::default(),
+        ))
+    }
+
     pub fn decode(bytes: &[u8]) -> Result<Self, &'static str> {
         Self::decode_limited(bytes, MAX_SECONDS)
     }
@@ -132,8 +140,7 @@ impl AudioClip {
             }
             spec = Some((rate, channels));
             // shortcut: bound decoded PCM to a short clip, stream packets when full playback is needed.
-            let limit = (seconds * rate as usize * channels).min(MAX_SAMPLES / channels * channels);
-            let remaining = limit - samples.len();
+            let remaining = remaining_samples(seconds, rate, channels, samples.len());
             let count = audio.samples_interleaved();
             if remaining > 0 {
                 packet_samples.resize(count, 0.0);
@@ -171,8 +178,6 @@ impl AudioClip {
         .map_err(|_| BAD_AUDIO)?;
         let cancel = CancellationToken::new();
         let channels = usize::from(head.channels);
-        let limit =
-            (seconds * OPUS_SAMPLE_RATE as usize * channels).min(MAX_SAMPLES / channels * channels);
         // Symphonia reports Opus pre-skip as a track delay and the end padding on each packet.
         let mut skip = u64::from(head.pre_skip);
         let mut samples = Vec::new();
@@ -195,7 +200,7 @@ impl AudioClip {
                 )
                 .map_err(|_| BAD_AUDIO)?;
             let pcm = &pcm.samples[start.min(end) as usize * channels..end as usize * channels];
-            let remaining = limit - samples.len();
+            let remaining = remaining_samples(seconds, OPUS_SAMPLE_RATE, channels, samples.len());
             samples.extend_from_slice(&pcm[..remaining.min(pcm.len())]);
             if remaining < pcm.len() {
                 truncated = true;
@@ -214,6 +219,11 @@ impl AudioClip {
             truncated,
         })
     }
+}
+
+fn remaining_samples(seconds: usize, rate: u32, channels: usize, decoded: usize) -> usize {
+    let limit = (seconds * rate as usize * channels).min(MAX_SAMPLES / channels * channels);
+    limit - decoded
 }
 
 pub(super) struct AudioPlayback {

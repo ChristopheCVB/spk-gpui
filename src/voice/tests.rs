@@ -53,6 +53,7 @@ pub(crate) fn start_recovery_fixture(
                         microphone: None,
                         speakers: None,
                         diagnostics: Default::default(),
+                        echo_reference_unavailable: false,
                         speaking: HashSet::new(),
                     })));
                     requested.changed().await.unwrap();
@@ -239,6 +240,7 @@ async fn exercise(scenario: Scenario) {
                                         microphone: None,
                                         speakers: None,
                                         diagnostics: Default::default(),
+                                        echo_reference_unavailable: false,
                                         speaking: HashSet::new(),
                                     })));
                                 }

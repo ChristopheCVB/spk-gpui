@@ -183,6 +183,7 @@ impl Spk {
                                             "Input device",
                                             microphone_controls(
                                                 sidebar.voice_intent.preferred.processing,
+                                                sidebar.echo_reference_unavailable(),
                                                 &app,
                                                 window,
                                                 cx,
@@ -257,6 +258,7 @@ const NOISE_MODES: [(NoiseSuppression, &str); 3] = [
 
 fn microphone_controls(
     settings: VoiceProcessing,
+    echo_reference_unavailable: bool,
     app: &Entity<Spk>,
     window: &mut Window,
     cx: &mut App,
@@ -314,6 +316,12 @@ fn microphone_controls(
             echo,
             VoiceProcessingSetting::EchoCancellation,
         ))
+        .when(echo && echo_reference_unavailable, |controls| {
+            controls.child(
+                Label::new("Echo cancellation is unavailable on the active speaker output.")
+                    .text_xs(),
+            )
+        })
         .child(processing_switch(
             app,
             "Auto gain",

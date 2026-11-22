@@ -126,6 +126,7 @@ pub struct Report {
     pub speakers: Option<Device>,
     pub speaking: HashSet<String>,
     pub diagnostics: Diagnostics,
+    pub echo_reference_unavailable: bool,
 }
 
 #[derive(Clone)]
@@ -203,6 +204,7 @@ impl Call {
                             microphone: None,
                             speakers: None,
                             diagnostics: Diagnostics::default(),
+                            echo_reference_unavailable: false,
                             speaking: if muted {
                                 HashSet::new()
                             } else {

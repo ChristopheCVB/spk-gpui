@@ -1516,6 +1516,7 @@ fn local_cues_follow_first_ready_report_and_explicit_leave() {
             microphone: None,
             speakers: None,
             diagnostics: Default::default(),
+            echo_reference_unavailable: false,
             speaking: HashSet::new(),
         })
     };

@@ -1,4 +1,5 @@
 mod audio;
+mod playback;
 mod video;
 
 use std::{
@@ -17,9 +18,9 @@ use super::*;
 use crate::{
     api::{Attachment, MAX_ATTACHMENTS},
     session::{AttachmentInput, UploadStatus, image_preview},
-    voice::MediaOutput,
 };
-use audio::{AudioClip, AudioPlayback, BAD_OUTPUT};
+use audio::AudioClip;
+use playback::Playback;
 
 #[derive(Default)]
 pub(in crate::ui) struct AttachmentUi {
@@ -71,34 +72,6 @@ impl Preview {
                 }
             }
             _ => {}
-        }
-    }
-}
-
-struct Playback {
-    id: String,
-    token: Uuid,
-    audio: Option<AudioPlayback>,
-    started: Option<Instant>,
-    elapsed: Duration,
-}
-
-impl Playback {
-    fn position(&self) -> Duration {
-        self.elapsed + self.started.map_or(Duration::ZERO, |start| start.elapsed())
-    }
-
-    fn toggle(&mut self) {
-        if let Some(start) = self.started.take() {
-            self.elapsed += start.elapsed();
-            if let Some(audio) = &self.audio {
-                audio.player.pause();
-            }
-        } else {
-            self.started = Some(Instant::now());
-            if let Some(audio) = &self.audio {
-                audio.player.play();
-            }
         }
     }
 }
@@ -486,7 +459,9 @@ impl Spk {
                     Some(Preview::Audio(clip)) => row
                         .child(self.attachment_media_controls(file, "audio", pending, cx))
                         .when(clip.truncated, |row| {
-                            row.child(Label::new("Short audio preview").text_xs())
+                            row.child(
+                                Label::new("Short preview. Open for the full audio.").text_xs(),
+                            )
                         }),
                     Some(Preview::Video(clip)) => {
                         let position = self
@@ -503,7 +478,9 @@ impl Spk {
                         )
                         .child(self.attachment_media_controls(file, "video", pending, cx))
                         .when(clip.truncated, |row| {
-                            row.child(Label::new("Short video preview").text_xs())
+                            row.child(
+                                Label::new("Short preview. Open for the full video.").text_xs(),
+                            )
                         })
                         .when(clip.silent, |row| {
                             row.child(Label::new("Preview without audio").text_xs())
@@ -702,192 +679,6 @@ impl Spk {
                 app.toggle_attachment_media(id.clone(), window, cx);
             }))
     }
-
-    fn toggle_attachment_media(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(playback) = self
-            .chat_attachments
-            .playback
-            .as_mut()
-            .filter(|playback| playback.id == id)
-        {
-            playback.toggle();
-            cx.notify();
-            return;
-        }
-        let View::SignedIn(sidebar) = &self.view else {
-            return;
-        };
-        let Some(card) = self
-            .chat_attachments
-            .cards
-            .get_mut(&id)
-            .filter(|card| card.pending.is_none())
-        else {
-            return;
-        };
-        let Some(preview) = card.preview.as_ref().filter(|preview| preview.is_media()) else {
-            return;
-        };
-        let video_duration = match preview {
-            Preview::Video(clip) => Some(clip.duration),
-            _ => None,
-        };
-        let samples = preview.audio_samples();
-        let mut output = sidebar.media_output();
-        let operation = Uuid::new_v4();
-        card.pending = Some(operation);
-        card.error = None;
-        self.chat_attachments.playback = None;
-        self.chat_attachments.media_start = Some(operation);
-        cx.spawn_in(window, async move |app, cx| {
-            let result = match samples {
-                Some(samples) => open_playback(cx, output.clone()).await.map(|audio| {
-                    audio.attach(samples, Duration::ZERO, false);
-                    Some(audio)
-                }),
-                None => Ok(None),
-            };
-            let started = app
-                .update_in(cx, |app, _, cx| {
-                    let Some(card) = app
-                        .chat_attachments
-                        .cards
-                        .get_mut(&id)
-                        .filter(|card| card.pending == Some(operation))
-                    else {
-                        return false;
-                    };
-                    card.pending = None;
-                    cx.notify();
-                    if app.chat_attachments.media_start != Some(operation) {
-                        return false;
-                    }
-                    app.chat_attachments.media_start = None;
-                    if !card.preview.as_ref().is_some_and(Preview::is_media) {
-                        return false;
-                    }
-                    let audio = match result {
-                        Ok(audio) => audio,
-                        Err(error) => {
-                            card.error = Some(error);
-                            if video_duration.is_none() {
-                                return false;
-                            }
-                            None
-                        }
-                    };
-                    let mut playback = Playback {
-                        id: id.clone(),
-                        token: operation,
-                        audio,
-                        started: None,
-                        elapsed: Duration::ZERO,
-                    };
-                    playback.toggle();
-                    app.chat_attachments.playback = Some(playback);
-                    true
-                })
-                .unwrap_or(false);
-            if !started {
-                return;
-            }
-            let interval = Duration::from_millis(if video_duration.is_some() { 40 } else { 120 });
-            let mut ending = false;
-            loop {
-                cx.background_executor().timer(interval).await;
-                let next_output = app
-                    .update_in(cx, |app, _, cx| {
-                        let View::SignedIn(sidebar) = &app.view else {
-                            return None;
-                        };
-                        let selected = sidebar.media_output();
-                        let playback = app
-                            .chat_attachments
-                            .playback
-                            .as_mut()
-                            .filter(|playback| playback.token == operation)?;
-                        let card = app.chat_attachments.cards.get_mut(&id);
-                        if output.device != selected.device
-                            && let Some(samples) = card
-                                .as_ref()
-                                .and_then(|card| card.preview.as_ref())
-                                .and_then(Preview::audio_samples)
-                        {
-                            return Some(Some((selected, samples)));
-                        }
-                        if let Some(audio) = &playback.audio {
-                            audio.player.set_volume(selected.volume);
-                        }
-                        let failed = playback.audio.as_ref().is_some_and(AudioPlayback::failed);
-                        if failed {
-                            playback.audio = None;
-                            if let Some(card) = card {
-                                card.error = Some(BAD_OUTPUT);
-                            }
-                        }
-                        let ended = match video_duration {
-                            Some(duration) => playback.position() >= duration,
-                            None => playback
-                                .audio
-                                .as_ref()
-                                .is_none_or(|audio| audio.player.empty()),
-                        };
-                        // Keep the audio device open for one tick while it drains its last samples.
-                        if ended && (ending || failed) {
-                            app.chat_attachments.playback = None;
-                            cx.notify();
-                            return None;
-                        }
-                        ending = ended;
-                        if failed || (video_duration.is_some() && playback.started.is_some()) {
-                            cx.notify();
-                        }
-                        Some(None)
-                    })
-                    .ok()
-                    .flatten();
-                let Some(next_output) = next_output else {
-                    break;
-                };
-                if let Some((selected, samples)) = next_output {
-                    output = selected;
-                    let result = open_playback(cx, output.clone()).await;
-                    let _ = app.update_in(cx, |app, _, cx| {
-                        let Some(playback) = app
-                            .chat_attachments
-                            .playback
-                            .as_mut()
-                            .filter(|playback| playback.token == operation)
-                        else {
-                            return;
-                        };
-                        let position = playback.position();
-                        playback.audio = None;
-                        playback.audio = result
-                            .inspect(|audio| {
-                                audio.attach(samples, position, playback.started.is_some())
-                            })
-                            .ok();
-                        if let Some(card) = app.chat_attachments.cards.get_mut(&id) {
-                            card.error = playback.audio.is_none().then_some(BAD_OUTPUT);
-                        }
-                        cx.notify();
-                    });
-                }
-            }
-        })
-        .detach();
-        cx.notify();
-    }
-}
-
-async fn open_playback(
-    cx: &AsyncWindowContext,
-    output: MediaOutput,
-) -> Result<AudioPlayback, &'static str> {
-    cx.background_executor()
-        .spawn(async move { AudioPlayback::open(output) })
-        .await
 }
 
 fn load_attachment(
@@ -901,6 +692,9 @@ fn load_attachment(
             .map(Preview::Image)
             .map(AccessResult::Preview)
             .ok_or("Image preview unavailable. Try downloading the file."),
+        Access::Preview if mime == "audio/webm" => AudioClip::decode_webm(bytes)
+            .map(Preview::Audio)
+            .map(AccessResult::Preview),
         Access::Preview if is_audio(mime) => AudioClip::decode(&bytes)
             .map(Preview::Audio)
             .map(AccessResult::Preview),
@@ -976,6 +770,7 @@ fn is_audio(mime: &str) -> bool {
             | "audio/wav"
             | "audio/x-wav"
             | "audio/ogg"
+            | "audio/webm"
             | "audio/flac"
             | "audio/x-flac"
             | "audio/aac"
@@ -1061,8 +856,20 @@ fn open_extension(mime: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Access, AccessResult, Preview, load_attachment};
+    use super::{Access, AccessResult, Preview, is_audio, load_attachment};
     use rodio::Source;
+
+    #[test]
+    fn previews_audio_only_webm() {
+        let bytes = include_bytes!("../../../tests/fixtures/attachments/preview.weba");
+        assert!(is_audio("audio/webm"));
+        let Ok(AccessResult::Preview(Preview::Audio(clip))) =
+            load_attachment(Access::Preview, "audio/webm", bytes.to_vec(), None)
+        else {
+            panic!("audio-only WebM should open an inline audio preview");
+        };
+        assert!(clip.samples.take(4_800).any(|sample| sample.abs() > 0.05));
+    }
 
     #[test]
     fn previews_audio_instead_of_rendering_it_as_text() {

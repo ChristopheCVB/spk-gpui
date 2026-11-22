@@ -39,8 +39,13 @@ impl RoomAudio for LiveKitAudio<'_> {
             .set_adm_playout_enabled(enabled && self.remote.native_playout);
     }
 
-    fn sync_remote_audio(&mut self, intent: &Intent, devices: &Devices, speakers: Option<&Device>) {
-        self.remote.sync(self.room, intent, devices, speakers);
+    fn sync_remote_audio(
+        &mut self,
+        intent: &Intent,
+        devices: &Devices,
+        speakers: Option<&Device>,
+    ) -> bool {
+        self.remote.sync(self.room, intent, devices, speakers)
     }
 
     fn suspend_remote_audio(&mut self) {

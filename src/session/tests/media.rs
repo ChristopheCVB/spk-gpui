@@ -135,6 +135,22 @@ async fn desktop_voice_routes_samples_and_synchronizes_presence() {
             )
             .await;
 
+            peer.set_echo_reference_unavailable(true);
+            let unavailable =
+                wait_for_sidebar(&views, |sidebar| sidebar.echo_reference_unavailable()).await;
+            assert!(
+                unavailable
+                    .voice_intent
+                    .preferred
+                    .processing
+                    .echo_cancellation
+            );
+            assert_eq!(peer.exchange(74, -31), (Some(74), Some(-31)));
+            assert!(!peer.echo_cancellation());
+            peer.set_echo_reference_unavailable(false);
+            wait_for_sidebar(&views, |sidebar| !sidebar.echo_reference_unavailable()).await;
+            assert!(peer.echo_cancellation());
+
             peer.set_hardware_format(Some((24_000, 1)));
             assert_eq!(peer.exchange(74, -31), (Some(74), None));
             peer.wait_for_playout((24_000, 1)).await;

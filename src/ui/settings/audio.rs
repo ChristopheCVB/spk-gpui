@@ -151,6 +151,14 @@ impl Settings {
                     echo,
                     VoiceProcessingSetting::EchoCancellation,
                 ))
+                .when(echo && sidebar.echo_reference_unavailable(), |controls| {
+                    controls.child(
+                        Label::new(
+                            "Echo cancellation is unavailable on the active speaker output.",
+                        )
+                        .text_xs(),
+                    )
+                })
                 .child(Label::new("Noise suppression"))
                 .child(noise)
                 .child(

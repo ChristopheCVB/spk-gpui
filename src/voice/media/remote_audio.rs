@@ -90,7 +90,7 @@ impl RemoteAudio {
         intent: &Intent,
         devices: &Devices,
         speakers: Option<&Device>,
-    ) {
+    ) -> bool {
         let routes = sync_subscriptions(room, intent);
         let voice = speakers.filter(|_| {
             routes
@@ -137,6 +137,7 @@ impl RemoteAudio {
             self.media.sink.as_ref().map(MixerDeviceSink::mixer),
         );
         self.native_playout = voice.is_some() && native_playout;
+        voice.is_some() && !matches!(self.voice.sink, Some(VoiceSink::Reference(_)))
     }
 }
 
