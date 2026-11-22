@@ -1,11 +1,21 @@
+mod accounts;
+mod chat;
+mod notifications;
+mod profile;
 mod radio;
+mod search;
 mod settings;
 mod soundboard;
+mod switcher;
 mod video;
 mod voice;
 mod workspace;
+mod workspace_keys;
 
-use std::sync::{Arc, LazyLock};
+use std::{
+    sync::{Arc, LazyLock},
+    time::{Duration, Instant},
+};
 
 use gpui_kit::{
     assets::IconName,
@@ -14,7 +24,7 @@ use gpui_kit::{
         ActiveTheme, Icon, Selectable, Sizable, WindowExt,
         avatar::Avatar,
         button::{Button, ButtonVariants},
-        input::{Input, InputContentType, InputEvent, InputState},
+        input::{Input, InputContentType, InputEvent, InputState, Textarea, TextareaState},
         label::Label,
     },
     prelude::FluentBuilder,
@@ -22,36 +32,61 @@ use gpui_kit::{
 };
 
 use crate::{
-    session::{self, Command, Sidebar, View},
+    session::{self, AccountLinkForm, AvatarPhoto, Command, Sidebar, View},
     shortcuts::{Chord, Shortcuts},
-    sounds::{Sound, SoundSetting, SoundSettings},
+    sounds::{Sound, SoundSetting, SoundSettings, VoiceSounds},
     voice::{DeviceKind, Status},
 };
 
-use settings::Appearance;
 pub(super) use settings::ShortcutKeys;
+use settings::{Appearance, Density};
 use voice::VoiceControls;
+
+const PRESENCE_IDLE_AFTER: Duration = Duration::from_secs(10 * 60);
 
 pub(super) struct Spk {
     email: Entity<InputState>,
     password: Entity<InputState>,
+    nickname: Entity<InputState>,
+    chat_input: Entity<TextareaState>,
+    gif_input: Entity<InputState>,
+    chat_attachments: chat::AttachmentUi,
+    message_action_input: Entity<TextareaState>,
+    message_action_form: Option<chat::MessageActionForm>,
+    chat_scroll: ScrollHandle,
+    chat_scroll_anchor: Option<String>,
+    chat_spoiler_link: String,
+    chat_spoilers: std::collections::HashMap<(String, u64), std::collections::HashSet<usize>>,
     commands: async_channel::Sender<Command>,
     view: View,
     form_error: Option<&'static str>,
     device_picker: Option<(VoiceControls, DeviceKind)>,
     selected_voice_channel: Option<String>,
     sidebar_open: bool,
+    quick_switcher: Option<WeakEntity<gpui_kit::component::command::CommandState>>,
     video_stage: video::VideoStage,
     workspace_focus: FocusHandle,
     appearance: Appearance,
     appearance_error: bool,
+    density: Density,
+    density_error: bool,
     shortcuts: Shortcuts,
     sound_settings: tokio::sync::watch::Sender<SoundSettings>,
+    cues: VoiceSounds,
+    notification_preferences: crate::notifications::Preferences,
+    notification_error: bool,
+    alert_activation: tokio::sync::watch::Sender<Option<crate::api::MessageTarget>>,
     signing_out: bool,
+    last_activity: Instant,
+    activity: tokio::sync::watch::Sender<bool>,
 }
 
 impl Spk {
-    pub(super) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(super) fn new(
+        initial_alert: Option<crate::api::MessageTarget>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let appearance = Appearance::load();
         appearance.apply(window, cx);
         cx.observe_window_appearance(window, |this, window, cx| {
@@ -66,6 +101,42 @@ impl Spk {
             input.set_masked(true, window, cx);
             input
         });
+        let nickname = cx.new(|cx| InputState::new(window, cx));
+        let chat_input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .rows(2)
+                .placeholder("Write a message")
+                .submit_on_enter(true)
+        });
+        cx.subscribe_in(
+            &chat_input,
+            window,
+            |this, _, event, window, cx| match event {
+                InputEvent::Change => this.on_chat_input(window, cx),
+                InputEvent::PressEnter { shift: false, .. } => this.submit_chat(window, cx),
+                _ => {}
+            },
+        )
+        .detach();
+        let gif_input = cx.new(|cx| InputState::new(window, cx));
+        cx.subscribe(&gif_input, |this, input, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.send(
+                    Command::SearchGifs(input.read(cx).value().to_string()),
+                    None,
+                    cx,
+                );
+            }
+        })
+        .detach();
+        let message_action_input =
+            cx.new(|cx| TextareaState::new(window, cx).rows(2).submit_on_enter(true));
+        cx.subscribe_in(&message_action_input, window, |this, _, event, _, cx| {
+            if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
+                this.submit_message_action(cx);
+            }
+        })
+        .detach();
         let workspace_focus = cx.focus_handle().tab_stop(false);
         cx.on_focus_lost(window, |this, window, cx| {
             if matches!(this.view, View::SignedIn(_)) && !window.has_active_dialog(cx) {
@@ -73,7 +144,7 @@ impl Spk {
             }
         })
         .detach();
-        for input in [&email, &password] {
+        for input in [&email, &password, &nickname] {
             cx.subscribe_in(input, window, |this, _, event, window, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
                     this.submit(window, cx);
@@ -85,7 +156,13 @@ impl Spk {
         let (commands, requests) = async_channel::bounded(8);
         let (updates, views) = async_channel::bounded(16);
         let shortcuts = Shortcuts::new(window);
+        let (activity, presence_activity) = tokio::sync::watch::channel(window.is_window_active());
         let (sound_settings, sounds) = tokio::sync::watch::channel(shortcuts.sound_settings());
+        let (alert_activation, targets) = tokio::sync::watch::channel(None);
+        if initial_alert.is_some() {
+            alert_activation.send_replace(initial_alert);
+        }
+        let cues = VoiceSounds::new(sounds);
         let global_events = shortcuts.watch_events();
         cx.spawn_in(window, async move |this, cx| {
             while let Ok((generation, event)) = global_events.recv().await {
@@ -115,12 +192,25 @@ impl Spk {
         let window_id = window.window_handle().window_id();
         cx.intercept_keystrokes(move |event, window, cx| {
             if window.window_handle().window_id() == window_id {
-                let _ = app.update(cx, |this, cx| this.capture_shortcut(event, window, cx));
+                let _ = app.update(cx, |this, cx| {
+                    this.record_activity(window);
+                    if this.shortcuts.editor.is_some() {
+                        this.capture_shortcut(event, window, cx);
+                    } else if this.workspace_key(event, window, cx) {
+                        cx.stop_propagation();
+                        window.prevent_default();
+                    }
+                });
             }
         })
         .detach();
         cx.observe_window_activation(window, |this, window, cx| {
-            if !window.is_window_active() {
+            if window.is_window_active() {
+                this.record_activity(window);
+                this.read_visible_chat(window);
+            } else {
+                this.activity
+                    .send_if_modified(|active| std::mem::replace(active, false));
                 this.shortcuts.clear_focused();
                 if this
                     .shortcuts
@@ -130,6 +220,29 @@ impl Spk {
                 {
                     this.cancel_shortcut_editor(cx);
                 }
+            }
+        })
+        .detach();
+
+        let clock = cx.background_executor().clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let mut until_idle = PRESENCE_IDLE_AFTER;
+            loop {
+                clock.timer(until_idle).await;
+                let Ok(remaining) = this.update_in(cx, |this, _, _| {
+                    let remaining =
+                        PRESENCE_IDLE_AFTER.saturating_sub(this.last_activity.elapsed());
+                    if remaining.is_zero() {
+                        this.activity
+                            .send_if_modified(|active| std::mem::replace(active, false));
+                        PRESENCE_IDLE_AFTER
+                    } else {
+                        remaining
+                    }
+                }) else {
+                    break;
+                };
+                until_idle = remaining;
             }
         })
         .detach();
@@ -149,12 +262,19 @@ impl Spk {
             }
         })
         .detach();
+        let session_cues = cues.clone();
         std::thread::spawn(move || {
             if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
             {
-                runtime.block_on(session::run(requests, updates, sounds));
+                runtime.block_on(session::run(
+                    requests,
+                    updates,
+                    session_cues,
+                    presence_activity,
+                    targets,
+                ));
             }
             let _ = finished.send(());
         });
@@ -176,16 +296,8 @@ impl Spk {
                             this.device_picker = None;
                             window.close_all_dialogs(cx);
                         }
-                        if matches!(view, View::SignIn { .. }) {
-                            let input = if this.email.read(cx).value().is_empty() {
-                                &this.email
-                            } else {
-                                &this.password
-                            };
-                            let handle = input.focus_handle(cx);
-                            window.focus(&handle, cx);
-                        }
-                        this.set_session_view(view, window);
+                        this.focus_account_input(&view, window, cx);
+                        this.set_session_view(view, window, cx);
                         cx.notify();
                     })
                     .is_err()
@@ -202,6 +314,7 @@ impl Spk {
                         retry_restore: false,
                     },
                     window,
+                    cx,
                 );
                 cx.notify();
             });
@@ -211,23 +324,73 @@ impl Spk {
         Self {
             email,
             password,
+            nickname,
+            chat_input,
+            gif_input,
+            chat_attachments: Default::default(),
+            message_action_input,
+            message_action_form: None,
+            chat_scroll: ScrollHandle::new(),
+            chat_scroll_anchor: None,
+            chat_spoiler_link: format!("spk-spoiler:{}:", uuid::Uuid::new_v4()),
+            chat_spoilers: Default::default(),
             commands,
             view: View::Busy("Checking saved session…"),
             form_error: None,
             device_picker: None,
             selected_voice_channel: None,
             sidebar_open: true,
+            quick_switcher: None,
             video_stage: video::VideoStage::default(),
             workspace_focus,
             appearance,
             appearance_error: false,
+            density: Density::load(),
+            density_error: false,
             shortcuts,
             sound_settings,
+            cues,
+            notification_preferences: Default::default(),
+            notification_error: false,
+            alert_activation,
             signing_out: false,
+            last_activity: Instant::now(),
+            activity,
         }
     }
 
-    fn set_session_view(&mut self, view: View, window: &mut Window) {
+    fn record_activity(&mut self, window: &Window) {
+        if window.is_window_active() {
+            self.last_activity = Instant::now();
+            self.activity
+                .send_if_modified(|active| !std::mem::replace(active, true));
+        }
+    }
+
+    fn observe_pointer<Event: MouseEvent>(app: &WeakEntity<Self>, window: &mut Window) {
+        let app = app.clone();
+        window.on_mouse_event(move |_: &Event, phase, window, cx| {
+            if phase.capture() {
+                let _ = app.update(cx, |app, _| app.record_activity(window));
+            }
+        });
+    }
+
+    fn set_session_view(&mut self, mut view: View, window: &mut Window, cx: &mut Context<Self>) {
+        self.update_chat(&view, window, cx);
+        if let Some(user_id) = notifications::account_id(&view) {
+            if notifications::account_id(&self.view) != Some(user_id) {
+                self.notification_preferences = notifications::preferences_path(user_id)
+                    .as_deref()
+                    .map(crate::notifications::Preferences::load)
+                    .unwrap_or_default();
+                self.notification_error = false;
+                window.clear_notifications(cx);
+            }
+        } else {
+            self.notification_preferences = Default::default();
+            self.notification_error = false;
+        }
         if let View::SignedIn(previous) = &self.view {
             let next = match &view {
                 View::SignedIn(sidebar) => Some(&sidebar.avatars),
@@ -235,11 +398,28 @@ impl Spk {
             };
             if !next.is_some_and(|next| std::sync::Arc::ptr_eq(&previous.avatars, next)) {
                 for (id, image) in previous.avatars.iter() {
-                    if next.and_then(|images| images.get(id)) != Some(image) {
-                        let _ = window.drop_image(image.clone());
+                    if !next
+                        .and_then(|images| images.get(id))
+                        .is_some_and(|next| Arc::ptr_eq(next, image))
+                    {
+                        profile::release_avatar(image, window, cx);
                     }
                 }
             }
+        }
+        if let View::SignedIn(sidebar) = &mut view {
+            if let (Some(id), Some(channels)) = (&self.selected_voice_channel, &sidebar.channels)
+                && !channels
+                    .iter()
+                    .any(|channel| channel.id == *id && channel.kind == "voice")
+            {
+                self.selected_voice_channel = None;
+            }
+            for alert in std::mem::take(&mut sidebar.alerts) {
+                self.show_alert(alert, sidebar, window, cx);
+            }
+        } else if matches!(self.view, View::SignedIn(_)) {
+            window.clear_notifications(cx);
         }
         self.view = view;
     }
@@ -321,97 +501,6 @@ impl Spk {
         self.sound_settings.send_replace(sounds);
         cx.notify();
     }
-
-    fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !matches!(self.view, View::SignIn { .. }) {
-            return;
-        }
-        let email = self.email.read(cx).value().trim().to_owned();
-        let password = self.password.read(cx).value().to_string();
-        if email.is_empty() || password.is_empty() {
-            self.form_error = Some("Enter your email and password.");
-            cx.notify();
-            return;
-        }
-        self.password
-            .update(cx, |input, cx| input.set_value("", window, cx));
-        self.send(Command::SignIn { email, password }, Some("Signing in…"), cx);
-    }
-
-    fn login(
-        &self,
-        message: Option<&'static str>,
-        retry_restore: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        div()
-            .w_full()
-            .max_w(px(360.0))
-            .mx_auto()
-            .p_6()
-            .rounded_lg()
-            .border_1()
-            .border_color(cx.theme().border)
-            .flex()
-            .flex_col()
-            .gap_4()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(logo(32.0))
-                    .child(Label::new("Sign in to SPK").text_xl().font_semibold()),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(Label::new("Email"))
-                    .child(
-                        Input::new(&self.email)
-                            .aria_label("Email")
-                            .content_type(InputContentType::EmailAddress)
-                            .tab_index(0),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(Label::new("Password"))
-                    .child(
-                        Input::new(&self.password)
-                            .aria_label("Password")
-                            .content_type(InputContentType::Password)
-                            .tab_index(1),
-                    ),
-            )
-            .children(
-                self.form_error
-                    .or(message)
-                    .map(|message| Label::new(message).text_sm().text_color(cx.theme().danger)),
-            )
-            .child(
-                Button::new("sign-in")
-                    .primary()
-                    .label("Sign in")
-                    .tab_index(2)
-                    .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx))),
-            )
-            .when(retry_restore, |card| {
-                card.child(
-                    Button::new("restore")
-                        .label("Retry saved session")
-                        .tab_index(3)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.send(Command::Restore, Some("Checking saved session…"), cx);
-                        })),
-                )
-            })
-    }
 }
 
 impl Render for Spk {
@@ -423,6 +512,12 @@ impl Render for Spk {
                 message,
                 retry_restore,
             } => self.login(*message, *retry_restore, cx).into_any_element(),
+            View::AccountLink { form, message } => {
+                self.account_link(*form, *message, cx).into_any_element()
+            }
+            View::ChooseNickname { message, notice } => self
+                .choose_nickname(*message, *notice, cx)
+                .into_any_element(),
             View::SignedIn(sidebar) => self.workspace(sidebar, cx).into_any_element(),
             View::RetrySignOut => div()
                 .flex()
@@ -441,10 +536,12 @@ impl Render for Spk {
                 )
                 .into_any_element(),
         };
+        let app = cx.weak_entity();
         div()
             .id("spk-window")
             .track_focus(&self.workspace_focus)
             .on_key_down(cx.listener(Self::dismiss_video_fullscreen))
+            .on_key_down(cx.listener(Self::hovered_video_key))
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
@@ -455,6 +552,18 @@ impl Render for Spk {
             .when(!matches!(self.view, View::SignedIn(_)), |page| {
                 page.justify_center().items_center().p_6()
             })
+            // Window-wide capture includes input over Profile and Settings dialogs.
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |_, (), window, _| {
+                        Self::observe_pointer::<MouseDownEvent>(&app, window);
+                        Self::observe_pointer::<MouseMoveEvent>(&app, window);
+                        Self::observe_pointer::<ScrollEvent>(&app, window);
+                    },
+                )
+                .absolute(),
+            )
             .child(content)
     }
 }
@@ -471,7 +580,7 @@ fn logo(size: f32) -> Img {
 
 fn profile_avatar(
     fallback: Avatar,
-    photo: Option<&Arc<RenderImage>>,
+    photo: Option<&Arc<AvatarPhoto>>,
     diameter: f32,
     speaking: bool,
     cx: &App,
@@ -485,6 +594,8 @@ fn profile_avatar(
             .into_any_element();
     };
 
+    let photo = Arc::clone(photo);
+    let photo_id = photo.image.id.0;
     div()
         .size(size)
         .flex_shrink_0()
@@ -498,11 +609,13 @@ fn profile_avatar(
             theme.border
         })
         .child(
-            img(Arc::clone(photo))
-                .id(("avatar-photo", photo.id.0))
-                .size_full()
-                .rounded_full()
-                .object_fit(ObjectFit::Cover),
+            img(move |window: &mut Window, cx: &mut App| {
+                Some(Ok(profile::avatar_thumbnail(&photo, diameter, window, cx)))
+            })
+            .id(("avatar-photo", photo_id))
+            .size_full()
+            .rounded_full()
+            .object_fit(ObjectFit::Cover),
         )
         .into_any_element()
 }

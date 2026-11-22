@@ -67,27 +67,36 @@ impl RootPlugin for ShortcutKeys {
 impl Settings {
     pub(super) fn shortcuts(&self, cx: &Context<Self>) -> impl IntoElement {
         let shortcuts = &self.spk.read(cx).shortcuts;
-        card(
-            "Voice shortcuts",
-            div()
-                .id("shortcut-recorder")
-                .track_focus(&self.recorder_focus)
-                .flex()
-                .flex_col()
-                .gap_5()
-                .children(
-                    shortcuts
-                        .platform_error()
-                        .map(|message| Label::new(message).text_color(cx.theme().muted_foreground)),
-                )
-                .children(Action::ALL.map(|action| self.shortcut_row(action, shortcuts, cx)))
-                .children(
-                    shortcuts
-                        .settings_error
-                        .map(|message| Label::new(message).text_color(cx.theme().danger)),
-                ),
-            cx,
-        )
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(card(
+                "Voice shortcuts",
+                div()
+                    .id("shortcut-recorder")
+                    .track_focus(&self.recorder_focus)
+                    .flex()
+                    .flex_col()
+                    .gap_5()
+                    .children(
+                        shortcuts.platform_error().map(|message| {
+                            Label::new(message).text_color(cx.theme().muted_foreground)
+                        }),
+                    )
+                    .children(Action::ALL.map(|action| self.shortcut_row(action, shortcuts, cx)))
+                    .children(
+                        shortcuts
+                            .settings_error
+                            .map(|message| Label::new(message).text_color(cx.theme().danger)),
+                    ),
+                cx,
+            ))
+            .child(card(
+                "Keyboard shortcuts",
+                workspace_keys::shortcut_reference(shortcuts, false, cx),
+                cx,
+            ))
     }
 
     fn shortcut_row(

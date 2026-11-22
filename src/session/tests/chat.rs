@@ -1,0 +1,926 @@
+use super::*;
+
+#[tokio::test]
+#[allow(
+    clippy::result_large_err,
+    reason = "Tungstenite defines the handshake callback type"
+)]
+async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let http = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = Url::parse(&format!("http://{}", http.local_addr().unwrap())).unwrap();
+    let sockets = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let socket_url = format!("ws://{}/_ws", sockets.local_addr().unwrap());
+    let (history_tx, history) = async_channel::unbounded();
+    let storage = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let http = tokio::spawn(async move {
+        loop {
+            let (line, request) = Request::receive(&http).await;
+            assert_eq!(request.header("cookie"), Some("session=chat"));
+            match line.as_str() {
+                "GET /api/unread HTTP/1.1" => request.respond(&[], "{}").await,
+                "GET /api/channels HTTP/1.1" => {
+                    request.respond(&[], r#"[{"id":"general","type":"text","name":"general"},{"id":"quiet","type":"text","name":"quiet"}]"#).await
+                }
+                "GET /api/voice HTTP/1.1" | "GET /api/users HTTP/1.1" => {
+                    request.respond(&[], "[]").await
+                }
+                "GET /api/users/presence HTTP/1.1" => request.respond(&[], "{}").await,
+                _ => history_tx.send((line, request)).await.unwrap(),
+            }
+        }
+    });
+
+    let mut cookies = CookieStore::default();
+    cookies.parse("session=chat; Path=/", &base).unwrap();
+    let client = SpkClient::new(base.clone(), cookies).unwrap();
+    let profile =
+        serde_json::from_value(value!({"id":"alice","email":"alice@example.test"})).unwrap();
+    let (tx, commands) = async_channel::unbounded();
+    let (views, rx) = async_channel::unbounded();
+    let session = tokio::spawn(async move {
+        let (mut saved, _) = SavedSession::with_test_store(None);
+        let mut settings = fixture_settings(socket_url, Call::start_for_test);
+        watch_session(
+            &client,
+            profile,
+            None,
+            &mut saved,
+            &mut settings,
+            &commands,
+            &views,
+        )
+        .await
+    });
+
+    timeout(Duration::from_secs(10), async {
+        let mut peer = accept_hdr_async(
+            sockets.accept().await.unwrap().0,
+            |request: &server::Request, response: server::Response| {
+                assert_eq!(request.uri().path(), "/_ws");
+                assert_eq!(request.headers()["cookie"], "session=chat");
+                Ok(response)
+            },
+        )
+        .await
+        .unwrap();
+        wait_for_sidebar(&rx, |view| {
+            view.channels.is_some() && matches!(view.connection, Connection::Online)
+        })
+        .await;
+        tx.send(Command::OpenTextChannel("general".into()))
+            .await
+            .unwrap();
+        wait_for_sidebar(&rx, |view| {
+            view.chat.as_ref().is_some_and(|chat| chat.loading())
+        })
+        .await;
+        history_request(&history, "?unread=1")
+            .await
+            .respond_raw("503 Unavailable", &[], b"")
+            .await;
+        wait_for_sidebar(&rx, |view| {
+            view.chat.as_ref().is_some_and(|chat| chat.history_failed())
+        })
+        .await;
+        tx.send(Command::RetryChatHistory).await.unwrap();
+        let latest = message("m2", 2, "bob", "Hi from web <@alice>");
+        page(
+            history_request(&history, "?unread=1").await,
+            std::slice::from_ref(&latest),
+            true,
+        )
+        .await;
+        wait_for_sidebar(&rx, |view| {
+            assert!(view.alerts.is_empty(), "history must never produce a message alert");
+            view.chat.as_ref().is_some_and(|chat| {
+                chat.messages.iter().any(|message| message.id == "m2")
+            })
+        }).await;
+        live(&mut peer, &latest, None).await;
+        tx.send(Command::LoadOlderMessages).await.unwrap();
+        let older = message("m1", 1, "bob", "Earlier message");
+        page(
+            history_request(&history, "?before=m2").await,
+            std::slice::from_ref(&older),
+            false,
+        )
+        .await;
+        wait_for_messages(&rx, &["m1", "m2"]).await;
+
+        tx.send(Command::SendChatMessage {
+            channel_id: "general".into(),
+            body: "Hi from desktop".into(),
+        })
+        .await
+        .unwrap();
+        let first = receive_chat_send(&mut peer, "general", "Hi from desktop").await;
+        peer.send(Message::text(
+            value!({"type":"message:error","nonce":first["nonce"],"error":"Slow down"}).to_string(),
+        ))
+        .await
+        .unwrap();
+        wait_for_delivery(
+            &rx,
+            |delivery| matches!(delivery, Delivery::Failed(error) if error == "Slow down"),
+        )
+        .await;
+        tx.send(Command::RetryChatSend).await.unwrap();
+        let retry = receive_chat_send(&mut peer, "general", "Hi from desktop").await;
+        assert_ne!(first["nonce"], retry["nonce"]);
+        let sent = message("m3", 3, "alice", "Hi from desktop <@alice>");
+        live(&mut peer, &sent, retry["nonce"].as_str()).await;
+        live(&mut peer, &sent, retry["nonce"].as_str()).await;
+        wait_for_sidebar(&rx, |view| {
+            assert!(view.alerts.is_empty(), "loaded and self-authored frames must stay silent");
+            view.chat.as_ref().is_some_and(|chat| chat.messages.iter().map(|message| message.id.as_str()).eq(["m1", "m2", "m3"]))
+        }).await;
+        tx.send(Command::MutateChatMessage {
+            channel_id: "general".into(),
+            message_id: "m3".into(),
+            action: MessageAction::Edit("Corrected from desktop https://example.test/story".into()),
+        }).await.unwrap();
+        let (line, edit) = history.recv().await.unwrap();
+        assert_eq!(line, "PATCH /api/messages/m3 HTTP/1.1");
+        assert_eq!(serde_json::from_slice::<Value>(&edit.body).unwrap(), value!({"body":"Corrected from desktop https://example.test/story"}));
+        let mut edited = message("m3", 3, "alice", "Corrected from desktop https://example.test/story");
+        edited["editedAt"] = value!(30);
+        peer.send(Message::text(value!({"type":"message:edit","message":edited}).to_string())).await.unwrap();
+        edit.respond(&[], &edited.to_string()).await;
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
+            chat.messages.iter().any(|m| m.id == "m3" && m.body == "Corrected from desktop https://example.test/story" && m.edited_at == Some(30))
+        })).await;
+
+        let url = "https://example.test/story";
+        let card = value!({"url":url,"title":"A story","description":"A preview","siteName":"Example","image":true});
+        peer.send(Message::text(value!({"type":"message:previews","channelId":"general","messageId":"m3","previews":[card]}).to_string())).await.unwrap();
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().unwrap().messages.last().is_some_and(|m| {
+            m.previews.first().is_some_and(|preview| preview.title.as_deref() == Some("A story"))
+        })).await;
+        let (line, preview) = history.recv().await.unwrap();
+        assert_eq!(line, "GET /api/messages/m3/preview-image?url=https%3A%2F%2Fexample.test%2Fstory HTTP/1.1");
+        let location = format!("Location: http://{}/thumbnail.webp", storage.local_addr().unwrap());
+        preview.respond_raw("302 Found", &[&location], b"").await;
+        let thumbnail = Request::read(&storage, "GET /thumbnail.webp HTTP/1.1").await;
+        assert_eq!(thumbnail.header("cookie"), None);
+        const WEBP: &[u8] = b"RIFF\x1e\0\0\0WEBPVP8L\x11\0\0\0/\x01\0\0\0\x07\xd0\x99\x9a\x95\xb9\xff\x81\x88\xe8\x7f\0\0";
+        thumbnail.respond_raw("200 OK", &["Content-Type: image/webp"], WEBP).await;
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().unwrap().preview_images.get("m3", url).is_some()).await;
+        tx.send(Command::LoadLatestMessages).await.unwrap();
+        let stale_history = history_request(&history, "?unread=1").await;
+        tx.send(Command::MutateChatMessage {
+            channel_id: "general".into(), message_id: "m3".into(), action: MessageAction::RemovePreview(url.into()),
+        }).await.unwrap();
+        let remove = chat_action_request(&history, "DELETE /api/messages/m3/previews HTTP/1.1", value!({"url":url})).await;
+        peer.send(Message::text(value!({"type":"message:previews","channelId":"general","messageId":"m3","previews":[]}).to_string())).await.unwrap();
+        remove.respond(&[], r#"{"ok":true}"#).await;
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
+            chat.loading() && chat.messages.last().is_some_and(|message| message.previews.is_empty())
+        })).await;
+        let mut stale = edited.clone();
+        stale["previews"] = value!([card]);
+        page(stale_history, &[older.clone(), latest.clone(), stale], false).await;
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
+            !chat.loading() && chat.messages.last().is_some_and(|message| message.previews.is_empty())
+        })).await;
+
+        tx.send(Command::RetryChatSend).await.unwrap();
+        tx.send(Command::SendChatMessage {
+            channel_id: "general".into(),
+            body: "Closed before confirmation".into(),
+        })
+        .await
+        .unwrap();
+        receive_chat_send(&mut peer, "general", "Closed before confirmation").await;
+        peer.close(None).await.unwrap();
+        wait_for_delivery(&rx, |delivery| matches!(delivery, Delivery::Unconfirmed)).await;
+        let mut peer = accept_async(sockets.accept().await.unwrap().0)
+            .await
+            .unwrap();
+        let latest_request = history_request(&history, "?unread=1").await;
+        let committed_without_ack = message("m4", 4, "alice", "Closed before confirmation");
+        let while_loading = message("m5", 5, "bob", "While catching up");
+        live(&mut peer, &while_loading, None).await;
+        page(
+            latest_request,
+            &[committed_without_ack, while_loading],
+            true,
+        )
+        .await;
+        let overlap_request = history_request(&history, "?before=m4").await;
+        let mut later = message("m6", 6, "bob", "");
+        later["replyTo"] = value!({"id":"m3","userId":"alice","preview":"Hi","deleted":false});
+        later["attachments"] = value!([{"id":"image","filename":"private.png","mime":"image/png","size":10,"spoiler":true}]);
+        live(&mut peer, &later, None).await;
+        wait_for_sidebar(&rx, |view| {
+            view.alerts.iter().any(|alert| {
+                alert.target.channel_id() == "general" && alert.target.message_id() == "m6"
+                    && alert.has_attachment && alert.body.is_empty()
+            })
+        }).await;
+        live(&mut peer, &later, None).await;
+        peer.send(Message::text(value!({
+            "type": "unread:update", "channelId": "general", "unread": 2, "mentions": 1
+        }).to_string())).await.unwrap();
+        wait_for_sidebar(&rx, |view| {
+            assert!(view.alerts.is_empty(), "a duplicate live frame must stay silent");
+            let state = view.unread("general");
+            state.unread == 2 && state.mentions == 1
+        }).await;
+        page(overlap_request, &[older, latest, sent], false).await;
+        wait_for_messages(&rx, &["m1", "m2", "m3", "m4", "m5", "m6"]).await;
+
+        tx.send(Command::JumpToChatMessage {
+            channel_id: "general".into(),
+            message_id: "m0".into(),
+        }).await.unwrap();
+        let request = history_request(&history, "?around=m0").await;
+        request.respond(&[], &value!({"messages":[message("m0", 0, "bob", "Original reply target"), message("m1", 1, "bob", "Earlier message")],"hasMoreBefore":false,"hasMoreAfter":true}).to_string()).await;
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
+            chat.jump.as_ref().is_some_and(|(id, _)| id == "m0") && chat.has_more_after && chat.messages[0].id == "m0"
+        })).await;
+        peer.close(None).await.unwrap();
+        let mut peer = accept_async(sockets.accept().await.unwrap().0).await.unwrap();
+        let request = history_request(&history, "?around=m0").await;
+        request.respond(&[], &value!({
+            "messages":[message("older", -1, "bob", "Outside the old start"), message("m0", 0, "bob", "Edited reply target"), message("m1", 1, "bob", "Earlier message"), message("m2", 2, "bob", "Outside the window")],
+            "hasMoreBefore":false,"hasMoreAfter":true
+        }).to_string()).await;
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
+            chat.history_ready() && chat.has_more_before && chat.has_more_after && chat.messages.len() == 2
+                && chat.messages[0].body == "Edited reply target"
+        })).await;
+        tx.send(Command::LoadNewerMessages).await.unwrap();
+        let request = history_request(&history, "?after=m1").await;
+        request.respond(&[], &value!({
+            "messages":[message("m2", 2, "bob", "Outside the window")],
+            "hasMoreBefore":true,"hasMoreAfter":true
+        }).to_string()).await;
+        wait_for_messages(&rx, &["m0", "m1", "m2"]).await;
+        tx.send(Command::LoadNewerMessages).await.unwrap();
+        let interrupted = history_request(&history, "?after=m2").await;
+        peer.close(None).await.unwrap();
+        let mut peer = accept_async(sockets.accept().await.unwrap().0).await.unwrap();
+        let request = history_request(&history, "?around=m0").await;
+        drop(interrupted);
+        request.respond(&[], &value!({
+            "messages":[message("m0", 0, "bob", "Edited reply target"), message("m1", 1, "bob", "Earlier message"), message("m2", 2, "bob", "Outside the window")],
+            "hasMoreBefore":false,"hasMoreAfter":true
+        }).to_string()).await;
+        let request = history_request(&history, "?after=m2").await;
+        live(&mut peer, &message("m7", 7, "bob", "Arrived during pagination"), None).await;
+        request.respond(&[], &value!({
+            "messages":[message("m6", 6, "bob", "After history was read")],
+            "hasMoreBefore":true,"hasMoreAfter":false
+        }).to_string()).await;
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
+            chat.latest_ready() && !chat.has_more_before && chat.messages.len() == 5
+                && chat.messages.last().is_some_and(|message| message.id == "m7")
+        })).await;
+        tx.send(Command::JumpToChatMessage {
+            channel_id: "general".into(),
+            message_id: "removed".into(),
+        }).await.unwrap();
+        history_request(&history, "?around=removed").await.respond_raw("404 Not Found", &[], b"").await;
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| chat.jump_failed)).await;
+        tx.send(Command::OpenMessageTarget(MessageTarget::new("general", "m0").unwrap()))
+            .await.unwrap();
+        history_request(&history, "?around=m0").await.respond(&[], &value!({
+            "messages":[message("m0", 0, "bob", "Edited reply target")],
+            "hasMoreBefore":false,"hasMoreAfter":true
+        }).to_string()).await;
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| chat.history_ready() && chat.has_more_after)).await;
+        tx.send(Command::OpenConversationTarget("general".into())).await.unwrap();
+        page(history_request(&history, "?unread=1").await, &[message("m6", 6, "bob", "After history was read")], true).await;
+        wait_for_messages(&rx, &["m6"]).await;
+
+        tx.send(Command::RetryChatSend).await.unwrap();
+        tx.send(Command::MarkChatSendDelivered("general".into())).await.unwrap();
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| chat.outgoing.is_none() && chat.draft.body.is_empty())).await;
+        tx.send(Command::SendChatMessage {
+            channel_id: "general".into(),
+            body: "Still here".into(),
+        })
+        .await
+        .unwrap();
+        receive_chat_send(&mut peer, "general", "Still here").await;
+
+        tx.send(Command::OpenTextChannel("quiet".into()))
+            .await
+            .unwrap();
+        let (line, request) = history.recv().await.unwrap();
+        assert_eq!(line, "GET /api/channels/quiet/messages?unread=1 HTTP/1.1");
+        page(request, &[], false).await;
+        wait_for_sidebar(&rx, |view| {
+            view.chat.as_ref().is_some_and(|chat| {
+                chat.channel_id == "quiet"
+                    && !chat.loading()
+                    && !chat.history_failed()
+                    && chat.messages.is_empty()
+            })
+        })
+        .await;
+
+        tx.send(Command::UpdateChatDraft { channel_id: "quiet".into(), body: "Quiet draft".into() }).await.unwrap();
+        receive_typing(&mut peer, "quiet").await;
+        tx.send(Command::OpenTextChannel("general".into())).await.unwrap();
+        page(history_request(&history, "?unread=1").await, &[], false).await;
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
+            chat.channel_id == "general" && !chat.loading() && chat.draft.body == "Still here"
+        })).await;
+        tx.send(Command::OpenTextChannel("quiet".into())).await.unwrap();
+        let (line, request) = history.recv().await.unwrap();
+        assert_eq!(line, "GET /api/channels/quiet/messages?unread=1 HTTP/1.1");
+        page(request, &[], false).await;
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
+            chat.channel_id == "quiet" && !chat.loading() && chat.draft.body == "Quiet draft"
+        })).await;
+
+        tx.close();
+        assert!(matches!(session.await.unwrap(), SessionEnd::Closed));
+    })
+    .await
+    .expect("loopback text channel timed out");
+    http.abort();
+}
+
+fn message(id: &str, created_at: i64, user_id: &str, body: &str) -> Value {
+    value!({"id":id,"channelId":"general","userId":user_id,"body":body,"createdAt":created_at})
+}
+
+async fn live(peer: &mut WebSocketStream<TcpStream>, message: &Value, nonce: Option<&str>) {
+    peer.send(Message::text(
+        value!({"type":"message:new","message":message,"nonce":nonce}).to_string(),
+    ))
+    .await
+    .unwrap();
+}
+
+async fn history_request(history: &Receiver<(String, Request)>, query: &str) -> Request {
+    let (line, request) = history.recv().await.unwrap();
+    assert_eq!(
+        line,
+        format!("GET /api/channels/general/messages{query} HTTP/1.1")
+    );
+    request
+}
+
+async fn page(request: Request, messages: &[Value], more_before: bool) {
+    request
+        .respond(
+            &[],
+            &value!({"messages":messages,"hasMoreBefore":more_before,"hasMoreAfter":false})
+                .to_string(),
+        )
+        .await;
+}
+
+async fn wait_for_messages(views: &Receiver<View>, expected: &[&str]) {
+    wait_for_sidebar(views, |view| {
+        view.chat.as_ref().is_some_and(|chat| {
+            !chat.loading()
+                && chat
+                    .messages
+                    .iter()
+                    .map(|message| message.id.as_str())
+                    .eq(expected.iter().copied())
+        })
+    })
+    .await;
+}
+
+async fn wait_for_delivery(views: &Receiver<View>, predicate: impl Fn(&Delivery) -> bool) {
+    wait_for_sidebar(views, |view| {
+        view.chat
+            .as_ref()
+            .and_then(|chat| chat.outgoing.as_ref())
+            .is_some_and(|outgoing| predicate(&outgoing.status))
+    })
+    .await;
+}
+
+async fn receive_chat_send(
+    peer: &mut WebSocketStream<TcpStream>,
+    conversation: &str,
+    body: &str,
+) -> Value {
+    let frame: Value = serde_json::from_str(
+        receive_non_presence_message(peer)
+            .await
+            .unwrap()
+            .unwrap()
+            .to_text()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(frame["type"], "message:send");
+    assert_eq!(frame["channelId"], conversation);
+    assert_eq!(frame["body"], body);
+    assert!(frame["nonce"].is_string());
+    frame
+}
+
+async fn receive_typing(peer: &mut WebSocketStream<TcpStream>, channel_id: &str) {
+    let frame = receive_non_presence_message(peer).await.unwrap().unwrap();
+    let typing: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+    assert_eq!(typing, value!({"type":"typing","channelId":channel_id}));
+}
+
+#[tokio::test]
+async fn direct_message_history_is_visible_only_to_a_participant_even_for_admins() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let http = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = Url::parse(&format!("http://{}", http.local_addr().unwrap())).unwrap();
+    let (history_tx, history) = async_channel::unbounded();
+    let http = tokio::spawn(async move {
+        loop {
+            let (line, request) = Request::receive(&http).await;
+            let account = request.header("cookie").unwrap();
+            match (line.as_str(), account) {
+                ("GET /api/unread HTTP/1.1", _) => request.respond(&[], "{}").await,
+                ("GET /api/channels HTTP/1.1", "session=alice") => {
+                    request.respond(&[], r#"[{"id":"private","type":"dm","name":null,"otherUserId":"bob","lastActivityAt":2}]"#).await
+                }
+                ("GET /api/users HTTP/1.1", "session=charlie") => {
+                    request.respond(&[], r#"[{"id":"charlie","role":"admin"}]"#).await
+                }
+                ("GET /api/channels HTTP/1.1", "session=charlie")
+                | ("GET /api/users HTTP/1.1" | "GET /api/voice HTTP/1.1", _) => {
+                    request.respond(&[], "[]").await
+                }
+                ("GET /api/users/presence HTTP/1.1", _) => request.respond(&[], "{}").await,
+                _ => history_tx.send((line, request)).await.unwrap(),
+            }
+        }
+    });
+
+    timeout(Duration::from_secs(10), async {
+        let (commands, views, sockets, mut peer, alice) =
+            direct_message_session(base.clone(), "alice").await;
+        commands
+            .send(Command::OpenDirectMessage("private".into()))
+            .await
+            .unwrap();
+        let (line, request) = history.recv().await.unwrap();
+        assert_eq!(line, "GET /api/channels/private/messages?unread=1 HTTP/1.1");
+        assert_eq!(request.header("cookie"), Some("session=alice"));
+        let message = value!({"id":"private-2","channelId":"private","userId":"bob","body":"Private content","createdAt":2});
+        page(request, std::slice::from_ref(&message), true).await;
+        wait_for_messages(&views, &["private-2"]).await;
+        commands.send(Command::LoadOlderMessages).await.unwrap();
+        let (line, request) = history.recv().await.unwrap();
+        assert_eq!(line, "GET /api/channels/private/messages?before=private-2 HTTP/1.1");
+        let older = value!({"id":"private-1","channelId":"private","userId":"bob","body":"Earlier private content","createdAt":1});
+        page(request, &[older], false).await;
+        wait_for_messages(&views, &["private-1", "private-2"]).await;
+
+        let (outsider, outsider_views, _, _outsider_peer, charlie) =
+            direct_message_session(base.clone(), "charlie").await;
+        wait_for_sidebar(&outsider_views, Sidebar::is_admin).await;
+        outsider
+            .send(Command::OpenDirectMessage("private".into()))
+            .await
+            .unwrap();
+        let denied = wait_for_sidebar(&outsider_views, |view| view.chat_notice.is_some()).await;
+        assert!(denied.chat.is_none());
+        assert!(denied.channels.unwrap().is_empty());
+        assert!(history.is_empty());
+
+        // If an authoritative history request denies access, discard the earlier page and
+        // ignore any in-flight socket delivery for the unavailable conversation.
+        peer.close(None).await.unwrap();
+        let mut peer = accept_async(sockets.accept().await.unwrap().0)
+            .await
+            .unwrap();
+        let (line, request) = history.recv().await.unwrap();
+        let pending = wait_for_sidebar(&views, |view| {
+            matches!(view.connection, Connection::Online)
+                && view.chat.as_ref().is_some_and(ChatView::loading)
+        })
+        .await;
+        assert!(pending.chat.unwrap().messages.is_empty());
+        live(&mut peer, &message, None).await;
+        assert_eq!(line, "GET /api/channels/private/messages?unread=1 HTTP/1.1");
+        request.respond_raw("403 Forbidden", &[], b"").await;
+        let denied = wait_for_sidebar(&views, |view| {
+            view.chat.as_ref().is_some_and(ChatView::unavailable)
+        })
+        .await;
+        assert!(denied.chat.unwrap().messages.is_empty());
+        commands.close();
+        outsider.close();
+        assert!(matches!(alice.await.unwrap(), SessionEnd::Closed));
+        assert!(matches!(charlie.await.unwrap(), SessionEnd::Closed));
+    })
+    .await
+    .expect("loopback private history timed out");
+    http.abort();
+}
+
+#[allow(
+    clippy::result_large_err,
+    reason = "Tungstenite defines the handshake callback type"
+)]
+pub(super) async fn direct_message_session(
+    base: Url,
+    account: &str,
+) -> (
+    async_channel::Sender<Command>,
+    Receiver<View>,
+    TcpListener,
+    WebSocketStream<TcpStream>,
+    tokio::task::JoinHandle<SessionEnd>,
+) {
+    let sockets = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let socket_url = format!("ws://{}/_ws", sockets.local_addr().unwrap());
+    let cookie = format!("session={account}");
+    let mut cookies = CookieStore::default();
+    cookies.parse(&format!("{cookie}; Path=/"), &base).unwrap();
+    let client = SpkClient::new(base, cookies).unwrap();
+    let profile =
+        serde_json::from_value(value!({"id":account,"email":format!("{account}@example.test")}))
+            .unwrap();
+    let (tx, commands) = async_channel::unbounded();
+    let (views, rx) = async_channel::unbounded();
+    let session = tokio::spawn(async move {
+        let (mut saved, _) = SavedSession::with_test_store(None);
+        let mut settings = fixture_settings(socket_url, Call::start_for_test);
+        watch_session(
+            &client,
+            profile,
+            None,
+            &mut saved,
+            &mut settings,
+            &commands,
+            &views,
+        )
+        .await
+    });
+    let peer = accept_hdr_async(
+        sockets.accept().await.unwrap().0,
+        |request: &server::Request, response: server::Response| {
+            assert_eq!(request.uri().path(), "/_ws");
+            assert_eq!(request.headers()["cookie"], cookie);
+            Ok(response)
+        },
+    )
+    .await
+    .unwrap();
+    wait_for_sidebar(&rx, |view| {
+        view.channels.is_some() && matches!(view.connection, Connection::Online)
+    })
+    .await;
+    (tx, rx, sockets, peer, session)
+}
+
+#[tokio::test]
+async fn direct_message_starts_reuses_and_recovers_between_participants() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let http = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = Url::parse(&format!("http://{}", http.local_addr().unwrap())).unwrap();
+    let (requests_tx, requests) = async_channel::unbounded();
+    let http = tokio::spawn(async move {
+        let mut created = false;
+        loop {
+            let (line, request) = Request::receive(&http).await;
+            let account = request.header("cookie").unwrap();
+            match line.as_str() {
+                "GET /api/unread HTTP/1.1" => request.respond(&[], "{}").await,
+                "GET /api/channels HTTP/1.1" => {
+                    let other = if account == "session=alice" {
+                        "bob"
+                    } else {
+                        "alice"
+                    };
+                    let list = if created {
+                        value!([{"id":"private","type":"dm","name":null,"otherUserId":other,"lastActivityAt":null}])
+                    } else {
+                        value!([])
+                    };
+                    request.respond(&[], &list.to_string()).await;
+                }
+                "GET /api/users HTTP/1.1" | "GET /api/voice HTTP/1.1" => {
+                    request.respond(&[], "[]").await;
+                }
+                "GET /api/users/presence HTTP/1.1" => request.respond(&[], "{}").await,
+                "POST /api/dms HTTP/1.1" => {
+                    assert!(!created, "an existing DM should open without a second POST");
+                    assert_eq!(account, "session=alice");
+                    assert_eq!(
+                        serde_json::from_slice::<Value>(&request.body).unwrap(),
+                        value!({"userId":"bob"})
+                    );
+                    created = true;
+                    request.respond(&[], r#"{"id":"private","type":"dm","name":null,"otherUserId":"bob","lastActivityAt":null}"#).await;
+                }
+                _ => requests_tx.send((line, request)).await.unwrap(),
+            }
+        }
+    });
+
+    timeout(Duration::from_secs(10), async {
+        let (alice, alice_views, sockets, mut alice_peer, alice_session) =
+            direct_message_session(base.clone(), "alice").await;
+        let (bob, bob_views, _, mut bob_peer, bob_session) =
+            direct_message_session(base.clone(), "bob").await;
+        alice.send(Command::StartDirectMessage("bob".into())).await.unwrap();
+        let request = private_history(&requests, "session=alice").await;
+        page(request, &[], false).await;
+        wait_for_messages(&alice_views, &[]).await;
+        alice.send(Command::SendChatMessage { channel_id: "private".into(), body: "Hello Bob".into() }).await.unwrap();
+        let sent = receive_chat_send(&mut alice_peer, "private", "Hello Bob").await;
+        let first = value!({"id":"private-1","channelId":"private","userId":"alice","body":"Hello Bob","createdAt":1});
+        live(&mut alice_peer, &first, sent["nonce"].as_str()).await;
+        live(&mut bob_peer, &first, sent["nonce"].as_str()).await;
+        wait_for_messages(&alice_views, &["private-1"]).await;
+        wait_for_sidebar(&bob_views, |view| view.channels.iter().flatten().any(|channel| channel.id == "private")).await;
+        bob.send(Command::OpenDirectMessage("private".into())).await.unwrap();
+        page(private_history(&requests, "session=bob").await, std::slice::from_ref(&first), false).await;
+        wait_for_messages(&bob_views, &["private-1"]).await;
+
+        bob.send(Command::MutateChatMessage {
+            channel_id: "private".into(), message_id: "private-1".into(),
+            action: MessageAction::Edit("Changed by another member".into()),
+        }).await.unwrap();
+        let denied = wait_for_sidebar(&bob_views, |view| {
+            view.chat.as_ref().unwrap().action_outcome.as_ref().is_some_and(|outcome| outcome.error.is_some())
+        }).await;
+        assert_eq!(denied.chat.unwrap().messages[0].body, "Hello Bob");
+        assert!(requests.is_empty());
+
+        // A standard member can pin another participant's message in a DM.
+        bob.send(Command::ShowChatPins { channel_id: "private".into(), shown: true }).await.unwrap();
+        let (line, empty) = requests.recv().await.unwrap();
+        assert_eq!(line, "GET /api/channels/private/pins HTTP/1.1");
+        assert_eq!(empty.header("cookie"), Some("session=bob"));
+        empty.respond(&[], "[]").await;
+        wait_for_sidebar(&bob_views, |view| matches!(&view.chat.as_ref().unwrap().pins, Some(Pins::Ready(pins)) if pins.is_empty())).await;
+
+        bob.send(Command::MutateChatMessage {
+            channel_id: "private".into(), message_id: "private-1".into(), action: MessageAction::Pin(true),
+        }).await.unwrap();
+        let pin = chat_action_request(&requests, "POST /api/messages/private-1/pin HTTP/1.1", value!({"on":true})).await;
+        assert_eq!(pin.header("cookie"), Some("session=bob"));
+        let pinned = value!({"channelId":"private","messageId":"private-1","pinned":true});
+        let event = value!({"type":"pin:update","channelId":"private","messageId":"private-1","pinned":true});
+        for peer in [&mut alice_peer, &mut bob_peer] {
+            peer.send(Message::text(event.to_string())).await.unwrap();
+        }
+        wait_for_sidebar(&alice_views, |view| view.chat.as_ref().unwrap().messages[0].pinned).await;
+        wait_for_sidebar(&bob_views, |view| view.chat.as_ref().unwrap().messages[0].pinned).await;
+        pin.respond(&[], &pinned.to_string()).await;
+        let (line, pins) = requests.recv().await.unwrap();
+        assert_eq!(line, "GET /api/channels/private/pins HTTP/1.1");
+        let mut pinned_message = first.clone();
+        pinned_message["pinned"] = value!(true);
+        pins.respond(&[], &value!([pinned_message]).to_string()).await;
+        wait_for_sidebar(&bob_views, |view| {
+            let chat = view.chat.as_ref().unwrap();
+            !chat.action_pending && matches!(&chat.pins, Some(Pins::Ready(pins)) if pins.iter().any(|m| m.id == "private-1"))
+        }).await;
+
+        // An HTTP refusal leaves both participants' current pin state unchanged.
+        bob.send(Command::MutateChatMessage {
+            channel_id: "private".into(), message_id: "private-1".into(), action: MessageAction::Pin(false),
+        }).await.unwrap();
+        let denied = chat_action_request(&requests, "POST /api/messages/private-1/pin HTTP/1.1", value!({"on":false})).await;
+        denied.respond_raw("403 Forbidden", &[], b"").await;
+        let denied = wait_for_sidebar(&bob_views, |view| view.chat.as_ref().unwrap().action_outcome.as_ref().is_some_and(|outcome| outcome.error.is_some())).await;
+        assert!(denied.chat.unwrap().messages[0].pinned);
+        bob.send(Command::ShowChatPins { channel_id: "private".into(), shown: false }).await.unwrap();
+        bob.send(Command::MutateChatMessage {
+            channel_id: "private".into(), message_id: "private-1".into(), action: MessageAction::Pin(false),
+        }).await.unwrap();
+        let unpin = chat_action_request(&requests, "POST /api/messages/private-1/pin HTTP/1.1", value!({"on":false})).await;
+        let update = value!({"type":"pin:update","channelId":"private","messageId":"private-1","pinned":false});
+        for peer in [&mut alice_peer, &mut bob_peer] {
+            peer.send(Message::text(update.to_string())).await.unwrap();
+        }
+        unpin.respond(&[], &update.to_string()).await;
+        for views in [&alice_views, &bob_views] {
+            wait_for_sidebar(views, |view| {
+                let chat = view.chat.as_ref().unwrap();
+                !chat.action_pending && !chat.messages[0].pinned
+            }).await;
+        }
+
+        for on in [true, false] {
+            bob.send(Command::MutateChatMessage {
+                channel_id: "private".into(), message_id: "private-1".into(),
+                action: MessageAction::React { emoji: "👍".into(), on },
+            }).await.unwrap();
+            let reaction = chat_action_request(&requests, "POST /api/messages/private-1/reactions HTTP/1.1", value!({"emoji":"👍","on":on})).await;
+            let reactions = if on { value!([{"emoji":"👍","userIds":["bob"]}]) } else { value!([]) };
+            let update = value!({"type":"reaction:update","channelId":"private","messageId":"private-1","reactions":reactions});
+            for peer in [&mut alice_peer, &mut bob_peer] {
+                peer.send(Message::text(update.to_string())).await.unwrap();
+            }
+            reaction.respond(&[], &update.to_string()).await;
+            for views in [&alice_views, &bob_views] {
+                wait_for_sidebar(views, |view| {
+                    let chat = view.chat.as_ref().unwrap();
+                    !chat.action_pending && if on {
+                        chat.messages[0].reactions.first().is_some_and(|r| r.emoji == "👍" && r.user_ids == ["bob"])
+                    } else {
+                        chat.messages[0].reactions.is_empty()
+                    }
+                }).await;
+            }
+        }
+
+        let body = "> Hello Bob\n\n**Hi** <@alice> 👋 ||a secret||";
+        bob.send(Command::UpdateChatDraft { channel_id: "private".into(), body: body.into() }).await.unwrap();
+        receive_typing(&mut bob_peer, "private").await;
+        alice_peer.send(Message::text(value!({"type":"typing","channelId":"private","userId":"bob"}).to_string())).await.unwrap();
+        wait_for_sidebar(&alice_views, |view| view.chat.as_ref().is_some_and(|chat| chat.typing == ["bob"])).await;
+        bob.send(Command::SetChatReply { channel_id: "private".into(), message_id: Some("private-1".into()) }).await.unwrap();
+        bob.send(Command::CloseChat).await.unwrap();
+        wait_for_sidebar(&bob_views, |view| view.chat.is_none()).await;
+        bob.send(Command::OpenDirectMessage("private".into())).await.unwrap();
+        page(private_history(&requests, "session=bob").await, std::slice::from_ref(&first), false).await;
+        wait_for_sidebar(&bob_views, |view| view.chat.as_ref().is_some_and(|chat| {
+            !chat.loading() && chat.draft.body == body && chat.draft.reply.as_ref().is_some_and(|reply| reply.id == "private-1")
+        })).await;
+
+        bob.send(Command::SendChatMessage { channel_id: "private".into(), body: body.into() }).await.unwrap();
+        let reply = receive_chat_send(&mut bob_peer, "private", body).await;
+        assert_eq!(reply["replyToId"], "private-1");
+        wait_for_sidebar(&bob_views, |view| view.chat.as_ref().is_some_and(|chat| chat.outgoing.is_some() && chat.draft.body == body)).await;
+        let second = value!({"id":"private-2","channelId":"private","userId":"bob","body":body,"createdAt":2,
+            "replyTo":{"id":"private-1","userId":"alice","preview":"Hello Bob","deleted":false}});
+        live(&mut bob_peer, &second, reply["nonce"].as_str()).await;
+        live(&mut alice_peer, &second, reply["nonce"].as_str()).await;
+        wait_for_sidebar(&alice_views, |view| view.chat.as_ref().is_some_and(|chat| {
+            chat.messages.last().is_some_and(|message| {
+                message.body == body && message.reply_to.as_ref().is_some_and(|reply| reply.id == "private-1" && reply.user_id == "alice")
+            })
+        })).await;
+        wait_for_sidebar(&bob_views, |view| view.chat.as_ref().is_some_and(|chat| {
+            chat.messages.len() == 2 && chat.draft.body.is_empty() && chat.draft.reply.is_none() && chat.outgoing.is_none()
+        })).await;
+
+        alice_peer.close(None).await.unwrap();
+        let mut alice_peer = accept_async(sockets.accept().await.unwrap().0).await.unwrap();
+        let request = private_history(&requests, "session=alice").await;
+        let third = value!({"id":"private-3","channelId":"private","userId":"bob","body":"While offline","createdAt":3});
+        let fourth = value!({"id":"private-4","channelId":"private","userId":"bob","body":"Live again","createdAt":4});
+        live(&mut alice_peer, &fourth, None).await;
+        let latest = [first, second, third, fourth];
+        page(request, &latest, false).await;
+        wait_for_messages(&alice_views, &["private-1", "private-2", "private-3", "private-4"]).await;
+
+        alice.send(Command::CloseChat).await.unwrap();
+        wait_for_sidebar(&alice_views, |view| view.chat.is_none()).await;
+        alice.send(Command::StartDirectMessage("bob".into())).await.unwrap();
+        page(private_history(&requests, "session=alice").await, &latest, false).await;
+        wait_for_messages(&alice_views, &["private-1", "private-2", "private-3", "private-4"]).await;
+        alice.send(Command::MutateChatMessage {
+            channel_id: "private".into(), message_id: "private-1".into(), action: MessageAction::Delete,
+        }).await.unwrap();
+        let (line, request) = requests.recv().await.unwrap();
+        assert_eq!(line, "DELETE /api/messages/private-1 HTTP/1.1");
+        assert_eq!(request.header("cookie"), Some("session=alice"));
+        for peer in [&mut alice_peer, &mut bob_peer] {
+            peer.send(Message::text(value!({"type":"message:delete","channelId":"private","id":"private-1"}).to_string())).await.unwrap();
+        }
+        request.respond(&[], r#"{"ok":true}"#).await;
+        wait_for_messages(&bob_views, &["private-2"]).await;
+        wait_for_sidebar(&alice_views, |view| view.chat.as_ref().is_some_and(|chat| {
+            chat.messages.len() == 3 && chat.messages.first().is_some_and(|message| {
+                message.id == "private-2" && message.reply_to.as_ref().is_some_and(|reply| reply.deleted && reply.preview.is_empty())
+            })
+        })).await;
+        alice.close();
+        bob.close();
+        assert!(matches!(alice_session.await.unwrap(), SessionEnd::Closed));
+        assert!(matches!(bob_session.await.unwrap(), SessionEnd::Closed));
+    })
+    .await
+    .expect("loopback private conversation timed out");
+    http.abort();
+}
+
+#[tokio::test]
+async fn admin_message_moderation_is_role_gated_and_updates_a_peer() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let http = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = Url::parse(&format!("http://{}", http.local_addr().unwrap())).unwrap();
+    let (requests_tx, requests) = async_channel::unbounded();
+    let http = tokio::spawn(async move {
+        loop {
+            let (line, request) = Request::receive(&http).await;
+            match line.as_str() {
+                "GET /api/channels HTTP/1.1" => {
+                    request
+                        .respond(&[], r#"[{"id":"general","type":"text"}]"#)
+                        .await;
+                }
+                "GET /api/users HTTP/1.1" => {
+                    request
+                        .respond(
+                            &[],
+                            r#"[{"id":"alice","role":"admin"},{"id":"bob","role":"user"}]"#,
+                        )
+                        .await;
+                }
+                "GET /api/voice HTTP/1.1" => request.respond(&[], "[]").await,
+                "GET /api/unread HTTP/1.1" | "GET /api/users/presence HTTP/1.1" => {
+                    request.respond(&[], "{}").await;
+                }
+                _ => requests_tx.send((line, request)).await.unwrap(),
+            }
+        }
+    });
+
+    timeout(Duration::from_secs(10), async {
+        let (alice, alice_views, _, mut alice_peer, alice_session) =
+            direct_message_session(base.clone(), "alice").await;
+        let (bob, bob_views, _, mut bob_peer, bob_session) =
+            direct_message_session(base.clone(), "bob").await;
+        let url = "https://example.test/moderation";
+        let mut target = message("target", 1, "charlie", url);
+        target["previews"] = value!([{"url":url,"title":"Moderated card","image":false}]);
+        for (commands, views, cookie) in [
+            (&alice, &alice_views, "session=alice"),
+            (&bob, &bob_views, "session=bob"),
+        ] {
+            commands.send(Command::OpenTextChannel("general".into())).await.unwrap();
+            let history = history_request(&requests, "?unread=1").await;
+            assert_eq!(history.header("cookie"), Some(cookie));
+            page(history, std::slice::from_ref(&target), false).await;
+            let view = wait_for_sidebar(views, |view| {
+                view.is_admin() == (cookie == "session=alice")
+                    && view.chat.as_ref().is_some_and(|chat| {
+                        chat.messages.first().is_some_and(|message| message.id == "target")
+                    })
+            }).await;
+            let message = &view.chat.as_ref().unwrap().messages[0];
+            assert_eq!(view.can_remove_message_content(message), cookie == "session=alice");
+            assert_eq!(message.previews.len(), 1);
+        }
+
+        let mutate = |action| Command::MutateChatMessage {
+            channel_id: "general".into(), message_id: "target".into(), action,
+        };
+        bob.send(mutate(MessageAction::Delete)).await.unwrap();
+        let denied = wait_for_sidebar(&bob_views, |view| {
+            view.chat.as_ref().unwrap().action_outcome.as_ref().is_some_and(|outcome| outcome.error.is_some())
+        }).await;
+        assert!(!denied.can_remove_message_content(&denied.chat.as_ref().unwrap().messages[0]));
+        assert!(requests.is_empty());
+
+        alice.send(mutate(MessageAction::RemovePreview(url.into()))).await.unwrap();
+        let remove = chat_action_request(&requests, "DELETE /api/messages/target/previews HTTP/1.1", value!({"url":url})).await;
+        assert_eq!(remove.header("cookie"), Some("session=alice"));
+        remove.respond(&[], r#"{"ok":true}"#).await;
+        let previews = value!({"type":"message:previews","channelId":"general","messageId":"target","previews":[]});
+        for peer in [&mut alice_peer, &mut bob_peer] {
+            peer.send(Message::text(previews.to_string())).await.unwrap();
+        }
+        for views in [&alice_views, &bob_views] {
+            wait_for_sidebar(views, |view| {
+                let chat = view.chat.as_ref().unwrap();
+                !chat.action_pending && chat.messages[0].previews.is_empty()
+            }).await;
+        }
+
+        alice.send(mutate(MessageAction::Delete)).await.unwrap();
+        let (line, delete) = requests.recv().await.unwrap();
+        assert_eq!(line, "DELETE /api/messages/target HTTP/1.1");
+        assert_eq!(delete.header("cookie"), Some("session=alice"));
+        delete.respond(&[], r#"{"ok":true}"#).await;
+        let deleted = value!({"type":"message:delete","channelId":"general","id":"target"});
+        for peer in [&mut alice_peer, &mut bob_peer] {
+            peer.send(Message::text(deleted.to_string())).await.unwrap();
+        }
+        for views in [&alice_views, &bob_views] {
+            wait_for_messages(views, &[]).await;
+        }
+        alice.close();
+        bob.close();
+        assert!(matches!(alice_session.await.unwrap(), SessionEnd::Closed));
+        assert!(matches!(bob_session.await.unwrap(), SessionEnd::Closed));
+    }).await.expect("loopback moderation timed out");
+    http.abort();
+}
+
+async fn private_history(requests: &Receiver<(String, Request)>, cookie: &str) -> Request {
+    let (line, request) = requests.recv().await.unwrap();
+    assert_eq!(line, "GET /api/channels/private/messages?unread=1 HTTP/1.1");
+    assert_eq!(request.header("cookie"), Some(cookie));
+    request
+}
+
+async fn chat_action_request(
+    requests: &Receiver<(String, Request)>,
+    path: &str,
+    body: Value,
+) -> Request {
+    let (line, request) = requests.recv().await.unwrap();
+    assert_eq!(line, path);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&request.body).unwrap(),
+        body
+    );
+    request
+}

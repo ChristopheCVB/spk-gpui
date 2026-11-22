@@ -66,6 +66,14 @@ pub struct Chord {
 }
 
 impl Chord {
+    pub fn keystroke(&self) -> Keystroke {
+        Keystroke {
+            key: self.key.clone(),
+            key_char: None,
+            modifiers: self.modifiers,
+        }
+    }
+
     pub fn capture(keystroke: &Keystroke, window: &Window) -> Option<Self> {
         let chord = Self::from_keystroke(keystroke, window);
         chord.valid().then_some(chord)
@@ -226,12 +234,38 @@ pub struct Binding {
     pub scope: Scope,
 }
 
-#[derive(Clone, Default, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(default)]
 struct Preferences {
     mute: Option<Binding>,
     deafen: Option<Binding>,
     sounds: SoundSettings,
+}
+
+impl Default for Preferences {
+    fn default() -> Self {
+        let focused = |key: &str, mac_key: &str| {
+            Some(Binding {
+                chord: Chord {
+                    key: key.to_owned(),
+                    mac_key: cfg!(target_os = "macos").then(|| mac_key.to_owned()),
+                    modifiers: Modifiers {
+                        alt: true,
+                        shift: true,
+                        platform: cfg!(target_os = "macos"),
+                        control: !cfg!(target_os = "macos"),
+                        ..Modifiers::default()
+                    },
+                },
+                scope: Scope::InSpk,
+            })
+        };
+        Self {
+            mute: focused("m", "KeyM"),
+            deafen: focused("d", "KeyD"),
+            sounds: SoundSettings::default(),
+        }
+    }
 }
 
 impl Preferences {
@@ -569,6 +603,13 @@ impl Shortcuts {
         }
     }
 
+    pub fn owns_chord(&self, chord: &Chord) -> bool {
+        Action::ALL.into_iter().any(|action| {
+            self.binding(action)
+                .is_some_and(|binding| binding.chord.same(chord))
+        })
+    }
+
     pub fn focused_action(&self, chord: &Chord) -> Option<Action> {
         if !self.signed_in || self.editor.is_some() {
             return None;
@@ -725,7 +766,7 @@ mod tests {
         let path = dir.path().join("voice-preferences.json");
         let mut shortcuts = Shortcuts::load(Some(path.clone()), Some("Unavailable"));
         shortcuts.signed_in(true);
-        assert!(shortcuts.binding(Action::Mute).is_none());
+        assert_eq!(shortcuts.binding(Action::Mute).unwrap().scope, Scope::InSpk);
         let original = binding("f1", Scope::InSpk);
         shortcuts
             .set_binding(Action::Mute, Some(original.clone()))

@@ -66,14 +66,13 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
         audio_stream::native::NativeAudioStream, video_frame::VideoRotation,
         video_stream::native::NativeVideoStream,
     };
-    use tokio::time::{interval, timeout};
+    use tokio::time::{Instant, interval, timeout, timeout_at};
 
     struct Fixture(oneshot::Receiver<()>, Option<Box<dyn Capture>>);
 
     impl Capture for Fixture {
         fn start(
             self: Box<Self>,
-            quality: Quality,
             audio: bool,
             sink: CaptureSink,
         ) -> BoxFuture<'static, Result<(), CaptureError>> {
@@ -81,29 +80,37 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
                 let mut stop = self.0;
                 if let Some(native) = self.1 {
                     return tokio::select! {
-                        result = native.start(quality, audio, sink) => result,
+                        result = native.start(audio, sink) => result,
                         _ = &mut stop => Err(CaptureError::SourceLost),
                     };
                 }
                 let mut ticks = interval(Duration::from_millis(10));
                 let mut elapsed = 0;
+                let mut quality = *sink.quality.borrow();
                 loop {
                     tokio::select! {
                         biased;
                         _ = &mut stop => return Err(CaptureError::SourceLost),
                         _ = ticks.tick() => {
-                            if elapsed % 40 == 0 {
-                                let mut frame = VideoFrame::new(VideoRotation::VideoRotation0, I420Buffer::new_black(320, 180));
+                            let requested = *sink.quality.borrow();
+                            if requested.fps != 60 {
+                                quality = requested;
+                            }
+                            if elapsed % (if quality.fps == 5 { 200 } else { 40 }) == 0 {
+                                let (width, height) = quality.dimensions(1920, 1080).unwrap();
+                                let mut frame = VideoFrame::new(VideoRotation::VideoRotation0, I420Buffer::new_black(width, height));
                                 frame.timestamp_us = elapsed * 1000;
-                                sink.video(frame, 25);
+                                sink.video(frame, quality, quality.fps);
                             }
                             if audio {
-                                let samples = (0..480)
+                                let samples: Vec<_> = (0..480)
                                     .flat_map(|index| {
                                         let phase = (index as f32 + elapsed as f32 * 48.) * 0.057595866;
                                         [(phase.sin() * 7000.) as i16, (phase.cos() * 4000.) as i16]
                                     })
                                     .collect();
+                                // Keep audio ready while testing that video delivery makes progress.
+                                sink.audio(samples.clone());
                                 sink.audio(samples);
                             }
                             elapsed += 10;
@@ -133,15 +140,15 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
     )
     .await
     .unwrap();
-    let (native, scope, quality) = (None, AudioScope::Application, (320, 180, 25));
+    let (native, scope) = (None, AudioScope::Application);
     #[cfg(target_os = "linux")]
-    let (native, scope, quality) = if let Ok(output) = std::env::var("SPK_TEST_PULSE_OUTPUT") {
+    let (native, scope) = if let Ok(output) = std::env::var("SPK_TEST_PULSE_OUTPUT") {
         let choice = linux::choices()
             .await
             .unwrap()
             .into_iter()
-            .find(|choice| choice.id.starts_with("display:"))
-            .expect("fixture Xvfb display");
+            .find(|choice| choice.id == "display" || choice.id.starts_with("display:"))
+            .expect("fixture Linux display");
         let selected = linux::select(
             choice,
             Some(Device {
@@ -152,21 +159,47 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
         .await
         .unwrap();
         assert_eq!(selected.audio, Some(AudioScope::PlaybackMix));
-        (
-            Some(selected.capture),
-            AudioScope::PlaybackMix,
-            (640, 480, 30),
-        )
+        (Some(selected.capture), AudioScope::PlaybackMix)
     } else {
-        (native, scope, quality)
+        (native, scope)
+    };
+    #[cfg(windows)]
+    let (native, scope) = if let Ok(title) = std::env::var("SPK_TEST_SCREEN_WINDOW") {
+        let choice = windows::choices()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|choice| choice.label == format!("Window · {title}"))
+            .expect("synthetic Windows fixture");
+        let selected = windows::select(choice, None).await.unwrap();
+        assert_eq!(selected.audio, Some(AudioScope::Application));
+        (Some(selected.capture), AudioScope::Application)
+    } else {
+        (native, scope)
+    };
+    let synthetic = native.is_none();
+    let audio_threshold = if !synthetic && scope == AudioScope::Application {
+        100
+    } else {
+        500
+    };
+    let check_peer_dimensions = |actual: (u32, u32), expected: (u32, u32)| {
+        if !synthetic && scope == AudioScope::Application {
+            // WebRTC aligns native capture dimensions for the encoder.
+            assert!(actual.0.abs_diff(expected.0) <= 4 && actual.1.abs_diff(expected.1) <= 4);
+        } else {
+            assert_eq!(actual, expected);
+        }
     };
     let (stop, stopped) = oneshot::channel();
     let (report_tx, mut report_rx) = tokio::sync::watch::channel(State::Starting);
+    let (requests, mut requested) = watch::channel(Intent::default());
 
     let share = tokio::spawn(async move {
         let result = capture_and_publish(
             &publisher,
             Quality::default(),
+            &mut requested,
             Some(scope),
             Box::new(Fixture(stopped, native)),
             &|state| {
@@ -177,14 +210,27 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
         (publisher, result)
     });
 
-    timeout(Duration::from_secs(8), async {
+    let initial_size = timeout(Duration::from_secs(8), async {
         let state = report_rx.wait_for(State::active).await.unwrap();
-        assert!(matches!(
-            *state,
-            State::Live {
-                width, height, fps, audio: Some(audio), ..
-            } if (width, height, fps) == quality && audio == scope
-        ));
+        let State::Live {
+            width,
+            height,
+            fps,
+            audio,
+            ..
+        } = *state
+        else {
+            unreachable!();
+        };
+        assert_eq!((fps, audio), (30, Some(scope)));
+        if synthetic {
+            assert_eq!((width, height), (1920, 1080));
+        } else if scope == AudioScope::PlaybackMix {
+            assert_eq!((width, height), (640, 480));
+        } else {
+            assert!((600..640).contains(&width) && (400..460).contains(&height));
+        }
+        (width, height)
     })
     .await
     .unwrap();
@@ -198,7 +244,14 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
             {
                 match publication.source() {
                     TrackSource::Screenshare => {
-                        assert_eq!(publication.name(), "screen");
+                        assert_eq!(
+                            publication.name(),
+                            if synthetic {
+                                "spk:screen:1080:30"
+                            } else {
+                                "screen"
+                            }
+                        );
                         video = Some(publication);
                     }
                     TrackSource::ScreenshareAudio => audio = Some(publication),
@@ -235,16 +288,140 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
     })
     .await
     .unwrap();
-    timeout(Duration::from_secs(8), async {
-        let frame = frames.next().await.unwrap();
-        assert_eq!(
-            (frame.buffer.width(), frame.buffer.height()),
-            (quality.0, quality.1)
-        );
+    let media_deadline = Instant::now() + Duration::from_secs(8);
+    let frame = timeout_at(media_deadline, frames.next())
+        .await
+        .expect("peer receives the initial Screen Share video")
+        .expect("peer video stream closed");
+    check_peer_dimensions((frame.buffer.width(), frame.buffer.height()), initial_size);
+    timeout_at(media_deadline, async {
         loop {
             let sample = samples.next().await.unwrap();
             assert_eq!(sample.sample_rate, 48_000);
-            if sample.data.iter().any(|value| value.unsigned_abs() > 500) {
+            if sample
+                .data
+                .iter()
+                .any(|value| value.unsigned_abs() > audio_threshold)
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("peer receives audible Screen Share audio");
+
+    let preset = Quality {
+        height: 720,
+        fps: 5,
+    };
+    let replacement_size = if synthetic { (1280, 720) } else { initial_size };
+    requests.send_modify(|intent| intent.screen.quality = preset);
+    timeout(Duration::from_secs(8), async {
+        let state = report_rx
+            .wait_for(|state| matches!(state, State::Live { fps: 5, .. }))
+            .await
+            .unwrap();
+        assert!(
+            matches!(*state, State::Live { width, height, quality, audio: Some(audio), .. }
+            if quality == preset && (width, height) == replacement_size && audio == scope)
+        );
+    })
+    .await
+    .expect("active Screen Share follows the new preset");
+
+    let replacement = timeout(Duration::from_secs(8), async {
+        loop {
+            match events.recv().await.expect("peer disconnected") {
+                RoomEvent::TrackPublished { publication, .. }
+                    if publication.source() == TrackSource::Screenshare =>
+                {
+                    break publication;
+                }
+                RoomEvent::TrackUnpublished { publication, .. }
+                    if publication.source() == TrackSource::ScreenshareAudio =>
+                {
+                    panic!("quality change interrupted Screen Share audio");
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_ne!(replacement.sid(), video.sid());
+    assert_eq!(
+        replacement.name(),
+        if synthetic {
+            "spk:screen:720:5"
+        } else {
+            "screen"
+        }
+    );
+    assert!(audio.is_desired());
+
+    timeout(Duration::from_secs(8), async {
+        loop {
+            if let Some(RoomEvent::TrackUnpublished { publication, .. }) = events.recv().await
+                && publication.sid() == video.sid()
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the old video publication is released");
+
+    replacement.set_subscribed(true);
+    let mut replacement_frames = timeout(Duration::from_secs(8), async {
+        loop {
+            if let Some(RoomEvent::TrackSubscribed {
+                track: RemoteTrack::Video(track),
+                publication,
+                ..
+            }) = events.recv().await
+                && publication.sid() == replacement.sid()
+            {
+                break NativeVideoStream::new(track.rtc_track());
+            }
+        }
+    })
+    .await
+    .unwrap();
+
+    if synthetic {
+        let rejected = Quality {
+            height: 1440,
+            fps: 60,
+        };
+        requests.send_modify(|intent| intent.screen.quality = rejected);
+        timeout(Duration::from_secs(8), async {
+            report_rx
+                .wait_for(|state| {
+                    matches!(state, State::Live {
+                quality, quality_failed: Some(failed), audio: Some(AudioScope::Application), ..
+            } if *quality == preset && *failed == rejected)
+                })
+                .await
+                .unwrap();
+        })
+        .await
+        .expect("an unsupported live change keeps the previous preset and audio");
+    }
+
+    samples = NativeAudioStream::new(samples.track(), 48_000, 2);
+    timeout(Duration::from_secs(8), async {
+        let frame = replacement_frames.next().await.unwrap();
+        check_peer_dimensions(
+            (frame.buffer.width(), frame.buffer.height()),
+            replacement_size,
+        );
+        loop {
+            let sample = samples.next().await.unwrap();
+            if sample
+                .data
+                .iter()
+                .any(|value| value.unsigned_abs() > audio_threshold)
+            {
                 break;
             }
         }
@@ -276,6 +453,7 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
             .track_publications()
             .is_empty()
     );
+    assert_eq!(publisher.connection_state(), ConnectionState::Connected);
     receiver.close().await.unwrap();
     publisher.close().await.unwrap();
 }

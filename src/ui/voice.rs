@@ -105,6 +105,7 @@ impl Spk {
                 .into_iter()
                 .map(|(kind, icon, label, action, off)| {
                     let picker_label = format!("Choose {}", device_label(kind).to_lowercase());
+                    let binding = self.shortcuts.binding(action);
                     let open = self.device_picker == Some((location, kind));
                     div()
                         .id(device_label(kind))
@@ -121,6 +122,19 @@ impl Spk {
                                 label,
                             )
                             .when(!compact, |button| button.label(label))
+                            .when_some(binding, |button, binding| {
+                                button.tooltip(format!("{label} ({})", binding.chord)).when(
+                                    !compact,
+                                    |button| {
+                                        button.child(
+                                            gpui_kit::component::kbd::Kbd::new(
+                                                binding.chord.keystroke(),
+                                            )
+                                            .outline(),
+                                        )
+                                    },
+                                )
+                            })
                             .on_click(
                                 cx.listener(move |this, _, _, cx| this.voice_action(action, cx)),
                             ),
@@ -313,9 +327,13 @@ fn microphone_controls(
         ))
         .child(Label::new("Sensitivity").font_semibold())
         .child(
-            Label::new("Higher picks up quieter speech.")
-                .text_xs()
-                .text_color(cx.theme().muted_foreground),
+            Label::new(if echo {
+                "Turn off echo cancellation to adjust processing."
+            } else {
+                "Higher picks up quieter speech."
+            })
+            .text_xs()
+            .text_color(cx.theme().muted_foreground),
         )
         .child(
             Slider::new(&quick_level(
@@ -652,6 +670,8 @@ pub(super) fn connection_diagnostics(cx: &Context<Spk>) -> Popover {
                             "Incoming audio packet loss",
                             metric(diagnostics.loss_percent, "%"),
                         ),
+                        ("Audio upload", metric(diagnostics.upload_kbps, "kbps")),
+                        ("Audio download", metric(diagnostics.download_kbps, "kbps")),
                     ]
                     .into_iter()
                     .map(|(label, value)| {

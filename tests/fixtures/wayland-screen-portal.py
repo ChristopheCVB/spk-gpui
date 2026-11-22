@@ -1,4 +1,4 @@
-"""Provide a window-only ScreenCast portal and verify picker cancellation teardown."""
+"""Verify ScreenCast teardown after picker cancellation and permission failure."""
 
 import os
 import subprocess
@@ -30,6 +30,7 @@ XML = """
 bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
 screen_cast, session, request = Gio.DBusNodeInfo.new_for_xml(XML).interfaces
 calls = []
+start_responses = iter([1, 2])
 
 
 def property_value(_connection, _sender, _path, _interface, name):
@@ -55,7 +56,7 @@ def method_call(_connection, sender, _path, _interface, method, parameters, invo
         status = 2
         calls.append("unexpected selection")
     elif method == "Start":
-        status = 1
+        status = next(start_responses)
 
     registration = bus.register_object(handle, request, None, None, None)
     invocation.return_value(GLib.Variant("(o)", (handle,)))
@@ -93,5 +94,5 @@ GLib.timeout_add(50, check_done)
 loop.run()
 if test.returncode:
     sys.exit(test.returncode)
-if calls != ["CreateSession", "SelectSources", "Start", "Close"]:
+if calls != ["CreateSession", "SelectSources", "Start", "Close"] * 2:
     sys.exit(f"Unexpected ScreenCast calls: {calls}")

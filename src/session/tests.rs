@@ -1,6 +1,21 @@
+mod account_admin;
+mod accounts;
+#[cfg(debug_assertions)]
+mod attachments;
+mod changelog;
+mod channel_admin;
+mod chat;
+mod gifs;
 mod media;
+mod moderation;
+mod profile;
 mod radio;
+mod search;
 mod soundboard;
+#[cfg(debug_assertions)]
+mod soundboard_admin;
+mod unread;
+mod user_presence;
 
 use std::{collections::HashSet, time::Duration};
 
@@ -22,6 +37,7 @@ use tokio_tungstenite::{
 use super::{presence::Data, voice_session::VOICE_REPLACED, *};
 use crate::{
     api::{Member, VideoPresence, VoiceFlags, VoiceSocket},
+    sounds::SoundSettings,
     voice::{self, DevicePreferences, Report as VoiceReport},
 };
 
@@ -167,7 +183,7 @@ async fn saved_session_restores_signs_out_and_clears_expired_credentials() {
         }
         let (tx, commands) = async_channel::unbounded();
         let (views, rx) = async_channel::unbounded();
-        let (saved, storage) = SavedSession::with_test_store(bytes.clone());
+        let (saved, storage) = SavedSession::with_test_store(Some(bytes.clone()));
         let settings = fixture_settings(endpoint.clone(), Call::start_for_test);
         let server = async {
             let request = Request::read(&http, "GET /api/profile/me HTTP/1.1").await;
@@ -186,12 +202,18 @@ async fn saved_session_restores_signs_out_and_clears_expired_credentials() {
                 let profile = Request::read(&http, "GET /api/profile/me HTTP/1.1").await;
                 assert_eq!(profile.header("cookie"), Some("session=new"));
                 profile
-                    .respond(&[], r#"{"id":"alice","email":"alice@example.test"}"#)
+                    .respond(
+                        &[],
+                        r#"{"id":"alice","email":"alice@example.test","displayName":"Alice"}"#,
+                    )
                     .await;
                 return;
             }
             request
-                .respond(&[], r#"{"id":"alice","email":"alice@example.test"}"#)
+                .respond(
+                    &[],
+                    r#"{"id":"alice","email":"alice@example.test","displayName":"Alice"}"#,
+                )
                 .await;
             let mut ws = accept_hdr_async(
                 sockets.accept().await.unwrap().0,
@@ -206,9 +228,11 @@ async fn saved_session_restores_signs_out_and_clears_expired_credentials() {
                 let (line, request) = Request::receive(&http).await;
                 assert_eq!(request.header("cookie"), Some("session=saved"));
                 match line.as_str() {
+                    "GET /api/unread HTTP/1.1" => request.respond(&[], "{}").await,
                     "GET /api/channels HTTP/1.1"
                     | "GET /api/voice HTTP/1.1"
                     | "GET /api/users HTTP/1.1" => request.respond(&[], "[]").await,
+                    "GET /api/users/presence HTTP/1.1" => request.respond(&[], "{}").await,
                     "POST /api/auth/sign-out HTTP/1.1" => {
                         request
                             .respond(&["session=; Path=/; HttpOnly; Max-Age=0"], "{}")
@@ -246,6 +270,16 @@ async fn saved_session_restores_signs_out_and_clears_expired_credentials() {
             }
             assert!(storage.lock().unwrap().is_none());
             if expired {
+                tx.send(Command::OpenAccountLink).await.unwrap();
+                assert!(matches!(rx.recv().await.unwrap(), View::AccountLink { .. }));
+                tx.send(Command::BackToSignIn).await.unwrap();
+                assert!(matches!(
+                    rx.recv().await.unwrap(),
+                    View::SignIn {
+                        message: Some(SESSION_EXPIRED),
+                        retry_restore: false
+                    }
+                ));
                 tx.send(Command::SignIn {
                     email: "alice@example.test".into(),
                     password: "test password".into(),
@@ -280,9 +314,19 @@ async fn saved_session_restores_signs_out_and_clears_expired_credentials() {
 #[derive(Clone, Copy)]
 enum SidebarSnapshot {
     Initial,
+    AccountAdmin {
+        role: &'static str,
+        target_role: &'static str,
+        banned: bool,
+    },
     Updated,
     VoiceReplaced,
     FailPresenceOnce,
+    DelayUserPresence,
+    VoiceModeration {
+        role: &'static str,
+        channel: Option<&'static str>,
+    },
     MediaPresence {
         channel: &'static str,
         flags: VoiceFlags,
@@ -290,6 +334,15 @@ enum SidebarSnapshot {
 }
 
 async fn voice_session(
+    start_call: impl Fn(String, SpkClient, VoiceSocket, Intent) -> Call + Send + Sync + 'static,
+    server: impl AsyncFnOnce(TcpListener, Receiver<Request>, watch::Sender<SidebarSnapshot>),
+    desktop: impl AsyncFnOnce(Sender<Command>, Receiver<View>),
+) -> SessionEnd {
+    voice_session_with_activity(watch::channel(true).1, start_call, server, desktop).await
+}
+
+async fn voice_session_with_activity(
+    activity: watch::Receiver<bool>,
     start_call: impl Fn(String, SpkClient, VoiceSocket, Intent) -> Call + Send + Sync + 'static,
     server: impl AsyncFnOnce(TcpListener, Receiver<Request>, watch::Sender<SidebarSnapshot>),
     desktop: impl AsyncFnOnce(Sender<Command>, Receiver<View>),
@@ -329,7 +382,19 @@ async fn voice_session(
                             .await;
                         continue;
                     }
-                    SidebarSnapshot::Initial | SidebarSnapshot::FailPresenceOnce => "[]",
+                    SidebarSnapshot::Initial
+                    | SidebarSnapshot::AccountAdmin { .. }
+                    | SidebarSnapshot::FailPresenceOnce
+                    | SidebarSnapshot::DelayUserPresence => "[]",
+                    SidebarSnapshot::VoiceModeration {
+                        channel: Some(channel),
+                        ..
+                    } => {
+                        let body = value!([{"userId":"bob","channelId":channel}]);
+                        request.respond(&[], &body.to_string()).await;
+                        continue;
+                    }
+                    SidebarSnapshot::VoiceModeration { channel: None, .. } => "[]",
                     SidebarSnapshot::Updated => {
                         r#"[{"userId":"bob","channelId":"first","speaking":true}]"#
                     }
@@ -348,7 +413,69 @@ async fn voice_session(
                 "GET /api/channels HTTP/1.1" => {
                     r#"[{"id":"first","type":"voice"},{"id":"second","type":"voice"}]"#
                 }
+                "GET /api/users HTTP/1.1"
+                    if let SidebarSnapshot::VoiceModeration { role, .. } = snapshot =>
+                {
+                    request
+                        .respond(&[], &value!([{"id":"alice","role":role}]).to_string())
+                        .await;
+                    continue;
+                }
+                "GET /api/users HTTP/1.1"
+                    if let SidebarSnapshot::AccountAdmin {
+                        role,
+                        target_role,
+                        banned,
+                    } = snapshot =>
+                {
+                    request
+                        .respond(
+                            &[],
+                            &value!([
+                                {"id":"alice","role":role},
+                                {"id":"bob","displayName":"Bob","role":target_role,"banned":banned},
+                            ])
+                            .to_string(),
+                        )
+                        .await;
+                    continue;
+                }
                 "GET /api/users HTTP/1.1" => "[]",
+                "GET /api/admin/users HTTP/1.1"
+                    if let SidebarSnapshot::AccountAdmin {
+                        target_role,
+                        banned,
+                        ..
+                    } = snapshot =>
+                {
+                    assert_eq!(request.header("cookie"), Some("session=fixture"));
+                    request
+                        .respond(
+                            &[],
+                            &value!({
+                                "users":[{"id":"bob","email":"bob@example.test","displayName":"Bob",
+                                    "role":target_role,"banned":banned,"bytes":512}],
+                                "totalBytes":4096,
+                            })
+                            .to_string(),
+                        )
+                        .await;
+                    continue;
+                }
+                line if line.contains(" /api/invites") || line.contains(" /api/admin/users") => {
+                    assert_eq!(request.header("cookie"), Some("session=fixture"));
+                    token_requests.send(request).await.unwrap();
+                    continue;
+                }
+
+                "GET /api/unread HTTP/1.1" => "{}",
+                "GET /api/users/presence HTTP/1.1"
+                    if matches!(snapshot, SidebarSnapshot::DelayUserPresence) =>
+                {
+                    token_requests.send(request).await.unwrap();
+                    continue;
+                }
+                "GET /api/users/presence HTTP/1.1" => "{}",
                 line if line.contains(" /api/radio/") => {
                     radio::respond(line, request, &mut radio_favorite).await;
                     continue;
@@ -359,6 +486,16 @@ async fn voice_session(
                     continue;
                 }
                 "POST /api/voice/token HTTP/1.1" => {
+                    token_requests.send(request).await.unwrap();
+                    continue;
+                }
+                "POST /api/admin/voice/move HTTP/1.1"
+                | "POST /api/admin/voice/disconnect HTTP/1.1" => {
+                    let payload: Value = serde_json::from_slice(&request.body).unwrap();
+                    assert_eq!(
+                        payload.get("channelId").is_some(),
+                        line == "POST /api/admin/voice/move HTTP/1.1",
+                    );
                     token_requests.send(request).await.unwrap();
                     continue;
                 }
@@ -374,8 +511,9 @@ async fn voice_session(
             .unwrap();
         let mut persisted = Vec::new();
         json::save(&client.cookies().lock().unwrap(), &mut persisted).unwrap();
-        let (mut saved, _) = SavedSession::with_test_store(persisted);
+        let (mut saved, _) = SavedSession::with_test_store(Some(persisted));
         let mut settings = fixture_settings(socket_endpoint, start_call);
+        settings.presence.activity = activity;
         watch_session(
             &client,
             profile,
@@ -399,12 +537,12 @@ async fn voice_session(
 fn fixture_settings(
     socket_endpoint: String,
     start_call: impl Fn(String, SpkClient, VoiceSocket, Intent) -> Call + Send + Sync + 'static,
-) -> VoiceSettings {
+) -> SessionSettings {
     let mut sounds = SoundSettings::default();
     for sound in Sound::ALL {
         sounds.get_mut(sound).enabled = false;
     }
-    VoiceSettings {
+    SessionSettings {
         socket_endpoint,
         start_call: Box::new(start_call),
         enumerate_devices: Devices::default,
@@ -413,7 +551,13 @@ fn fixture_settings(
             preferred: DevicePreferences::default(),
             notice: None,
         },
-        sounds: VoiceSounds::new(tokio::sync::watch::channel(sounds).1),
+        sounds: VoiceSounds::new(watch::channel(sounds).1),
+        alert_activation: watch::channel(None).1,
+        presence: PresenceSettings {
+            path: None,
+            status: UserStatus::default(),
+            activity: watch::channel(true).1,
+        },
     }
 }
 
@@ -464,8 +608,25 @@ async fn request_voice_token(requests: &Receiver<Request>, channel: &str) -> Req
     request
 }
 
+async fn receive_non_presence_message(
+    socket: &mut WebSocketStream<TcpStream>,
+) -> Option<Result<Message, tokio_tungstenite::tungstenite::Error>> {
+    loop {
+        let message = socket.next().await;
+        if let Some(Ok(Message::Text(text))) = &message
+            && let Ok(frame) = serde_json::from_str::<Value>(text.as_str())
+            && frame["type"]
+                .as_str()
+                .is_some_and(|kind| kind.starts_with("presence:"))
+        {
+            continue;
+        }
+        return message;
+    }
+}
+
 async fn receive_voice_frame(socket: &mut WebSocketStream<TcpStream>) -> Value {
-    let frame = socket.next().await.unwrap().unwrap();
+    let frame = receive_non_presence_message(socket).await.unwrap().unwrap();
     serde_json::from_str(frame.to_text().unwrap()).unwrap()
 }
 
@@ -593,7 +754,7 @@ async fn spk_recovery_yields_to_another_client_in_a_different_voice_channel() {
                 .unwrap();
             tokio::select! {
                 biased;
-                Some(Ok(Message::Text(frame))) = socket.next() => {
+                Some(Ok(Message::Text(frame))) = receive_non_presence_message(&mut socket) => {
                     panic!("the previous client sent a voice frame: {frame}")
                 }
                 result = closed => result.unwrap(),
@@ -721,6 +882,7 @@ async fn spk_recovery_yields_to_voice_teardown_and_invalidation() {
     ] {
         let (established, voice_started) = oneshot::channel();
         let (left_offline, reconnect_after_leaving) = oneshot::channel();
+        let (reconnected, presence_seen) = oneshot::channel();
         let end = voice_session(
             Call::start_for_test,
             async |listener, requests, _| {
@@ -742,13 +904,20 @@ async fn spk_recovery_yields_to_voice_teardown_and_invalidation() {
                             .send(Message::text(r#"{"type":"ping"}"#))
                             .await
                             .unwrap();
-                        assert_eq!(socket.next().await.unwrap().unwrap(), Message::text("ping"));
+                        assert_eq!(
+                            receive_non_presence_message(&mut socket)
+                                .await
+                                .unwrap()
+                                .unwrap(),
+                            Message::text("ping")
+                        );
                         socket
                             .send(Message::text(
                                 r#"{"type":"voice:presence","userId":"bob","channelId":"first"}"#,
                             ))
                             .await
                             .unwrap();
+                        presence_seen.await.unwrap();
                     }
                     VoiceEnding::Unauthorized => {
                         drop(socket);
@@ -801,6 +970,7 @@ async fn spk_recovery_yields_to_voice_teardown_and_invalidation() {
                     })
                     .await;
                     assert!(sidebar.voice.is_none());
+                    reconnected.send(()).unwrap();
                 } else if matches!(ending, VoiceEnding::Unauthorized) {
                     while views.recv().await.is_ok() {}
                 } else {
@@ -890,6 +1060,7 @@ fn live_membership_and_flags_win_over_an_in_flight_snapshot() {
             email: "reader@example.test".into(),
             display_name: None,
             avatar_key: None,
+            role: "user".into(),
         },
         None,
     );
@@ -905,6 +1076,8 @@ fn live_membership_and_flags_win_over_an_in_flight_snapshot() {
                     id: id.into(),
                     kind: kind.into(),
                     name: None,
+                    other_user_id: None,
+                    last_activity_at: None,
                 })
                 .collect(),
         )),
@@ -924,6 +1097,7 @@ fn live_membership_and_flags_win_over_an_in_flight_snapshot() {
             id: "alice".into(),
             display_name: Some("Alice".into()),
             avatar_key: None,
+            role: "user".into(),
             banned: false,
         }])),
     );
@@ -1101,7 +1275,7 @@ async fn avatar_loads_share_a_photo_and_discard_an_older_response() {
             .avatar(sidebar.profile.id.as_deref())
             .unwrap()
             .clone();
-        assert_eq!(photo.frame_count(), 2);
+        assert_eq!(photo.image.frame_count(), 2);
         new_applied.send(()).unwrap();
         let loaded = avatars.tasks.join_next().await.unwrap().unwrap();
         avatars.complete(&mut sidebar, loaded);
@@ -1138,6 +1312,7 @@ pub(crate) struct Request {
     stream: BufReader<TcpStream>,
     headers: String,
     pub(crate) body: Vec<u8>,
+    line: String,
 }
 
 impl Request {
@@ -1162,6 +1337,7 @@ impl Request {
             stream,
             headers: String::new(),
             body: Vec::new(),
+            line: request_line.clone(),
         };
         loop {
             line.clear();
@@ -1295,6 +1471,11 @@ fn voice_cues_follow_live_membership_of_other_users() {
             width: 1280,
             height: 720,
             fps: 30,
+            quality: screen::Quality {
+                height: 720,
+                fps: 30,
+            },
+            quality_failed: None,
             audio: None,
             audio_unavailable: false,
             frames: Default::default(),
@@ -1546,7 +1727,10 @@ async fn server_move_releases_the_original_call_when_the_destination_fails() {
                 .await
                 .respond_raw("404 Not Found", &[], b"")
                 .await;
-            assert!(!matches!(socket.next().await, Some(Ok(Message::Text(_)))));
+            assert!(!matches!(
+                receive_non_presence_message(&mut socket).await,
+                Some(Ok(Message::Text(_)))
+            ));
         },
         async |commands, views| {
             join_test_voice(&commands, &views).await;
@@ -1578,7 +1762,10 @@ async fn leave_cancels_a_voice_channel_switch() {
             );
             acknowledge_voice(&mut socket, &old).await;
             acknowledged.send(()).unwrap();
-            assert!(!matches!(socket.next().await, Some(Ok(Message::Text(_)))));
+            assert!(!matches!(
+                receive_non_presence_message(&mut socket).await,
+                Some(Ok(Message::Text(_)))
+            ));
         },
         async |commands, views| {
             request_first_voice(&commands, &views).await;
@@ -1608,6 +1795,8 @@ fn terminal_media_failure_offers_the_affected_voice_channel_for_rejoin() {
         id: "room".into(),
         kind: "voice".into(),
         name: None,
+        other_user_id: None,
+        last_activity_at: None,
     }]);
     sidebar.voice = Some(VoiceView::joining("room".into()));
     sidebar.voice.as_mut().unwrap().status = VoiceStatus::Reconnecting;
@@ -1720,6 +1909,58 @@ async fn queued_screen_start_respects_the_latest_audio_preference() {
     assert_eq!(
         sidebar.voice_intent.screen.action,
         screen::Action::Start(false)
+    );
+}
+
+#[test]
+fn failed_screen_quality_restores_the_previous_preset_for_the_current_share() {
+    let mut sidebar = Sidebar::new(
+        serde_json::from_str(r#"{"id":"alice","email":"alice@example.test"}"#).unwrap(),
+        None,
+    );
+    let mut voice = VoiceView::joining("first".into());
+    voice.status = VoiceStatus::Connected;
+    sidebar.voice = Some(voice);
+    let request = &mut sidebar.voice_intent.screen;
+    request.open();
+    let attempt = request.attempt;
+    assert!(request.advance(attempt, screen::Action::Choose("display".into(), None)));
+    assert!(request.advance(attempt, screen::Action::Start(false)));
+    let applied = screen::Quality::default();
+    let rejected = screen::Quality {
+        height: 1440,
+        fps: 60,
+    };
+    request.quality = rejected;
+    let report = |attempt| screen::Report {
+        attempt,
+        state: screen::State::Live {
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            quality: applied,
+            quality_failed: Some(rejected),
+            audio: None,
+            audio_unavailable: false,
+            frames: Default::default(),
+        },
+    };
+    let session = VoiceSession::default();
+    let settings = fixture_settings(String::new(), Call::start_for_test);
+    session.screen_report(&mut sidebar, &settings, report(attempt - 1));
+    assert_eq!(sidebar.voice_intent.screen.quality, rejected);
+    session.screen_report(&mut sidebar, &settings, report(attempt));
+    assert_eq!(sidebar.voice_intent.screen.quality, applied);
+    assert!(
+        sidebar
+            .voice
+            .as_ref()
+            .unwrap()
+            .screen
+            .as_ref()
+            .unwrap()
+            .state
+            .active()
     );
 }
 

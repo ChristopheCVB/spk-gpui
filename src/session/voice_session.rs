@@ -1,12 +1,15 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-use tokio::{task::spawn_blocking, time::Instant};
+use tokio::{
+    task::{JoinSet, spawn_blocking},
+    time::Instant,
+};
 
 use super::{Command, Sidebar, VoiceProcessingSetting};
-use crate::api::{Connection, SpkClient, VoiceSocket};
-use crate::sounds::{Sound, VoiceSounds};
+use crate::api::{Channel, Connection, Failure, SpkClient, VoiceModeration, VoiceSocket};
+use crate::sounds::Sound;
 use crate::voice::{
-    self, Call, DeviceKind, DevicePreferences, Devices, Intent, Issue as VoiceIssue,
+    self, Call, DeviceKind, DevicePreferences, Intent, Issue as VoiceIssue,
     ParticipantVolumeChange, Report as VoiceReport, Status as VoiceStatus, Update as VoiceUpdate,
     screen::{self, Action, State},
     video::{CameraStatus, VideoReport},
@@ -91,6 +94,49 @@ impl Sidebar {
             self.camera_status(),
             CameraStatus::Starting | CameraStatus::Live(..)
         )
+    }
+
+    pub fn voice_moderation_channels(&self, user_id: &str) -> Option<Vec<&Channel>> {
+        if !self.is_admin() || !matches!(self.connection, Connection::Online) {
+            return None;
+        }
+        let member = self.voice_presence.get(user_id)?;
+        Some(
+            self.channels
+                .iter()
+                .flatten()
+                .filter(|channel| channel.kind == "voice" && channel.id != member.channel_id)
+                .collect(),
+        )
+    }
+
+    pub(super) fn moderate_voice(
+        &mut self,
+        client: &SpkClient,
+        tasks: &mut JoinSet<Result<VoiceModeration, Failure>>,
+        user_id: String,
+        action: VoiceModeration,
+    ) {
+        if !self.is_admin() {
+            self.voice_moderation_notice = Some("You don’t have permission to moderate voice.");
+            return;
+        }
+        let available = self
+            .voice_moderation_channels(&user_id)
+            .is_some_and(|destinations| match &action {
+                VoiceModeration::Move(id) => destinations.iter().any(|channel| &channel.id == id),
+                VoiceModeration::Disconnect => true,
+            });
+        if !available {
+            self.voice_moderation_notice = Some("This voice moderation action is unavailable.");
+            return;
+        }
+        self.voice_moderation_notice = Some("Moderating voice…");
+        let client = client.clone();
+        tasks.spawn(async move {
+            client.moderate_voice(&user_id, &action).await?;
+            Ok(action)
+        });
     }
 
     pub(super) fn has_voice_channel(&self, channel_id: &str) -> bool {
@@ -194,14 +240,6 @@ impl DeviceSettings {
 }
 
 pub(super) type StartCall = dyn Fn(String, SpkClient, VoiceSocket, Intent) -> Call + Send + Sync;
-
-pub(super) struct VoiceSettings {
-    pub(super) socket_endpoint: String,
-    pub(super) start_call: Box<StartCall>,
-    pub(super) enumerate_devices: fn() -> Devices,
-    pub(super) devices: DeviceSettings,
-    pub(super) sounds: VoiceSounds,
-}
 
 #[derive(Default)]
 pub(super) struct VoiceSession {
@@ -475,10 +513,48 @@ impl VoiceSession {
         }
     }
 
+    pub(super) fn screen_report(
+        &self,
+        sidebar: &mut Sidebar,
+        settings: &super::SessionSettings,
+        report: screen::Report,
+    ) {
+        let request = &mut sidebar.voice_intent.screen;
+        let Some(voice) = sidebar
+            .voice
+            .as_mut()
+            .filter(|voice| voice.is_participating())
+        else {
+            return;
+        };
+        if report.attempt != request.attempt || request.action == Action::Stop {
+            return;
+        }
+        let was_live = voice
+            .screen
+            .as_ref()
+            .is_some_and(|screen| screen.state.active());
+        if was_live != report.state.active() {
+            settings.sounds.play(Sound::Screen, report.state.active());
+        }
+        if let State::Live { quality, quality_failed: Some(failed), .. } = &report.state
+            && request.quality == *failed
+            && !voice.screen.as_ref().is_some_and(|previous| {
+                matches!(previous.state, State::Live { quality_failed: Some(value), .. } if value == *failed)
+            })
+        {
+            request.quality = *quality;
+            if let Some(call) = &self.call {
+                call.apply(&sidebar.voice_intent);
+            }
+        }
+        voice.screen = Some(report);
+    }
+
     pub(super) async fn apply_controls(
         &self,
         sidebar: &mut Sidebar,
-        settings: &mut VoiceSettings,
+        settings: &mut super::SessionSettings,
         command: Command,
     ) {
         let save_preferences = matches!(

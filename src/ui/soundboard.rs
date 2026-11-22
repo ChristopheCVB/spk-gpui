@@ -54,19 +54,7 @@ impl SoundboardPanel {
         let play_id = clip.id.clone();
         let preview_id = clip.id.clone();
         let theme = cx.theme();
-        let icon_path = format!("icons/{}.svg", clip.icon);
-        let icon = if clip
-            .icon
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-            && assets::AllAssets
-                .load(&icon_path)
-                .is_ok_and(|data| data.is_some())
-        {
-            Icon::new(IconName::Megaphone).path(icon_path)
-        } else {
-            Icon::new(IconName::Megaphone)
-        };
+        let icon = clip_icon(&clip.icon);
         div()
             .id(SharedString::from(clip.id.clone()))
             .flex()
@@ -228,5 +216,20 @@ impl Render for SoundboardPanel {
                     .child(Label::new("Media Output").text_xs())
                     .child(device_picker(sidebar, DeviceKind::MediaOutput, &self.app)),
             )
+    }
+}
+
+pub(super) fn clip_icon(name: &str) -> Icon {
+    let path = format!("icons/{name}.svg");
+    if name
+        .bytes()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && assets::AllAssets
+            .load(&path)
+            .is_ok_and(|data| data.is_some())
+    {
+        Icon::new(IconName::Megaphone).path(path)
+    } else {
+        Icon::new(IconName::Megaphone)
     }
 }

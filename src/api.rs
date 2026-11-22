@@ -1,4 +1,25 @@
-use std::{sync::Arc, time::Duration};
+mod account_admin;
+mod attachments;
+mod channel_admin;
+mod chat_actions;
+mod gifs;
+mod public_media;
+mod search;
+mod soundboard_admin;
+
+pub(crate) use account_admin::account_link_token;
+pub use account_admin::{
+    AccountRole, AdminDirectory, AdminUser, Invite, InviteStatus, IssuedAccountLink,
+};
+pub use attachments::{Attachment, AttachmentRef, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS};
+pub use channel_admin::{ChannelKind, ChannelMutation};
+pub use chat_actions::{LinkPreview, MessageAction, MessageChange, Reaction};
+pub use gifs::{GifItem, GifPage, image_message_url};
+pub(crate) use public_media::{PublicDns, public_media_url};
+pub use search::{MessageTarget, SearchHit, SearchPage, SearchScope, conversation_link};
+pub use soundboard_admin::MAX_SOUND_BYTES;
+
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use futures::{SinkExt, StreamExt};
 use reqwest::{Client, Method, StatusCode, cookie::CookieStore as _, header, redirect::Policy};
@@ -16,6 +37,7 @@ use url::{Host, Url};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_AVATAR_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_AVATAR_UPLOAD: usize = 5 * 1024 * 1024;
 
 fn signed_storage_url(url: &Url) -> bool {
     if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
@@ -45,6 +67,12 @@ impl Failure {
     }
 }
 
+#[derive(Deserialize)]
+pub struct AccountLinkCheck {
+    pub valid: bool,
+    pub reason: Option<String>,
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Profile {
@@ -52,6 +80,8 @@ pub struct Profile {
     pub email: String,
     pub display_name: Option<String>,
     pub avatar_key: Option<String>,
+    #[serde(default)]
+    pub role: String,
 }
 
 impl Profile {
@@ -63,12 +93,40 @@ impl Profile {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangelogPage {
+    pub commits: Vec<ChangelogEntry>,
+    pub head: Option<String>,
+    pub next_page: Option<u32>,
+}
+
+#[derive(Deserialize)]
+pub struct ChangelogEntry {
+    pub sha: String,
+    pub message: String,
+    pub date: String,
+}
+
+fn commit_sha(value: &str) -> bool {
+    value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 #[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Channel {
     pub id: String,
     #[serde(rename = "type")]
     pub kind: String,
     pub name: Option<String>,
+    pub other_user_id: Option<String>,
+    pub last_activity_at: Option<i64>,
+}
+
+impl Channel {
+    pub fn is_conversation(&self) -> bool {
+        self.kind == "text" || (self.kind == "dm" && self.other_user_id.is_some())
+    }
 }
 
 #[derive(Deserialize)]
@@ -77,6 +135,8 @@ pub struct User {
     pub id: String,
     pub display_name: Option<String>,
     pub avatar_key: Option<String>,
+    #[serde(default)]
+    pub role: String,
     #[serde(default)]
     pub banned: bool,
 }
@@ -144,11 +204,206 @@ pub struct RadioSummary {
     pub station: Option<RadioStationName>,
 }
 
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatMessage {
+    pub id: String,
+    pub channel_id: String,
+    pub user_id: String,
+    pub body: String,
+    pub created_at: i64,
+    pub reply_to: Option<ReplyRef>,
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
+    pub edited_at: Option<i64>,
+    #[serde(default)]
+    pub reactions: Vec<Reaction>,
+    #[serde(default)]
+    pub previews: Vec<LinkPreview>,
+    #[serde(default)]
+    pub pinned: bool,
+}
+
+impl ChatMessage {
+    pub fn pings(&self, user_id: &str) -> bool {
+        self.user_id != user_id
+            && (self
+                .reply_to
+                .as_ref()
+                .is_some_and(|reply| reply.user_id == user_id)
+                || mentions(&self.body, user_id))
+    }
+}
+
+fn mentions(body: &str, user_id: &str) -> bool {
+    let token = format!("<@{user_id}>");
+    if !body.contains(&token)
+        || user_id.is_empty()
+        || !user_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return false;
+    }
+
+    // Match SPK mention tokens outside fenced and inline code.
+    let mut fence = None;
+    let mut lines = body.split('\n').peekable();
+    while let Some(line) = lines.next() {
+        if let Some(marker) = fence {
+            if line.strip_prefix(marker).is_some_and(|rest: &str| {
+                rest.trim_end_matches([' ', '\t', '\r'])
+                    .bytes()
+                    .all(|byte| matches!(byte, b'`' | b'~'))
+            }) {
+                fence = None;
+            }
+            continue;
+        }
+        if let Some(marker @ (b'`' | b'~')) = line.as_bytes().first().copied() {
+            let count = line.bytes().take_while(|&byte| byte == marker).count();
+            if count >= 3 && lines.peek().is_some() {
+                fence = Some(&line[..count]);
+                continue;
+            }
+        }
+        let mut spans = line.split('`');
+        if spans.next().is_some_and(|text| text.contains(&token)) {
+            return true;
+        }
+        while let Some(code) = spans.next() {
+            if spans.next().unwrap_or(code).contains(&token) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[derive(Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplyRef {
+    pub id: String,
+    pub user_id: String,
+    pub preview: String,
+    pub deleted: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessagePage {
+    pub messages: Vec<ChatMessage>,
+    pub has_more_before: bool,
+    #[serde(default)]
+    pub has_more_after: bool,
+    pub first_unread_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+pub struct UnreadState {
+    pub unread: usize,
+    // SPK records direct Mentions and Replies in the same count.
+    pub mentions: usize,
+}
+
+#[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum UserPresence {
+    Online,
+    Idle,
+    Busy,
+    #[default]
+    Offline,
+}
+
+impl UserPresence {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Online => "Online",
+            Self::Idle => "Away",
+            Self::Busy => "Busy",
+            Self::Offline => "Offline",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum UserStatus {
+    #[default]
+    Online,
+    Away,
+    Busy,
+    #[serde(rename = "offline")]
+    Invisible,
+}
+
+impl UserStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Online => "Online",
+            Self::Away => "Away",
+            Self::Busy => "Busy",
+            Self::Invisible => "Invisible",
+        }
+    }
+}
+
+pub enum PresenceReport {
+    Status(UserStatus),
+    Activity(bool),
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "type")]
 pub enum Frame {
+    #[serde(rename = "unread:update", rename_all = "camelCase")]
+    UnreadUpdate {
+        channel_id: String,
+        #[serde(flatten)]
+        state: UnreadState,
+    },
+    #[serde(rename = "message:new")]
+    MessageNew {
+        message: Box<ChatMessage>,
+        nonce: Option<String>,
+    },
+    #[serde(rename = "message:delete", rename_all = "camelCase")]
+    MessageDelete { channel_id: String, id: String },
+    #[serde(rename = "message:edit")]
+    MessageEdit { message: Box<ChatMessage> },
+    #[serde(rename = "message:previews", rename_all = "camelCase")]
+    MessagePreviews {
+        channel_id: String,
+        message_id: String,
+        previews: Vec<LinkPreview>,
+    },
+    #[serde(rename = "reaction:update", rename_all = "camelCase")]
+    ReactionUpdate {
+        channel_id: String,
+        message_id: String,
+        reactions: Vec<Reaction>,
+    },
+    #[serde(rename = "pin:update", rename_all = "camelCase")]
+    PinUpdate {
+        channel_id: String,
+        message_id: String,
+        pinned: bool,
+    },
+    #[serde(rename = "message:error")]
+    MessageError {
+        nonce: Option<String>,
+        error: String,
+    },
+    #[serde(rename = "typing", rename_all = "camelCase")]
+    Typing { channel_id: String, user_id: String },
     #[serde(rename = "ping")]
     Ping,
+    #[serde(rename = "presence:update", rename_all = "camelCase")]
+    UserPresence {
+        user_id: String,
+        status: UserPresence,
+    },
     #[serde(rename = "voice:presence", rename_all = "camelCase")]
     Presence {
         user_id: String,
@@ -226,6 +481,12 @@ pub struct SoundboardClip {
     pub duration_ms: u32,
 }
 
+#[derive(Clone)]
+pub enum VoiceModeration {
+    Move(String),
+    Disconnect,
+}
+
 #[derive(Deserialize)]
 pub struct VoiceToken {
     pub token: String,
@@ -272,12 +533,52 @@ pub enum VoiceJoin<'a> {
     Reclaim { ready: bool },
 }
 
-type SocketWrite = (String, oneshot::Sender<()>);
+type SocketWrite = (String, Option<oneshot::Sender<()>>);
 
 #[derive(Clone)]
 pub struct VoiceSocket(async_channel::Sender<SocketWrite>);
 
 impl VoiceSocket {
+    pub fn send_message(
+        &self,
+        channel_id: &str,
+        body: &str,
+        nonce: &str,
+        reply_to_id: Option<&str>,
+        attachments: &[AttachmentRef],
+    ) -> bool {
+        let frame = serde_json::json!({
+            "type": "message:send",
+            "channelId": channel_id,
+            "body": body,
+            "nonce": nonce,
+            "replyToId": reply_to_id,
+            "attachments": attachments,
+        });
+        self.0.try_send((frame.to_string(), None)).is_ok()
+    }
+
+    pub fn typing(&self, channel_id: &str) -> bool {
+        let frame = serde_json::json!({"type": "typing", "channelId": channel_id});
+        self.0.try_send((frame.to_string(), None)).is_ok()
+    }
+
+    pub async fn send_presence(&self, report: PresenceReport) -> Result<(), Failure> {
+        let frame = match report {
+            PresenceReport::Status(status) => serde_json::json!({
+                "type": "presence:set",
+                "status": status,
+            }),
+            PresenceReport::Activity(active) => serde_json::json!({
+                "type": if active { "presence:active" } else { "presence:idle" },
+            }),
+        };
+        self.0
+            .send((frame.to_string(), None))
+            .await
+            .map_err(|_| Failure::Connection)
+    }
+
     pub fn same_connection(&self, other: &Self) -> bool {
         self.0.same_channel(&other.0)
     }
@@ -286,7 +587,7 @@ impl VoiceSocket {
         let text = serde_json::to_string(&frame).expect("voice frames are serializable");
         let (written, receipt) = oneshot::channel();
         self.0
-            .try_send((text, written))
+            .try_send((text, Some(written)))
             .map_err(|_| Failure::Connection)?;
         timeout(REQUEST_TIMEOUT, receipt)
             .await
@@ -299,6 +600,7 @@ impl VoiceSocket {
 pub struct SpkClient {
     http: Client,
     storage: Client,
+    public_media: Client,
     base: Url,
     origin: String,
     cookies: Arc<CookieStoreMutex>,
@@ -320,9 +622,20 @@ impl SpkClient {
             .build()
             .map_err(|_| Failure::Connection)?;
 
+        let public_media = Client::builder()
+            .https_only(!cfg!(test))
+            .no_proxy()
+            .referer(false)
+            .dns_resolver(Arc::new(PublicDns))
+            .redirect(Policy::none())
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .map_err(|_| Failure::Connection)?;
+
         Ok(Self {
             http,
             storage,
+            public_media,
             base,
             origin,
             cookies,
@@ -369,6 +682,67 @@ impl SpkClient {
         Ok(())
     }
 
+    pub async fn check_invite(&self, token: &str) -> Result<AccountLinkCheck, Failure> {
+        self.check_account_link("/api/invites/check", token).await
+    }
+
+    pub async fn check_password_reset(&self, token: &str) -> Result<AccountLinkCheck, Failure> {
+        self.check_account_link("/api/reset-password/check", token)
+            .await
+    }
+
+    async fn check_account_link(
+        &self,
+        path: &str,
+        token: &str,
+    ) -> Result<AccountLinkCheck, Failure> {
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("token", token)
+            .finish();
+        self.get(&format!("{path}?{query}")).await
+    }
+
+    pub async fn sign_up(&self, token: &str, email: &str, password: &str) -> Result<(), Failure> {
+        let name = email.split('@').next().unwrap_or_default();
+        let mut token =
+            header::HeaderValue::from_str(token).map_err(|_| Failure::InvalidResponse)?;
+        token.set_sensitive(true);
+        Self::send(
+            self.request(Method::POST, "/api/auth/sign-up/email")
+                .header("x-invite-token", token)
+                .json(&serde_json::json!({"email": email, "password": password, "name": name})),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn reset_password(&self, token: &str, password: &str) -> Result<(), Failure> {
+        Self::send(
+            self.request(Method::POST, "/api/reset-password")
+                .json(&serde_json::json!({"token": token, "password": password})),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn set_nickname(&self, nickname: &str) -> Result<String, Failure> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Nickname {
+            display_name: String,
+        }
+
+        Self::send(
+            self.request(Method::POST, "/api/profile/nickname")
+                .json(&serde_json::json!({"displayName": nickname})),
+        )
+        .await?
+        .json::<Nickname>()
+        .await
+        .map(|result| result.display_name)
+        .map_err(|_| Failure::InvalidResponse)
+    }
+
     pub async fn sign_out(&self) -> Result<(), Failure> {
         Self::send(self.request(Method::POST, "/api/auth/sign-out")).await?;
         Ok(())
@@ -378,12 +752,216 @@ impl SpkClient {
         self.get("/api/profile/me").await
     }
 
+    pub async fn upload_avatar(
+        &self,
+        bytes: Vec<u8>,
+        mime: &'static str,
+    ) -> Result<String, Failure> {
+        #[derive(Deserialize)]
+        struct Upload {
+            key: String,
+            url: String,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Avatar {
+            avatar_key: String,
+        }
+
+        let upload: Upload = Self::send(
+            self.request(Method::POST, "/api/profile/avatar-upload")
+                .json(&serde_json::json!({ "size": bytes.len(), "type": mime })),
+        )
+        .await?
+        .json()
+        .await
+        .map_err(|_| Failure::InvalidResponse)?;
+        let url = Url::parse(&upload.url)
+            .ok()
+            .filter(signed_storage_url)
+            .ok_or(Failure::InvalidResponse)?;
+        if upload.key.is_empty() {
+            return Err(Failure::InvalidResponse);
+        }
+        // The storage response cannot expire the authenticated SPK session.
+        Self::send(
+            self.storage
+                .put(url)
+                .header(header::CONTENT_TYPE, mime)
+                .body(bytes),
+        )
+        .await
+        .map_err(|_| Failure::InvalidResponse)?;
+        let avatar: Avatar = Self::send(
+            self.request(Method::POST, "/api/profile/avatar")
+                .json(&serde_json::json!({ "key": upload.key })),
+        )
+        .await?
+        .json()
+        .await
+        .map_err(|_| Failure::InvalidResponse)?;
+        Ok(avatar.avatar_key)
+    }
+
+    pub async fn admin_profile_email(&self, id: &str) -> Result<Option<String>, Failure> {
+        #[derive(Deserialize)]
+        struct Directory {
+            users: Vec<Entry>,
+        }
+
+        #[derive(Deserialize)]
+        struct Entry {
+            id: String,
+            email: String,
+        }
+
+        let directory: Directory = self.get("/api/admin/users").await?;
+        Ok(directory
+            .users
+            .into_iter()
+            .find(|entry| entry.id == id)
+            .map(|entry| entry.email))
+    }
+
+    pub async fn changelog(&self, page: u32, head: Option<&str>) -> Result<ChangelogPage, Failure> {
+        let mut url = self.base.join("/api/changelog").expect("fixed SPK path");
+        url.query_pairs_mut().append_pair("page", &page.to_string());
+        if let Some(head) = head {
+            url.query_pairs_mut().append_pair("head", head);
+        }
+        let response = Self::send(self.http.get(url).header(header::ORIGIN, &self.origin)).await?;
+        let result: ChangelogPage = response
+            .json()
+            .await
+            .map_err(|_| Failure::InvalidResponse)?;
+        if result.head.as_deref().is_some_and(|head| !commit_sha(head))
+            || result
+                .next_page
+                .is_some_and(|next| next <= page || result.head.is_none())
+            || result.commits.iter().any(|entry| !commit_sha(&entry.sha))
+        {
+            return Err(Failure::InvalidResponse);
+        }
+        Ok(result)
+    }
+
     pub async fn channels(&self) -> Result<Vec<Channel>, Failure> {
         self.get("/api/channels").await
     }
 
+    pub async fn open_direct_message(&self, user_id: &str) -> Result<Channel, Failure> {
+        let response = Self::send(
+            self.request(Method::POST, "/api/dms")
+                .json(&serde_json::json!({ "userId": user_id })),
+        )
+        .await?;
+        let channel: Channel = response
+            .json()
+            .await
+            .map_err(|_| Failure::InvalidResponse)?;
+        if channel.kind != "dm"
+            || channel.id.is_empty()
+            || channel.other_user_id.as_deref() != Some(user_id)
+        {
+            return Err(Failure::InvalidResponse);
+        }
+        Ok(channel)
+    }
+
+    pub async fn messages(
+        &self,
+        channel_id: &str,
+        before: Option<&str>,
+    ) -> Result<MessagePage, Failure> {
+        self.message_page(channel_id, before.map(|id| ("before", id)))
+            .await
+    }
+
+    pub async fn messages_around(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+    ) -> Result<MessagePage, Failure> {
+        self.message_page(channel_id, Some(("around", message_id)))
+            .await
+    }
+
+    pub async fn messages_after(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+    ) -> Result<MessagePage, Failure> {
+        self.message_page(channel_id, Some(("after", message_id)))
+            .await
+    }
+
+    async fn message_page(
+        &self,
+        channel_id: &str,
+        cursor: Option<(&str, &str)>,
+    ) -> Result<MessagePage, Failure> {
+        let mut url = self.base.join("/api/channels/").expect("fixed SPK path");
+        url.path_segments_mut()
+            .expect("validated SPK URL")
+            .pop_if_empty()
+            .extend([channel_id, "messages"]);
+        if let Some((key, id)) = cursor {
+            url.query_pairs_mut().append_pair(key, id);
+        } else {
+            url.query_pairs_mut().append_pair("unread", "1");
+        }
+        let response = Self::send(self.http.get(url).header(header::ORIGIN, &self.origin)).await?;
+        let page: MessagePage = response
+            .json()
+            .await
+            .map_err(|_| Failure::InvalidResponse)?;
+        if page
+            .messages
+            .iter()
+            .any(|message| message.channel_id != channel_id)
+        {
+            return Err(Failure::InvalidResponse);
+        }
+        Ok(page)
+    }
+
+    pub async fn update_read_point(
+        &self,
+        channel_id: &str,
+        message_id: Option<&str>,
+    ) -> Result<UnreadState, Failure> {
+        let mut url = self.base.join("/api/channels/").expect("fixed SPK path");
+        let endpoint = if message_id.is_some() {
+            "unread"
+        } else {
+            "read"
+        };
+        url.path_segments_mut()
+            .expect("validated SPK URL")
+            .pop_if_empty()
+            .extend([channel_id, endpoint]);
+        let mut request = self.http.post(url).header(header::ORIGIN, &self.origin);
+        if let Some(message_id) = message_id {
+            request = request.json(&serde_json::json!({ "messageId": message_id }));
+        }
+        Self::send(request)
+            .await?
+            .json()
+            .await
+            .map_err(|_| Failure::InvalidResponse)
+    }
+
+    pub async fn unread(&self) -> Result<std::collections::HashMap<String, UnreadState>, Failure> {
+        self.get("/api/unread").await
+    }
+
     pub async fn users(&self) -> Result<Vec<User>, Failure> {
         self.get("/api/users").await
+    }
+
+    pub async fn user_presence(&self) -> Result<HashMap<String, UserPresence>, Failure> {
+        self.get("/api/users/presence").await
     }
 
     pub async fn voice_presence(&self) -> Result<Vec<Member>, Failure> {
@@ -437,7 +1015,7 @@ impl SpkClient {
             .filter(signed_storage_url)
             .ok_or(Failure::InvalidResponse)?;
         // A storage response cannot expire the authenticated SPK session.
-        self.storage_bytes(url, 3 * 1024 * 1024)
+        self.storage_bytes(url, MAX_SOUND_BYTES)
             .await
             .map_err(|_| Failure::InvalidResponse)
     }
@@ -463,13 +1041,19 @@ impl SpkClient {
             .pop_if_empty()
             .push(user_id);
         url.query_pairs_mut().append_pair("v", key);
-        let response = self
-            .http
-            .get(url)
-            .header(header::ORIGIN, &self.origin)
-            .send()
-            .await
-            .map_err(|_| Failure::Connection)?;
+        self.storage_redirect(
+            self.http.get(url).header(header::ORIGIN, &self.origin),
+            MAX_AVATAR_BYTES,
+        )
+        .await
+    }
+
+    async fn storage_redirect(
+        &self,
+        request: reqwest::RequestBuilder,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, Failure> {
+        let response = request.send().await.map_err(|_| Failure::Connection)?;
         if !response.status().is_redirection() {
             return Err(Failure::Http(response.status()));
         }
@@ -480,11 +1064,18 @@ impl SpkClient {
             .filter(signed_storage_url)
             .ok_or(Failure::InvalidResponse)?;
         // The storage URL carries its own authorization and can use a different host.
-        self.storage_bytes(url, MAX_AVATAR_BYTES).await
+        self.storage_bytes(url, max_bytes).await
     }
 
     async fn storage_bytes(&self, url: Url, max_bytes: usize) -> Result<Vec<u8>, Failure> {
-        let mut response = Self::send(self.storage.get(url)).await?;
+        Self::limited_bytes(self.storage.get(url), max_bytes).await
+    }
+
+    async fn limited_bytes(
+        request: reqwest::RequestBuilder,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, Failure> {
+        let mut response = Self::send(request).await?;
         let mut bytes = Vec::new();
         if response
             .content_length()
@@ -499,6 +1090,25 @@ impl SpkClient {
             bytes.extend_from_slice(&chunk);
         }
         Ok(bytes)
+    }
+
+    pub async fn moderate_voice(
+        &self,
+        user_id: &str,
+        action: &VoiceModeration,
+    ) -> Result<(), Failure> {
+        let (path, body) = match action {
+            VoiceModeration::Move(channel_id) => (
+                "/api/admin/voice/move",
+                serde_json::json!({ "userId": user_id, "channelId": channel_id }),
+            ),
+            VoiceModeration::Disconnect => (
+                "/api/admin/voice/disconnect",
+                serde_json::json!({ "userId": user_id }),
+            ),
+        };
+        Self::send(self.request(Method::POST, path).json(&body)).await?;
+        Ok(())
     }
 
     pub async fn voice_token(&self, channel_id: &str) -> Result<VoiceToken, Failure> {
@@ -548,7 +1158,7 @@ impl SpkClient {
                                 _ => break,
                             },
                             Ok((text, written)) = outgoing.recv() => {
-                                if written.is_closed() {
+                                if written.as_ref().is_some_and(oneshot::Sender::is_closed) {
                                     continue;
                                 }
                                 if !matches!(
@@ -557,7 +1167,9 @@ impl SpkClient {
                                 ) {
                                     break;
                                 }
-                                let _ = written.send(());
+                                if let Some(written) = written {
+                                    let _ = written.send(());
+                                }
                                 continue;
                             }
                         };

@@ -43,38 +43,53 @@ async fn controlled_window_video_audio_and_source_loss() {
     let title = std::env::var("SPK_TEST_SCREEN_WINDOW").unwrap();
     let window = Window::from_name(&title).unwrap();
     let choices = choices().await.unwrap();
-    assert!(
-        choices
-            .iter()
-            .any(|choice| choice.id.starts_with("display:"))
-    );
+    let display = choices
+        .iter()
+        .find(|choice| choice.id.starts_with("display:"))
+        .expect("display in source list");
+    let playback_mix = select(display.clone(), None).await.unwrap();
+    assert_eq!(playback_mix.audio, Some(AudioScope::PlaybackMix));
+    drop(playback_mix);
+    let video_only = select(
+        display.clone(),
+        Some(Device {
+            id: "missing-fixture-playback-endpoint".into(),
+            name: "Unavailable speakers".into(),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(video_only.audio, None);
+    drop(video_only);
     let choice = choices
         .into_iter()
         .find(|choice| Some(&choice.id) == window_id(&window).as_ref())
         .expect("fixture in window list");
-    let selection = select(choice, None).await.unwrap();
+    let selection = select(choice.clone(), None).await.unwrap();
+    let pending = select(choice, None).await.unwrap();
     assert_eq!(selection.audio, Some(AudioScope::Application));
     let (video, mut frames) = mpsc::channel(1);
     let (audio, mut samples) = mpsc::channel(4);
     let (audio_unavailable, status) = watch::channel(false);
     let quality = Quality {
-        height: 720,
+        height: 1440,
         fps: 5,
     };
+    let (_quality, target) = watch::channel(quality);
     let capture = tokio::spawn(selection.capture.start(
-        quality,
         true,
         CaptureSink {
             video,
+            quality: target,
             audio: Some(audio),
             audio_unavailable,
         },
     ));
     tokio::time::timeout(Duration::from_secs(15), async {
-        let (frame, fps) = frames.recv().await.unwrap();
+        let (frame, _, fps) = frames.recv().await.unwrap();
         assert_eq!(fps, quality.fps);
-        assert!(frame.buffer.height() <= quality.height);
-        assert!(frame.buffer.width() > 0);
+        assert!((400..460).contains(&frame.buffer.height()));
+        assert!((600..640).contains(&frame.buffer.width()));
         while !samples
             .recv()
             .await
@@ -107,6 +122,20 @@ async fn controlled_window_video_audio_and_source_loss() {
             .await
             .unwrap()
             .unwrap(),
+        Err(CaptureError::SourceLost),
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while frames.recv().await.is_some() {}
+        while samples.recv().await.is_some() {}
+    })
+    .await
+    .expect("both capture outputs close after source loss");
+
+    let (sink, _) = CaptureSink::test_pair(false);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), pending.capture.start(false, sink))
+            .await
+            .expect("a closed source is rejected at start"),
         Err(CaptureError::SourceLost),
     );
 }

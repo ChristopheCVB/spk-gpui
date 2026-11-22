@@ -110,14 +110,13 @@ struct Selected {
 impl Capture for Selected {
     fn start(
         self: Box<Self>,
-        quality: Quality,
         audio: bool,
         sink: CaptureSink,
     ) -> BoxFuture<'static, Result<(), CaptureError>> {
         Box::pin(async move {
             let (signal, ended) = mpsc::sync_channel(1);
             let _owner = StopCapture(signal.clone());
-            tokio::task::spawn_blocking(move || self.run(quality, audio, sink, signal, ended))
+            tokio::task::spawn_blocking(move || self.run(audio, sink, signal, ended))
                 .await
                 .map_err(|_| CaptureError::Unavailable)?
         })
@@ -135,53 +134,62 @@ impl Drop for StopCapture {
 impl Selected {
     fn run(
         self: Box<Self>,
-        quality: Quality,
-        audio: bool,
-        sink: CaptureSink,
+        mut audio: bool,
+        mut sink: CaptureSink,
         signal: mpsc::SyncSender<CaptureError>,
         ended: mpsc::Receiver<CaptureError>,
     ) -> Result<(), CaptureError> {
-        let dimensions = quality
+        let quality = *sink.quality.borrow_and_update();
+        let size = quality
             .dimensions(self.width, self.height)
             .ok_or(CaptureError::Unavailable)?;
+        let (format, frames) = watch::channel((quality, size));
         if let Ok(error) = ended.try_recv() {
             return Err(error);
         }
-        let stream = match self.stream(dimensions, quality.fps, audio, &sink, &signal) {
+        let stream = match self.stream(audio, &sink, &signal, &frames) {
             Ok(stream) => stream,
             Err(error) if audio && error != CaptureError::Permission => {
                 if let Ok(error) = ended.try_recv() {
                     return Err(error);
                 }
                 sink.audio_unavailable();
-                self.stream(dimensions, quality.fps, false, &sink, &signal)?
+                audio = false;
+                self.stream(audio, &sink, &signal, &frames)?
             }
             Err(error) => return Err(error),
         };
-        let outcome = ended.recv().unwrap_or(CaptureError::SourceLost);
+        let outcome = loop {
+            match ended.recv_timeout(Duration::from_millis(50)) {
+                Ok(error) => break error,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break CaptureError::SourceLost,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            if sink.quality.has_changed().unwrap_or(false) {
+                let next = *sink.quality.borrow_and_update();
+                let (active, _) = *format.borrow();
+                if next != active
+                    && let Some(size) = next.dimensions(self.width, self.height)
+                    && let Ok(config) = config(size, next, audio)
+                    && stream.update_configuration(&config).is_ok()
+                {
+                    format.send_replace((next, size));
+                }
+            }
+        };
         let _ = stream.stop_capture();
         Err(outcome)
     }
 
     fn stream(
         &self,
-        (width, height): (u32, u32),
-        fps: u32,
         audio: bool,
         sink: &CaptureSink,
         signal: &mpsc::SyncSender<CaptureError>,
+        format: &watch::Receiver<(Quality, (u32, u32))>,
     ) -> Result<SCStream, CaptureError> {
-        let config = SCStreamConfiguration::new()
-            .with_width(width)
-            .with_height(height)
-            .with_pixel_format(PixelFormat::BGRA)
-            .with_minimum_frame_interval(&CMTime::new(1, fps as i32))
-            .with_captures_audio(audio)
-            .with_sample_rate(48_000)
-            .with_channel_count(2)
-            .with_excludes_current_process_audio(true)
-            .with_preserves_aspect_ratio(true)
-            .map_err(|_| CaptureError::Unavailable)?;
+        let (quality, size) = *format.borrow();
+        let config = config(size, quality, audio)?;
         let mut stream = SCStream::new_with_delegate(
             &self.filter,
             &config,
@@ -198,15 +206,17 @@ impl Selected {
                 {
                     let sink = sink.clone();
                     let signal = signal.clone();
+                    let format = format.clone();
                     let started = Instant::now();
                     move |sample: CMSampleBuffer, _| match sample.frame_status() {
                         Some(SCFrameStatus::Stopped) => {
                             let _ = signal.try_send(CaptureError::SourceLost);
                         }
                         Some(SCFrameStatus::Complete) => {
+                            let (quality, (width, height)) = *format.borrow();
                             if let Some(mut frame) = screen_frame(&sample, width, height) {
                                 frame.timestamp_us = started.elapsed().as_micros() as i64;
-                                sink.video(frame, fps);
+                                sink.video(frame, quality, quality.fps);
                             }
                         }
                         _ => {}
@@ -241,6 +251,24 @@ impl Selected {
         }
         Ok(stream)
     }
+}
+
+fn config(
+    (width, height): (u32, u32),
+    quality: Quality,
+    audio: bool,
+) -> Result<SCStreamConfiguration, CaptureError> {
+    SCStreamConfiguration::new()
+        .with_width(width)
+        .with_height(height)
+        .with_pixel_format(PixelFormat::BGRA)
+        .with_minimum_frame_interval(&CMTime::new(1, quality.fps as i32))
+        .with_captures_audio(audio)
+        .with_sample_rate(48_000)
+        .with_channel_count(2)
+        .with_excludes_current_process_audio(true)
+        .with_preserves_aspect_ratio(true)
+        .map_err(|_| CaptureError::Unavailable)
 }
 
 fn capture_error(error: SCError, fallback: CaptureError) -> CaptureError {

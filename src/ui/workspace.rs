@@ -1,6 +1,14 @@
-use super::*;
+use gpui_kit::component::{
+    Disableable,
+    menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
+};
+
+use super::{
+    chat::{mark_read_item, unread_badges, unread_label},
+    *,
+};
 use crate::{
-    api::{Channel, Connection},
+    api::{Channel, Connection, VoiceModeration},
     session::{Participant, VoiceView},
     voice::video::CameraStatus,
 };
@@ -30,11 +38,11 @@ fn call_status(call: &VoiceView, switching: bool) -> &'static str {
     }
 }
 
-fn channel_name(channel: &Channel) -> &str {
+pub(super) fn channel_name(channel: &Channel) -> &str {
     channel.name.as_deref().unwrap_or("Unnamed channel")
 }
 
-fn voice_channels(sidebar: &Sidebar) -> impl Iterator<Item = &Channel> {
+pub(super) fn voice_channels(sidebar: &Sidebar) -> impl Iterator<Item = &Channel> {
     sidebar
         .channels
         .iter()
@@ -43,10 +51,42 @@ fn voice_channels(sidebar: &Sidebar) -> impl Iterator<Item = &Channel> {
 }
 
 impl Spk {
+    pub(super) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_open = !self.sidebar_open;
+        self.device_picker = None;
+        cx.notify();
+    }
+
     pub(super) fn workspace(&self, sidebar: &Sidebar, cx: &mut Context<Self>) -> impl IntoElement {
         let selected_channel = voice_channels(sidebar)
             .find(|channel| Some(channel.id.as_str()) == self.selected_voice_channel.as_deref())
             .or_else(|| voice_channels(sidebar).next());
+        let chat = sidebar
+            .chat
+            .as_ref()
+            .filter(|_| !self.video_stage.fullscreen);
+        let (stage_icon, stage_name) = match chat {
+            Some(chat) if chat.direct_message_peer.is_some() => (
+                IconName::MessageCircle,
+                chat.direct_message_peer
+                    .as_deref()
+                    .filter(|_| !chat.unavailable())
+                    .map_or("Direct message", |peer| sidebar.message_author(peer)),
+            ),
+            Some(chat) => (
+                IconName::Hash,
+                sidebar
+                    .channels
+                    .iter()
+                    .flatten()
+                    .find(|channel| channel.id == chat.channel_id)
+                    .map_or("Text channel", channel_name),
+            ),
+            None => (
+                IconName::Volume2,
+                selected_channel.map_or("Voice channels", channel_name),
+            ),
+        };
         let theme = cx.theme();
         let status = match sidebar.connection {
             Connection::Connecting => Some("Connecting to live updates…"),
@@ -57,7 +97,10 @@ impl Spk {
         let notices = [
             status,
             sidebar.notice,
+            sidebar.chat_notice,
+            sidebar.read_notice,
             sidebar.device_notice,
+            sidebar.voice_moderation_notice,
             self.form_error,
         ];
         let rejoin = sidebar.rejoin_channel().map(str::to_owned);
@@ -100,22 +143,24 @@ impl Spk {
                                             "Show sidebar"
                                         },
                                     )
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)),
+                                    ),
+                                )
+                                .child(themed_icon(stage_icon, theme.muted_foreground, 16.0))
+                                .child(Label::new(stage_name.to_owned()).font_semibold())
+                                .child(
+                                    tool_button(
+                                        "message-search",
+                                        IconName::Search,
+                                        "Search messages",
+                                    )
+                                    .ml_auto()
                                     .on_click(cx.listener(
-                                        |this, _, _, cx| {
-                                            this.sidebar_open = !this.sidebar_open;
-                                            this.device_picker = None;
-                                            cx.notify();
+                                        |this, _, window, cx| {
+                                            this.open_message_search(window, cx);
                                         },
                                     )),
-                                )
-                                .child(themed_icon(IconName::Volume2, theme.muted_foreground, 16.0))
-                                .child(
-                                    Label::new(
-                                        selected_channel
-                                            .map_or("Voice channels", channel_name)
-                                            .to_owned(),
-                                    )
-                                    .font_semibold(),
                                 ),
                         )
                     })
@@ -165,7 +210,12 @@ impl Spk {
                                 }),
                         )
                     })
-                    .child(self.voice_channel_stage(sidebar, selected_channel, cx)),
+                    .child(match chat {
+                        Some(chat) => self.chat_stage(sidebar, chat, cx).into_any_element(),
+                        None => self
+                            .voice_channel_stage(sidebar, selected_channel, cx)
+                            .into_any_element(),
+                    }),
             )
     }
 
@@ -176,7 +226,11 @@ impl Spk {
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
-        let selected = selected_channel.map(|channel| channel.id.as_str());
+        let selected = if sidebar.chat.is_none() {
+            selected_channel.map(|channel| channel.id.as_str())
+        } else {
+            None
+        };
         let people = sidebar.people();
         let has_text = sidebar
             .channels
@@ -184,7 +238,6 @@ impl Spk {
             .flatten()
             .any(|channel| channel.kind == "text");
         let name = sidebar.profile.name();
-        let online = matches!(sidebar.connection, Connection::Online);
 
         div()
             .flex()
@@ -230,23 +283,11 @@ impl Spk {
                                     IconName::MessageCircle,
                                     cx,
                                 ))
-                                .children(people.into_iter().map(|(id, name)| {
-                                    div()
-                                        .id(SharedString::from(format!("person-{id}")))
-                                        .flex()
-                                        .items_center()
-                                        .h_8()
-                                        .gap_2()
-                                        .px_2()
-                                        .child(profile_avatar(
-                                            Avatar::new().name(name.to_owned()).small(),
-                                            sidebar.avatar(Some(id)),
-                                            20.0,
-                                            false,
-                                            cx,
-                                        ))
-                                        .child(Label::new(name.to_owned()).truncate())
-                                })),
+                                .children(
+                                    people
+                                        .into_iter()
+                                        .map(|(id, name)| self.person_row(sidebar, id, name, cx)),
+                                ),
                         )
                     })
                     .when(has_text, |nav| {
@@ -261,19 +302,85 @@ impl Spk {
                                         .flatten()
                                         .filter(|channel| channel.kind == "text")
                                         .map(|channel| {
+                                            let id = channel.id.clone();
+                                            let name = channel_name(channel).to_owned();
+                                            let active = sidebar
+                                                .chat
+                                                .as_ref()
+                                                .is_some_and(|chat| chat.channel_id == id);
+                                            let counts = sidebar.unread(&id);
+                                            let muted =
+                                                self.notification_preferences.muted.contains(&id);
+                                            let menu_id = id.clone();
+                                            let app = cx.weak_entity();
                                             div()
-                                                .id(SharedString::from(format!(
-                                                    "text-{}",
-                                                    channel.id
-                                                )))
-                                                .flex()
-                                                .items_center()
-                                                .h_8()
-                                                .px_2()
+                                                .id(SharedString::from(format!("text-{id}")))
                                                 .child(
-                                                    Label::new(channel_name(channel).to_owned())
-                                                        .truncate(),
+                                                    Button::new("select")
+                                                        .ghost()
+                                                        .small()
+                                                        .tab_stop(true)
+                                                        .selected(active)
+                                                        .accessibility_label(unread_label(
+                                                            &name, counts,
+                                                        ))
+                                                        .w_full()
+                                                        .h(if self.compact() {
+                                                            px(26.0)
+                                                        } else {
+                                                            px(32.0)
+                                                        })
+                                                        .when(
+                                                            active || counts.mentions > 0,
+                                                            |button| {
+                                                                button
+                                                                    .bg(theme.primary.opacity(0.10))
+                                                            },
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .flex()
+                                                                .items_center()
+                                                                .gap_2()
+                                                                .w_full()
+                                                                .min_w_0()
+                                                                .child(
+                                                                    Label::new(name)
+                                                                        .flex_1()
+                                                                        .truncate()
+                                                                        .when(
+                                                                            counts.unread > 0,
+                                                                            |label| {
+                                                                                label.font_bold()
+                                                                            },
+                                                                        ),
+                                                                )
+                                                                .child(unread_badges(counts, cx)),
+                                                        )
+                                                        .on_click(cx.listener(
+                                                            move |this, _, _, cx| {
+                                                                this.device_picker = None;
+                                                                this.send(
+                                                                    Command::OpenTextChannel(
+                                                                        id.clone(),
+                                                                    ),
+                                                                    None,
+                                                                    cx,
+                                                                );
+                                                            },
+                                                        )),
                                                 )
+                                                .context_menu(move |menu, _, _| {
+                                                    menu.item(mark_read_item(
+                                                        menu_id.clone(),
+                                                        app.clone(),
+                                                    ))
+                                                    .item(notifications::mute_item(
+                                                        menu_id.clone(),
+                                                        muted,
+                                                        app.clone(),
+                                                    ))
+                                                })
                                         }),
                                 ),
                         )
@@ -346,47 +453,27 @@ impl Spk {
                     .py_2()
                     .rounded_lg()
                     .bg(theme.secondary)
-                    .child(
-                        div()
-                            .id("footer-avatar")
-                            .relative()
-                            .flex_shrink_0()
-                            .child(profile_avatar(
-                                Avatar::new().name(name.to_owned()).small(),
-                                sidebar.avatar(sidebar.profile.id.as_deref()),
-                                28.0,
-                                false,
-                                cx,
-                            ))
-                            .child(
-                                div()
-                                    .absolute()
-                                    .top_0()
-                                    .right_0()
-                                    .size_2()
-                                    .rounded_full()
-                                    .border_1()
-                                    .border_color(theme.background)
-                                    .bg(if online {
-                                        theme.success
-                                    } else {
-                                        theme.muted_foreground
-                                    }),
-                            ),
-                    )
+                    .child(profile_avatar(
+                        Avatar::new().name(name.to_owned()).small(),
+                        sidebar.avatar(sidebar.profile.id.as_deref()),
+                        28.0,
+                        false,
+                        cx,
+                    ))
                     .child(
                         div()
                             .flex()
                             .flex_col()
+                            .items_start()
                             .flex_1()
                             .min_w_0()
                             .ml_1()
                             .child(Label::new(name.to_owned()).font_semibold().truncate())
-                            .child(
-                                Label::new(if online { "Online" } else { "Offline" })
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground),
-                            ),
+                            .child(profile::user_status_picker(
+                                "sidebar-status",
+                                sidebar.user_status,
+                                cx.weak_entity(),
+                            )),
                     )
                     .child(self.voice_controls(sidebar, VoiceControls::Profile, cx))
                     .child(
@@ -426,7 +513,7 @@ impl Spk {
                 div()
                     .flex()
                     .items_center()
-                    .h_8()
+                    .h(if self.compact() { px(26.0) } else { px(32.0) })
                     .rounded_md()
                     .pr_1()
                     .when(active, |row| row.bg(theme.primary.opacity(0.10)))
@@ -439,7 +526,7 @@ impl Spk {
                             .accessibility_label(name.clone())
                             .flex_1()
                             .min_w_0()
-                            .h_8()
+                            .h(if self.compact() { px(26.0) } else { px(32.0) })
                             .when(active, |button| button.bg(theme.transparent))
                             .child(Label::new(name.clone()).w_full().truncate().text_color(
                                 if active {
@@ -480,7 +567,7 @@ impl Spk {
                     .gap_2()
                     .pl_6()
                     .pr_2()
-                    .h_6()
+                    .h(if self.compact() { px(20.0) } else { px(24.0) })
                     .child(profile_avatar(
                         Avatar::new().name(person.name.to_owned()).xsmall(),
                         sidebar.avatar(Some(person.id)),
@@ -494,6 +581,7 @@ impl Spk {
                             .text_color(theme.muted_foreground),
                     )
                     .children(participant_status(flags.muted, flags.deafened, cx))
+                    .children(voice_moderation_menu(&person, sidebar, cx))
                     .when(
                         sidebar.profile.id.as_deref() != Some(person.id)
                             && call.is_some_and(|call| {
@@ -507,8 +595,9 @@ impl Spk {
             }))
     }
 
-    fn select_voice_channel(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub(super) fn select_voice_channel(&mut self, id: &str, cx: &mut Context<Self>) {
         self.selected_voice_channel = Some(id.to_owned());
+        self.send(Command::CloseChat, None, cx);
         self.device_picker = None;
         cx.notify();
     }
@@ -584,8 +673,12 @@ impl Spk {
                             .flex_wrap()
                             .items_center()
                             .justify_center()
-                            .gap_3()
-                            .when(theater.is_none(), |tiles| tiles.p_4().my_auto())
+                            .gap(if self.compact() { px(6.0) } else { px(12.0) })
+                            .when(theater.is_none(), |tiles| {
+                                tiles
+                                    .p(if self.compact() { px(8.0) } else { px(16.0) })
+                                    .my_auto()
+                            })
                             .when(theater.is_some(), |tiles| {
                                 tiles
                                     .flex_1()
@@ -771,8 +864,23 @@ impl Spk {
                 )
         };
         let (image, camera_inset) = self.video_images(&participant, is_me);
+        let hover_id = participant.id.to_owned();
+        let key_id = hover_id.clone();
         div()
             .id(SharedString::from(participant.id.to_owned()))
+            .focusable()
+            .tab_index(0)
+            .focus_visible(|tile| tile.border_color(theme.primary))
+            .on_hover(cx.listener(move |app, hovered: &bool, _, _| {
+                if *hovered {
+                    app.video_stage.hovered = Some(hover_id.clone());
+                } else if app.video_stage.hovered.as_deref() == Some(&hover_id) {
+                    app.video_stage.hovered = None;
+                }
+            }))
+            .on_key_down(cx.listener(move |app, event, window, cx| {
+                app.video_tile_key(&key_id, event, window, cx)
+            }))
             .relative()
             .flex()
             .items_center()
@@ -780,7 +888,10 @@ impl Spk {
             .role(Role::Group)
             .when(speaking, |tile| tile.aria_description("Speaking"))
             .when(theater, |tile| tile.size_full())
-            .when(!theater, |tile| tile.w(px(320.0)).max_w_full().h(px(180.0)))
+            .when(!theater, |tile| {
+                let width = if self.compact() { 256.0 } else { 320.0 };
+                tile.w(px(width)).max_w_full().h(px(width * 9.0 / 16.0))
+            })
             .overflow_hidden()
             .border_1()
             .border_color(if speaking {
@@ -849,6 +960,7 @@ impl Spk {
                         )
                     })
                     .children(participant_status(flags.muted, flags.deafened, cx))
+                    .children(voice_moderation_menu(&participant, sidebar, cx))
                     .when(
                         !is_me && call.is_some_and(VoiceView::is_participating),
                         |row| row.child(self.participant_volume_button(&participant, sidebar, cx)),
@@ -862,6 +974,72 @@ impl Spk {
                     .map(|call| self.video_tile_controls(&participant, call, sidebar, cx)),
             )
     }
+}
+
+fn voice_moderation_menu(
+    participant: &Participant<'_>,
+    sidebar: &Sidebar,
+    cx: &Context<Spk>,
+) -> Option<impl IntoElement> {
+    let destinations = sidebar
+        .voice_moderation_channels(participant.id)?
+        .into_iter()
+        .map(|channel| (channel.id.clone(), channel_name(channel).to_owned()))
+        .collect::<Vec<_>>();
+    let user_id = participant.id.to_owned();
+    let app = cx.weak_entity();
+    Some(
+        tool_button(
+            "voice-moderation",
+            IconName::Ellipsis,
+            format!("Moderate {}", participant.name),
+        )
+        .disabled(sidebar.voice_moderation_pending)
+        .dropdown_menu(move |mut menu, window, cx| {
+            if !destinations.is_empty() {
+                let app = app.clone();
+                let user_id = user_id.clone();
+                let destinations = destinations.clone();
+                menu = menu.submenu("Move to", window, cx, move |mut submenu, _, _| {
+                    for (id, name) in &destinations {
+                        submenu = submenu.item(voice_moderation_item(
+                            name.clone(),
+                            app.clone(),
+                            user_id.clone(),
+                            VoiceModeration::Move(id.clone()),
+                        ));
+                    }
+                    submenu
+                });
+            }
+            menu.item(voice_moderation_item(
+                "Disconnect from voice",
+                app.clone(),
+                user_id.clone(),
+                VoiceModeration::Disconnect,
+            ))
+        }),
+    )
+}
+
+fn voice_moderation_item(
+    label: impl Into<SharedString>,
+    app: WeakEntity<Spk>,
+    user_id: String,
+    action: VoiceModeration,
+) -> PopupMenuItem {
+    PopupMenuItem::new(label).on_click(move |_, _, cx| {
+        let _ = app.update(cx, |app, cx| {
+            app.send(
+                Command::ModerateVoice {
+                    user_id: user_id.clone(),
+                    action: action.clone(),
+                },
+                None,
+                cx,
+            );
+        });
+    })
 }
 
 fn radio_badge(cx: &App) -> impl IntoElement {

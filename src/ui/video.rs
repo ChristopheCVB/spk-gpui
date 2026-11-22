@@ -16,7 +16,70 @@ pub(super) struct VideoStage {
     pub theater: Option<String>,
     pub fullscreen: bool,
     pub hide_preview: bool,
+    pub hovered: Option<String>,
     pub frames: HashMap<(String, VideoSource), Arc<RenderImage>>,
+}
+
+#[derive(Clone, Copy)]
+enum TileAction {
+    Watch,
+    Theater,
+    Fullscreen,
+}
+
+#[derive(Clone, Copy)]
+struct TileActions {
+    live: bool,
+    can_watch: bool,
+    watching: bool,
+    show: bool,
+    theater: bool,
+    fullscreen: bool,
+    is_me: bool,
+}
+
+impl TileActions {
+    fn for_participant(
+        app: &Spk,
+        participant: &Participant<'_>,
+        call: &VoiceView,
+        sidebar: &Sidebar,
+    ) -> Self {
+        let is_me = sidebar.profile.id.as_deref() == Some(participant.id);
+        let report = call.video.as_ref();
+        let live = (is_me
+            && call
+                .screen
+                .as_ref()
+                .is_some_and(|screen| screen.state.active()))
+            || participant_video(report.and_then(|report| report.participants.get(participant.id)))
+            || participant
+                .video
+                .is_some_and(|media| !is_me && (media.cam || media.screen));
+        let watching = sidebar.voice_intent.watching.contains(participant.id);
+        Self {
+            live,
+            can_watch: !is_me
+                && (watching
+                    || (live
+                        && report.is_none_or(|report| {
+                            !report.reconnecting && report.participants.contains_key(participant.id)
+                        }))),
+            watching,
+            show: live && (is_me || watching),
+            theater: app.video_stage.theater.as_deref() == Some(participant.id),
+            fullscreen: app.video_stage.fullscreen,
+            is_me,
+        }
+    }
+
+    fn permits(&self, action: TileAction) -> bool {
+        match action {
+            TileAction::Watch => self.can_watch,
+            TileAction::Theater => self.show || self.theater,
+            TileAction::Fullscreen => self.show || self.fullscreen,
+        }
+    }
 }
 
 impl Spk {
@@ -109,7 +172,7 @@ impl Spk {
         }
     }
 
-    fn exit_video_fullscreen(&mut self, window: &Window) {
+    pub(super) fn exit_video_fullscreen(&mut self, window: &Window) {
         if self.video_stage.fullscreen && window.is_fullscreen() {
             window.toggle_fullscreen();
         }
@@ -208,6 +271,7 @@ impl Spk {
     ) -> Option<Div> {
         let report = call.screen.as_ref()?;
         let attempt = report.attempt;
+        let selected = sidebar.voice_intent.screen.quality;
         let panel = div().flex().flex_col().items_center().gap_2().px_4().pb_2();
         Some(match &report.state {
             ScreenState::Picking => panel.child(Label::new("Choose a display or window…")),
@@ -248,7 +312,6 @@ impl Spk {
                     (None, true) => "Video only. Audio is unavailable for this source.",
                     _ => "Video only",
                 };
-                let selected = sidebar.voice_intent.screen.quality;
                 let confirmed_audio = enabled && audio.is_some();
                 panel
                     .child(Label::new(label.clone()).font_semibold())
@@ -268,37 +331,7 @@ impl Spk {
                                 app.send(Command::SetScreenAudio(!enabled), None, cx);
                             })),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .justify_center()
-                            .gap_1()
-                            .children(Quality::HEIGHTS.into_iter().map(|height| {
-                                let label = SharedString::from(format!("{height}p"));
-                                Button::new(label.clone())
-                                    .small()
-                                    .ghost()
-                                    .tab_stop(true)
-                                    .label(label)
-                                    .selected(selected.height == height)
-                                    .on_click(cx.listener(move |app, _, _, cx| {
-                                        app.send(Command::SetScreenHeight(height), None, cx);
-                                    }))
-                            }))
-                            .children(Quality::FPS.into_iter().map(|fps| {
-                                let label = SharedString::from(format!("{fps} fps"));
-                                Button::new(label.clone())
-                                    .small()
-                                    .ghost()
-                                    .tab_stop(true)
-                                    .label(label)
-                                    .selected(selected.fps == fps)
-                                    .on_click(cx.listener(move |app, _, _, cx| {
-                                        app.send(Command::SetScreenFps(fps), None, cx);
-                                    }))
-                            })),
-                    )
+                    .child(Self::screen_quality_options(selected, cx))
                     .child(
                         Button::new("start-screen-share")
                             .small()
@@ -321,12 +354,21 @@ impl Spk {
                 fps,
                 audio,
                 audio_unavailable,
+                quality,
+                quality_failed,
                 ..
             } => panel
+                .child(Self::screen_quality_options(selected, cx))
                 .child(
                     Label::new(format!("Sharing at {width} × {height} · up to {fps} fps"))
                         .text_xs(),
                 )
+                .when(selected != *quality, |panel| {
+                    panel.child(Label::new("Changing Screen Share quality…").text_xs())
+                })
+                .when(selected == *quality && quality_failed.is_some(), |panel| {
+                    panel.child(Label::new("Could not change Screen Share quality.").text_xs())
+                })
                 .child(
                     Label::new(if *audio_unavailable {
                         "Video only. Screen Share audio is unavailable."
@@ -337,6 +379,38 @@ impl Spk {
                 ),
             ScreenState::Ended(message) => panel.child(Label::new(*message)),
         })
+    }
+
+    fn screen_quality_options(selected: Quality, cx: &Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_wrap()
+            .justify_center()
+            .gap_1()
+            .children(Quality::HEIGHTS.into_iter().map(|height| {
+                let label = SharedString::from(format!("{height}p"));
+                Button::new(label.clone())
+                    .small()
+                    .ghost()
+                    .tab_stop(true)
+                    .label(label)
+                    .selected(selected.height == height)
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.send(Command::SetScreenHeight(height), None, cx);
+                    }))
+            }))
+            .children(Quality::FPS.into_iter().map(|fps| {
+                let label = SharedString::from(format!("{fps} fps"));
+                Button::new(label.clone())
+                    .small()
+                    .ghost()
+                    .tab_stop(true)
+                    .label(label)
+                    .selected(selected.fps == fps)
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.send(Command::SetScreenFps(fps), None, cx);
+                    }))
+            }))
     }
 
     #[cfg(windows)]
@@ -393,6 +467,122 @@ impl Spk {
         }
     }
 
+    pub(super) fn hovered_video_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(id) = self.video_stage.hovered.clone() {
+            self.video_tile_key(&id, event, window, cx);
+        }
+    }
+
+    pub(super) fn video_tile_key(
+        &mut self,
+        id: &str,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.is_held
+            || event.keystroke.modifiers.modified()
+            || window.has_focused_input(cx)
+            || window.has_active_dialog(cx)
+        {
+            return;
+        }
+        let action = match event.keystroke.key.as_str() {
+            "w" => TileAction::Watch,
+            "t" => TileAction::Theater,
+            "f" => TileAction::Fullscreen,
+            _ => return,
+        };
+        let View::SignedIn(sidebar) = &self.view else {
+            return;
+        };
+        let Some(call) = sidebar
+            .voice
+            .as_ref()
+            .filter(|call| call.is_participating())
+        else {
+            return;
+        };
+        if sidebar.chat.is_some()
+            || self.selected_voice_channel.as_deref().or_else(|| {
+                super::workspace::voice_channels(sidebar)
+                    .next()
+                    .map(|channel| channel.id.as_str())
+            }) != Some(call.channel_id.as_str())
+        {
+            return;
+        }
+        let participants = sidebar.participants(&call.channel_id);
+        let own_tile = Participant {
+            id,
+            name: sidebar.profile.name(),
+            flags: Default::default(),
+            video: None,
+        };
+        let Some(participant) = participants
+            .iter()
+            .find(|participant| participant.id == id)
+            .or_else(|| (sidebar.profile.id.as_deref() == Some(id)).then_some(&own_tile))
+        else {
+            return;
+        };
+        let available = TileActions::for_participant(self, participant, call, sidebar);
+        if available.permits(action) {
+            self.apply_tile_action(id, action, &available, window, cx);
+            cx.stop_propagation();
+            window.prevent_default();
+        }
+    }
+
+    fn apply_tile_action(
+        &mut self,
+        id: &str,
+        action: TileAction,
+        available: &TileActions,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            TileAction::Watch => {
+                if available.watching {
+                    if available.theater {
+                        self.video_stage.theater = None;
+                        self.exit_video_fullscreen(window);
+                    }
+                } else {
+                    self.video_stage.theater = Some(id.to_owned());
+                }
+                self.send(
+                    Command::SetWatching(id.to_owned(), !available.watching),
+                    None,
+                    cx,
+                );
+            }
+            TileAction::Theater => {
+                self.video_stage.theater = (!available.theater).then(|| id.to_owned());
+                self.exit_video_fullscreen(window);
+                cx.notify();
+            }
+            TileAction::Fullscreen => {
+                if available.fullscreen {
+                    self.exit_video_fullscreen(window);
+                } else {
+                    self.video_stage.theater = Some(id.to_owned());
+                    self.video_stage.fullscreen = true;
+                    if !window.is_fullscreen() {
+                        window.toggle_fullscreen();
+                    }
+                }
+                cx.notify();
+            }
+        }
+    }
+
     pub(super) fn video_tile_controls(
         &self,
         participant: &Participant<'_>,
@@ -400,24 +590,7 @@ impl Spk {
         sidebar: &Sidebar,
         cx: &Context<Self>,
     ) -> impl IntoElement {
-        let is_me = sidebar.profile.id.as_deref() == Some(participant.id);
-        let report = call.video.as_ref();
-        let live = (is_me
-            && call
-                .screen
-                .as_ref()
-                .is_some_and(|screen| screen.state.active()))
-            || participant_video(report.and_then(|report| report.participants.get(participant.id)))
-            || participant
-                .video
-                .is_some_and(|media| !is_me && (media.cam || media.screen));
-        let watching = sidebar.voice_intent.watching.contains(participant.id);
-        let can_watch = report.is_none_or(|report| {
-            !report.reconnecting && report.participants.contains_key(participant.id)
-        });
-        let theater = self.video_stage.theater.as_deref() == Some(participant.id);
-        let fullscreen = self.video_stage.fullscreen;
-        let show = live && (is_me || watching);
+        let available = TileActions::for_participant(self, participant, call, sidebar);
         let id = participant.id.to_owned();
         let watch_id = id.clone();
         let theater_id = id.clone();
@@ -432,7 +605,7 @@ impl Spk {
             .items_center()
             .justify_end()
             .gap_1()
-            .when(live && !viewers.is_empty(), |row| {
+            .when(available.live && !viewers.is_empty(), |row| {
                 row.child(
                     Label::new(format!("Watching: {}", viewers.join(", ")))
                         .flex_1()
@@ -443,12 +616,16 @@ impl Spk {
                         .truncate(),
                 )
             })
-            .when(!is_me && ((live && can_watch) || watching), |row| {
-                let label = if watching { "Stop watching" } else { "Watch" };
+            .when(available.permits(TileAction::Watch), |row| {
+                let label = if available.watching {
+                    "Stop watching"
+                } else {
+                    "Watch"
+                };
                 row.child(
                     tool_button(
                         "watch",
-                        if watching {
+                        if available.watching {
                             IconName::EyeOff
                         } else {
                             IconName::Eye
@@ -458,19 +635,11 @@ impl Spk {
                     .secondary()
                     .label(label)
                     .on_click(cx.listener(move |app, _, window, cx| {
-                        if watching {
-                            if app.video_stage.theater.as_ref() == Some(&watch_id) {
-                                app.video_stage.theater = None;
-                                app.exit_video_fullscreen(window);
-                            }
-                        } else {
-                            app.video_stage.theater = Some(watch_id.clone());
-                        }
-                        app.send(Command::SetWatching(watch_id.clone(), !watching), None, cx);
+                        app.apply_tile_action(&watch_id, TileAction::Watch, &available, window, cx);
                     })),
                 )
             })
-            .when(is_me && live, |row| {
+            .when(available.is_me && available.live, |row| {
                 let label = if self.video_stage.hide_preview {
                     "Show preview"
                 } else {
@@ -485,12 +654,12 @@ impl Spk {
                         })),
                 )
             })
-            .when(show || theater, |row| {
+            .when(available.permits(TileAction::Theater), |row| {
                 row.child(
                     tool_button(
                         "theater",
                         IconName::Monitor,
-                        if theater {
+                        if available.theater {
                             "Exit theater mode"
                         } else {
                             "Theater mode"
@@ -498,22 +667,26 @@ impl Spk {
                     )
                     .secondary()
                     .on_click(cx.listener(move |app, _, window, cx| {
-                        app.video_stage.theater = (!theater).then(|| theater_id.clone());
-                        app.exit_video_fullscreen(window);
-                        cx.notify();
+                        app.apply_tile_action(
+                            &theater_id,
+                            TileAction::Theater,
+                            &available,
+                            window,
+                            cx,
+                        );
                     })),
                 )
             })
-            .when(show || fullscreen, |row| {
+            .when(available.permits(TileAction::Fullscreen), |row| {
                 row.child(
                     tool_button(
                         "fullscreen",
-                        if fullscreen {
+                        if available.fullscreen {
                             IconName::Minimize
                         } else {
                             IconName::Maximize
                         },
-                        if fullscreen {
+                        if available.fullscreen {
                             "Exit fullscreen"
                         } else {
                             "Fullscreen"
@@ -521,16 +694,7 @@ impl Spk {
                     )
                     .secondary()
                     .on_click(cx.listener(move |app, _, window, cx| {
-                        if fullscreen {
-                            app.exit_video_fullscreen(window);
-                        } else {
-                            app.video_stage.theater = Some(id.clone());
-                            app.video_stage.fullscreen = true;
-                            if !window.is_fullscreen() {
-                                window.toggle_fullscreen();
-                            }
-                        }
-                        cx.notify();
+                        app.apply_tile_action(&id, TileAction::Fullscreen, &available, window, cx);
                     })),
                 )
             })
