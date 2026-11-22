@@ -32,6 +32,7 @@ mod livekit_audio;
 mod macos_audio;
 mod processing;
 mod remote_audio;
+mod voice_output;
 
 #[cfg(target_os = "macos")]
 pub(crate) use capture::microphone_permission;

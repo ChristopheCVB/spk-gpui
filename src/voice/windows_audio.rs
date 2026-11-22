@@ -1,7 +1,3 @@
-use std::time::Duration;
-
-use livekit::{prelude::LocalAudioTrack, webrtc::stats::RtcStats};
-use tokio::time::{sleep, timeout};
 use windows::Win32::{
     Foundation::RPC_E_CHANGED_MODE,
     Media::Audio::{
@@ -20,24 +16,6 @@ pub(super) fn default_id(kind: DeviceKind) -> Option<String> {
         DeviceKind::Microphone => eCapture,
         DeviceKind::Speakers | DeviceKind::MediaOutput => eRender,
     })
-}
-
-pub(super) async fn wait_for_capture(track: &LocalAudioTrack) -> bool {
-    timeout(Duration::from_secs(5), async {
-        loop {
-            let has_samples = track.get_stats().await.is_ok_and(|reports| {
-                reports.iter().any(|report| {
-                    matches!(report, RtcStats::MediaSource(source) if source.audio.total_samples_duration > 0.0)
-                })
-            });
-            if has_samples {
-                return;
-            }
-            sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await
-    .is_ok()
 }
 
 fn communications_endpoint(flow: EDataFlow) -> Option<String> {

@@ -74,6 +74,9 @@ jobs:
           data_dir="$(mktemp -d)"
           XDG_DATA_HOME="$data_dir" SPK_TEST_NOTIFICATION_DATA="$data_dir" dbus-run-session -- \
             mise exec -- cargo test --locked --bin spk-gpui retained_notification_starts_the_registered_application -- --ignored
+      - name: Test the PulseAudio voice reference
+        if: runner.os == 'Linux'
+        run: bash tests/fixtures/linux-screen-share.sh mise exec -- cargo test --locked --bin spk-gpui linux_voice_output -- --ignored
       - name: Test Wayland ScreenCast availability and picker rejection
         if: runner.os == 'Linux'
         run: |
