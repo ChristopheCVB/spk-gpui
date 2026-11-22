@@ -170,6 +170,7 @@ impl Tab {
 
 impl Spk {
     pub(super) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_sidebar_drawer(window, cx);
         self.device_picker = None;
         let spk = cx.entity();
         let sounds = self.shortcuts.sound_settings();

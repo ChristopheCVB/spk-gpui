@@ -44,6 +44,7 @@ impl Spk {
                 self.quick_switcher = None;
                 window.close_dialog(cx);
             } else {
+                self.close_sidebar_drawer(window, cx);
                 self.open_quick_switcher(window, cx);
             }
             return true;
@@ -118,22 +119,28 @@ impl Spk {
         }
         match (primary, modifiers.alt, modifiers.shift, count, key_name) {
             (false, true, shift, 1 | 2, "up" | "down") => {
+                self.close_sidebar_drawer(window, cx);
                 self.navigate_channel(key_name == "up", shift, window, cx);
             }
             (true, false, false, 1, "b") if !typing => {
-                self.toggle_sidebar(cx);
+                self.toggle_sidebar(window, cx);
             }
             (true, false, true, 2, "f") => {
+                self.close_sidebar_drawer(window, cx);
                 self.open_search(true, window, cx);
             }
             (false, false, false, 0, "/") if !typing => {
+                self.close_sidebar_drawer(window, cx);
                 self.open_message_search(window, cx);
             }
             (false, false, _, 0 | 1, "?") | (false, false, true, 1, "/") if !typing => {
+                self.close_sidebar_drawer(window, cx);
                 self.open_shortcut_reference(window, cx)
             }
             (false, false, false, 0, "up") if composer && self.edit_last_message(window, cx) => {}
-            (false, false, false, 0, "escape") if !self.video_stage.fullscreen => {
+            (false, false, false, 0, "escape")
+                if !self.video_stage.fullscreen && !self.sidebar_drawer_open =>
+            {
                 return self.escape_chat(window, cx);
             }
             _ => return false,

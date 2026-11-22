@@ -129,7 +129,8 @@ impl Spk {
                             .child(user_presence_label(status, cx))
                             .child(unread_badges(counts, cx)),
                     )
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.close_sidebar_drawer(window, cx);
                         let command = match &conversation {
                             Some(id) => Command::OpenDirectMessage(id.clone()),
                             None => Command::StartDirectMessage(message_id.clone()),
@@ -163,14 +164,17 @@ impl Spk {
                             });
                         }),
                     )
-                    .item(PopupMenuItem::new("Send DM").on_click(move |_, _, cx| {
-                        let _ = message_app.update(cx, |app, cx| {
-                            app.open_direct_message(
-                                Command::StartDirectMessage(message_id.clone()),
-                                cx,
-                            );
-                        });
-                    }))
+                    .item(
+                        PopupMenuItem::new("Send DM").on_click(move |_, window, cx| {
+                            let _ = message_app.update(cx, |app, cx| {
+                                app.close_sidebar_drawer(window, cx);
+                                app.open_direct_message(
+                                    Command::StartDirectMessage(message_id.clone()),
+                                    cx,
+                                );
+                            });
+                        }),
+                    )
                     .item(PopupMenuItem::new("Copy name").on_click(move |_, _, cx| {
                         if let Some(name) = copy_app.upgrade().and_then(|app| {
                             let View::SignedIn(sidebar) = &app.read(cx).view else {
@@ -229,6 +233,7 @@ impl Spk {
             self.send(Command::InspectProfileEmail(id.clone(), reply), None, cx);
             result
         });
+        self.close_sidebar_drawer(window, cx);
         let app = cx.entity();
         let profile = cx.new(|cx: &mut Context<PersonProfile>| {
             cx.observe(&app, |profile, _, cx| {

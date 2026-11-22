@@ -1,7 +1,24 @@
 use gpui_kit::component::{
-    Disableable,
+    Disableable, Placement,
     menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
+    resizable::{HandleEdge, resize_handle},
+    window_paddings,
 };
+
+pub(super) const SIDEBAR_WIDTH: Pixels = px(288.0);
+
+pub(super) fn wide_workspace(window: &Window) -> bool {
+    let padding = window_paddings(window);
+    window.viewport_size().width - padding.left - padding.right >= px(1024.0)
+}
+
+struct SidebarResize;
+
+impl Render for SidebarResize {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
 
 use super::{
     chat::{chat_destination, mark_read_item, unread_badges, unread_label},
@@ -51,16 +68,74 @@ pub(super) fn voice_channels(sidebar: &Sidebar) -> impl Iterator<Item = &Channel
 }
 
 impl Spk {
-    pub(super) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
-        self.sidebar_open = !self.sidebar_open;
+    pub(super) fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.close_sidebar_drawer(window, cx) || self.video_stage.fullscreen {
+            return;
+        }
         self.device_picker = None;
+        if wide_workspace(window) {
+            self.sidebar_open = !self.sidebar_open;
+        } else {
+            self.sidebar_drawer_open = true;
+            let app = cx.weak_entity();
+            window.open_sheet_at(Placement::Left, cx, move |sheet, _, cx| {
+                let drawer = app.update(cx, |this, cx| {
+                    let View::SignedIn(sidebar) = &this.view else {
+                        return None;
+                    };
+                    Some(
+                        this.navigation(sidebar, this.selected_voice_destination(sidebar), cx)
+                            .into_any_element(),
+                    )
+                });
+                let app = app.clone();
+                sheet
+                    .title("Channels and direct messages")
+                    .size(SIDEBAR_WIDTH)
+                    .resizable(false)
+                    .px_0()
+                    .children(drawer.ok().flatten())
+                    .on_close(move |_, _, cx| {
+                        let _ = app.update(cx, |this, cx| {
+                            this.sidebar_drawer_open = false;
+                            this.device_picker = None;
+                            cx.notify();
+                        });
+                    })
+            });
+        }
         cx.notify();
     }
 
-    pub(super) fn workspace(&self, sidebar: &Sidebar, cx: &mut Context<Self>) -> impl IntoElement {
-        let selected_channel = voice_channels(sidebar)
+    pub(super) fn close_sidebar_drawer(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !std::mem::take(&mut self.sidebar_drawer_open) {
+            return false;
+        }
+        self.device_picker = None;
+        window.close_sheet(cx);
+        cx.notify();
+        true
+    }
+
+    fn selected_voice_destination<'a>(&self, sidebar: &'a Sidebar) -> Option<&'a Channel> {
+        voice_channels(sidebar)
             .find(|channel| Some(channel.id.as_str()) == self.selected_voice_channel.as_deref())
-            .or_else(|| voice_channels(sidebar).next());
+            .or_else(|| voice_channels(sidebar).next())
+    }
+
+    pub(super) fn workspace(
+        &self,
+        sidebar: &Sidebar,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let selected_channel = self.selected_voice_destination(sidebar);
+        let wide = wide_workspace(window);
+        let inline_sidebar = wide && self.sidebar_open && !self.video_stage.fullscreen;
         let chat = sidebar
             .chat
             .as_ref()
@@ -94,10 +169,29 @@ impl Spk {
         let rejoin = sidebar.rejoin_channel().map(str::to_owned);
 
         div()
+            .id("workspace")
             .size_full()
             .flex()
-            .when(self.sidebar_open && !self.video_stage.fullscreen, |page| {
-                page.child(self.navigation(sidebar, selected_channel, cx))
+            .when(inline_sidebar, |page| {
+                page.on_drag_move(cx.listener(
+                    |this, drag: &DragMoveEvent<SidebarResize>, _, cx| {
+                        this.sidebar_width = (drag.event.position.x - drag.bounds.left())
+                            .clamp(px(248.0), px(368.0));
+                        cx.notify();
+                    },
+                ))
+                .child(
+                    div()
+                        .relative()
+                        .w(self.sidebar_width)
+                        .flex_shrink_0()
+                        .child(self.navigation(sidebar, selected_channel, cx))
+                        .child(
+                            resize_handle("sidebar-edge", Axis::Horizontal)
+                                .inside(HandleEdge::Trailing)
+                                .on_drag(SidebarResize, |_, _, _, cx| cx.new(|_| SidebarResize)),
+                        ),
+                )
             })
             .child(
                 div()
@@ -120,23 +214,27 @@ impl Spk {
                                 .child(
                                     tool_button(
                                         "toggle-sidebar",
-                                        if self.sidebar_open {
+                                        if inline_sidebar {
                                             IconName::PanelLeftClose
                                         } else {
                                             IconName::PanelLeftOpen
                                         },
-                                        if self.sidebar_open {
+                                        if inline_sidebar {
                                             "Hide sidebar"
                                         } else {
-                                            "Show sidebar"
+                                            "Open sidebar"
                                         },
                                     )
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)),
-                                    ),
+                                    .track_focus(&self.sidebar_toggle_focus)
+                                    .on_click(cx.listener(
+                                        |this, _, window, cx| {
+                                            this.sidebar_toggle_focus.focus(window, cx);
+                                            this.toggle_sidebar(window, cx);
+                                        },
+                                    )),
                                 )
                                 .child(themed_icon(stage_icon, theme.muted_foreground, 16.0))
-                                .child(Label::new(stage_name.to_owned()).font_semibold())
+                                .child(Label::new(stage_name.to_owned()).font_semibold().truncate())
                                 .child(
                                     tool_button(
                                         "message-search",
@@ -144,6 +242,7 @@ impl Spk {
                                         "Search messages",
                                     )
                                     .ml_auto()
+                                    .flex_shrink_0()
                                     .on_click(cx.listener(
                                         |this, _, window, cx| {
                                             this.open_message_search(window, cx);
@@ -203,7 +302,19 @@ impl Spk {
                         None => self
                             .voice_channel_stage(sidebar, selected_channel, cx)
                             .into_any_element(),
-                    }),
+                    })
+                    .when(
+                        !inline_sidebar
+                            && !self.sidebar_drawer_open
+                            && !self.video_stage.fullscreen,
+                        |area| {
+                            area.children(
+                                sidebar.voice.as_ref().map(|call| {
+                                    self.persistent_voice_session(sidebar, call, true, cx)
+                                }),
+                            )
+                        },
+                    ),
             )
     }
 
@@ -228,14 +339,9 @@ impl Spk {
         let name = sidebar.profile.name();
 
         div()
+            .size_full()
             .flex()
             .flex_col()
-            .w(relative(0.20))
-            .min_w(px(270.0))
-            .max_w(px(378.0))
-            .flex_shrink_0()
-            .border_r_1()
-            .border_color(theme.border)
             .px_2()
             .pb_2()
             .gap_2()
@@ -346,7 +452,10 @@ impl Spk {
                                                                 .child(unread_badges(counts, cx)),
                                                         )
                                                         .on_click(cx.listener(
-                                                            move |this, _, _, cx| {
+                                                            move |this, _, window, cx| {
+                                                                this.close_sidebar_drawer(
+                                                                    window, cx,
+                                                                );
                                                                 this.device_picker = None;
                                                                 this.send(
                                                                     Command::OpenTextChannel(
@@ -384,54 +493,12 @@ impl Spk {
                             ),
                     ),
             )
-            .children(sidebar.voice.as_ref().map(|call| {
-                let switching = sidebar.switching_to().is_some();
-                let id = sidebar
-                    .switching_to()
-                    .unwrap_or(&call.channel_id)
-                    .to_owned();
-                let voice_channel_name = voice_channels(sidebar)
-                    .find(|channel| channel.id == id)
-                    .map_or("Voice", channel_name);
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .p_2()
-                    .rounded_lg()
-                    .bg(theme.secondary)
-                    .child(
-                        tool_button(
-                            "current-call",
-                            IconName::Volume2,
-                            "Show current voice channel",
-                        )
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| this.select_voice_channel(&id, cx)),
-                        ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                Label::new(voice_channel_name.to_owned())
-                                    .font_semibold()
-                                    .truncate(),
-                            )
-                            .child(
-                                Label::new(call_status(call, switching))
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground),
-                            ),
-                    )
-                    .when(call.is_participating(), |card| {
-                        card.children(self.voice_media_buttons(false, cx))
-                    })
-                    .children(self.leave_voice("sidebar-leave", call, switching, false, cx))
-            }))
+            .children(
+                sidebar
+                    .voice
+                    .as_ref()
+                    .map(|call| self.persistent_voice_session(sidebar, call, false, cx)),
+            )
             .child(
                 div()
                     .flex()
@@ -471,6 +538,71 @@ impl Spk {
                     )
                     .child(self.voice_controls(sidebar, VoiceControls::Profile, cx)),
             )
+    }
+
+    fn persistent_voice_session(
+        &self,
+        sidebar: &Sidebar,
+        call: &VoiceView,
+        bottom_bar: bool,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        let switching = sidebar.switching_to().is_some();
+        let id = sidebar
+            .switching_to()
+            .unwrap_or(&call.channel_id)
+            .to_owned();
+        let voice_channel_name = voice_channels(sidebar)
+            .find(|channel| channel.id == id)
+            .map_or("Voice", channel_name);
+        div()
+            .id("voice-session")
+            .flex()
+            .flex_shrink_0()
+            .items_center()
+            .gap_2()
+            .p_2()
+            .bg(theme.secondary)
+            .when(bottom_bar, |bar| {
+                bar.border_t_1().border_color(theme.border)
+            })
+            .when(!bottom_bar, |card| card.rounded_lg())
+            .child(
+                tool_button(
+                    "current-call",
+                    IconName::Volume2,
+                    "Show current voice channel",
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.close_sidebar_drawer(window, cx);
+                    this.select_voice_channel(&id, cx);
+                })),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        Label::new(voice_channel_name.to_owned())
+                            .font_semibold()
+                            .truncate(),
+                    )
+                    .child(
+                        Label::new(call_status(call, switching))
+                            .text_xs()
+                            .text_color(theme.muted_foreground),
+                    ),
+            )
+            .when(call.is_participating(), |card| {
+                card.children(self.voice_media_buttons(false, cx))
+            })
+            .when(bottom_bar && call.is_participating(), |bar| {
+                bar.child(self.voice_controls(sidebar, VoiceControls::Profile, cx))
+            })
+            .children(self.leave_voice("persistent-voice-leave", call, switching, bottom_bar, cx))
     }
 
     fn channel_row(
@@ -524,8 +656,9 @@ impl Spk {
                                     theme.foreground
                                 },
                             ))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.select_voice_channel(&id, cx)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.close_sidebar_drawer(window, cx);
+                                this.select_voice_channel(&id, cx);
                             })),
                     )
                     .children(sidebar.channel_radio.get(&channel.id).map(|station| {
@@ -541,8 +674,9 @@ impl Spk {
                     }))
                     .when(can_join, |row| {
                         row.child(tool_button("join", IconName::Phone, join_label).on_click(
-                            cx.listener(move |this, _, _, cx| {
-                                this.join_voice_channel(&join_id, cx)
+                            cx.listener(move |this, _, window, cx| {
+                                this.close_sidebar_drawer(window, cx);
+                                this.join_voice_channel(&join_id, cx);
                             }),
                         ))
                     }),
