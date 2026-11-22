@@ -1,34 +1,92 @@
-use std::slice;
+use std::{ptr, slice};
 
 use ::windows::{
     Win32::{
         Foundation::E_FAIL,
         Media::MediaFoundation::{
-            IMFMediaType, IMFSourceReader, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
-            MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
+            IMFActivate, IMFMediaType, IMFSourceReader, MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME,
+            MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
             MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, MF_E_NO_MORE_TYPES,
             MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_RATE, MF_MT_FRAME_RATE_RANGE_MAX,
             MF_MT_FRAME_RATE_RANGE_MIN, MF_MT_FRAME_SIZE, MF_MT_SUBTYPE,
             MF_READWRITE_DISABLE_CONVERTERS, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
             MF_SOURCE_READERF_ENDOFSTREAM, MF_SOURCE_READERF_ERROR, MF_VERSION, MFCreateAttributes,
-            MFCreateDeviceSource, MFCreateSourceReaderFromMediaSource,
+            MFCreateDeviceSource, MFCreateSourceReaderFromMediaSource, MFEnumDeviceSources,
             MFGetStrideForBitmapInfoHeader, MFSTARTUP_NOSOCKET, MFShutdown, MFStartup,
             MFVideoFormat_MJPG as MJPG, MFVideoFormat_NV12 as NV12, MFVideoFormat_RGB24 as RGB24,
             MFVideoFormat_YUY2 as YUY2,
         },
-        System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize},
+        System::Com::{
+            COINIT, COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree,
+            CoUninitialize,
+        },
     },
-    core::{GUID, HSTRING, Result},
+    core::{GUID, HSTRING, PWSTR, Result},
 };
 use nokhwa::{
     Buffer,
     utils::{CameraInfo, FrameFormat, Resolution},
 };
 
-use super::{format_preference, rgb24::packed_rows};
+use super::{CameraDevice, format_preference, rgb24::packed_rows};
 
 const VIDEO: u32 = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
 const Y800: GUID = GUID::from_u128(0x30303859_0000_0010_8000_00aa00389b71);
+
+pub(super) fn devices() -> Result<Vec<CameraDevice>> {
+    // Camera discovery shares blocking threads with Windows Graphics Capture.
+    let _media_foundation = MediaFoundation::start(COINIT_MULTITHREADED)?;
+    unsafe {
+        let mut attributes = None;
+        MFCreateAttributes(&mut attributes, 1)?;
+        let attributes = attributes.ok_or(E_FAIL)?;
+        attributes.SetGUID(
+            &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+            &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
+        )?;
+        let mut activations = ptr::null_mut();
+        let mut count = 0;
+        MFEnumDeviceSources(&attributes, &mut activations, &mut count)?;
+        if activations.is_null() {
+            return Ok(Vec::new());
+        }
+        // Release each COM reference before freeing the array allocated by Media Foundation.
+        let devices = slice::from_raw_parts_mut(activations, count as usize)
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(index, activation)| {
+                let activation = activation.take()?;
+                let name = device_attribute(&activation, &MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME)?;
+                let mut id = device_attribute(
+                    &activation,
+                    &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK,
+                )?;
+                if id.is_empty() {
+                    id = format!("{index}:{name}");
+                }
+                Some(CameraDevice { id, name })
+            })
+            .collect();
+        CoTaskMemFree(Some(activations.cast()));
+        Ok(devices)
+    }
+}
+
+fn device_attribute(device: &IMFActivate, key: &GUID) -> Option<String> {
+    let mut value = PWSTR::null();
+    let mut length = 0;
+    unsafe {
+        device
+            .GetAllocatedString(key, &mut value, &mut length)
+            .ok()?;
+        if value.is_null() {
+            return None;
+        }
+        let string = value.to_string().ok();
+        CoTaskMemFree(Some(value.0.cast()));
+        string
+    }
+}
 
 pub(super) struct Camera {
     reader: IMFSourceReader,
@@ -37,7 +95,7 @@ pub(super) struct Camera {
 
 impl Camera {
     pub(super) fn open(device: &CameraInfo, ceiling: (u32, u32)) -> Result<Self> {
-        let media_foundation = MediaFoundation::start()?;
+        let media_foundation = MediaFoundation::start(COINIT_APARTMENTTHREADED)?;
         // Use the source reader directly because Nokhwa's Buffer discards the signed stride.
         unsafe {
             let mut attributes = None;
@@ -167,9 +225,9 @@ fn frame_format(media_type: &IMFMediaType) -> Result<Option<FrameFormat>> {
 struct MediaFoundation;
 
 impl MediaFoundation {
-    fn start() -> Result<Self> {
+    fn start(apartment: COINIT) -> Result<Self> {
         unsafe {
-            CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
+            CoInitializeEx(None, apartment).ok()?;
             if let Err(error) = MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET) {
                 CoUninitialize();
                 return Err(error);
