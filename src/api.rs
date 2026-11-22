@@ -225,6 +225,14 @@ pub struct ChatMessage {
 }
 
 impl ChatMessage {
+    pub fn reacted_with(&self, emoji: &str, user_id: Option<&str>) -> bool {
+        user_id.is_some_and(|user_id| {
+            self.reactions.iter().any(|reaction| {
+                reaction.emoji == emoji && reaction.user_ids.iter().any(|id| id == user_id)
+            })
+        })
+    }
+
     pub fn pings(&self, user_id: &str) -> bool {
         self.user_id != user_id
             && (self
@@ -1229,5 +1237,35 @@ impl SpkClient {
             sleep(delay).await;
             delay = (delay * 2).min(Duration::from_secs(15));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reaction_selection_is_specific_to_the_message_emoji_and_user() {
+        let messages: Vec<ChatMessage> = serde_json::from_value(serde_json::json!([
+            {
+                "id": "first", "channelId": "chat", "userId": "author",
+                "body": "", "createdAt": 0,
+                "reactions": [
+                    {"emoji": "👍", "userIds": ["me", "other"]},
+                    {"emoji": "❤️", "userIds": ["other"]}
+                ]
+            },
+            {
+                "id": "second", "channelId": "chat", "userId": "author",
+                "body": "", "createdAt": 1,
+                "reactions": [{"emoji": "👍", "userIds": ["other"]}]
+            }
+        ]))
+        .unwrap();
+
+        assert!(messages[0].reacted_with("👍", Some("me")));
+        assert!(!messages[0].reacted_with("❤️", Some("me")));
+        assert!(!messages[0].reacted_with("👍", None));
+        assert!(!messages[1].reacted_with("👍", Some("me")));
     }
 }

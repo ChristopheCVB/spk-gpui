@@ -16,7 +16,7 @@ use chrono::{DateTime, Local};
 use gpui_kit::base::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::{
     Disableable,
-    menu::{DropdownMenu, PopupMenuItem},
+    menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
     separator::Separator,
     text::{MarkdownExtensions, TextView},
     tooltip::Tooltip,
@@ -31,7 +31,7 @@ use super::*;
 
 use crate::{
     api::{ChatMessage, MessageTarget, UnreadState},
-    chat_markdown::{image_preview_links, message_markdown, plain_text, safe_link},
+    chat_markdown::{image_preview_links, message_markdown, safe_link},
     session::{ChatView, Delivery, Pins},
 };
 
@@ -565,6 +565,25 @@ impl Spk {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let keyboard_focus = window
+            .last_input_was_keyboard()
+            .then(|| window.focused(cx))
+            .flatten();
+        if self
+            .chat_history_keyboard_focus
+            .replace(keyboard_focus.clone())
+            != keyboard_focus
+            && let Some(focus) = keyboard_focus
+            && self.chat_history_position.get().is_none()
+            && let Some((message_id, _)) = self
+                .chat_row_focus
+                .borrow()
+                .iter()
+                .find(|(_, row)| row.contains(&focus, window))
+            && let Some(index) = history_message_index(chat, message_id)
+        {
+            self.chat_scroll.scroll_to_item(index);
+        }
         let theme = cx.theme();
         let now = Local::now();
         let divider = |label, color| {
@@ -1023,7 +1042,7 @@ impl Spk {
                 }
             });
         let composer_busy = chat.outgoing.is_some() || !chat.can_send();
-        let message_actions = actions::MessageActions {
+        let message_actions = Rc::new(actions::MessageActions {
             app: app.clone(),
             channel: channel.clone(),
             message: message_id.clone(),
@@ -1031,7 +1050,13 @@ impl Spk {
             can_delete: sidebar.can_remove_message_content(message),
             pin_to: chat.can_pin(sidebar.is_admin()).then_some(!message.pinned),
             disabled: chat.action_pending || !chat.can_send(),
-        };
+            composer_busy,
+            body,
+            share_text,
+            target,
+            spoiler_key,
+            hidden,
+        });
         let reply_channel = channel.clone();
         let reply_id = message_id.clone();
         let row_focus = self
@@ -1046,111 +1071,14 @@ impl Spk {
         let time = DateTime::from_timestamp_millis(message.created_at)
             .map(|time| time.with_timezone(&Local));
         let exact_time = time.map(|time| time.format("%b %-d, %Y, %H:%M:%S").to_string());
-        let actions = Button::new("message-actions")
-            .ghost()
-            .small()
-            .label("Actions")
-            .tab_stop(true)
-            .dropdown_menu(move |menu, _, _| {
-                let channel_id = channel.clone();
-                let quote_channel = channel.clone();
-                let message_id = message_id.clone();
-                let mark_channel = channel.clone();
-                let mark_message = message_id.clone();
-                let reply_app = app.clone();
-                let quote_app = app.clone();
-                let mark_app = app.clone();
-                let quoted = body
-                    .lines()
-                    .map(|line| format!("> {line}"))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                let menu = menu
-                    .item(
-                        PopupMenuItem::new("Reply")
-                            .disabled(composer_busy)
-                            .on_click(move |_, window, cx| {
-                                let _ = reply_app.update(cx, |this, cx| {
-                                    this.reply_to_message(
-                                        channel_id.clone(),
-                                        message_id.clone(),
-                                        window,
-                                        cx,
-                                    );
-                                });
-                            }),
-                    )
-                    .item(
-                        PopupMenuItem::new("Quote")
-                            .disabled(composer_busy)
-                            .on_click(move |_, window, cx| {
-                                let _ = quote_app.update(cx, |this, cx| {
-                                    if self::chat(&this.view).is_some_and(|chat| {
-                                        chat.channel_id == quote_channel
-                                            && chat.can_send()
-                                            && chat.outgoing.is_none()
-                                    }) {
-                                        this.chat_input.update(cx, |input, cx| {
-                                            let end = input.value().len();
-                                            input.set_selected_range(end..end, cx);
-                                            input.insert(format!("\n\n{quoted}\n\n"), window, cx);
-                                            input.focus(window, cx);
-                                        });
-                                        this.update_chat_draft(cx);
-                                    }
-                                });
-                            }),
-                    );
-                let menu = message_actions.menu(menu).separator().item(
-                    PopupMenuItem::new("Mark as unread").on_click(move |_, _, cx| {
-                        let _ = mark_app.update(cx, |this, cx| {
-                            this.send(
-                                Command::MarkChatUnread {
-                                    channel_id: mark_channel.clone(),
-                                    message_id: mark_message.clone(),
-                                },
-                                None,
-                                cx,
-                            );
-                        });
-                    }),
-                );
-                let copy_text = share_text.clone();
-                let copy_markdown = body.clone();
-                let menu = menu
-                    .separator()
-                    .item(PopupMenuItem::new("Copy text").on_click(move |_, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(plain_text(&copy_text)));
-                    }))
-                    .item(
-                        PopupMenuItem::new("Copy Markdown").on_click(move |_, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(copy_markdown.clone()));
-                        }),
-                    )
-                    .when_some(target.clone(), |menu, target| {
-                        menu.item(PopupMenuItem::new("Copy link").on_click(move |_, _, cx| {
-                            search::copy_message_link(&target, cx);
-                        }))
-                    });
-                if hidden.is_empty() {
-                    menu
-                } else {
-                    let app = app.clone();
-                    let key = spoiler_key.clone();
-                    let offsets = hidden.clone();
-                    menu.item(
-                        PopupMenuItem::new("Reveal spoilers").on_click(move |_, _, cx| {
-                            let _ = app.update(cx, |this, cx| {
-                                this.chat_spoilers
-                                    .entry(key.clone())
-                                    .or_default()
-                                    .extend(&offsets);
-                                cx.notify();
-                            });
-                        }),
-                    )
-                }
+        let menu_focused = self
+            .message_menu_focus
+            .as_ref()
+            .is_some_and(|(channel, id, focus)| {
+                channel == &chat.channel_id && id == &message.id && focus.is_focused(window)
             });
+        let toolbar =
+            message_actions.toolbar(sidebar, chat, message, row_focused || menu_focused, cx);
         let content = div()
             .flex_1()
             .min_w_0()
@@ -1194,8 +1122,7 @@ impl Spk {
                                 .text_xs()
                                 .text_color(theme.muted_foreground),
                         )
-                    })
-                    .child(div().ml_auto().child(actions)),
+                    }),
             )
             .when_some(message.reply_to.as_ref(), |row, reply| {
                 row.child(if reply.deleted {
@@ -1341,6 +1268,8 @@ impl Spk {
                     ),
             )
             .child(content)
+            .child(toolbar)
+            .context_menu(move |menu, window, cx| message_actions.menu(menu, window, cx))
     }
 
     fn reply_to_message(

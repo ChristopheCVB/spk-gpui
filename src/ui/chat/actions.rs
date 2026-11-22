@@ -2,7 +2,16 @@ use super::*;
 
 use gpui_kit::component::menu::PopupMenu;
 
-use crate::{chat_markdown::notification_preview, session::MessageAction};
+use crate::{
+    chat_markdown::{notification_preview, plain_text},
+    session::MessageAction,
+};
+
+const QUICK_REACTIONS: [(&str, &str); 3] = [
+    ("👍", "thumbs up"),
+    ("❤️", "red heart"),
+    ("😂", "face with tears of joy"),
+];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(in crate::ui) enum PinPanel {
@@ -92,9 +101,15 @@ impl Spk {
     }
 
     pub(in crate::ui) fn submit_message_action(&mut self, cx: &mut Context<Self>) {
+        let View::SignedIn(sidebar) = &self.view else {
+            return;
+        };
         let (Some(form), Some(view)) = (
             &mut self.message_action_form,
-            chat(&self.view).filter(|view| !view.action_pending),
+            sidebar
+                .chat
+                .as_ref()
+                .filter(|view| !view.action_pending && view.can_send()),
         ) else {
             return;
         };
@@ -104,33 +119,17 @@ impl Spk {
             ActionForm::Delete => MessageAction::Delete,
             ActionForm::React => {
                 let emoji = text.trim();
-                if emoji.is_empty() {
-                    return;
-                }
-                let own_id = match &self.view {
-                    View::SignedIn(sidebar) => sidebar.profile.id.as_deref(),
-                    _ => None,
-                };
-                let already_reacted = view
+                let Some(message) = view
                     .messages
                     .iter()
                     .find(|message| message.id == form.message_id)
-                    .and_then(|message| {
-                        message
-                            .reactions
-                            .iter()
-                            .find(|reaction| reaction.emoji == emoji)
-                    })
-                    .is_some_and(|reaction| {
-                        reaction
-                            .user_ids
-                            .iter()
-                            .any(|id| own_id == Some(id.as_str()))
-                    });
-                MessageAction::React {
-                    emoji: emoji.to_owned(),
-                    on: !already_reacted,
+                else {
+                    return;
+                };
+                if emoji.is_empty() {
+                    return;
                 }
+                reaction_action(message, emoji, sidebar.profile.id.as_deref())
             }
         };
         form.submitted = true;
@@ -201,6 +200,40 @@ impl Spk {
         )
     }
 
+    pub(super) fn toggle_reaction(
+        &mut self,
+        channel_id: &str,
+        message_id: &str,
+        emoji: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let View::SignedIn(sidebar) = &self.view else {
+            return;
+        };
+        let Some(view) = sidebar.chat.as_ref().filter(|view| {
+            view.channel_id == channel_id && !view.action_pending && view.can_send()
+        }) else {
+            return;
+        };
+        let Some(message) = view
+            .messages
+            .iter()
+            .find(|message| message.id == message_id)
+        else {
+            return;
+        };
+        let action = reaction_action(message, emoji, sidebar.profile.id.as_deref());
+        self.send(
+            Command::MutateChatMessage {
+                channel_id: channel_id.to_owned(),
+                message_id: message_id.to_owned(),
+                action,
+            },
+            None,
+            cx,
+        );
+    }
+
     pub(super) fn reactions(
         &self,
         sidebar: &Sidebar,
@@ -212,44 +245,30 @@ impl Spk {
         div()
             .flex()
             .flex_wrap()
+            .mt_1()
             .gap_1()
             .children(message.reactions.iter().map(|reaction| {
-                let mine = reaction
-                    .user_ids
-                    .iter()
-                    .any(|id| own_id == Some(id.as_str()));
+                let emoji = &reaction.emoji;
+                let mine = message.reacted_with(emoji, own_id);
                 let names = reaction
                     .user_ids
                     .iter()
                     .map(|id| sidebar.message_author(id))
                     .collect::<Vec<_>>()
                     .join(", ");
-                let channel_id = chat.channel_id.clone();
-                let message_id = message.id.clone();
-                let emoji = reaction.emoji.clone();
-                Button::new(SharedString::from(format!("reaction-{emoji}")))
-                    .small()
-                    .tab_stop(true)
+                let count = reaction.user_ids.len();
+                let action = if mine {
+                    "Remove your reaction"
+                } else {
+                    "React"
+                };
+                reaction_button(chat, message, emoji, mine, cx)
                     .outline()
-                    .selected(mine)
-                    .disabled(chat.action_pending)
-                    .label(format!("{emoji} {}", reaction.user_ids.len()))
-                    .tooltip(names.clone())
-                    .accessibility_label(format!("{emoji} reactions from {names}"))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.send(
-                            Command::MutateChatMessage {
-                                channel_id: channel_id.clone(),
-                                message_id: message_id.clone(),
-                                action: MessageAction::React {
-                                    emoji: emoji.clone(),
-                                    on: !mine,
-                                },
-                            },
-                            None,
-                            cx,
-                        );
-                    }))
+                    .xsmall()
+                    .rounded(px(10.))
+                    .label(format!("{emoji} {count}"))
+                    .tooltip(names)
+                    .accessibility_label(format!("{emoji}, {count} reactions. {action}"))
             }))
     }
 
@@ -582,6 +601,33 @@ impl Spk {
     }
 }
 
+fn reaction_action(message: &ChatMessage, emoji: &str, own_id: Option<&str>) -> MessageAction {
+    MessageAction::React {
+        emoji: emoji.to_owned(),
+        on: !message.reacted_with(emoji, own_id),
+    }
+}
+
+fn reaction_button(
+    chat: &ChatView,
+    message: &ChatMessage,
+    emoji: &str,
+    mine: bool,
+    cx: &Context<Spk>,
+) -> Button {
+    let channel_id = chat.channel_id.clone();
+    let message_id = message.id.clone();
+    let emoji = emoji.to_owned();
+    Button::new(SharedString::from(format!("reaction-{emoji}")))
+        .tab_stop(true)
+        .selected(mine)
+        .toggled(mine)
+        .disabled(chat.action_pending || !chat.can_send())
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.toggle_reaction(&channel_id, &message_id, &emoji, cx);
+        }))
+}
+
 fn pin_snippet(message: &ChatMessage, sidebar: &Sidebar) -> String {
     notification_preview(&message.body, !message.attachments.is_empty(), |id| {
         sidebar.message_author(id)
@@ -596,10 +642,204 @@ pub(super) struct MessageActions {
     pub can_delete: bool,
     pub pin_to: Option<bool>,
     pub disabled: bool,
+    pub composer_busy: bool,
+    pub body: String,
+    pub share_text: SharedString,
+    pub target: Option<MessageTarget>,
+    pub spoiler_key: (String, u64),
+    pub hidden: Vec<usize>,
 }
 
 impl MessageActions {
-    pub fn menu(&self, menu: PopupMenu) -> PopupMenu {
+    pub fn toolbar(
+        self: &Rc<Self>,
+        sidebar: &Sidebar,
+        chat: &ChatView,
+        message: &ChatMessage,
+        visible: bool,
+        cx: &Context<Spk>,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        let menu = self.clone();
+        div()
+            .id("message-toolbar")
+            .role(Role::Toolbar)
+            .aria_label("Message actions")
+            .absolute()
+            .top_0()
+            .right_2()
+            .max_w_full()
+            .flex()
+            .flex_wrap()
+            .justify_end()
+            .bg(theme.popover)
+            .border_1()
+            .border_color(theme.border)
+            .rounded_md()
+            .shadow_sm()
+            .when(!visible, |toolbar| {
+                toolbar
+                    .invisible()
+                    .group_hover("message-row", |style| style.visible())
+            })
+            .children(QUICK_REACTIONS.into_iter().map(|(emoji, name)| {
+                let own = message.reacted_with(emoji, sidebar.profile.id.as_deref());
+                let label = format!("{} {name} reaction", if own { "Remove" } else { "Add" });
+                reaction_button(chat, message, emoji, own, cx)
+                    .xsmall()
+                    .w(px(24.))
+                    .h(px(24.))
+                    .ghost()
+                    .label(emoji)
+                    .accessibility_label(label.clone())
+                    .tooltip(label)
+            }))
+            .child(
+                tool_button(
+                    "add-reaction",
+                    IconName::FaceSlightlySmiling,
+                    "Add reaction",
+                )
+                .size(px(24.))
+                .disabled(self.disabled)
+                .on_click(self.form_action(ActionForm::React)),
+            )
+            .child(
+                tool_button("message-reply", IconName::Reply, "Reply")
+                    .disabled(self.composer_busy)
+                    .on_click(self.reply()),
+            )
+            .when(self.can_edit, |toolbar| {
+                toolbar.child(
+                    tool_button("message-edit", IconName::Pencil, "Edit message")
+                        .disabled(self.disabled)
+                        .on_click(self.form_action(ActionForm::Edit)),
+                )
+            })
+            .child(
+                tool_button("copy-markdown", IconName::Copy, "Copy Markdown")
+                    .on_click(self.copy_markdown()),
+            )
+            .child(
+                tool_button("more-message-actions", IconName::Ellipsis, "More actions")
+                    .dropdown_menu_with_anchor(Anchor::TopRight, move |popup, window, cx| {
+                        menu.menu(popup, window, cx)
+                    }),
+            )
+    }
+
+    pub fn menu(
+        &self,
+        menu: PopupMenu,
+        window: &mut Window,
+        cx: &mut Context<PopupMenu>,
+    ) -> PopupMenu {
+        let menu_focus = menu.focus_handle(cx);
+        let _ = self.app.update(cx, |this, cx| {
+            this.message_menu_focus =
+                Some((self.channel.clone(), self.message.clone(), menu_focus));
+            cx.notify();
+        });
+        let (app, channel, message) =
+            (self.app.clone(), self.channel.clone(), self.message.clone());
+        let quote_app = app.clone();
+        let quote_channel = channel.clone();
+        let quoted = self
+            .body
+            .lines()
+            .map(|line| format!("> {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let copy_text = self.share_text.clone();
+        let spoiler_key = self.spoiler_key.clone();
+        let hidden = self.hidden.clone();
+        let menu = menu
+            .max_h(window.viewport_size().height - px(24.))
+            .scrollable(true)
+            .item(
+                PopupMenuItem::new("Reply")
+                    .disabled(self.composer_busy)
+                    .on_click(self.reply()),
+            )
+            .item(
+                PopupMenuItem::new("Quote")
+                    .disabled(self.composer_busy)
+                    .on_click(move |_, window, cx| {
+                        let _ = quote_app.update(cx, |this, cx| {
+                            if chat(&this.view).is_some_and(|chat| {
+                                chat.channel_id == quote_channel
+                                    && chat.can_send()
+                                    && chat.outgoing.is_none()
+                            }) {
+                                this.chat_input.update(cx, |input, cx| {
+                                    let end = input.value().len();
+                                    input.set_selected_range(end..end, cx);
+                                    input.insert(format!("\n\n{quoted}\n\n"), window, cx);
+                                    input.focus(window, cx);
+                                });
+                                this.update_chat_draft(cx);
+                            }
+                        });
+                    }),
+            );
+        let mark_app = app.clone();
+        self.mutation_items(menu)
+            .separator()
+            .item(
+                PopupMenuItem::new("Mark as unread").on_click(move |_, _, cx| {
+                    let _ = mark_app.update(cx, |this, cx| {
+                        this.send(
+                            Command::MarkChatUnread {
+                                channel_id: channel.clone(),
+                                message_id: message.clone(),
+                            },
+                            None,
+                            cx,
+                        );
+                    });
+                }),
+            )
+            .separator()
+            .item(PopupMenuItem::new("Copy text").on_click(move |_, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(plain_text(&copy_text)));
+            }))
+            .item(PopupMenuItem::new("Copy Markdown").on_click(self.copy_markdown()))
+            .when_some(self.target.clone(), |menu, target| {
+                menu.item(PopupMenuItem::new("Copy link").on_click(move |_, _, cx| {
+                    search::copy_message_link(&target, cx);
+                }))
+            })
+            .when(!hidden.is_empty(), |menu| {
+                menu.item(
+                    PopupMenuItem::new("Reveal spoilers").on_click(move |_, _, cx| {
+                        let _ = app.update(cx, |this, cx| {
+                            this.chat_spoilers
+                                .entry(spoiler_key.clone())
+                                .or_default()
+                                .extend(&hidden);
+                            cx.notify();
+                        });
+                    }),
+                )
+            })
+    }
+
+    fn copy_markdown(&self) -> impl Fn(&ClickEvent, &mut Window, &mut App) + use<> {
+        let body = self.body.clone();
+        move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(body.clone()))
+    }
+
+    fn reply(&self) -> impl Fn(&ClickEvent, &mut Window, &mut App) + use<> {
+        let (app, channel, message) =
+            (self.app.clone(), self.channel.clone(), self.message.clone());
+        move |_, window, cx| {
+            let _ = app.update(cx, |this, cx| {
+                this.reply_to_message(channel.clone(), message.clone(), window, cx)
+            });
+        }
+    }
+
+    fn mutation_items(&self, menu: PopupMenu) -> PopupMenu {
         let menu = menu.item(self.form_item("Add reaction…", ActionForm::React));
         let menu = if self.can_edit {
             menu.item(self.form_item("Edit message", ActionForm::Edit))
@@ -637,14 +877,18 @@ impl MessageActions {
     }
 
     fn form_item(&self, label: &'static str, kind: ActionForm) -> PopupMenuItem {
-        let (app, channel_id, message_id) =
-            (self.app.clone(), self.channel.clone(), self.message.clone());
         PopupMenuItem::new(label)
             .disabled(self.disabled)
-            .on_click(move |_, window, cx| {
-                let _ = app.update(cx, |this, cx| {
-                    this.begin_message_action(&channel_id, &message_id, kind, window, cx)
-                });
-            })
+            .on_click(self.form_action(kind))
+    }
+
+    fn form_action(&self, kind: ActionForm) -> impl Fn(&ClickEvent, &mut Window, &mut App) + use<> {
+        let (app, channel, message) =
+            (self.app.clone(), self.channel.clone(), self.message.clone());
+        move |_, window, cx| {
+            let _ = app.update(cx, |this, cx| {
+                this.begin_message_action(&channel, &message, kind, window, cx)
+            });
+        }
     }
 }
