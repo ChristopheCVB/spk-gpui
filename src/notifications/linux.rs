@@ -11,12 +11,7 @@ use wayland_client::{
     protocol::{wl_registry::WlRegistry, wl_surface::WlSurface},
 };
 use wayland_protocols::xdg::activation::v1::client::xdg_activation_v1::XdgActivationV1;
-use zbus::{
-    Proxy,
-    connection::Builder,
-    fdo::RequestNameFlags,
-    zvariant::{OwnedValue, Value},
-};
+use zbus::{OwnedVariant, Proxy, Variant, connection::Builder, fdo::RequestNameFlags};
 
 use super::NativeActivation;
 use crate::{APP_ID, ui::Spk};
@@ -35,14 +30,12 @@ impl Global for Notifications {}
 impl Notifications {
     pub async fn register(activated: async_channel::Sender<NativeActivation>) -> Option<Self> {
         let connection = Builder::session()
-            .ok()?
             .serve_at(OBJECT_PATH, Application { activated })
-            .ok()?
             .build()
             .await
             .ok()?;
         connection
-            .request_name_with_flags(APP_ID, RequestNameFlags::DoNotQueue.into())
+            .request_name_with_flags(APP_ID, RequestNameFlags::DO_NOT_QUEUE)
             .await
             .ok()?;
         let portal = async {
@@ -83,19 +76,19 @@ impl Notifications {
         cx.background_spawn(async move {
             let tag: &str = &notification.tag;
             let action = HashMap::from([
-                ("label", Value::from("Open")),
-                ("action", Value::from(OPEN_ACTION)),
-                ("target", Value::from(tag)),
+                ("label", Variant::from("Open")),
+                ("action", Variant::from(OPEN_ACTION)),
+                ("target", Variant::from(tag)),
             ]);
             let mut payload = HashMap::from([
-                ("title", Value::from(notification.title.as_ref())),
-                ("body", Value::from(notification.body.as_ref())),
-                ("default-action", Value::from(OPEN_ACTION)),
-                ("default-action-target", Value::from(tag)),
-                ("buttons", Value::from(vec![action])),
+                ("title", Variant::from(notification.title.as_ref())),
+                ("body", Variant::from(notification.body.as_ref())),
+                ("default-action", Variant::from(OPEN_ACTION)),
+                ("default-action-target", Variant::from(tag)),
+                ("buttons", Variant::from(vec![action])),
             ]);
             if explicit_silence {
-                payload.insert("sound", Value::from("silent"));
+                payload.insert("sound", Variant::from("silent"));
             }
             // A portal denial must not bypass the user's permission through the fallback.
             let _: zbus::Result<()> = portal.call("AddNotification", &(tag, payload)).await;
@@ -128,15 +121,15 @@ struct Application {
 
 #[zbus::interface(name = "org.freedesktop.Application")]
 impl Application {
-    fn activate(&self, platform_data: HashMap<String, OwnedValue>) {
+    fn activate(&self, platform_data: HashMap<String, OwnedVariant>) {
         self.dispatch(None, platform_data);
     }
 
     fn activate_action(
         &self,
         action_name: &str,
-        parameter: Vec<OwnedValue>,
-        platform_data: HashMap<String, OwnedValue>,
+        parameter: Vec<OwnedVariant>,
+        platform_data: HashMap<String, OwnedVariant>,
     ) {
         if let ("open", [tag]) = (action_name, parameter.as_slice())
             && let Ok(tag) = <&str>::try_from(tag)
@@ -156,7 +149,7 @@ impl Application {
     fn dispatch(
         &self,
         response: Option<SystemNotificationResponse>,
-        platform_data: HashMap<String, OwnedValue>,
+        platform_data: HashMap<String, OwnedVariant>,
     ) {
         let token = platform_data
             .get("activation-token")
@@ -324,11 +317,8 @@ mod tests {
         let tag = crate::notifications::activation_tag(&base, &target);
         let connection = zbus::Connection::session().await.unwrap();
         let _server = Builder::session()
-            .unwrap()
             .name("org.freedesktop.Notifications")
-            .unwrap()
             .serve_at("/org/freedesktop/Notifications", GnomeNotificationServer)
-            .unwrap()
             .build()
             .await
             .unwrap();
@@ -341,11 +331,11 @@ mod tests {
         )
         .await
         .unwrap();
-        let data = HashMap::from([("activation-token", Value::from("portal-token"))]);
+        let data = HashMap::from([("activation-token", Variant::from("portal-token"))]);
         let (): () = application
             .call(
                 "ActivateAction",
-                &("open", vec![Value::from(tag.as_str())], data),
+                &("open", vec![Variant::from(tag.as_str())], data),
             )
             .await
             .unwrap();

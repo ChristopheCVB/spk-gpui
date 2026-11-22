@@ -10,7 +10,7 @@ bytes = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 cookie_store = "0.22"
 dfn3_rs = "=0.1.2"
-dirs = "6"
+dirs = "7"
 futures = "0.3"
 global-hotkey = "=0.10.0"
 gpui-kit = "=0.10.0"
@@ -56,7 +56,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 screencapturekit = { version = "=11.1.2", features = ["macos_15_0"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-ashpd = { version = "0.13.13", default-features = false, features = ["screencast"] }
+ashpd = { version = "0.14.1", default-features = false, features = ["async-io", "screencast"] }
 cpal = { version = "0.18.2", features = ["pulseaudio"] }
 notify-rust = "=4.19.0"
 cxx = "1.0"
@@ -67,7 +67,7 @@ wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 webrtc-sys = "=0.3.55"
 x11rb = { version = "0.14", features = ["allow-unsafe-code", "xkb"] }
-zbus = { version = "5", default-features = false, features = ["async-io"] }
+zbus = { version = "6", default-features = false, features = ["default-rt", "proxy", "service"] }
 
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"
@@ -91,7 +91,7 @@ windows = { version = "0.62", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 windows-core = "0.62"
-windows-registry = "0.6"
+windows-registry = "0.100"
 windows-capture = "=2.0.1"
 
 [build-dependencies]
