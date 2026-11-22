@@ -67,28 +67,60 @@ pub(super) async fn select(_: Choice, _: Option<Device>) -> Result<Selection, Ca
         Ok(SCPickerFilterOutcome::Cancelled) => return Err(CaptureError::Cancelled),
         _ => return Err(CaptureError::Unavailable),
     };
+    selection(filter)
+}
+
+fn selection(filter: SCContentFilter) -> Result<Selection, CaptureError> {
     let (label, scope) = match filter.style() {
         Ok(SCShareableContentStyle::Display) => ("Display", AudioScope::PlaybackMix),
         Ok(SCShareableContentStyle::Window) => ("Window", AudioScope::Application),
         _ => return Err(CaptureError::Unavailable),
     };
-    let size = filter.content_rect().size;
-    let scale = f64::from(filter.point_pixel_scale());
-    let (width, height) = (size.width * scale, size.height * scale);
-    if !(2.0..=f64::from(u32::MAX)).contains(&width)
-        || !(2.0..=f64::from(u32::MAX)).contains(&height)
-    {
-        return Err(CaptureError::Unavailable);
-    }
+    let (width, height) = source_size(&filter).ok_or(CaptureError::Unavailable)?;
     Ok(Selection {
         label: label.into(),
         audio: Some(scope),
         capture: Box::new(Selected {
             filter,
-            width: width as u32,
-            height: height as u32,
+            width,
+            height,
         }),
     })
+}
+
+fn source_size(filter: &SCContentFilter) -> Option<(u32, u32)> {
+    let size = filter.content_rect().size;
+    let scale = f64::from(filter.point_pixel_scale());
+    let (width, height) = (size.width * scale, size.height * scale);
+    let valid = 2.0..=f64::from(u32::MAX);
+    (valid.contains(&width) && valid.contains(&height)).then_some((width as u32, height as u32))
+}
+
+#[cfg(test)]
+pub(super) fn fixture_selection(mode: &str, title: &str) -> (Selection, (u32, u32)) {
+    let content = SCShareableContent::get().expect("list capturable macOS displays and windows");
+    let builder = SCContentFilter::create();
+    let filter = match mode {
+        "display" => builder
+            .with_display(content.displays().first().expect("fixture macOS display"))
+            .with_excluding_windows(&[])
+            .build(),
+        "window" => {
+            let window = content
+                .windows()
+                .into_iter()
+                .find(|window| window.title().as_deref() == Some(title))
+                .expect("fixture macOS window");
+            builder.with_window(&window).build()
+        }
+        _ => panic!("invalid macOS Screen Share fixture mode"),
+    }
+    .expect("create ScreenCaptureKit fixture filter");
+    let size = source_size(&filter).expect("macOS fixture source has valid dimensions");
+    (
+        selection(filter).expect("select macOS fixture source"),
+        size,
+    )
 }
 
 struct Picker(bool);
@@ -149,7 +181,7 @@ impl Selected {
         }
         let stream = match self.stream(audio, &sink, &signal, &frames) {
             Ok(stream) => stream,
-            Err(error) if audio && error != CaptureError::Permission => {
+            Err(CaptureError::Unavailable) if audio => {
                 if let Ok(error) = ended.try_recv() {
                     return Err(error);
                 }
@@ -212,7 +244,7 @@ impl Selected {
                         Some(SCFrameStatus::Stopped) => {
                             let _ = signal.try_send(CaptureError::SourceLost);
                         }
-                        Some(SCFrameStatus::Complete) => {
+                        Some(SCFrameStatus::Complete | SCFrameStatus::Started) => {
                             let (quality, (width, height)) = *format.borrow();
                             if let Some(mut frame) = screen_frame(&sample, width, height) {
                                 frame.timestamp_us = started.elapsed().as_micros() as i64;
@@ -272,12 +304,42 @@ fn config(
 }
 
 fn capture_error(error: SCError, fallback: CaptureError) -> CaptureError {
-    if matches!(error, SCError::PermissionDenied(_))
-        || error.stream_error_code() == Some(SCStreamErrorCode::UserDeclined)
-    {
-        CaptureError::Permission
-    } else {
-        fallback
+    match error.stream_error_code() {
+        Some(SCStreamErrorCode::UserDeclined) => CaptureError::Permission,
+        Some(
+            SCStreamErrorCode::NoCaptureSource
+            | SCStreamErrorCode::NoWindowList
+            | SCStreamErrorCode::NoDisplayList
+            | SCStreamErrorCode::FailedApplicationConnectionInvalid
+            | SCStreamErrorCode::FailedApplicationConnectionInterrupted
+            | SCStreamErrorCode::FailedNoMatchingApplicationContext
+            | SCStreamErrorCode::UserStopped
+            | SCStreamErrorCode::SystemStoppedStream,
+        ) => CaptureError::SourceLost,
+        _ if matches!(error, SCError::PermissionDenied(_)) => CaptureError::Permission,
+        _ => fallback,
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn denied_or_lost_capture_does_not_qualify_for_video_only_retry() {
+    for (code, expected) in [
+        (SCStreamErrorCode::UserDeclined, CaptureError::Permission),
+        (SCStreamErrorCode::NoCaptureSource, CaptureError::SourceLost),
+        (SCStreamErrorCode::UserStopped, CaptureError::SourceLost),
+        (
+            SCStreamErrorCode::FailedToStartAudioCapture,
+            CaptureError::Unavailable,
+        ),
+    ] {
+        assert_eq!(
+            capture_error(
+                SCError::from_stream_error_code(code),
+                CaptureError::Unavailable
+            ),
+            expected
+        );
     }
 }
 
