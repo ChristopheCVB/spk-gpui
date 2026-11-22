@@ -23,4 +23,4 @@ done
 test -e "$runtime/ready"
 
 SPK_TEST_MAC_SCREEN=display python3 tests/fixtures/livekit-peers.py "$@"
-SPK_TEST_MAC_SCREEN=window SPK_TEST_MAC_SCREEN_STOP="$runtime/stop" +    python3 tests/fixtures/livekit-peers.py "$@"
+SPK_TEST_MAC_SCREEN=window SPK_TEST_MAC_SCREEN_STOP="$runtime/stop" python3 tests/fixtures/livekit-peers.py "$@"
