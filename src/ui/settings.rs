@@ -8,7 +8,6 @@ mod account_admin;
 mod audio;
 mod camera;
 mod changelog;
-mod channels;
 mod notifications;
 mod profile;
 mod shortcuts;
@@ -157,12 +156,11 @@ enum Tab {
     Changelog,
     Invites,
     Users,
-    Channels,
     Soundboard,
 }
 
 impl Tab {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 9] = [
         Self::Profile,
         Self::Appearance,
         Self::Voice,
@@ -171,7 +169,6 @@ impl Tab {
         Self::Soundboard,
         Self::Invites,
         Self::Users,
-        Self::Channels,
         Self::Changelog,
     ];
 
@@ -185,16 +182,12 @@ impl Tab {
             Self::Soundboard => ("Soundboard", IconName::Megaphone),
             Self::Invites => ("Invites", IconName::Link),
             Self::Users => ("Users", IconName::Users),
-            Self::Channels => ("Channels", IconName::Hash),
             Self::Changelog => ("Changelog", IconName::FileText),
         }
     }
 
     fn requires_admin(self) -> bool {
-        matches!(
-            self,
-            Self::Invites | Self::Users | Self::Channels | Self::Soundboard
-        )
+        matches!(self, Self::Invites | Self::Users | Self::Soundboard)
     }
 }
 
@@ -228,16 +221,8 @@ impl Spk {
                 }
             })
             .detach();
-            let channel_name = cx.new(|cx| InputState::new(window, cx).placeholder("Channel name"));
-            cx.subscribe_in(&channel_name, window, |settings, _, event, _, cx| {
-                if matches!(event, InputEvent::PressEnter { .. }) {
-                    settings.submit_channel_form(false, cx);
-                }
-            })
-            .detach();
             cx.observe(&spk, |settings, _, cx| {
                 settings.sync_account_admin(cx);
-                settings.sync_channel_form(cx);
                 settings.sync_soundboard_form(cx);
                 settings.sync_mic_test(cx);
                 settings.sync_camera_preview(cx);
@@ -317,9 +302,6 @@ impl Spk {
                 invite_note,
                 ban_reason,
                 ban_target: None,
-                channel_name,
-                channel_form: None,
-                channel_submitted_at: None,
                 avatar_picker_open: false,
                 avatar_picker_error: None,
                 volumes,
@@ -383,9 +365,6 @@ struct Settings {
     invite_note: Entity<InputState>,
     ban_reason: Entity<InputState>,
     ban_target: Option<String>,
-    channel_name: Entity<InputState>,
-    channel_form: Option<channels::ChannelForm>,
-    channel_submitted_at: Option<u64>,
     avatar_picker_open: bool,
     avatar_picker_error: Option<&'static str>,
     volumes: [Entity<SliderState>; Sound::ALL.len()],
@@ -429,7 +408,6 @@ impl Render for Settings {
                     cx,
                 )
                 .into_any_element(),
-            Tab::Channels => self.channels(sidebar, cx).into_any_element(),
             Tab::Soundboard => self.soundboard_admin(sidebar, cx).into_any_element(),
         };
         div()
@@ -488,30 +466,7 @@ impl Render for Settings {
                             .overflow_y_scroll()
                             .bg(theme.background)
                             .p(if compact { px(16.0) } else { px(24.0) })
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_2()
-                                    .children(
-                                        self.channel_form
-                                            .as_ref()
-                                            .filter(|_| self.tab == Tab::Channels)
-                                            .map(|form| {
-                                                div()
-                                                    .gap_2()
-                                                    .flex()
-                                                    .flex_col()
-                                                    .children(self.channel_status(sidebar, cx))
-                                                    .child(self.channel_editor(
-                                                        form,
-                                                        sidebar.channel_admin.pending,
-                                                        cx,
-                                                    ))
-                                            }),
-                                    )
-                                    .child(body),
-                            ),
+                            .child(body),
                     ),
             )
     }
