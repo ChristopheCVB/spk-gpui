@@ -169,7 +169,11 @@ impl ChatSession {
         change_message(&mut view.messages, message_id, &change);
         let refresh = match &mut view.pins {
             Some(Pins::Ready(pins)) => {
-                change_message(pins, message_id, &change);
+                if matches!(change, MessageChange::Pin(false)) {
+                    remove_message(Arc::make_mut(pins), message_id);
+                } else {
+                    change_message(pins, message_id, &change);
+                }
                 matches!(change, MessageChange::Pin(_))
                     // An older pins response could restore a deleted message or stale content.
                     || !self.pin_tasks.is_empty()
@@ -191,29 +195,21 @@ impl ChatSession {
         }
     }
 
-    pub fn show_pins(&mut self, client: &SpkClient, channel_id: &str, shown: bool) {
-        let Some(view) = self
-            .selected
-            .as_mut()
-            .filter(|view| view.channel_id == channel_id && !view.unavailable())
-        else {
-            return;
-        };
-        self.pin_tasks = JoinSet::new();
-        view.pins = shown.then_some(Pins::Loading);
-        if shown && view.history == History::Ready {
+    pub fn retry_pins(&mut self, client: &SpkClient, channel_id: &str) {
+        if let Some(view) = &mut self.selected
+            && view.channel_id == channel_id
+            && matches!(view.pins, Some(Pins::Failed))
+        {
+            view.pins = Some(Pins::Loading);
             self.refresh_pins(client);
         }
     }
 
     pub fn refresh_pins(&mut self, client: &SpkClient) {
-        let Some(view) = self
-            .selected
-            .as_ref()
-            .filter(|view| view.pins.is_some() && !view.unavailable())
-        else {
+        let Some(view) = self.selected.as_mut().filter(|view| !view.unavailable()) else {
             return;
         };
+        view.pins.get_or_insert(Pins::Loading);
         let client = client.clone();
         let channel_id = view.channel_id.clone();
         self.pin_tasks = JoinSet::new();

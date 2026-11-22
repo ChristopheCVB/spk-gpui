@@ -38,6 +38,7 @@ async fn channel_changes_reach_another_session_and_close_removed_channels() {
                     "GET /api/users/presence HTTP/1.1" | "GET /api/unread HTTP/1.1" => {
                         request.respond(&[], "{}").await
                     }
+                    "GET /api/channels/new-text/pins HTTP/1.1" => request.respond(&[], "[]").await,
                     "GET /api/channels/new-text/messages?unread=1 HTTP/1.1" => {
                         request
                             .respond(&[], r#"{"messages":[],"hasMoreBefore":false}"#)

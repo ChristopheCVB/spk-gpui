@@ -271,7 +271,7 @@ impl ChatSession {
             jump: None,
             jump_failed: false,
             outgoing: None,
-            pins: None,
+            pins: Some(Pins::Loading),
             preview_images: PreviewImages::default(),
             gifs: None,
             message_image: None,
@@ -494,6 +494,9 @@ impl ChatSession {
                     view.jump = None;
                     view.jump_failed = true;
                     self.buffered.clear();
+                    if matches!(view.pins, Some(Pins::Loading)) {
+                        self.refresh_pins(client);
+                    }
                     return;
                 }
                 if matches!(error, Failure::Http(reqwest::StatusCode::NOT_FOUND))

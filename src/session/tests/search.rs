@@ -31,6 +31,7 @@ async fn searches_messages_and_opens_authenticated_exact_targets() {
                     request.respond(&[], "[]").await
                 }
                 "GET /api/unread HTTP/1.1" | "GET /api/users/presence HTTP/1.1" => request.respond(&[], "{}").await,
+                "GET /api/channels/general/pins HTTP/1.1" | "GET /api/channels/dm-1/pins HTTP/1.1" => request.respond(&[], "[]").await,
                 _ => requests.send((line, request)).await.unwrap(),
             }
         }
