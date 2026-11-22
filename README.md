@@ -22,7 +22,7 @@ To enable downloads for your deployment, set the `SPK_URL` HTTPS origin and `LIV
 
 Settings → Notifications controls Direct Messages, Mentions and replies, sound, and system preview text. Mute Notifications is available from a Text Channel or DM Conversation's sidebar menu. Your operating system controls permission to show system notifications. On macOS, open `SPK.app` to use system notifications. On Linux, the desktop notification service must support actions, and Wayland compositors can limit whether an action raises or restores the window.
 
-Quitting SPK ends desktop delivery. Browser Web Push can still deliver messages if your instance supports it and you have subscribed in the browser. A click on a previously delivered macOS notification can reopen the app through its bundle. The portable Windows and Linux builds support notification activation while SPK is running. Relaunch from a retained alert on those platforms requires OS app activation registration.
+Quitting SPK ends desktop delivery. Browser Web Push can still deliver messages if your instance supports it and you have subscribed in the browser. A previously delivered notification can reopen SPK on macOS, on Windows, and on Linux desktops that provide the version 2 XDG Notification Portal. Windows and Linux register the executable for your OS user when SPK runs. If you move the executable, open it from its new location before using a retained alert. Linux desktops with an older or unavailable notification portal support opening alerts while SPK is running.
 
 ## Build prerequisites
 

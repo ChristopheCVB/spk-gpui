@@ -1,3 +1,8 @@
+#[cfg(target_os = "linux")]
+pub mod linux;
+#[cfg(target_os = "windows")]
+pub mod windows;
+
 use std::{
     collections::HashSet,
     fs, io,
@@ -194,6 +199,22 @@ impl LiveAlerts {
 
     pub fn disconnected(&mut self) {
         self.unlisted.clear();
+    }
+}
+
+pub struct NativeActivation {
+    pub response: Option<gpui_kit::SystemNotificationResponse>,
+    #[cfg(target_os = "linux")]
+    pub token: Option<String>,
+}
+
+impl From<gpui_kit::SystemNotificationResponse> for NativeActivation {
+    fn from(response: gpui_kit::SystemNotificationResponse) -> Self {
+        Self {
+            response: Some(response),
+            #[cfg(target_os = "linux")]
+            token: None,
+        }
     }
 }
 

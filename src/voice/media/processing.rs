@@ -4,7 +4,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use dfn3_rs::Denoiser;
@@ -19,7 +19,7 @@ use rodio::cpal::{
     traits::{DeviceTrait, StreamTrait},
 };
 use tokio::{
-    sync::{mpsc, oneshot, watch},
+    sync::{broadcast, mpsc, oneshot, watch},
     task::JoinHandle,
     time::timeout,
 };
@@ -29,11 +29,20 @@ use crate::voice::{
 };
 
 pub(super) const RATE: u32 = 48_000;
-const FRAME: usize = RATE as usize / 100;
+pub(super) const FRAME: usize = RATE as usize / 100;
 const _: () = assert!(dfn3_rs::SAMPLE_RATE == RATE && dfn3_rs::FRAME_SIZE == FRAME);
+
+pub(super) struct RenderBlock {
+    pub(super) stream: Arc<()>,
+    pub(super) playback: Instant,
+    pub(super) rate: u32,
+    pub(super) channels: u32,
+    pub(super) samples: Vec<i16>,
+}
 
 struct InputBlock {
     generation: u64,
+    captured_at: Instant,
     samples: Vec<i16>,
 }
 
@@ -51,6 +60,7 @@ impl ProcessedInput {
         preferences: VoiceProcessing,
         source: NativeAudioSource,
         track: LocalAudioTrack,
+        render: broadcast::Receiver<Arc<RenderBlock>>,
     ) -> (Self, oneshot::Receiver<()>) {
         let (preferences, updates) = watch::channel(preferences);
         let (ready, opened) = oneshot::channel();
@@ -58,12 +68,12 @@ impl ProcessedInput {
         let generation = Arc::new(AtomicU64::new(0));
         let capture = tokio::spawn(capture(
             device,
-            source.clone(),
-            track,
+            (source.clone(), track),
             updates,
             generation.clone(),
             ready,
             stopped,
+            render,
         ));
         (
             Self {
@@ -107,12 +117,12 @@ impl ProcessedInput {
 
 async fn capture(
     selected: Option<Device>,
-    source: NativeAudioSource,
-    track: LocalAudioTrack,
+    publication: (NativeAudioSource, LocalAudioTrack),
     preferences: watch::Receiver<VoiceProcessing>,
     generation: Arc<AtomicU64>,
     ready: oneshot::Sender<()>,
     mut stopped: oneshot::Receiver<()>,
+    render: broadcast::Receiver<Arc<RenderBlock>>,
 ) -> Option<()> {
     #[cfg(target_os = "macos")]
     tokio::select! {
@@ -160,32 +170,37 @@ async fn capture(
         biased;
         _ = &mut stopped => None,
         _ = &mut failed => None,
-        result = send_audio(source, track, preferences, ready, blocks, rate, generation) => result,
+        result = send_audio(publication, preferences, ready, blocks, rate, generation, render) => result,
     };
     let _ = stream.pause();
     result
 }
 
 async fn send_audio(
-    source: NativeAudioSource,
-    track: LocalAudioTrack,
+    (source, track): (NativeAudioSource, LocalAudioTrack),
     preferences: watch::Receiver<VoiceProcessing>,
     ready: oneshot::Sender<()>,
     mut blocks: mpsc::Receiver<InputBlock>,
     rate: u32,
     generation: Arc<AtomicU64>,
+    mut render: broadcast::Receiver<Arc<RenderBlock>>,
 ) -> Option<()> {
     let mut ready = Some(ready);
     let mut resampler = AudioResampler::default();
     let mut controls = None;
     let mut apm = None;
+    let mut render_stream: Option<Arc<()>> = None;
+    let mut render_time = None;
+    let mut render_resampler = AudioResampler::default();
     let mut gate = Gate::default();
     let mut denoiser = None;
     let mut last_generation = None;
     let mut frame = [0; FRAME];
+    let mut reverse = [0; FRAME * 2];
     loop {
         let InputBlock {
             generation: captured,
+            captured_at,
             samples: mut block,
         } = timeout(Duration::from_secs(3), blocks.recv())
             .await
@@ -203,16 +218,19 @@ async fn send_audio(
             gate = Gate::default();
             denoiser = None;
             controls = None;
+            render_stream = None;
+            render_time = None;
+            render_resampler = AudioResampler::default();
         }
         let settings = *preferences.borrow();
         let toggles = (
+            settings.echo_cancellation,
             settings.noise_suppression == NoiseSuppression::Standard,
             settings.auto_gain,
         );
-        if controls != Some(toggles) {
-            controls = Some(toggles);
-            apm = (toggles.0 || toggles.1)
-                .then(|| AudioProcessingModule::new(false, toggles.1, false, toggles.0));
+        if controls.replace(toggles) != Some(toggles) {
+            apm = WebRtcProcessing::new(settings);
+            render_time = None;
         }
         let samples = if rate == RATE {
             block.as_mut_slice()
@@ -227,8 +245,55 @@ async fn send_audio(
             ));
             frame.as_mut_slice()
         };
+        // Keep the render queue current even when echo cancellation is off.
+        for _ in 0..16 {
+            let block = match render.try_recv() {
+                Ok(block) => block,
+                Err(broadcast::error::TryRecvError::Lagged(_)) => {
+                    render_stream = None;
+                    continue;
+                }
+                Err(_) => break,
+            };
+            if !settings.echo_cancellation
+                || captured_at.saturating_duration_since(block.playback)
+                    > Duration::from_millis(100)
+            {
+                continue;
+            }
+            if !render_stream
+                .as_ref()
+                .is_some_and(|stream| Arc::ptr_eq(stream, &block.stream))
+            {
+                render_stream = Some(block.stream.clone());
+                render_resampler = AudioResampler::default();
+                apm = WebRtcProcessing::new(settings);
+            }
+            let reverse = &mut reverse[..FRAME * block.channels as usize];
+            let pcm = if block.rate == RATE {
+                &block.samples
+            } else {
+                render_resampler.remix_and_resample(
+                    &block.samples,
+                    block.rate / 100,
+                    block.channels,
+                    block.rate,
+                    block.channels,
+                    RATE,
+                )
+            };
+            reverse.copy_from_slice(pcm);
+            apm.as_mut()?
+                .module
+                .process_reverse_stream(reverse, RATE as i32, block.channels as i32)
+                .ok()?;
+            render_time = Some(block.playback);
+        }
         if let Some(apm) = apm.as_mut() {
-            apm.process_stream(samples, RATE as i32, 1).ok()?;
+            let delay = render_time.map_or(Duration::ZERO, |playback: Instant| {
+                playback.saturating_duration_since(captured_at)
+            });
+            apm.process(samples, delay).ok()?;
         }
         if settings.noise_suppression == NoiseSuppression::Enhanced {
             let model = denoiser.take();
@@ -260,6 +325,34 @@ async fn send_audio(
     }
 }
 
+struct WebRtcProcessing {
+    module: AudioProcessingModule,
+    echo: bool,
+}
+
+impl WebRtcProcessing {
+    fn new(settings: VoiceProcessing) -> Option<Self> {
+        let echo = settings.echo_cancellation;
+        let standard = settings.noise_suppression == NoiseSuppression::Standard;
+        (echo || standard || settings.auto_gain).then(|| Self {
+            module: AudioProcessingModule::new(echo, settings.auto_gain, false, standard),
+            echo,
+        })
+    }
+
+    fn process(
+        &mut self,
+        samples: &mut [i16],
+        delay: Duration,
+    ) -> Result<(), livekit::webrtc::RtcError> {
+        if self.echo {
+            self.module
+                .set_stream_delay_ms(delay.as_millis().min(500) as i32)?;
+        }
+        self.module.process_stream(samples, RATE as i32, 1)
+    }
+}
+
 fn process_enhanced(denoiser: &mut Denoiser, mut pcm: [f32; FRAME]) -> [i16; FRAME] {
     denoiser.process_frame(&mut pcm);
     pcm.map(|sample| (sample * 32768.0).round() as i16)
@@ -279,16 +372,26 @@ where
     let frames = config.sample_rate as usize / 100;
     let mut block = Vec::with_capacity(frames);
     let mut last_generation = None;
+    let mut captured_at = Instant::now();
     let mut fail = Some(fail);
     device.build_input_stream(
         config,
-        move |samples: &[T], _| {
+        move |samples: &[T], info| {
+            let timestamp = info.timestamp();
+            let started = Instant::now();
+            let first_sample = started
+                .checked_sub(timestamp.callback.duration_since(timestamp.capture))
+                .unwrap_or(started);
             let captured = generation.load(Ordering::Relaxed);
             if last_generation != Some(captured) {
                 last_generation = Some(captured);
                 block.clear();
             }
-            for channel_frame in samples.chunks_exact(channels) {
+            for (index, channel_frame) in samples.chunks_exact(channels).enumerate() {
+                if block.is_empty() {
+                    captured_at = first_sample
+                        + Duration::from_secs_f64(index as f64 / f64::from(config.sample_rate));
+                }
                 let mono = channel_frame
                     .iter()
                     .copied()
@@ -300,6 +403,7 @@ where
                     if let Ok(slot) = send.try_reserve() {
                         slot.send(InputBlock {
                             generation: captured,
+                            captured_at,
                             samples: std::mem::replace(&mut block, Vec::with_capacity(frames)),
                         });
                     } else {
@@ -353,6 +457,53 @@ impl Gate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn echo_cancellation_combines_with_automatic_gain_and_standard_noise_suppression() {
+        let settings = VoiceProcessing::default();
+        let mut processor = WebRtcProcessing::new(settings).unwrap();
+        let mut without_echo = WebRtcProcessing::new(VoiceProcessing {
+            echo_cancellation: false,
+            ..settings
+        })
+        .unwrap();
+        let mut previous = [0; FRAME];
+        let mut seed = 1_u32;
+        let (mut input_power, mut output_power) = (0.0, 0.0);
+        for frame in 0..500 {
+            let mut render = std::array::from_fn::<_, FRAME, _>(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (seed >> 16) as i16 / 4
+            });
+            let mut baseline = previous.map(|sample: i16| sample / 2);
+            let mut capture = baseline;
+            previous = render;
+            without_echo.process(&mut baseline, Duration::ZERO).unwrap();
+            if frame >= 400 {
+                input_power += baseline
+                    .iter()
+                    .map(|sample| f64::from(*sample).powi(2))
+                    .sum::<f64>();
+            }
+            processor
+                .module
+                .process_reverse_stream(&mut render, RATE as i32, 1)
+                .unwrap();
+            processor
+                .process(&mut capture, Duration::from_millis(10))
+                .unwrap();
+            if frame >= 400 {
+                output_power += capture
+                    .iter()
+                    .map(|sample| f64::from(*sample).powi(2))
+                    .sum::<f64>();
+            }
+        }
+        assert!(
+            output_power < input_power / 10.0,
+            "{output_power} >= {input_power} / 10"
+        );
+    }
 
     #[test]
     fn enhanced_suppresses_stationary_noise() {

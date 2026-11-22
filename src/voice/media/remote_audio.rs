@@ -10,12 +10,14 @@ use std::{
 
 use futures::StreamExt;
 use livekit::{prelude::*, webrtc::audio_stream::native::NativeAudioStream};
-use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player, buffer::SamplesBuffer, mixer::Mixer};
-use tokio::{task::JoinHandle, time::Instant};
+use rodio::{MixerDeviceSink, Player, buffer::SamplesBuffer, mixer::Mixer};
+use tokio::{sync::broadcast, task::JoinHandle, time::Instant};
 
 use crate::voice::{
     Device, DeviceKind, Devices, Intent, audio_preview::cpal_device, devices::open_media_output,
 };
+
+use super::{processing::RenderBlock, voice_output::VoiceOutput};
 
 #[cfg(test)]
 mod tests;
@@ -23,7 +25,6 @@ mod tests;
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Route {
     Silent,
-    Native,
     Voice(f32),
     Media(f32),
 }
@@ -41,24 +42,42 @@ fn route(intent: &Intent, id: &str, source: TrackSource, muted: bool) -> Option<
             Route::Silent
         } else if source == TrackSource::ScreenshareAudio {
             Route::Media(gain)
-        } else if gain == 1.0 {
-            Route::Native
         } else {
             Route::Voice(gain)
         },
     )
 }
 
-#[derive(Default)]
 pub(super) struct RemoteAudio {
     tracks: HashMap<TrackSid, Playback>,
-    voice: Output,
-    media: Output,
+    voice: Output<VoiceOutput>,
+    media: Output<MixerDeviceSink>,
+    render: broadcast::Sender<Arc<RenderBlock>>,
+    pub(super) native_playout: bool,
+}
+
+impl Default for RemoteAudio {
+    fn default() -> Self {
+        Self {
+            tracks: HashMap::new(),
+            voice: Output::default(),
+            media: Output::default(),
+            render: broadcast::channel(16).0,
+            native_playout: false,
+        }
+    }
 }
 
 impl RemoteAudio {
     pub(super) fn suspend(&mut self) {
-        *self = Self::default();
+        self.tracks.clear();
+        self.voice = Output::default();
+        self.media = Output::default();
+        self.native_playout = false;
+    }
+
+    pub(super) fn render_reference(&self) -> broadcast::Receiver<Arc<RenderBlock>> {
+        self.render.subscribe()
     }
 
     pub(super) fn forget(&mut self, sid: &TrackSid) {
@@ -96,17 +115,16 @@ impl RemoteAudio {
         let voice_changed = self.voice.update(voice.is_some(), voice_device, |failed| {
             let selected = voice.filter(|_| !system_speakers);
             let device = cpal_device(DeviceKind::Speakers, selected)?;
-            let mut sink = DeviceSinkBuilder::from_device(device)
-                .ok()?
-                .with_error_callback(move |_| failed.store(true, Relaxed))
-                .open_stream()
-                .ok()?;
-            sink.log_on_drop(false);
-            Some(sink)
+            VoiceOutput::open(device, self.render.clone(), failed)
         });
         let media_changed = self.media.update(media, media_device, |failed| {
             open_media_output(media_device, move |_| failed.store(true, Relaxed)).ok()
         });
+        self.native_playout = voice.is_some()
+            && self.voice.sink.is_none()
+            && routes
+                .values()
+                .any(|(_, route)| *route == Route::Voice(1.0));
         if voice_changed || media_changed {
             self.tracks.retain(|_, playback| {
                 if playback.media {
@@ -119,8 +137,8 @@ impl RemoteAudio {
         sync_playback(
             &mut self.tracks,
             routes,
-            self.voice.mixer(),
-            self.media.mixer(),
+            self.voice.sink.as_ref().map(VoiceOutput::mixer),
+            self.media.sink.as_ref().map(MixerDeviceSink::mixer),
         );
     }
 }
@@ -138,8 +156,7 @@ fn sync_subscriptions(
             }
             let route = route(intent, &id.0, publication.source(), publication.is_muted());
             if let Some(RemoteTrack::Audio(track)) = publication.track() {
-                // Feed the raw sink without also sending screen audio through WebRTC's playout mixer.
-                if route != Some(Route::Native) && track.is_enabled() {
+                if route.is_none() && track.is_enabled() {
                     track.disable();
                 }
                 if let Some(route) = route {
@@ -169,13 +186,16 @@ fn sync_playback(
             })
     });
     for (sid, (track, route)) in routes {
-        let (mixer, gain, media) = match route {
-            Route::Native => {
-                if !track.is_enabled() {
-                    track.enable();
-                }
-                continue;
+        // shortcut: LiveKit fallback has no render reference, remove when all supported routes can provide PCM.
+        let native = matches!(route, Route::Voice(1.0)) && voice.is_none();
+        if track.is_enabled() != native {
+            if native {
+                track.enable();
+            } else {
+                track.disable();
             }
+        }
+        let (mixer, gain, media) = match route {
             Route::Voice(gain) => (voice, gain, false),
             Route::Media(gain) => (media, gain, true),
             Route::Silent => continue,
@@ -189,24 +209,30 @@ fn sync_playback(
     }
 }
 
-#[derive(Default)]
-struct Output {
+struct Output<T> {
     device: Option<Device>,
-    sink: Option<MixerDeviceSink>,
+    sink: Option<T>,
     failed: Arc<AtomicBool>,
     retry_at: Option<Instant>,
 }
 
-impl Output {
-    fn mixer(&self) -> Option<&Mixer> {
-        self.sink.as_ref().map(MixerDeviceSink::mixer)
+impl<T> Default for Output<T> {
+    fn default() -> Self {
+        Self {
+            device: None,
+            sink: None,
+            failed: Arc::default(),
+            retry_at: None,
+        }
     }
+}
 
+impl<T> Output<T> {
     fn update(
         &mut self,
         wanted: bool,
         device: Option<&Device>,
-        open: impl FnOnce(Arc<AtomicBool>) -> Option<MixerDeviceSink>,
+        open: impl FnOnce(Arc<AtomicBool>) -> Option<T>,
     ) -> bool {
         if !wanted {
             return self.sink.take().is_some();
