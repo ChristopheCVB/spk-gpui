@@ -21,7 +21,7 @@ use ::windows::{
     Win32::{
         Foundation::{
             E_ABORT, E_ACCESSDENIED, E_POINTER, ERROR_ACCESS_DISABLED_BY_POLICY, ERROR_CANCELLED,
-            HANDLE, HMODULE, HWND, WAIT_TIMEOUT,
+            HANDLE, HMODULE, HWND, RPC_E_CHANGED_MODE, WAIT_TIMEOUT,
         },
         Graphics::{
             Direct3D::D3D_DRIVER_TYPE_HARDWARE,
@@ -218,20 +218,28 @@ fn window_id(window: &Window) -> Option<String> {
     Some(format!("window:{:p}:{pid}", window.as_raw_hwnd()))
 }
 
-struct Apartment;
+struct Apartment {
+    needs_uninitialize: bool,
+}
 
 impl Apartment {
     fn new() -> Result<Self, CaptureError> {
-        wasapi::initialize_mta()
-            .ok()
-            .map_err(|_| CaptureError::Unavailable)?;
-        Ok(Self)
+        let status = wasapi::initialize_mta();
+        // CPAL device discovery can leave a reusable worker thread initialized as STA.
+        if status.is_err() && status != RPC_E_CHANGED_MODE {
+            return Err(CaptureError::Unavailable);
+        }
+        Ok(Self {
+            needs_uninitialize: status.is_ok(),
+        })
     }
 }
 
 impl Drop for Apartment {
     fn drop(&mut self) {
-        wasapi::deinitialize();
+        if self.needs_uninitialize {
+            wasapi::deinitialize();
+        }
     }
 }
 
@@ -307,9 +315,8 @@ impl Selected {
             return Err(CaptureError::SourceLost);
         }
         let _apartment = Apartment::new()?;
-        // Keep the selection MTA alive until the capture worker has entered it.
-        let SelectedItem(item, apartment) = self.item;
-        drop(apartment);
+        // The capture worker may be STA, so keep the selection MTA alive through capture.
+        let SelectedItem(item, _graphics_apartment) = self.item;
 
         let mut device = None;
         let mut context = None;
