@@ -21,11 +21,11 @@ pub(crate) mod screen;
 pub(crate) mod soundboard;
 pub(crate) mod video;
 
-pub(crate) use devices::MediaOutput;
 pub use devices::{
     Device, DeviceKind, DeviceList, DevicePreferences, Devices, NoiseSuppression,
     ParticipantVolumeChange, VoiceProcessing,
 };
+pub(crate) use devices::{MediaOutput, open_media_output};
 pub use media::Diagnostics;
 use media::Media;
 #[cfg(test)]
