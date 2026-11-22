@@ -156,35 +156,36 @@ async fn searches_messages_and_opens_authenticated_exact_targets() {
         }).await;
 
         let private = MessageTarget::new("dm-1", "private").unwrap();
-        tx.send(Command::OpenMessageTarget(private.clone())).await.unwrap();
-        let (line, request) = search.recv().await.unwrap();
-        assert_eq!(line, "GET /api/channels/dm-1/messages?around=private HTTP/1.1");
-        request.respond(&[], &value!({
-            "messages":[
-                {"id":"neighbor","channelId":"dm-1","userId":"bob","body":"private context","createdAt":12},
-                {"id":"private","channelId":"dm-1","userId":"bob","body":"private text","createdAt":13}
-            ],
-            "hasMoreBefore":false,
-            "hasMoreAfter":false,
-        }).to_string()).await;
-        wait_for_sidebar(&rx, |view| {
-            view.chat.as_ref().is_some_and(|chat| chat.messages.len() == 2)
-        }).await;
+        for status in ["403 Forbidden", "503 Service Unavailable"] {
+            tx.send(Command::OpenMessageTarget(private.clone())).await.unwrap();
+            let (line, request) = search.recv().await.unwrap();
+            assert_eq!(line, "GET /api/channels/dm-1/messages?around=private HTTP/1.1");
+            request.respond(&[], &value!({
+                "messages":[
+                    {"id":"neighbor","channelId":"dm-1","userId":"bob","body":"private context","createdAt":12},
+                    {"id":"private","channelId":"dm-1","userId":"bob","body":"private text","createdAt":13}
+                ],
+                "hasMoreBefore":false,
+                "hasMoreAfter":false,
+            }).to_string()).await;
+            wait_for_sidebar(&rx, |view| {
+                view.chat.as_ref().is_some_and(|chat| chat.messages.len() == 2)
+            }).await;
 
-        activate.send_replace(Some(private));
-        let (line, request) = search.recv().await.unwrap();
-        assert_eq!(line, "GET /api/channels/dm-1/messages?around=private HTTP/1.1");
-        let pending = wait_for_sidebar(&rx, |view| {
-            view.chat.as_ref().is_none_or(ChatView::loading)
-        }).await;
-        assert!(pending.chat.is_none(), "authorization must finish before opening an alert's conversation");
-        request.respond_raw("403 Forbidden", &[], b"").await;
-        wait_for_sidebar(&rx, |view| {
-            view.chat.is_none() && view.chat_notice == Some("Message unavailable.")
-        }).await;
+            activate.send_replace(Some(private.clone()));
+            let (line, request) = search.recv().await.unwrap();
+            assert_eq!(line, "GET /api/channels/dm-1/messages?around=private HTTP/1.1");
+            let pending = wait_for_sidebar(&rx, |view| view.chat_notice == Some("Opening message…")).await;
+            assert!(pending.chat.is_none(), "authorization must finish before opening an alert's conversation");
+            request.respond_raw(status, &[], b"").await;
+            let finished = wait_for_sidebar(&rx, |view| view.chat_notice != Some("Opening message…")).await;
+            assert!(finished.chat.is_none(), "{status} must keep the alert's conversation closed");
+            assert_eq!(finished.chat_notice, Some("Message unavailable."));
+        }
 
         let unknown = MessageTarget::new("unknown", "private").unwrap();
         tx.send(Command::OpenMessageTarget(unknown)).await.unwrap();
+        wait_for_sidebar(&rx, |view| view.chat_notice == Some("Opening message…")).await;
         wait_for_sidebar(&rx, |view| view.chat_notice == Some("Message unavailable.")).await;
 
         tx.send(Command::OpenConversationTarget("dm-1".into())).await.unwrap();

@@ -32,6 +32,18 @@ fn chat(view: &View) -> Option<&ChatView> {
     }
 }
 
+fn chat_jump_index(
+    previous_jump: Option<&(String, u64)>,
+    jump: Option<&(String, u64)>,
+    messages: &[ChatMessage],
+) -> Option<usize> {
+    if previous_jump == jump {
+        return None;
+    }
+    let (id, _) = jump?;
+    messages.iter().position(|message| message.id == *id)
+}
+
 fn chat_images(chat: &ChatView) -> impl Iterator<Item = &Arc<RenderImage>> {
     chat.preview_images
         .images()
@@ -228,9 +240,9 @@ impl Spk {
                 .commands
                 .try_send(Command::ReadVisibleChat(next.channel_id.clone()));
         }
-        if previous.map(|chat| (&chat.channel_id, chat.unavailable()))
-            != next.map(|chat| (&chat.channel_id, chat.unavailable()))
-        {
+        let reset = previous.map(|chat| (&chat.channel_id, chat.unavailable()))
+            != next.map(|chat| (&chat.channel_id, chat.unavailable()));
+        if reset {
             self.chat_input.update(cx, |input, cx| {
                 input.set_value(
                     next.map_or("", |chat| chat.draft.body.as_str()).to_owned(),
@@ -241,7 +253,6 @@ impl Spk {
             self.chat_spoilers.clear();
             self.chat_scroll_anchor = None;
             self.chat_scroll = ScrollHandle::new();
-            self.chat_scroll.scroll_to_bottom();
         } else if let (Some(previous), Some(next)) = (previous, next) {
             if previous.has_more_after
                 && next.direct_message_peer.is_some()
@@ -268,14 +279,20 @@ impl Spk {
                     input.set_value(next.draft.body.clone(), window, cx)
                 });
             }
-            if previous.jump != next.jump
-                && let Some((id, _)) = &next.jump
-                && let Some(index) = next.messages.iter().position(|message| message.id == *id)
-            {
-                self.chat_scroll_anchor = None;
-                self.chat_scroll.scroll_to_top_of_item(index);
-                return;
-            }
+        }
+        let previous_jump = previous
+            .filter(|_| !reset)
+            .and_then(|chat| chat.jump.as_ref());
+        if let Some(index) =
+            next.and_then(|chat| chat_jump_index(previous_jump, chat.jump.as_ref(), &chat.messages))
+        {
+            self.chat_scroll_anchor = None;
+            self.chat_scroll.scroll_to_top_of_item(index);
+            return;
+        }
+        if reset {
+            self.chat_scroll.scroll_to_bottom();
+        } else if let (Some(previous), Some(next)) = (previous, next) {
             if next.history_ready()
                 && let Some(anchor) = self.chat_scroll_anchor.take()
                 && (next.has_more_after || next.paging_forward)
@@ -1158,5 +1175,23 @@ impl Spk {
             input.focus(window, cx);
         });
         self.update_chat_draft(cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ChatMessage, chat_jump_index};
+
+    #[test]
+    fn resolves_the_jump_when_an_alert_first_opens_a_chat() {
+        let messages: Vec<ChatMessage> = serde_json::from_value(serde_json::json!([
+            {"id":"before","channelId":"general","userId":"bob","body":"Before","createdAt":1},
+            {"id":"target","channelId":"general","userId":"bob","body":"Target","createdAt":2},
+            {"id":"after","channelId":"general","userId":"bob","body":"After","createdAt":3}
+        ]))
+        .unwrap();
+        let jump = ("target".to_owned(), 0);
+        assert_eq!(chat_jump_index(None, Some(&jump), &messages), Some(1));
+        assert_eq!(chat_jump_index(Some(&jump), Some(&jump), &messages), None);
     }
 }

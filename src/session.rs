@@ -656,10 +656,13 @@ async fn watch_session(
                 if let Ok(page) = &result {
                     alerts.remember_history(&page.messages);
                 }
-                let denied_alert = matches!(chat_navigation, Some(ChatNavigation::OpeningAlert))
-                    && matches!(&result, Err(Failure::Http(reqwest::StatusCode::FORBIDDEN)));
+                // SPK checks conversation access before reporting that the target message is missing.
+                let unverified_alert = matches!(chat_navigation, Some(ChatNavigation::OpeningAlert))
+                    && result.as_ref().is_err_and(|error| {
+                        !matches!(error, Failure::Http(reqwest::StatusCode::NOT_FOUND))
+                    });
                 chat.complete(client, sidebar.profile.id.as_deref(), result);
-                if denied_alert {
+                if unverified_alert {
                     chat.close();
                     sidebar.chat_notice = Some("Message unavailable.");
                 }
