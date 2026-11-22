@@ -25,7 +25,12 @@ use crate::{
     session::{ChatJump, ChatView, Delivery},
 };
 
-pub(super) const QUOTE_PREFIX: &str = "\n> ";
+pub(super) const BOLD: (&str, &str) = ("**", "**");
+pub(super) const ITALIC: (&str, &str) = ("_", "_");
+pub(super) const STRIKETHROUGH: (&str, &str) = ("~~", "~~");
+pub(super) const INLINE_CODE: (&str, &str) = ("`", "`");
+pub(super) const CODE_BLOCK: (&str, &str) = ("\n```\n", "\n```\n");
+pub(super) const QUOTE: (&str, &str) = ("\n> ", "");
 
 fn chat(view: &View) -> Option<&ChatView> {
     match view {
@@ -34,19 +39,37 @@ fn chat(view: &View) -> Option<&ChatView> {
     }
 }
 
-pub(super) fn chat_destination<'a>(
-    sidebar: &'a Sidebar,
-    chat: &ChatView,
-) -> Option<(char, &'a str)> {
-    if let Some(peer) = &chat.direct_message_peer {
-        (!chat.unavailable()).then(|| ('@', sidebar.message_author(peer)))
+pub(super) struct ChatDestination<'a> {
+    pub icon: IconName,
+    pub name: &'a str,
+    placeholder_prefix: Option<char>,
+}
+
+pub(super) fn chat_destination<'a>(sidebar: &'a Sidebar, chat: &ChatView) -> ChatDestination<'a> {
+    let (icon, name, fallback, prefix) = if let Some(peer) = &chat.direct_message_peer {
+        (
+            IconName::MessageCircle,
+            (!chat.unavailable()).then(|| sidebar.message_author(peer)),
+            "Direct message",
+            '@',
+        )
     } else {
-        sidebar
-            .channels
-            .iter()
-            .flatten()
-            .find(|channel| channel.id == chat.channel_id)
-            .map(|channel| ('#', super::workspace::channel_name(channel)))
+        (
+            IconName::Hash,
+            sidebar
+                .channels
+                .iter()
+                .flatten()
+                .find(|channel| channel.id == chat.channel_id)
+                .map(super::workspace::channel_name),
+            "Text channel",
+            '#',
+        )
+    };
+    ChatDestination {
+        icon,
+        name: name.unwrap_or(fallback),
+        placeholder_prefix: name.map(|_| prefix),
     }
 }
 
@@ -54,7 +77,8 @@ fn composer_destination(view: &View) -> Option<(char, &str)> {
     let View::SignedIn(sidebar) = view else {
         return None;
     };
-    chat_destination(sidebar, sidebar.chat.as_ref()?)
+    let destination = chat_destination(sidebar, sidebar.chat.as_ref()?);
+    Some((destination.placeholder_prefix?, destination.name))
 }
 
 fn chat_jump_index(jump: Option<&ChatJump>, messages: &[ChatMessage]) -> Option<usize> {
@@ -400,11 +424,7 @@ impl Spk {
             return;
         };
         let body = self.chat_input.read(cx).value().to_string();
-        if chat.draft.attachments_block_send()
-            || (body.trim().is_empty()
-                && chat.draft.gif.is_none()
-                && !chat.draft.attachments_ready())
-        {
+        if !chat.draft.can_send(&body) {
             return;
         }
         let reading_older = chat.has_more_after;
@@ -580,8 +600,7 @@ impl Spk {
                     .py(if self.compact() { px(6.0) } else { px(12.0) })
                     .flex()
                     .flex_col()
-                    .max_h_full()
-                    .flex_shrink_0()
+                    .min_h_0()
                     .border_1()
                     .border_color(theme.background.opacity(0.0))
                     .when(chat.can_send() && chat.outgoing.is_none(), |composer| {
@@ -748,6 +767,7 @@ impl Spk {
         let theme = cx.theme();
         let surface = theme.secondary;
         let disabled = chat.outgoing.is_some() || !chat.can_send();
+        let can_send = !disabled && chat.draft.can_send(&self.chat_input.read(cx).value());
         let app = cx.weak_entity();
         div()
             .id("message-composer")
@@ -794,7 +814,7 @@ impl Spk {
                             .label("Send")
                             .tab_stop(true)
                             .flex_shrink_0()
-                            .disabled(disabled || chat.draft.attachments_block_send())
+                            .disabled(!can_send)
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.submit_chat(window, cx)),
                             ),
@@ -1169,16 +1189,16 @@ impl Spk {
             .gap_1()
             .children(
                 [
-                    (IconName::Bold, "Bold", "**", "**"),
-                    (IconName::Italic, "Italic", "_", "_"),
-                    (IconName::Strikethrough, "Strikethrough", "~~", "~~"),
-                    (IconName::Code, "Inline code", "`", "`"),
-                    (IconName::SquareCode, "Code block", "\n```\n", "\n```\n"),
-                    (IconName::Quote, "Quote", QUOTE_PREFIX, ""),
-                    (IconName::EyeOff, "Spoiler", "||", "||"),
+                    (IconName::Bold, "Bold", BOLD),
+                    (IconName::Italic, "Italic", ITALIC),
+                    (IconName::Strikethrough, "Strikethrough", STRIKETHROUGH),
+                    (IconName::Code, "Inline code", INLINE_CODE),
+                    (IconName::SquareCode, "Code block", CODE_BLOCK),
+                    (IconName::Quote, "Quote", QUOTE),
+                    (IconName::EyeOff, "Spoiler", ("||", "||")),
                 ]
                 .into_iter()
-                .map(|(icon, label, before, after)| {
+                .map(|(icon, label, (before, after))| {
                     tool_button(label, icon, label)
                         .disabled(disabled)
                         .on_click(cx.listener(move |this, _, window, cx| {

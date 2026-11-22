@@ -1,4 +1,4 @@
-use super::chat::QUOTE_PREFIX;
+use super::chat::{BOLD, CODE_BLOCK, INLINE_CODE, ITALIC, QUOTE, STRIKETHROUGH};
 use super::*;
 use crate::{
     session::VoiceProcessingSetting,
@@ -103,14 +103,12 @@ impl Spk {
                 .is_focused(window);
         if composer || editor {
             let formatting = match (primary, modifiers.alt, modifiers.shift, count, key_name) {
-                (true, false, false, 1, "b") => Some(("**", "**")),
-                (true, false, false, 1, "i") => Some(("_", "_")),
-                (true, false, false, 1, "e") => Some(("`", "`")),
-                (true, false, true, 2, "x") => Some(("~~", "~~")),
-                (true, true, false, 2, "c") | (true, false, true, 2, "c") => {
-                    Some(("\n```\n", "\n```\n"))
-                }
-                (true, false, true, 2, "." | ">") => Some((QUOTE_PREFIX, "")),
+                (true, false, false, 1, "b") => Some(BOLD),
+                (true, false, false, 1, "i") => Some(ITALIC),
+                (true, false, false, 1, "e") => Some(INLINE_CODE),
+                (true, false, true, 2, "x") => Some(STRIKETHROUGH),
+                (true, true, false, 2, "c") | (true, false, true, 2, "c") => Some(CODE_BLOCK),
+                (true, false, true, 2, "." | ">") => Some(QUOTE),
                 _ => None,
             };
             if let Some((before, after)) = formatting {
