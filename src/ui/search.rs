@@ -196,6 +196,13 @@ impl Spk {
         };
         let theme = cx.theme();
         let search = div()
+            .id("search-surface")
+            .role(if wide {
+                Role::Complementary
+            } else {
+                Role::Dialog
+            })
+            .aria_label("Search")
             .h_full()
             .w((window.viewport_size().width * 0.3).clamp(px(304.0), px(384.0)))
             .flex_shrink_0()
@@ -205,7 +212,7 @@ impl Spk {
             .occlude()
             .child(panel.clone());
         if wide {
-            layer = layer.h_full().child(search.id("search-surface"));
+            layer = layer.h_full().child(search);
         } else {
             layer = layer
                 .absolute()
