@@ -125,8 +125,14 @@ impl Spk {
                     }],
                 };
                 #[cfg(target_os = "linux")]
-                show_linux_notification(notification, target, window, cx);
-                #[cfg(not(target_os = "linux"))]
+                if !notifications::linux::Notifications::show(&notification, cx) {
+                    show_linux_notification(notification, target, window, cx);
+                }
+                #[cfg(target_os = "windows")]
+                if !notifications::windows::Notifications::show(&notification, cx) {
+                    cx.show_system_notification(notification);
+                }
+                #[cfg(target_os = "macos")]
                 cx.show_system_notification(notification);
             }
         }
