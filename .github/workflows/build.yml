@@ -38,6 +38,7 @@ jobs:
       LIVEKIT_URL: ${{ github.event_name == 'push' && vars.SPK_URL != '' && vars.LIVEKIT_URL || 'wss://voice.example' }}
       UPLOAD_BINARIES: ${{ github.event_name == 'push' && vars.SPK_URL != '' && vars.LIVEKIT_URL != '' }}
       CARGO_PROFILE_DEV_DEBUG: "0"
+      BUILD_DIR: ${{ inputs.release-tag != '' && 'target/release' || 'target/debug' }}
     steps:
       - name: Require deployment URLs for a release
         if: inputs.release-tag != '' && env.UPLOAD_BINARIES != 'true'
@@ -119,38 +120,38 @@ jobs:
             mise exec -- cargo test --locked --bin spk-gpui livekit_screen_share_publishes_video_and_separate_audio -- --ignored
           dbus-run-session -- bash tests/fixtures/linux-screen-share.sh --wayland-window \
             mise exec -- cargo test --locked --bin spk-gpui wayland_window_publishes_video_only_and_preserves_voice -- --ignored
-      - run: mise exec -- cargo build --locked
+      - run: mise exec -- cargo build --locked ${{ inputs.release-tag != '' && '--release' || '' }}
       - name: Verify Windows executable embeds DirectX shaders
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           # Launching on the runner can pass even when GPUI loads its shaders from the Cargo cache.
-          $exe = (Resolve-Path target/debug/spk-gpui.exe).Path
+          $exe = (Resolve-Path (Join-Path $env:BUILD_DIR 'spk-gpui.exe')).Path
           $image = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe))
           if (!$image.Contains('DXBC') -or $image.Contains('src/shaders.hlsl')) {
             throw 'The Windows executable must embed its DirectX shaders.'
           }
-      - name: Verify macOS development bundle
+      - name: Verify macOS app bundle
         if: runner.os == 'macOS'
         run: |
-          sh build/macos-bundle.sh
-          app=target/debug/SPK.app
+          sh build/macos-bundle.sh "$BUILD_DIR"
+          app="$BUILD_DIR/SPK.app"
           icon=$(plutil -extract CFBundleIconFile raw -expect string -o - "$app/Contents/Info.plist")
           test -f "$app/Contents/Resources/$icon"
           test -s "$app/Contents/Resources/$icon"
           codesign --verify --strict "$app"
       - name: Package macOS app
         if: env.UPLOAD_BINARIES == 'true' && runner.os == 'macOS'
-        run: ditto -c -k --sequesterRsrc --keepParent target/debug/SPK.app "target/debug/${{ matrix.artifact }}"
+        run: ditto -c -k --sequesterRsrc --keepParent "$BUILD_DIR/SPK.app" "$BUILD_DIR/${{ matrix.artifact }}"
       - name: Package Linux executable
         if: env.UPLOAD_BINARIES == 'true' && runner.os == 'Linux'
-        run: tar -czf "target/debug/${{ matrix.artifact }}" -C target/debug spk-gpui -C ../../build media-licenses.txt
+        run: tar -czf "$BUILD_DIR/${{ matrix.artifact }}" -C "$BUILD_DIR" spk-gpui -C ../../build media-licenses.txt
       - name: Upload build
         if: env.UPLOAD_BINARIES == 'true'
         uses: actions/upload-artifact@v7.0.2
         with:
           name: ${{ matrix.artifact }}
-          path: target/debug/${{ matrix.artifact }}
+          path: ${{ env.BUILD_DIR }}/${{ matrix.artifact }}
           archive: false
           if-no-files-found: error
           overwrite: true
