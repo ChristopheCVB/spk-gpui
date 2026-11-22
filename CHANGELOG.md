@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.0](https://github.com/ChristopheCVB/spk-gpui/compare/v0.1.0...v0.2.0) (2026-11-22)
+
+
+### Features
+
+* **chat:** rework Message History and actions ([#119](https://github.com/ChristopheCVB/spk-gpui/issues/119)) ([02d9319](https://github.com/ChristopheCVB/spk-gpui/commit/02d9319d000a3a457d064e115d062cdac55d8d12))
+* **ui:** align SPK Desktop with Web ([#113](https://github.com/ChristopheCVB/spk-gpui/issues/113)) ([cbf5737](https://github.com/ChristopheCVB/spk-gpui/commit/cbf57371d16a0cbe5e8c472f0940b4adcabb8301))
+
+
+### Bug Fixes
+
+* **voice:** restore Windows screen sharing after device discovery ([#92](https://github.com/ChristopheCVB/spk-gpui/issues/92)) ([3aa0fa7](https://github.com/ChristopheCVB/spk-gpui/commit/3aa0fa778c0f7b96dc2a54298679e8c7ad348c85))
+
 ## 0.1.0 (2026-11-22)
 
 
