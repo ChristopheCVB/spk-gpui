@@ -612,6 +612,15 @@ async fn watch_session(
         admin_soundboard.sync(&mut sidebar);
         voice.start_pending(&mut sidebar, client, &settings.start_call);
         let mut next = sidebar.clone();
+        if matches!(chat_navigation, Some(ChatNavigation::OpeningAlert)) {
+            // A retained alert can point to a conversation the account can no longer access.
+            if next.chat.as_ref().is_some_and(ChatView::loading) {
+                next.chat = None;
+                next.chat_notice = Some("Opening message…");
+            } else {
+                chat_navigation = None;
+            }
+        }
         next.alerts = std::mem::take(&mut alerts.ready);
         if views.send(View::SignedIn(Box::new(next))).await.is_err() {
             break SessionEnd::Closed;
@@ -620,11 +629,6 @@ async fn watch_session(
         let chat_timeout = chat.next_timeout();
         let active = *settings.presence.activity.borrow_and_update();
         let alert_activation = &mut settings.alert_activation;
-        if matches!(chat_navigation, Some(ChatNavigation::OpeningAlert))
-            && !sidebar.chat.as_ref().is_some_and(ChatView::loading)
-        {
-            chat_navigation = None;
-        }
         let mut from_alert = false;
         tokio::select! {
             () = presence.report(sidebar.user_status, active) => {}
@@ -652,7 +656,13 @@ async fn watch_session(
                 if let Ok(page) = &result {
                     alerts.remember_history(&page.messages);
                 }
+                let denied_alert = matches!(chat_navigation, Some(ChatNavigation::OpeningAlert))
+                    && matches!(&result, Err(Failure::Http(reqwest::StatusCode::FORBIDDEN)));
                 chat.complete(client, sidebar.profile.id.as_deref(), result);
+                if denied_alert {
+                    chat.close();
+                    sidebar.chat_notice = Some("Message unavailable.");
+                }
             }
             Some(result) = chat.action_tasks.join_next() => {
                 let result = result.unwrap_or(Err(Failure::Connection));

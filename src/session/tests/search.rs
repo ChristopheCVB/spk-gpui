@@ -171,15 +171,16 @@ async fn searches_messages_and_opens_authenticated_exact_targets() {
             view.chat.as_ref().is_some_and(|chat| chat.messages.len() == 2)
         }).await;
 
-        tx.send(Command::OpenMessageTarget(private)).await.unwrap();
+        activate.send_replace(Some(private));
         let (line, request) = search.recv().await.unwrap();
         assert_eq!(line, "GET /api/channels/dm-1/messages?around=private HTTP/1.1");
-        wait_for_sidebar(&rx, |view| {
-            view.chat.as_ref().is_some_and(|chat| chat.channel_id == "dm-1" && chat.loading() && chat.messages.is_empty())
+        let pending = wait_for_sidebar(&rx, |view| {
+            view.chat.as_ref().is_none_or(ChatView::loading)
         }).await;
+        assert!(pending.chat.is_none(), "authorization must finish before opening an alert's conversation");
         request.respond_raw("403 Forbidden", &[], b"").await;
         wait_for_sidebar(&rx, |view| {
-            view.chat.as_ref().is_some_and(|chat| chat.jump_failed && chat.unavailable())
+            view.chat.is_none() && view.chat_notice == Some("Message unavailable.")
         }).await;
 
         let unknown = MessageTarget::new("unknown", "private").unwrap();
