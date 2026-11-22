@@ -9,7 +9,12 @@ mod sounds;
 mod ui;
 mod voice;
 
-use gpui_kit::{component::ThemeRegistry, *};
+use std::borrow::Cow;
+
+use gpui_kit::{
+    component::{Theme, ThemeRegistry},
+    *,
+};
 
 use ui::Spk;
 
@@ -36,6 +41,7 @@ fn main() -> std::process::ExitCode {
         .with_assets(assets::AllAssets)
         .run(move |cx| {
             init(cx);
+            load_fonts(cx);
             gpui_kit::base::Root::register_plugin(cx, |_, _| ui::ShortcutKeys);
             ThemeRegistry::global_mut(cx)
                 .load_themes_from_str(include_str!("../assets/themes.json"))
@@ -60,6 +66,30 @@ fn main() -> std::process::ExitCode {
             cx.activate(true);
         });
     std::process::ExitCode::SUCCESS
+}
+
+fn load_fonts(cx: &mut App) {
+    const GEIST: &[&[u8]] = &[
+        include_bytes!("../assets/fonts/Geist-Regular.ttf"),
+        include_bytes!("../assets/fonts/Geist-Medium.ttf"),
+        include_bytes!("../assets/fonts/Geist-SemiBold.ttf"),
+        include_bytes!("../assets/fonts/Geist-Bold.ttf"),
+        include_bytes!("../assets/fonts/Geist-Italic.ttf"),
+        include_bytes!("../assets/fonts/GeistMono-Regular.ttf"),
+    ];
+    let text = cx.text_system();
+    if let Err(error) = text.add_fonts(GEIST.iter().copied().map(Cow::Borrowed).collect()) {
+        eprintln!("Could not load embedded Geist fonts: {error}");
+    }
+    let families = text.all_font_names();
+    Theme::update(cx, |theme| {
+        if families.iter().any(|family| family == "Geist") {
+            theme.font_family = "Geist".into();
+        }
+        if families.iter().any(|family| family == "Geist Mono") {
+            theme.mono_font_family = "Geist Mono".into();
+        }
+    });
 }
 
 #[cfg(test)]
