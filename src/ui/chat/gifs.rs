@@ -1,5 +1,7 @@
 use super::*;
 
+use gpui_kit::component::popover::Popover;
+
 use crate::{api::GifItem, session::GifPickerView};
 
 fn gif_button(id: &'static str, label: &'static str) -> Button {
@@ -39,32 +41,53 @@ impl Spk {
                 input.set_placeholder(placeholder, window, cx);
                 if previous.is_none() {
                     input.set_value("", window, cx);
+                } else {
+                    input.focus(window, cx);
                 }
-                input.focus(window, cx);
             });
         }
     }
 
-    pub(super) fn gif_toggle(&self, chat: &ChatView, cx: &Context<Self>) -> Button {
+    pub(super) fn gif_toggle(&self, chat: &ChatView, cx: &Context<Self>) -> impl IntoElement {
         let opened = chat.gifs.is_some();
-        gif_button("toggle-gif-picker", "GIFs")
+        let disabled = !chat.can_send() || chat.outgoing.is_some();
+        let trigger = tool_button("toggle-gif-picker", IconName::ImagePlay, "GIFs")
+            .track_focus(&self.gif_button_focus)
             .toggled(opened)
             .accessibility_label(if opened {
                 "Close GIF menu"
             } else {
                 "Open GIF menu"
             })
-            .disabled(!chat.can_send() || chat.outgoing.is_some())
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.send(Command::ShowGifs(!opened), None, cx);
-                if opened {
-                    this.chat_input
-                        .update(cx, |input, cx| input.focus(window, cx));
+            .disabled(disabled)
+            .when(!disabled, |button| {
+                // AccessKit dispatches Click as a pointer press, which the popover handles.
+                button.on_click(cx.listener(move |app, event, _, cx| {
+                    if !matches!(event, ClickEvent::Mouse(_)) {
+                        app.send(Command::ShowGifs(!opened), None, cx);
+                    }
+                }))
+            });
+        let app = cx.weak_entity();
+        Popover::new("gif-picker")
+            .anchor(Anchor::BottomLeft)
+            .w(px(320.))
+            .p_2()
+            .open(opened)
+            .overlay_closable(true)
+            .track_focus(&self.gif_input.focus_handle(cx))
+            .trigger(trigger)
+            .on_open_change(move |open, _, cx| {
+                if !*open || !disabled {
+                    let _ = app.update(cx, |app, cx| {
+                        app.send(Command::ShowGifs(*open), None, cx);
+                    });
                 }
-            }))
+            })
+            .children(chat.gifs.as_ref().map(|gifs| self.gif_picker(gifs, cx)))
     }
 
-    pub(super) fn gif_picker(&self, gifs: &GifPickerView, cx: &Context<Self>) -> impl IntoElement {
+    fn gif_picker(&self, gifs: &GifPickerView, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let favorites = gifs.showing_favorites;
         let loading = if favorites {
@@ -92,19 +115,19 @@ impl Spk {
             .flex()
             .flex_col()
             .gap_2()
-            .mb_2()
-            .p_2()
-            .rounded_md()
-            .border_1()
-            .border_color(theme.border)
             .child(
                 div()
                     .flex()
                     .gap_1()
+                    .p_1()
+                    .rounded_md()
+                    .bg(theme.accent)
                     .children(
                         [("Browse", false), ("Favorites", true)].map(|(label, show)| {
                             gif_button(label, label)
+                                .flex_1()
                                 .toggled(favorites == show)
+                                .when(favorites == show, |button| button.primary())
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.send(Command::ShowGifFavorites(show), None, cx);
                                 }))
@@ -174,9 +197,11 @@ impl Spk {
                     ),
             )
             .child(
-                Label::new("Powered by KLIPY")
-                    .text_xs()
-                    .text_color(theme.muted_foreground),
+                div().flex().justify_center().child(
+                    Label::new("Powered by KLIPY")
+                        .text_xs()
+                        .text_color(theme.muted_foreground),
+                ),
             )
     }
 

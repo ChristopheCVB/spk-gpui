@@ -4,7 +4,7 @@ use gpui_kit::component::{
 };
 
 use super::{
-    chat::{mark_read_item, unread_badges, unread_label},
+    chat::{chat_destination, mark_read_item, unread_badges, unread_label},
     *,
 };
 use crate::{
@@ -68,19 +68,11 @@ impl Spk {
         let (stage_icon, stage_name) = match chat {
             Some(chat) if chat.direct_message_peer.is_some() => (
                 IconName::MessageCircle,
-                chat.direct_message_peer
-                    .as_deref()
-                    .filter(|_| !chat.unavailable())
-                    .map_or("Direct message", |peer| sidebar.message_author(peer)),
+                chat_destination(sidebar, chat).map_or("Direct message", |(_, name)| name),
             ),
             Some(chat) => (
                 IconName::Hash,
-                sidebar
-                    .channels
-                    .iter()
-                    .flatten()
-                    .find(|channel| channel.id == chat.channel_id)
-                    .map_or("Text channel", channel_name),
+                chat_destination(sidebar, chat).map_or("Text channel", |(_, name)| name),
             ),
             None => (
                 IconName::Volume2,

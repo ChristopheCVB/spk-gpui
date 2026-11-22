@@ -52,6 +52,7 @@ pub(super) struct Spk {
     nickname: Entity<InputState>,
     chat_input: Entity<TextareaState>,
     gif_input: Entity<InputState>,
+    gif_button_focus: FocusHandle,
     chat_attachments: chat::AttachmentUi,
     message_action_input: Entity<TextareaState>,
     message_action_form: Option<chat::MessageActionForm>,
@@ -107,7 +108,7 @@ impl Spk {
         let nickname = cx.new(|cx| InputState::new(window, cx));
         let chat_input = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .rows(2)
+                .auto_grow(1, 6)
                 .placeholder("Write a message")
                 .submit_on_enter(true)
         });
@@ -330,6 +331,7 @@ impl Spk {
             nickname,
             chat_input,
             gif_input,
+            gif_button_focus: cx.focus_handle(),
             chat_attachments: Default::default(),
             message_action_input,
             message_action_form: None,

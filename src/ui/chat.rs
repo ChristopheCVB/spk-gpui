@@ -25,11 +25,36 @@ use crate::{
     session::{ChatJump, ChatView, Delivery},
 };
 
+pub(super) const QUOTE_PREFIX: &str = "\n> ";
+
 fn chat(view: &View) -> Option<&ChatView> {
     match view {
         View::SignedIn(sidebar) => sidebar.chat.as_ref(),
         _ => None,
     }
+}
+
+pub(super) fn chat_destination<'a>(
+    sidebar: &'a Sidebar,
+    chat: &ChatView,
+) -> Option<(char, &'a str)> {
+    if let Some(peer) = &chat.direct_message_peer {
+        (!chat.unavailable()).then(|| ('@', sidebar.message_author(peer)))
+    } else {
+        sidebar
+            .channels
+            .iter()
+            .flatten()
+            .find(|channel| channel.id == chat.channel_id)
+            .map(|channel| ('#', super::workspace::channel_name(channel)))
+    }
+}
+
+fn composer_destination(view: &View) -> Option<(char, &str)> {
+    let View::SignedIn(sidebar) = view else {
+        return None;
+    };
+    chat_destination(sidebar, sidebar.chat.as_ref()?)
 }
 
 fn chat_jump_index(jump: Option<&ChatJump>, messages: &[ChatMessage]) -> Option<usize> {
@@ -135,7 +160,10 @@ impl Spk {
         let Some(chat) = chat(&self.view) else {
             return false;
         };
-        if self.message_action_form.take().is_some() {
+        if chat.gifs.is_some() {
+            self.gif_button_focus.focus(window, cx);
+            self.send(Command::ShowGifs(false), None, cx);
+        } else if self.message_action_form.take().is_some() {
             self.chat_input
                 .update(cx, |input, cx| input.focus(window, cx));
             cx.notify();
@@ -218,6 +246,16 @@ impl Spk {
     }
 
     pub(super) fn update_chat(&mut self, next: &View, window: &mut Window, cx: &mut Context<Self>) {
+        let destination = composer_destination(next);
+        if destination != composer_destination(&self.view) {
+            let placeholder = destination.map_or_else(
+                || "Write a message".to_owned(),
+                |(prefix, name)| format!("Message {prefix}{name}"),
+            );
+            self.chat_input.update(cx, |input, cx| {
+                input.set_placeholder(placeholder, window, cx);
+            });
+        }
         let previous = chat(&self.view);
         let signed_in = matches!(next, View::SignedIn(_));
         let next = chat(next);
@@ -390,7 +428,6 @@ impl Spk {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
-        let app = cx.weak_entity();
         let status = if chat.jump_failed {
             Some("Message unavailable.")
         } else if chat.unavailable() {
@@ -541,9 +578,12 @@ impl Spk {
                     .id("chat-composer")
                     .px_4()
                     .py(if self.compact() { px(6.0) } else { px(12.0) })
-                    .border_t_1()
-                    .border_color(theme.border)
+                    .flex()
+                    .flex_col()
+                    .max_h_full()
                     .flex_shrink_0()
+                    .border_1()
+                    .border_color(theme.background.opacity(0.0))
                     .when(chat.can_send() && chat.outgoing.is_none(), |composer| {
                         let accent = theme.primary;
                         composer
@@ -645,6 +685,7 @@ impl Spk {
                                 .child(
                                     div()
                                         .flex()
+                                        .flex_wrap()
                                         .items_center()
                                         .gap_2()
                                         .child(
@@ -694,51 +735,71 @@ impl Spk {
                                 ),
                         )
                     })
-                    .when_some(chat.gifs.as_ref(), |composer, gifs| {
-                        composer.child(self.gif_picker(gifs, cx))
-                    })
-                    .child(self.staged_gif(chat, cx))
-                    .child(self.attachment_queue(chat, cx))
-                    .child(
-                        div()
-                            .flex()
-                            .items_end()
-                            .gap_2()
-                            .child(self.attachment_picker(chat, cx))
-                            .child(self.gif_toggle(chat, cx))
-                            .child(
-                                div().flex_1().min_w_0().child(
-                                    Textarea::new(&self.chat_input)
-                                        .aria_label("Write a message")
-                                        .on_paste(move |item, _, cx| {
-                                            app.update(cx, |app, cx| {
-                                                app.paste_attachments(item, cx)
-                                            })
-                                            .unwrap_or(false)
-                                        })
-                                        .disabled(chat.outgoing.is_some() || !chat.can_send()),
-                                ),
-                            )
-                            .child(
-                                Button::new("send-chat")
-                                    .label("Send")
-                                    .tab_stop(true)
-                                    .disabled(
-                                        chat.outgoing.is_some()
-                                            || !chat.can_send()
-                                            || chat.draft.attachments_block_send(),
-                                    )
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.submit_chat(window, cx)
-                                    })),
-                            ),
-                    )
-                    .child(self.composer_tools(
-                        sidebar,
-                        chat.outgoing.is_some() || !chat.can_send(),
-                        cx,
-                    ))
+                    .child(self.message_composer(sidebar, chat, cx))
             }))
+    }
+
+    fn message_composer(
+        &self,
+        sidebar: &Sidebar,
+        chat: &ChatView,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        let surface = theme.secondary;
+        let disabled = chat.outgoing.is_some() || !chat.can_send();
+        let app = cx.weak_entity();
+        div()
+            .id("message-composer")
+            .flex()
+            .flex_col()
+            .min_h_0()
+            .p_1()
+            .rounded_lg()
+            .bg(surface)
+            .border_1()
+            .border_color(surface)
+            .child(
+                div()
+                    .id("composer-media")
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(self.staged_gif(chat, cx))
+                    .child(self.attachment_queue(chat, cx)),
+            )
+            .child(
+                Textarea::new(&self.chat_input)
+                    .flex_shrink_0()
+                    .bg(surface)
+                    .border_color(surface)
+                    .aria_label("Write a message")
+                    .on_paste(move |item, _, cx| {
+                        app.update(cx, |app, cx| app.paste_attachments(item, cx))
+                            .unwrap_or(false)
+                    })
+                    .disabled(disabled),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_shrink_0()
+                    .items_end()
+                    .gap_2()
+                    .child(self.composer_tools(sidebar, chat, disabled, cx))
+                    .child(
+                        Button::new("send-chat")
+                            .primary()
+                            .small()
+                            .icon(IconName::SendHorizontal)
+                            .label("Send")
+                            .tab_stop(true)
+                            .flex_shrink_0()
+                            .disabled(disabled || chat.draft.attachments_block_send())
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.submit_chat(window, cx)),
+                            ),
+                    ),
+            )
     }
 
     fn chat_message(
@@ -1089,6 +1150,7 @@ impl Spk {
     fn composer_tools(
         &self,
         sidebar: &Sidebar,
+        chat: &ChatView,
         disabled: bool,
         cx: &Context<Self>,
     ) -> impl IntoElement {
@@ -1101,25 +1163,23 @@ impl Spk {
             .collect();
         div()
             .flex()
+            .flex_1()
+            .min_w_0()
             .flex_wrap()
             .gap_1()
-            .pt_2()
             .children(
                 [
-                    ("Bold", "**", "**"),
-                    ("Italic", "_", "_"),
-                    ("Strikethrough", "~~", "~~"),
-                    ("Inline code", "`", "`"),
-                    ("Code block", "\n```\n", "\n```\n"),
-                    ("Spoiler", "||", "||"),
+                    (IconName::Bold, "Bold", "**", "**"),
+                    (IconName::Italic, "Italic", "_", "_"),
+                    (IconName::Strikethrough, "Strikethrough", "~~", "~~"),
+                    (IconName::Code, "Inline code", "`", "`"),
+                    (IconName::SquareCode, "Code block", "\n```\n", "\n```\n"),
+                    (IconName::Quote, "Quote", QUOTE_PREFIX, ""),
+                    (IconName::EyeOff, "Spoiler", "||", "||"),
                 ]
                 .into_iter()
-                .map(|(label, before, after)| {
-                    Button::new(label)
-                        .ghost()
-                        .small()
-                        .tab_stop(true)
-                        .label(label)
+                .map(|(icon, label, before, after)| {
+                    tool_button(label, icon, label)
                         .disabled(disabled)
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.insert_chat_text(before, after, window, cx);
@@ -1127,13 +1187,9 @@ impl Spk {
                 }),
             )
             .child(
-                Button::new("mention-menu")
-                    .ghost()
-                    .small()
-                    .label("Mention")
-                    .tab_stop(true)
+                tool_button("mention-menu", IconName::AtSign, "Mention")
                     .disabled(disabled || people.is_empty())
-                    .dropdown_menu(move |menu, _, _| {
+                    .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
                         people.iter().fold(menu, |menu, (name, id)| {
                             let app = mention_app.clone();
                             let mention = format!("<@{id}> ");
@@ -1148,13 +1204,9 @@ impl Spk {
                     }),
             )
             .child(
-                Button::new("emoji-menu")
-                    .ghost()
-                    .small()
-                    .label("Emoji")
-                    .tab_stop(true)
+                tool_button("emoji-menu", IconName::FaceSlightlySmiling, "Emoji")
                     .disabled(disabled)
-                    .dropdown_menu(move |menu, _, _| {
+                    .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
                         [
                             ("👍", "Thumbs up"),
                             ("❤️", "Heart"),
@@ -1176,6 +1228,8 @@ impl Spk {
                         })
                     }),
             )
+            .child(self.attachment_picker(chat, cx))
+            .child(self.gif_toggle(chat, cx))
     }
 
     fn insert_chat_text(

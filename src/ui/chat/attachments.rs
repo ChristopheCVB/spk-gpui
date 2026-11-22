@@ -235,11 +235,7 @@ impl Spk {
 
     pub(super) fn attachment_picker(&self, chat: &ChatView, cx: &Context<Self>) -> Button {
         let channel = chat.channel_id.clone();
-        Button::new("add-attachments")
-            .ghost()
-            .small()
-            .tab_stop(true)
-            .label("Attach files")
+        tool_button("add-attachments", IconName::Paperclip, "Attach files")
             .disabled(
                 self.chat_attachments.picker.is_some()
                     || !chat.can_send()
@@ -278,6 +274,7 @@ impl Spk {
                 div()
                     .id(SharedString::from(key.to_string()))
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap_2()
                     .children(
@@ -291,16 +288,20 @@ impl Spk {
                                     .object_fit(ObjectFit::Contain)
                             }),
                     )
-                    .child(Label::new(file.filename.clone()).truncate())
-                    .child(div().id("upload-status").role(Role::Status).child(
-                        Label::new(status).text_xs().text_color(
-                            if matches!(file.status, UploadStatus::Failed(_)) {
-                                theme.danger
-                            } else {
-                                theme.muted_foreground
-                            },
-                        ),
-                    ))
+                    .child(Label::new(file.filename.clone()).max_w_full().truncate())
+                    .child(
+                        div()
+                            .id("upload-status")
+                            .role(Role::Status)
+                            .max_w_full()
+                            .child(Label::new(status).text_xs().text_color(
+                                if matches!(file.status, UploadStatus::Failed(_)) {
+                                    theme.danger
+                                } else {
+                                    theme.muted_foreground
+                                },
+                            )),
+                    )
                     .child(
                         Button::new("spoiler")
                             .ghost()

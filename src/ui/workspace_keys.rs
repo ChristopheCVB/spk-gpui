@@ -1,3 +1,4 @@
+use super::chat::QUOTE_PREFIX;
 use super::*;
 use crate::{
     session::VoiceProcessingSetting,
@@ -109,7 +110,7 @@ impl Spk {
                 (true, true, false, 2, "c") | (true, false, true, 2, "c") => {
                     Some(("\n```\n", "\n```\n"))
                 }
-                (true, false, true, 2, "." | ">") => Some(("\n> ", "")),
+                (true, false, true, 2, "." | ">") => Some((QUOTE_PREFIX, "")),
                 _ => None,
             };
             if let Some((before, after)) = formatting {
