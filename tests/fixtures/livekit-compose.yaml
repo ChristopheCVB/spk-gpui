@@ -1,0 +1,22 @@
+services:
+  livekit:
+    image: livekit/livekit-server:v1.13.11
+    command: ["--bind", "0.0.0.0", "--node-ip", "127.0.0.1"]
+    environment:
+      LIVEKIT_CONFIG: |
+        port: 17880
+        rtc:
+          tcp_port: 17881
+          udp_port: 17882
+        keys:
+          ${SPK_TEST_LIVEKIT_KEYS:?run through livekit-peers.py}
+    # shortcut: one Compose fixture per host, allocate ports on the Docker host if parallel runs are needed.
+    ports:
+      - "127.0.0.1:17880:17880/tcp"
+      - "127.0.0.1:17881:17881/tcp"
+      - "127.0.0.1:17882:17882/udp"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:17880/"]
+      interval: 1s
+      timeout: 1s
+      retries: 15
