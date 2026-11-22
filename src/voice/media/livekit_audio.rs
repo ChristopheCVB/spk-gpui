@@ -36,7 +36,7 @@ impl RoomAudio for LiveKitAudio<'_> {
     fn set_playout(&self, enabled: bool) {
         LkRuntime::instance()
             .pc_factory()
-            .set_adm_playout_enabled(enabled);
+            .set_adm_playout_enabled(enabled && self.remote.native_playout);
     }
 
     fn sync_remote_audio(&mut self, intent: &Intent, devices: &Devices, speakers: Option<&Device>) {
@@ -85,21 +85,19 @@ impl RoomAudio for LiveKitAudio<'_> {
     ) {
         self.capture.start(
             self.room,
-            self.audio,
             device,
             processing,
             use_system_default,
+            self.remote.render_reference(),
         );
     }
 
     async fn sync_microphone_processing(&mut self, processing: VoiceProcessing) {
-        self.capture
-            .sync_processing(self.room, self.audio, processing)
-            .await;
+        self.capture.sync_processing(self.room, processing).await;
     }
 
     async fn stop_microphone(&mut self) {
-        self.capture.stop(self.room, self.audio).await;
+        self.capture.stop(self.room).await;
     }
 
     fn silence_microphone(&self) {
@@ -111,9 +109,7 @@ impl RoomAudio for LiveKitAudio<'_> {
     }
 
     async fn reconcile_microphone(&mut self) {
-        self.capture
-            .reconcile_publication(self.room, self.audio)
-            .await;
+        self.capture.reconcile_publication(self.room).await;
     }
 
     fn start_stats(&self, jobs: &mut JoinSet<Option<SessionStats>>) {
@@ -137,9 +133,7 @@ impl RoomAudio for LiveKitAudio<'_> {
     async fn handle_event(&mut self, event: Event) -> MediaEvent {
         match event {
             Event::Published(published) => {
-                self.capture
-                    .complete(self.room, self.audio, published)
-                    .await;
+                self.capture.complete(self.room, published).await;
                 MediaEvent::MicrophoneChanged
             }
             Event::Unpublish(sid) => {
@@ -159,9 +153,7 @@ impl LiveKitAudio<'_> {
                 publication,
                 ..
             }) => {
-                if publication.source() == TrackSource::ScreenshareAudio {
-                    track.disable();
-                }
+                track.disable();
                 self.remote.forget(&publication.sid());
                 MediaEvent::RemoteAudioChanged
             }

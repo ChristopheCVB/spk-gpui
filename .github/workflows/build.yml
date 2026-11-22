@@ -68,6 +68,9 @@ jobs:
       - name: Test native X11 Screen Share with a controlled peer
         if: runner.os == 'Linux'
         run: bash tests/fixtures/linux-screen-share.sh mise exec -- cargo test --locked --bin spk-gpui screen_share -- --ignored --test-threads=1
+      - name: Test the PulseAudio voice reference
+        if: runner.os == 'Linux'
+        run: bash tests/fixtures/linux-screen-share.sh mise exec -- cargo test --locked --bin spk-gpui linux_voice_output -- --ignored
       - name: Test Wayland ScreenCast availability and picker rejection
         if: runner.os == 'Linux'
         run: |

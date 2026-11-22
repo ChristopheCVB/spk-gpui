@@ -173,7 +173,6 @@ async fn desktop_voice_routes_samples_and_synchronizes_presence() {
             wait_for_flags(&views, true, false, false).await;
             assert_eq!(peer.exchange(74, -31), (None, Some(-31)));
             for setting in [
-                VoiceProcessingSetting::EchoCancellation(false),
                 VoiceProcessingSetting::NoiseSuppression(NoiseSuppression::Enhanced),
                 VoiceProcessingSetting::AutoGain(false),
                 VoiceProcessingSetting::Sensitivity(80),
@@ -189,7 +188,7 @@ async fn desktop_voice_routes_samples_and_synchronizes_presence() {
             .await;
             let processing = tuned.voice_intent.preferred.processing;
             assert!(
-                !processing.echo_cancellation
+                processing.echo_cancellation
                     && processing.noise_suppression == NoiseSuppression::Enhanced
                     && !processing.auto_gain
             );
@@ -210,6 +209,21 @@ async fn desktop_voice_routes_samples_and_synchronizes_presence() {
                     wait_for_flags(&views, false, false, false).await;
                 }
             }
+            commands
+                .send(Command::SetVoiceProcessing(
+                    VoiceProcessingSetting::EchoCancellation(false),
+                ))
+                .await
+                .unwrap();
+            let tuned_live = wait_for_sidebar(&views, |sidebar| {
+                !sidebar.voice_intent.preferred.processing.echo_cancellation
+            })
+            .await;
+            assert_eq!(
+                tuned_live.voice_intent.retry_mic,
+                tuned.voice_intent.retry_mic
+            );
+            assert_eq!(peer.exchange(74, -31), (Some(74), Some(-31)));
 
             peer.quality(ConnectionQuality::Good);
             assert_call_quality(&views, Some(ConnectionQuality::Good)).await;

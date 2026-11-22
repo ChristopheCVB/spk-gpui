@@ -590,9 +590,6 @@ impl VoiceSession {
                 let processing = &mut sidebar.voice_intent.preferred.processing;
                 match setting {
                     VoiceProcessingSetting::EchoCancellation(enabled) => {
-                        if processing.echo_cancellation != enabled {
-                            sidebar.voice_intent.retry_mic += 1;
-                        }
                         processing.echo_cancellation = enabled;
                     }
                     VoiceProcessingSetting::NoiseSuppression(mode) => {
