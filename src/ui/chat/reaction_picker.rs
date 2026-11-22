@@ -232,13 +232,7 @@ impl Spk {
                                             .items_center()
                                             .gap_2()
                                             .min_w_0()
-                                            .child(
-                                                div()
-                                                    .w(px(24.))
-                                                    .flex_shrink_0()
-                                                    .text_lg()
-                                                    .child(emoji.emoji.clone()),
-                                            )
+                                            .child(reaction_glyph(&emoji.emoji, px(20.)))
                                             .child(
                                                 div()
                                                     .text_sm()

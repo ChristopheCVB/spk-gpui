@@ -34,6 +34,7 @@ use super::*;
 use crate::{
     api::{ChatMessage, MessageTarget, UnreadState},
     chat_markdown::{image_preview_links, message_markdown, safe_link},
+    reaction_artwork::reaction_artwork_path,
     session::{ChatView, Delivery, Pins},
 };
 
@@ -231,6 +232,17 @@ pub(super) fn mark_read_item(channel_id: String, app: WeakEntity<Spk>) -> PopupM
             this.send(Command::MarkChatRead(channel_id.clone()), None, cx);
         });
     })
+}
+
+fn reaction_glyph(emoji: &str, size: Pixels) -> AnyElement {
+    match reaction_artwork_path(emoji) {
+        Some(path) => img(path).size(size).flex_shrink_0().into_any_element(),
+        None => div()
+            .flex_none()
+            .text_size(size)
+            .child(emoji.to_owned())
+            .into_any_element(),
+    }
 }
 
 impl Spk {
