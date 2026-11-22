@@ -1,4 +1,4 @@
-use std::{borrow::Cow, collections::BTreeMap, fmt::Write, sync::LazyLock};
+use std::{borrow::Cow, collections::BTreeMap, fmt::Write, io::Read, sync::LazyLock};
 
 use flate2::read::GzDecoder;
 use gpui_kit::{AssetSource, Result, SharedString, assets::AllAssets};
@@ -6,8 +6,11 @@ use gpui_kit::{AssetSource, Result, SharedString, assets::AllAssets};
 const PREFIX: &str = "twemoji/";
 static ARTWORK: LazyLock<BTreeMap<String, String>> = LazyLock::new(|| {
     let bundle = include_bytes!("../assets/emoji/twemoji-1.2.5.json.gz");
-    serde_json::from_reader(GzDecoder::new(bundle.as_slice()))
-        .expect("bundled Twemoji artwork must be valid")
+    let mut json = Vec::new();
+    GzDecoder::new(bundle.as_slice())
+        .read_to_end(&mut json)
+        .expect("bundled Twemoji artwork must decompress");
+    serde_json::from_slice(&json).expect("bundled Twemoji artwork must be valid")
 });
 
 pub(crate) struct DesktopAssets;
