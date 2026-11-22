@@ -5,6 +5,16 @@ use gpui_kit::component::{
     window_paddings,
 };
 
+use super::{
+    chat::{chat_destination, mark_read_item, unread_badges, unread_label},
+    *,
+};
+use crate::{
+    api::{Channel, Connection, VoiceModeration},
+    session::{Participant, VoiceView},
+    voice::video::CameraStatus,
+};
+
 pub(super) const SIDEBAR_WIDTH: Pixels = px(288.0);
 
 pub(super) fn wide_workspace(window: &Window) -> bool {
@@ -19,16 +29,6 @@ impl Render for SidebarResize {
         div()
     }
 }
-
-use super::{
-    chat::{chat_destination, mark_read_item, unread_badges, unread_label},
-    *,
-};
-use crate::{
-    api::{Channel, Connection, VoiceModeration},
-    session::{Participant, VoiceView},
-    voice::video::CameraStatus,
-};
 
 fn section_title(title: &'static str, icon: IconName, cx: &App) -> Div {
     let color = cx.theme().muted_foreground;
@@ -93,6 +93,8 @@ impl Spk {
                     .title("Channels and direct messages")
                     .size(SIDEBAR_WIDTH)
                     .resizable(false)
+                    .bg(cx.theme().sidebar)
+                    .text_color(cx.theme().sidebar_foreground)
                     .px_0()
                     .children(drawer.ok().flatten())
                     .on_close(move |_, _, cx| {
@@ -200,6 +202,7 @@ impl Spk {
                     .flex_1()
                     .min_w_0()
                     .min_h_0()
+                    .bg(theme.background)
                     .when(!self.video_stage.fullscreen, |area| {
                         area.child(
                             div()
@@ -209,8 +212,9 @@ impl Spk {
                                 .h_12()
                                 .flex_shrink_0()
                                 .px_3()
+                                .bg(theme.sidebar)
                                 .border_b_1()
-                                .border_color(theme.border)
+                                .border_color(theme.sidebar_border)
                                 .child(
                                     tool_button(
                                         "toggle-sidebar",
@@ -342,9 +346,11 @@ impl Spk {
             .size_full()
             .flex()
             .flex_col()
+            .bg(theme.sidebar)
+            .text_color(theme.sidebar_foreground)
             .px_2()
             .pb_2()
-            .gap_2()
+            .gap(if self.compact() { px(4.0) } else { px(8.0) })
             .child(
                 div()
                     .id("channel-navigation")
@@ -353,21 +359,23 @@ impl Spk {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .gap_3()
-                    .child(
-                        div()
-                            .flex()
-                            .h_16()
-                            .items_center()
-                            .justify_center()
-                            .flex_shrink_0()
-                            .gap_1()
-                            .text_2xl()
-                            .font_bold()
-                            .text_color(theme.primary)
-                            .child(logo(26.0))
-                            .child("spk"),
-                    )
+                    .gap(if self.compact() { px(4.0) } else { px(12.0) })
+                    .when(!self.sidebar_drawer_open, |nav| {
+                        nav.child(
+                            div()
+                                .flex()
+                                .h_16()
+                                .items_center()
+                                .justify_center()
+                                .flex_shrink_0()
+                                .gap_1()
+                                .text_2xl()
+                                .font_bold()
+                                .text_color(theme.primary)
+                                .child(logo(26.0))
+                                .child("spk"),
+                        )
+                    })
                     .when(!people.is_empty(), |nav| {
                         nav.child(
                             div()
@@ -419,11 +427,7 @@ impl Spk {
                                                             &name, counts,
                                                         ))
                                                         .w_full()
-                                                        .h(if self.compact() {
-                                                            px(26.0)
-                                                        } else {
-                                                            px(32.0)
-                                                        })
+                                                        .h_8()
                                                         .when(
                                                             active || counts.mentions > 0,
                                                             |button| {
@@ -634,7 +638,7 @@ impl Spk {
                 div()
                     .flex()
                     .items_center()
-                    .h(if self.compact() { px(26.0) } else { px(32.0) })
+                    .h_8()
                     .rounded_md()
                     .pr_1()
                     .when(active, |row| row.bg(theme.primary.opacity(0.10)))
@@ -647,7 +651,7 @@ impl Spk {
                             .accessibility_label(name.clone())
                             .flex_1()
                             .min_w_0()
-                            .h(if self.compact() { px(26.0) } else { px(32.0) })
+                            .h_8()
                             .when(active, |button| button.bg(theme.transparent))
                             .child(Label::new(name.clone()).w_full().truncate().text_color(
                                 if active {
@@ -690,7 +694,7 @@ impl Spk {
                     .gap_2()
                     .pl_6()
                     .pr_2()
-                    .h(if self.compact() { px(20.0) } else { px(24.0) })
+                    .h_6()
                     .child(profile_avatar(
                         Avatar::new().name(person.name.to_owned()).xsmall(),
                         sidebar.avatar(Some(person.id)),
@@ -703,6 +707,9 @@ impl Spk {
                             .truncate()
                             .text_color(theme.muted_foreground),
                     )
+                    .when(flags.speaking && !flags.muted && !flags.deafened, |row| {
+                        row.child(speaking_badge(cx))
+                    })
                     .children(participant_status(flags.muted, flags.deafened, cx))
                     .children(voice_moderation_menu(&person, sidebar, cx))
                     .when(
@@ -993,7 +1000,7 @@ impl Spk {
             .id(SharedString::from(participant.id.to_owned()))
             .focusable()
             .tab_index(0)
-            .focus_visible(|tile| tile.border_color(theme.primary))
+            .focus_visible(|tile| tile.border_color(theme.ring))
             .on_hover(cx.listener(move |app, hovered: &bool, _, _| {
                 if *hovered {
                     app.video_stage.hovered = Some(hover_id.clone());
@@ -1011,10 +1018,7 @@ impl Spk {
             .role(Role::Group)
             .when(speaking, |tile| tile.aria_description("Speaking"))
             .when(theater, |tile| tile.size_full())
-            .when(!theater, |tile| {
-                let width = if self.compact() { 256.0 } else { 320.0 };
-                tile.w(px(width)).max_w_full().h(px(width * 9.0 / 16.0))
-            })
+            .when(!theater, |tile| tile.w(px(320.0)).max_w_full().h(px(180.0)))
             .overflow_hidden()
             .border_1()
             .border_color(if speaking {
@@ -1023,7 +1027,7 @@ impl Spk {
                 theme.border
             })
             .rounded_lg()
-            .bg(theme.secondary)
+            .bg(theme.popover)
             .when(image.is_none(), |tile| {
                 tile.child(profile_avatar(
                     Avatar::new().name(participant.name.to_owned()),
@@ -1082,6 +1086,7 @@ impl Spk {
                                 .bg(theme.background),
                         )
                     })
+                    .when(speaking, |row| row.child(speaking_badge(cx)))
                     .children(participant_status(flags.muted, flags.deafened, cx))
                     .children(voice_moderation_menu(&participant, sidebar, cx))
                     .when(
@@ -1163,6 +1168,17 @@ fn voice_moderation_item(
             );
         });
     })
+}
+
+fn speaking_badge(cx: &App) -> impl IntoElement {
+    div()
+        .id("speaking")
+        .role(Role::Image)
+        .aria_label("Speaking")
+        .px_1()
+        .rounded_sm()
+        .bg(cx.theme().popover)
+        .child(themed_icon(IconName::Volume2, cx.theme().success, 14.0))
 }
 
 fn radio_badge(cx: &App) -> impl IntoElement {

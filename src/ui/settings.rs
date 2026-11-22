@@ -16,6 +16,7 @@ mod soundboard_admin;
 
 use gpui_kit::component::{
     Theme, ThemeMode, ThemeRegistry, WindowExt,
+    radio::RadioGroup,
     slider::{SliderEvent, SliderState, SliderValue},
 };
 
@@ -29,24 +30,22 @@ pub use shortcuts::ShortcutKeys;
 
 #[derive(Clone, Copy, Default, Eq, PartialEq)]
 pub enum Appearance {
-    #[default]
     Dark,
     Light,
+    #[default]
     System,
 }
 
 impl Appearance {
     pub fn load() -> Self {
-        load_preference(preference_path("appearance"))
-            .as_deref()
-            .map_or_else(Self::default, Self::from_preference)
+        Self::load_from(preference_path("appearance"))
     }
 
-    fn from_preference(value: &str) -> Self {
-        match value {
-            "Light" => Self::Light,
-            "System" => Self::System,
-            _ => Self::Dark,
+    fn load_from(path: Option<PathBuf>) -> Self {
+        match load_preference(path).as_deref() {
+            Some("Dark") => Self::Dark,
+            Some("Light") => Self::Light,
+            _ => Self::System,
         }
     }
 
@@ -58,8 +57,8 @@ impl Appearance {
         }
     }
 
-    pub(super) fn save(self) -> io::Result<()> {
-        save_preference(preference_path("appearance"), self.label())
+    fn save_to(self, path: Option<PathBuf>) -> io::Result<()> {
+        save_preference(path, self.label())
     }
 
     pub fn apply(self, window: &Window, cx: &mut App) {
@@ -135,7 +134,7 @@ impl Spk {
         cx: &mut Context<Self>,
     ) {
         self.appearance = appearance;
-        self.appearance_error = appearance.save().is_err();
+        self.appearance_error = appearance.save_to(preference_path("appearance")).is_err();
         appearance.apply(window, cx);
         cx.notify();
     }
@@ -377,6 +376,7 @@ impl Render for Settings {
         if self.tab.requires_admin() && !sidebar.is_admin() {
             self.tab = Tab::Profile;
         }
+        let compact = app.compact();
         let body = match self.tab {
             Tab::Profile => self.profile(sidebar, cx).into_any_element(),
             Tab::Appearance => self.appearance(app, cx).into_any_element(),
@@ -399,6 +399,7 @@ impl Render for Settings {
             .flex()
             .flex_col()
             .text_sm()
+            .bg(theme.popover)
             .font_family(theme.font_family.clone())
             .text_color(theme.foreground)
             .child(
@@ -407,8 +408,8 @@ impl Render for Settings {
                     .justify_between()
                     .items_start()
                     .gap_3()
-                    .px_6()
-                    .py_4()
+                    .px(if compact { px(16.0) } else { px(24.0) })
+                    .py(if compact { px(12.0) } else { px(16.0) })
                     .flex_shrink_0()
                     .border_b_1()
                     .border_color(theme.border)
@@ -445,7 +446,8 @@ impl Render for Settings {
                             .w(px(208.0))
                             .max_w(relative(0.36))
                             .flex_shrink_0()
-                            .p_3()
+                            .bg(theme.sidebar)
+                            .p(if compact { px(8.0) } else { px(12.0) })
                             .border_r_1()
                             .border_color(theme.border)
                             .children(
@@ -570,7 +572,8 @@ impl Render for Settings {
                                     .flex_1()
                                     .min_h_0()
                                     .overflow_y_scroll()
-                                    .p_6()
+                                    .bg(theme.background)
+                                    .p(if compact { px(16.0) } else { px(24.0) })
                                     .child(body),
                             ),
                     ),
@@ -585,6 +588,7 @@ fn card(title: &'static str, body: impl IntoElement, cx: &App) -> impl IntoEleme
         .flex()
         .flex_col()
         .rounded_lg()
+        .bg(cx.theme().popover)
         .border_1()
         .border_color(border)
         .child(
@@ -600,49 +604,14 @@ fn card(title: &'static str, body: impl IntoElement, cx: &App) -> impl IntoEleme
 
 impl Settings {
     fn appearance(&self, app: &Spk, cx: &App) -> impl IntoElement {
+        const THEMES: [Appearance; 3] = [Appearance::System, Appearance::Light, Appearance::Dark];
+        const DENSITIES: [Density; 2] = [Density::Comfortable, Density::Compact];
+        let theme_app = self.spk.downgrade();
+        let density_app = theme_app.clone();
         div()
             .flex()
             .flex_col()
-            .gap_4()
-            .child(card(
-                "Density",
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(
-                        div().flex().flex_wrap().gap_2().children(
-                            [Density::Comfortable, Density::Compact]
-                                .into_iter()
-                                .map(|density| {
-                                    let spk = self.spk.downgrade();
-                                    let active = app.density == density;
-                                    Button::new(density.label())
-                                        .small()
-                                        .label(density.label())
-                                        .tab_stop(true)
-                                        .selected(active)
-                                        .when(active, |button| button.icon(IconName::Check))
-                                        .on_click(move |_, _, cx| {
-                                            let _ = spk.update(cx, |app, cx| {
-                                                app.density = density;
-                                                app.density_error = density
-                                                    .save_to(preference_path("density"))
-                                                    .is_err();
-                                                cx.notify();
-                                            });
-                                        })
-                                }),
-                        ),
-                    )
-                    .when(app.density_error, |body| {
-                        body.child(
-                            Label::new("Could not save your density preference.")
-                                .text_color(cx.theme().danger),
-                        )
-                    }),
-                cx,
-            ))
+            .gap(if app.compact() { px(8.0) } else { px(16.0) })
             .child(card(
                 "Theme",
                 div()
@@ -650,30 +619,49 @@ impl Settings {
                     .flex_col()
                     .gap_3()
                     .child(
-                        div().flex().flex_wrap().gap_2().children(
-                            [Appearance::Dark, Appearance::Light, Appearance::System]
-                                .into_iter()
-                                .map(|appearance| {
-                                    let spk = self.spk.downgrade();
-                                    let active = app.appearance == appearance;
-                                    Button::new(appearance.label())
-                                        .small()
-                                        .w(px(88.0))
-                                        .label(appearance.label())
-                                        .tab_stop(true)
-                                        .selected(active)
-                                        .when(active, |button| button.icon(IconName::Check))
-                                        .on_click(move |_, window, cx| {
-                                            let _ = spk.update(cx, |app, cx| {
-                                                app.set_appearance(appearance, window, cx);
-                                            });
-                                        })
-                                }),
-                        ),
+                        RadioGroup::vertical("theme-choices")
+                            .children(THEMES.map(Appearance::label))
+                            .selected_index(
+                                THEMES.iter().position(|choice| *choice == app.appearance),
+                            )
+                            .on_change(move |&index, window, cx| {
+                                let _ = theme_app.update(cx, |app, cx| {
+                                    app.set_appearance(THEMES[index], window, cx);
+                                });
+                            }),
                     )
                     .when(app.appearance_error, |body| {
                         body.child(
                             Label::new("Could not save your theme preference.")
+                                .text_color(cx.theme().danger),
+                        )
+                    }),
+                cx,
+            ))
+            .child(card(
+                "Density",
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        RadioGroup::vertical("density-choices")
+                            .children(DENSITIES.map(Density::label))
+                            .selected_index(
+                                DENSITIES.iter().position(|choice| *choice == app.density),
+                            )
+                            .on_change(move |&index, _, cx| {
+                                let _ = density_app.update(cx, |app, cx| {
+                                    app.density = DENSITIES[index];
+                                    app.density_error =
+                                        app.density.save_to(preference_path("density")).is_err();
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                    .when(app.density_error, |body| {
+                        body.child(
+                            Label::new("Could not save your density preference.")
                                 .text_color(cx.theme().danger),
                         )
                     }),
@@ -700,11 +688,16 @@ mod tests {
     }
 
     #[test]
-    fn appearance_defaults_to_dark_and_restores_saved_modes() {
-        assert!(Appearance::default() == Appearance::Dark);
-        assert!(Appearance::from_preference("unknown") == Appearance::Dark);
+    fn appearance_defaults_to_system_and_restores_saved_modes() {
+        assert!(Appearance::default() == Appearance::System);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("appearance");
+        assert!(Appearance::load_from(Some(path.clone())) == Appearance::System);
         for choice in [Appearance::Dark, Appearance::Light, Appearance::System] {
-            assert!(Appearance::from_preference(choice.label()) == choice);
+            Appearance::save_to(choice, Some(path.clone())).unwrap();
+            assert!(Appearance::load_from(Some(path.clone())) == choice);
         }
+        std::fs::write(&path, "unknown").unwrap();
+        assert!(Appearance::load_from(Some(path)) == Appearance::System);
     }
 }
