@@ -60,6 +60,7 @@ pub(super) struct Spk {
     chat_attachments: chat::AttachmentUi,
     message_action_input: Entity<TextareaState>,
     message_action_form: Option<chat::MessageActionForm>,
+    chat_row_focus: std::cell::RefCell<std::collections::HashMap<String, FocusHandle>>,
     chat_scroll: ScrollHandle,
     chat_scroll_anchor: Option<String>,
     chat_jump_row: Rc<Cell<Option<usize>>>,
@@ -272,6 +273,8 @@ impl Spk {
         })
         .detach();
 
+        Self::track_chat_time(window, cx);
+
         let (finished, stopped) = tokio::sync::oneshot::channel();
         let shutdown = commands.clone();
         let app = cx.weak_entity();
@@ -364,6 +367,7 @@ impl Spk {
             chat_attachments: Default::default(),
             message_action_input,
             message_action_form: None,
+            chat_row_focus: Default::default(),
             chat_scroll: ScrollHandle::new(),
             chat_scroll_anchor: None,
             chat_jump_row: Rc::default(),
