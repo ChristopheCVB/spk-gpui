@@ -2,6 +2,16 @@ name: Build
 
 on:
   pull_request:
+  workflow_call:
+    inputs:
+      release-tag:
+        description: Tag for the release being built
+        type: string
+        required: true
+    outputs:
+      asset-count:
+        description: Number of packages produced by the build matrix
+        value: ${{ jobs.build.outputs.asset-count }}
   push:
     branches: [main]
 
@@ -21,18 +31,28 @@ jobs:
           - os: ubuntu-24.04
             artifact: spk-gpui-linux-x64.tar.gz
     runs-on: ${{ matrix.os }}
+    outputs:
+      asset-count: ${{ strategy.job-total }}
     env:
       SPK_URL: ${{ github.event_name == 'push' && vars.LIVEKIT_URL != '' && vars.SPK_URL || 'https://spk.example' }}
       LIVEKIT_URL: ${{ github.event_name == 'push' && vars.SPK_URL != '' && vars.LIVEKIT_URL || 'wss://voice.example' }}
       UPLOAD_BINARIES: ${{ github.event_name == 'push' && vars.SPK_URL != '' && vars.LIVEKIT_URL != '' }}
       CARGO_PROFILE_DEV_DEBUG: "0"
     steps:
+      - name: Require deployment URLs for a release
+        if: inputs.release-tag != '' && env.UPLOAD_BINARIES != 'true'
+        shell: bash
+        run: |
+          echo "::error::Set both SPK_URL and LIVEKIT_URL repository variables before retrying the release."
+          exit 1
       - name: Warn when download configuration is missing
-        if: github.event_name == 'push' && env.UPLOAD_BINARIES != 'true'
+        if: github.event_name == 'push' && inputs.release-tag == '' && env.UPLOAD_BINARIES != 'true'
         shell: bash
         run: echo "::warning::Set the SPK_URL and LIVEKIT_URL repository variables to enable build downloads."
-      - uses: actions/checkout@v7
-      - uses: jdx/mise-action@v5
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.release-tag != '' && format('refs/tags/{0}', inputs.release-tag) || '' }}
+      - uses: jdx/mise-action@v5.3.0
       - name: Select Xcode for ScreenCaptureKit
         if: runner.os == 'macOS'
         shell: bash
@@ -57,7 +77,7 @@ jobs:
           cmd-format: mise exec -- {0}
           cache-bin: "false"
           env-vars: DEVELOPER_DIR
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && inputs.release-tag == '' }}
       - run: mise exec -- cargo fmt --all --check
       - run: mise exec -- cargo test --locked
       - name: Install the LiveKit peer fixture server
@@ -127,7 +147,7 @@ jobs:
         run: tar -czf "target/debug/${{ matrix.artifact }}" -C target/debug spk-gpui -C ../../build media-licenses.txt
       - name: Upload build
         if: env.UPLOAD_BINARIES == 'true'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: ${{ matrix.artifact }}
           path: target/debug/${{ matrix.artifact }}

@@ -1,0 +1,92 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release
+
+permissions:
+  contents: read
+
+jobs:
+  release-please:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    outputs:
+      tag: ${{ steps.draft.outputs.tag }}
+    steps:
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        id: release
+        continue-on-error: true
+      - name: Identify the draft to build
+        id: draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag_name }}
+          RELEASE_OUTCOME: ${{ steps.release.outcome }}
+        shell: bash
+        run: |
+          if [[ -z "$RELEASE_TAG" ]]; then
+            # Release Please can tag a merge handled by a different push.
+            RELEASE_TAG=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" |
+              jq -rs '
+                add // [] | map(select(.draft and .author.login == "github-actions[bot]"
+                  and (.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))))
+                | min_by(.id).tag_name // empty
+              ')
+          fi
+          if [[ -z "$RELEASE_TAG" && "$RELEASE_OUTCOME" != success ]]; then
+            echo "::error::Release Please failed and no automated draft was found."
+            exit 1
+          fi
+          if [[ -n "$RELEASE_TAG" ]]; then
+            git check-ref-format "refs/tags/$RELEASE_TAG"
+          fi
+          printf 'tag=%s\n' "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: release-please
+    if: needs.release-please.outputs.tag != ''
+    uses: ./.github/workflows/build.yml
+    with:
+      release-tag: ${{ needs.release-please.outputs.tag }}
+
+  publish:
+    needs: [release-please, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+          skip-decompress: true
+      - name: Publish the draft with all platform assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.release-please.outputs.tag }}
+          ASSET_COUNT: ${{ needs.build.outputs.asset-count }}
+        shell: bash
+        run: |
+          shopt -s nullglob
+          assets=(dist/*)
+          if [[ "$ASSET_COUNT" -le 0 || "${#assets[@]}" -ne "$ASSET_COUNT" ]]; then
+            echo "::error::Expected $ASSET_COUNT release packages, found ${#assets[@]}."
+            exit 1
+          fi
+          for asset in "${assets[@]}"; do
+            test -f "$asset" && test -s "$asset" || exit 1
+          done
+          draft_id=$(gh release view "$TAG" --json databaseId,isDraft --jq 'select(.isDraft) | .databaseId')
+          if [[ -n "$draft_id" ]]; then
+            gh release upload "$TAG" "${assets[@]}" --clobber
+            gh api "repos/$GH_REPO/git/ref/tags/$TAG" --silent
+            gh api "repos/$GH_REPO/releases/$draft_id" --method PATCH -F draft=false -f make_latest=legacy --silent
+          fi
