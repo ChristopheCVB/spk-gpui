@@ -105,7 +105,11 @@ where
             let measured = microphone_level(samples.iter().copied().map(f32::from_sample_));
             level.fetch_max(measured, Relaxed);
         },
-        move |_| failed.store(true, Relaxed),
+        move |error| {
+            if error.kind() != cpal::ErrorKind::Xrun {
+                failed.store(true, Relaxed);
+            }
+        },
         None,
     )
 }

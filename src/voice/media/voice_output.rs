@@ -10,6 +10,7 @@ use std::{
 use rodio::{
     cpal::{
         self, BufferSize, FromSample, SampleFormat, SizedSample, SupportedBufferSize,
+        SupportedStreamConfig,
         traits::{DeviceTrait, StreamTrait},
     },
     mixer::{Mixer, MixerSource, mixer},
@@ -74,7 +75,27 @@ impl VoiceOutput {
                 .ok()?
                 .find_map(|config| config.try_with_sample_rate(RATE))?;
         }
+        if cfg!(windows) && supported.sample_rate() != RATE {
+            // WASAPI can convert a continuous stream. Rodio's per-packet conversion loses
+            // samples at the end of short voice packets.
+            if let Some(output) =
+                Self::open_at_rate(&device, &supported, RATE, render.clone(), failed.clone())
+            {
+                return Some(output);
+            }
+        }
+        Self::open_at_rate(&device, &supported, supported.sample_rate(), render, failed)
+    }
+
+    fn open_at_rate(
+        device: &cpal::Device,
+        supported: &SupportedStreamConfig,
+        rate: u32,
+        render: broadcast::Sender<Arc<RenderBlock>>,
+        failed: Arc<AtomicBool>,
+    ) -> Option<Self> {
         let mut config = supported.config();
+        config.sample_rate = rate;
         // Short PulseAudio callbacks keep the render reference close to the capture clock.
         if cfg!(target_os = "linux")
             && let SupportedBufferSize::Range { min, max } = *supported.buffer_size()
@@ -99,7 +120,7 @@ impl VoiceOutput {
             SampleFormat::F32 => open::<f32>,
             SampleFormat::F64 => open::<f64>,
             _ => return None,
-        }(&device, config, pcm, render, failed)
+        }(device, config, pcm, render, failed)
         .ok()?;
         stream.play().ok()?;
         Some(Self {
