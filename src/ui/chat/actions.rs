@@ -758,11 +758,13 @@ impl MessageActions {
             .scrollable(true)
             .item(
                 PopupMenuItem::new("Reply")
+                    .icon(IconName::Reply)
                     .disabled(self.composer_busy)
                     .on_click(self.reply()),
             )
             .item(
                 PopupMenuItem::new("Quote")
+                    .icon(IconName::Quote)
                     .disabled(self.composer_busy)
                     .on_click(move |_, window, cx| {
                         let _ = quote_app.update(cx, |this, cx| {
@@ -783,43 +785,59 @@ impl MessageActions {
                     }),
             );
         let mark_app = app.clone();
-        self.mutation_items(menu)
+        self.mutation_items(menu, cx.theme().danger)
             .separator()
             .item(
-                PopupMenuItem::new("Mark as unread").on_click(move |_, _, cx| {
-                    let _ = mark_app.update(cx, |this, cx| {
-                        this.send(
-                            Command::MarkChatUnread {
-                                channel_id: channel.clone(),
-                                message_id: message.clone(),
-                            },
-                            None,
-                            cx,
-                        );
-                    });
-                }),
+                PopupMenuItem::new("Mark as unread")
+                    .icon(IconName::Mail)
+                    .on_click(move |_, _, cx| {
+                        let _ = mark_app.update(cx, |this, cx| {
+                            this.send(
+                                Command::MarkChatUnread {
+                                    channel_id: channel.clone(),
+                                    message_id: message.clone(),
+                                },
+                                None,
+                                cx,
+                            );
+                        });
+                    }),
             )
             .separator()
-            .item(PopupMenuItem::new("Copy text").on_click(move |_, _, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(plain_text(&copy_text)));
-            }))
-            .item(PopupMenuItem::new("Copy Markdown").on_click(self.copy_markdown()))
+            .item(
+                PopupMenuItem::new("Copy text")
+                    .icon(IconName::Copy)
+                    .on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(plain_text(&copy_text)));
+                    }),
+            )
+            .item(
+                PopupMenuItem::new("Copy Markdown")
+                    .icon(IconName::FileCode)
+                    .on_click(self.copy_markdown()),
+            )
             .when_some(self.target.clone(), |menu, target| {
-                menu.item(PopupMenuItem::new("Copy link").on_click(move |_, _, cx| {
-                    search::copy_message_link(&target, cx);
-                }))
+                menu.item(
+                    PopupMenuItem::new("Copy link")
+                        .icon(IconName::Link)
+                        .on_click(move |_, _, cx| {
+                            search::copy_message_link(&target, cx);
+                        }),
+                )
             })
             .when(!hidden.is_empty(), |menu| {
                 menu.item(
-                    PopupMenuItem::new("Reveal spoilers").on_click(move |_, _, cx| {
-                        let _ = app.update(cx, |this, cx| {
-                            this.chat_spoilers
-                                .entry(spoiler_key.clone())
-                                .or_default()
-                                .extend(&hidden);
-                            cx.notify();
-                        });
-                    }),
+                    PopupMenuItem::new("Reveal spoilers")
+                        .icon(IconName::Eye)
+                        .on_click(move |_, _, cx| {
+                            let _ = app.update(cx, |this, cx| {
+                                this.chat_spoilers
+                                    .entry(spoiler_key.clone())
+                                    .or_default()
+                                    .extend(&hidden);
+                                cx.notify();
+                            });
+                        }),
                 )
             })
     }
@@ -839,15 +857,24 @@ impl MessageActions {
         }
     }
 
-    fn mutation_items(&self, menu: PopupMenu) -> PopupMenu {
-        let menu = menu.item(self.form_item("Add reaction…", ActionForm::React));
+    fn mutation_items(&self, menu: PopupMenu, danger: Hsla) -> PopupMenu {
+        let menu = menu.item(
+            self.form_item("Add reaction…", ActionForm::React)
+                .icon(IconName::FaceSlightlySmilingPlus),
+        );
         let menu = if self.can_edit {
-            menu.item(self.form_item("Edit message", ActionForm::Edit))
+            menu.item(
+                self.form_item("Edit message", ActionForm::Edit)
+                    .icon(IconName::Pencil),
+            )
         } else {
             menu
         };
         let menu = if self.can_delete {
-            menu.item(self.form_item("Delete message…", ActionForm::Delete))
+            menu.item(
+                self.form_item("Delete message…", ActionForm::Delete)
+                    .icon(Icon::new(IconName::Trash).text_color(danger)),
+            )
         } else {
             menu
         };
@@ -856,6 +883,7 @@ impl MessageActions {
                 (self.app.clone(), self.channel.clone(), self.message.clone());
             menu.item(
                 PopupMenuItem::new(if on { "Pin message" } else { "Unpin message" })
+                    .icon(if on { IconName::Pin } else { IconName::PinOff })
                     .disabled(self.disabled)
                     .on_click(move |_, _, cx| {
                         let _ = app.update(cx, |this, cx| {
