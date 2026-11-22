@@ -1,4 +1,4 @@
-param([string]$Title, [string]$Ready)
+param([string]$Title, [string]$Ready, [switch]$IfAvailable)
 $ErrorActionPreference = 'Stop'
 
 if ($Title) {
@@ -47,6 +47,19 @@ if ($Title) {
     $wav.Dispose()
     $form.Dispose()
     exit
+}
+
+if ($IfAvailable) {
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -Name Audio -Namespace SpkFixture -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("winmm.dll")]
+public static extern uint waveOutGetNumDevs();
+'@
+    if (![Environment]::UserInteractive -or [Windows.Forms.Screen]::AllScreens.Count -eq 0 -or
+        [SpkFixture.Audio]::waveOutGetNumDevs() -eq 0) {
+        Write-Host '::warning::Native Windows Screen Share remains unverified on this runner. The fixture needs an interactive display and a playback endpoint.'
+        exit 0
+    }
 }
 
 # Run from the repository root in an interactive Windows session.

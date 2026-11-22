@@ -65,6 +65,10 @@ jobs:
         run: brew install livekit
       - name: Test LiveKit media with a controlled peer
         run: python tests/fixtures/livekit-peers.py mise exec -- cargo test --locked --bin spk-gpui livekit_ -- --ignored --test-threads=1
+      - name: Test native Windows Screen Share when the runner supports it
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: tests/fixtures/windows-screen-share.ps1 -IfAvailable
       - name: Test native macOS Screen Share with a controlled peer
         if: runner.os == 'macOS'
         shell: bash
@@ -116,7 +120,7 @@ jobs:
         run: ditto -c -k --sequesterRsrc --keepParent target/debug/SPK.app "target/debug/${{ matrix.artifact }}"
       - name: Package Linux executable
         if: env.UPLOAD_BINARIES == 'true' && runner.os == 'Linux'
-        run: tar -czf "target/debug/${{ matrix.artifact }}" -C target/debug spk-gpui -C ../../build zvidlib-license.txt
+        run: tar -czf "target/debug/${{ matrix.artifact }}" -C target/debug spk-gpui -C ../../build media-licenses.txt
       - name: Upload build
         if: env.UPLOAD_BINARIES == 'true'
         uses: actions/upload-artifact@v7

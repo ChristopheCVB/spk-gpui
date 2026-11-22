@@ -28,6 +28,8 @@ rodio = { version = "=0.23.0", default-features = false, features = ["playback"]
 # Embed GPUI Kit icons in the debug binaries distributed by CI.
 rust-embed = { version = "8.14", features = ["debug-embed"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
+rusty_h264-common = { version = "=0.17.3", default-features = false }
+rusty_h264-decoder = { version = "=0.17.3", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 symphonia = { version = "0.6", default-features = false, features = ["mp3", "aac", "isomp4", "wav", "pcm", "ogg", "vorbis", "flac"] }

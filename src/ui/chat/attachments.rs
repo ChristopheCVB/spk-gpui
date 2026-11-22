@@ -7,6 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use rodio::buffer::SamplesBuffer;
 use tempfile::{Builder, NamedTempFile, TempPath};
 use tokio::sync::oneshot;
 use uuid::Uuid;
@@ -27,6 +28,7 @@ pub(in crate::ui) struct AttachmentUi {
     cards: HashMap<String, AttachmentCard>,
     opened_files: HashMap<String, TempPath>,
     playback: Option<Playback>,
+    media_start: Option<Uuid>,
 }
 
 #[derive(Default)]
@@ -47,6 +49,15 @@ enum Preview {
 impl Preview {
     fn is_media(&self) -> bool {
         matches!(self, Self::Audio(_) | Self::Video(_))
+    }
+
+    fn audio_samples(&self) -> Option<SamplesBuffer> {
+        match self {
+            Self::Audio(clip) => Some(clip),
+            Self::Video(clip) => clip.audio.as_ref(),
+            _ => None,
+        }
+        .map(|clip| clip.samples.clone())
     }
 
     fn drop_images(self, window: &mut Window) {
@@ -714,36 +725,28 @@ impl Spk {
         else {
             return;
         };
-        let (samples, video_duration) = match &card.preview {
-            Some(Preview::Audio(clip)) => (Some(clip.samples.clone()), None),
-            Some(Preview::Video(clip)) => (
-                clip.audio.as_ref().map(|audio| audio.samples.clone()),
-                Some(clip.duration),
-            ),
-            _ => return,
+        let Some(preview) = card.preview.as_ref().filter(|preview| preview.is_media()) else {
+            return;
         };
-        let preferred = &sidebar.voice_intent.preferred;
-        let output = MediaOutput {
-            device: sidebar
-                .devices
-                .media_outputs
-                .resolve(preferred.media_output.as_ref())
-                .cloned(),
-            volume: preferred.output_gain(),
+        let video_duration = match preview {
+            Preview::Video(clip) => Some(clip.duration),
+            _ => None,
         };
+        let samples = preview.audio_samples();
+        let mut output = sidebar.media_output();
         let operation = Uuid::new_v4();
         card.pending = Some(operation);
         card.error = None;
         self.chat_attachments.playback = None;
+        self.chat_attachments.media_start = Some(operation);
         cx.spawn_in(window, async move |app, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    samples
-                        .map(|samples| AudioPlayback::open(samples, output))
-                        .transpose()
-                })
-                .await;
+            let result = match samples {
+                Some(samples) => open_playback(cx, output.clone()).await.map(|audio| {
+                    audio.attach(samples, Duration::ZERO, false);
+                    Some(audio)
+                }),
+                None => Ok(None),
+            };
             let started = app
                 .update_in(cx, |app, _, cx| {
                     let Some(card) = app
@@ -756,6 +759,10 @@ impl Spk {
                     };
                     card.pending = None;
                     cx.notify();
+                    if app.chat_attachments.media_start != Some(operation) {
+                        return false;
+                    }
+                    app.chat_attachments.media_start = None;
                     if !card.preview.as_ref().is_some_and(Preview::is_media) {
                         return false;
                     }
@@ -788,20 +795,33 @@ impl Spk {
             let mut ending = false;
             loop {
                 cx.background_executor().timer(interval).await;
-                let keep_playing = app
+                let next_output = app
                     .update_in(cx, |app, _, cx| {
-                        let Some(playback) = app
+                        let View::SignedIn(sidebar) = &app.view else {
+                            return None;
+                        };
+                        let selected = sidebar.media_output();
+                        let playback = app
                             .chat_attachments
                             .playback
                             .as_mut()
-                            .filter(|playback| playback.token == operation)
-                        else {
-                            return false;
-                        };
+                            .filter(|playback| playback.token == operation)?;
+                        let card = app.chat_attachments.cards.get_mut(&id);
+                        if output.device != selected.device
+                            && let Some(samples) = card
+                                .as_ref()
+                                .and_then(|card| card.preview.as_ref())
+                                .and_then(Preview::audio_samples)
+                        {
+                            return Some(Some((selected, samples)));
+                        }
+                        if let Some(audio) = &playback.audio {
+                            audio.player.set_volume(selected.volume);
+                        }
                         let failed = playback.audio.as_ref().is_some_and(AudioPlayback::failed);
                         if failed {
                             playback.audio = None;
-                            if let Some(card) = app.chat_attachments.cards.get_mut(&id) {
+                            if let Some(card) = card {
                                 card.error = Some(BAD_OUTPUT);
                             }
                         }
@@ -816,23 +836,58 @@ impl Spk {
                         if ended && (ending || failed) {
                             app.chat_attachments.playback = None;
                             cx.notify();
-                            return false;
+                            return None;
                         }
                         ending = ended;
                         if failed || (video_duration.is_some() && playback.started.is_some()) {
                             cx.notify();
                         }
-                        true
+                        Some(None)
                     })
-                    .unwrap_or(false);
-                if !keep_playing {
+                    .ok()
+                    .flatten();
+                let Some(next_output) = next_output else {
                     break;
+                };
+                if let Some((selected, samples)) = next_output {
+                    output = selected;
+                    let result = open_playback(cx, output.clone()).await;
+                    let _ = app.update_in(cx, |app, _, cx| {
+                        let Some(playback) = app
+                            .chat_attachments
+                            .playback
+                            .as_mut()
+                            .filter(|playback| playback.token == operation)
+                        else {
+                            return;
+                        };
+                        let position = playback.position();
+                        playback.audio = None;
+                        playback.audio = result
+                            .inspect(|audio| {
+                                audio.attach(samples, position, playback.started.is_some())
+                            })
+                            .ok();
+                        if let Some(card) = app.chat_attachments.cards.get_mut(&id) {
+                            card.error = playback.audio.is_none().then_some(BAD_OUTPUT);
+                        }
+                        cx.notify();
+                    });
                 }
             }
         })
         .detach();
         cx.notify();
     }
+}
+
+async fn open_playback(
+    cx: &AsyncWindowContext,
+    output: MediaOutput,
+) -> Result<AudioPlayback, &'static str> {
+    cx.background_executor()
+        .spawn(async move { AudioPlayback::open(output) })
+        .await
 }
 
 fn load_attachment(

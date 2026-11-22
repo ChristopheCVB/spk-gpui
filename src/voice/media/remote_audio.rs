@@ -50,7 +50,7 @@ fn route(intent: &Intent, id: &str, source: TrackSource, muted: bool) -> Option<
 
 pub(super) struct RemoteAudio {
     tracks: HashMap<TrackSid, Playback>,
-    voice: Output<VoiceOutput>,
+    voice: Output<VoiceSink>,
     media: Output<MixerDeviceSink>,
     render: broadcast::Sender<Arc<RenderBlock>>,
     pub(super) native_playout: bool,
@@ -115,16 +115,12 @@ impl RemoteAudio {
         let voice_changed = self.voice.update(voice.is_some(), voice_device, |failed| {
             let selected = voice.filter(|_| !system_speakers);
             let device = cpal_device(DeviceKind::Speakers, selected)?;
-            VoiceOutput::open(device, self.render.clone(), failed)
+            let reference = VoiceOutput::open(device.clone(), self.render.clone(), failed.clone());
+            VoiceSink::open(device, reference, failed)
         });
         let media_changed = self.media.update(media, media_device, |failed| {
             open_media_output(media_device, move |_| failed.store(true, Relaxed)).ok()
         });
-        self.native_playout = voice.is_some()
-            && self.voice.sink.is_none()
-            && routes
-                .values()
-                .any(|(_, route)| *route == Route::Voice(1.0));
         if voice_changed || media_changed {
             self.tracks.retain(|_, playback| {
                 if playback.media {
@@ -134,12 +130,13 @@ impl RemoteAudio {
                 }
             });
         }
-        sync_playback(
+        let native_playout = sync_playback(
             &mut self.tracks,
             routes,
-            self.voice.sink.as_ref().map(VoiceOutput::mixer),
+            self.voice.sink.as_ref().map(VoiceSink::mixer),
             self.media.sink.as_ref().map(MixerDeviceSink::mixer),
         );
+        self.native_playout = voice.is_some() && native_playout;
     }
 }
 
@@ -176,7 +173,7 @@ fn sync_playback(
     routes: HashMap<TrackSid, (RemoteAudioTrack, Route)>,
     voice: Option<&Mixer>,
     media: Option<&Mixer>,
-) {
+) -> bool {
     tracks.retain(|sid, playback| {
         !playback.task.is_finished()
             && routes.get(sid).is_some_and(|(_, route)| match route {
@@ -185,9 +182,11 @@ fn sync_playback(
                 _ => false,
             })
     });
+    let mut native_playout = false;
     for (sid, (track, route)) in routes {
         // shortcut: LiveKit fallback has no render reference, remove when all supported routes can provide PCM.
         let native = matches!(route, Route::Voice(1.0)) && voice.is_none();
+        native_playout |= native;
         if track.is_enabled() != native {
             if native {
                 track.enable();
@@ -205,6 +204,38 @@ fn sync_playback(
                 .entry(sid)
                 .or_insert_with(|| Playback::start(track, mixer, gain, media));
             playback.player.set_volume(gain);
+        }
+    }
+    native_playout
+}
+
+enum VoiceSink {
+    Reference(VoiceOutput),
+    Playback(MixerDeviceSink),
+}
+
+impl VoiceSink {
+    fn open(
+        device: rodio::cpal::Device,
+        reference: Option<VoiceOutput>,
+        failed: Arc<AtomicBool>,
+    ) -> Option<Self> {
+        reference.map(Self::Reference).or_else(|| {
+            failed.store(false, Relaxed);
+            let mut sink = rodio::DeviceSinkBuilder::from_device(device)
+                .ok()?
+                .with_error_callback(move |_| failed.store(true, Relaxed))
+                .open_sink_or_fallback()
+                .ok()?;
+            sink.log_on_drop(false);
+            Some(Self::Playback(sink))
+        })
+    }
+
+    fn mixer(&self) -> &Mixer {
+        match self {
+            Self::Reference(output) => output.mixer(),
+            Self::Playback(output) => output.mixer(),
         }
     }
 }

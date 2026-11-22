@@ -46,6 +46,32 @@ fn participant_playback_matches_watch_and_local_volume_settings() {
     assert_eq!(route(&intent, "alice", screen, false), None);
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[ignore = "requires the isolated stereo PulseAudio output from tests/fixtures/linux-screen-share.sh"]
+async fn linux_voice_output_keeps_the_mixer_when_the_render_reference_is_unavailable() {
+    let device = cpal_device(DeviceKind::Speakers, None).unwrap();
+    let failed = Arc::new(AtomicBool::new(false));
+    let output = VoiceSink::open(device, None, failed.clone()).unwrap();
+    assert!(matches!(output, VoiceSink::Playback(_)));
+    let player = Player::connect_new(output.mixer());
+    player.set_volume(0.5);
+    player.append(SamplesBuffer::new(
+        NonZero::new(2).unwrap(),
+        NonZero::new(48_000).unwrap(),
+        vec![0.25; 4_800],
+    ));
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !player.empty() {
+            assert!(!failed.load(Relaxed));
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the fallback device should play mixer samples");
+    assert_eq!(player.volume(), 0.5);
+}
+
 #[tokio::test]
 #[ignore = "requires a loopback LiveKit server and SPK_TEST_PUBLISHER/SPK_TEST_RECEIVER tokens"]
 async fn livekit_watch_audio_keeps_microphone_and_recovers_after_full_reconnect() {
@@ -210,7 +236,12 @@ async fn livekit_watch_audio_keeps_microphone_and_recovers_after_full_reconnect(
     assert_eq!(remote.tracks[&mic_sid].player.volume(), 1.0);
     assert!(!mic_track.is_enabled());
     let routes = sync_subscriptions(&receiver, &intent);
-    sync_playback(&mut remote.tracks, routes, None, Some(&media));
+    assert!(sync_playback(
+        &mut remote.tracks,
+        routes,
+        None,
+        Some(&media)
+    ));
     assert!(remote.tracks.is_empty());
     assert!(mic_track.is_enabled());
     let screen = publication(&receiver, &identity, &replacement).unwrap();

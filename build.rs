@@ -22,7 +22,7 @@ fn main() {
         Ok("windows") => {
             println!("cargo::rerun-if-changed=build/windows.rc");
             println!("cargo::rerun-if-changed=assets/logo.ico");
-            println!("cargo::rerun-if-changed=build/zvidlib-license.txt");
+            println!("cargo::rerun-if-changed=build/media-licenses.txt");
             embed_resource::compile_for(
                 "build/windows.rc",
                 ["spk-gpui"],

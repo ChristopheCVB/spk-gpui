@@ -8,14 +8,18 @@ use std::{
     time::Duration,
 };
 
-use rodio::{MixerDeviceSink, Player, buffer::SamplesBuffer};
+use rodio::{MixerDeviceSink, Player, Source, buffer::SamplesBuffer};
 use symphonia::core::{
-    formats::{TrackType, probe::Hint},
+    codecs::audio::well_known::CODEC_ID_OPUS,
+    formats::{FormatReader, TrackType, probe::Hint},
     io::MediaSourceStream,
 };
 use zvidlib_container::container::open_audio_track;
-use zvidlib_core::{AudioSampleReader, CancellationToken, Limits, SampleRange, io::MemorySource};
-use zvidlib_opus::{NativeOpusDecoder, OPUS_SAMPLE_RATE};
+use zvidlib_core::{
+    AudioDecoder, AudioSampleReader, CancellationToken, EncodedAudioSample, Limits, SampleRange,
+    io::MemorySource,
+};
+use zvidlib_opus::{NativeOpusDecoder, OPUS_SAMPLE_RATE, OpusHead, opus_packet_samples};
 
 use crate::voice::{MediaOutput, open_media_output};
 
@@ -99,6 +103,13 @@ impl AudioClip {
             .as_ref()
             .and_then(|params| params.audio())
             .ok_or(BAD_AUDIO)?;
+        if params.codec == CODEC_ID_OPUS {
+            let head = OpusHead::from_identification_header(
+                params.extra_data.as_deref().ok_or(BAD_AUDIO)?,
+            )
+            .map_err(|_| BAD_AUDIO)?;
+            return Self::decode_ogg_opus(&mut *format, track_id, head, seconds);
+        }
         let mut decoder = symphonia::default::get_codecs()
             .make_audio_decoder(params, &Default::default())
             .map_err(|_| BAD_AUDIO)?;
@@ -144,6 +155,65 @@ impl AudioClip {
             truncated,
         })
     }
+    fn decode_ogg_opus(
+        format: &mut dyn FormatReader,
+        track_id: u32,
+        head: OpusHead,
+        seconds: usize,
+    ) -> Result<Self, &'static str> {
+        let mut decoder = NativeOpusDecoder::new(
+            &head,
+            Limits {
+                max_audio_channels: 8,
+                ..Limits::default()
+            },
+        )
+        .map_err(|_| BAD_AUDIO)?;
+        let cancel = CancellationToken::new();
+        let channels = usize::from(head.channels);
+        let limit =
+            (seconds * OPUS_SAMPLE_RATE as usize * channels).min(MAX_SAMPLES / channels * channels);
+        // Symphonia reports Opus pre-skip as a track delay and the end padding on each packet.
+        let mut skip = u64::from(head.pre_skip);
+        let mut samples = Vec::new();
+        let mut truncated = false;
+        while let Some(packet) = format.next_packet().map_err(|_| BAD_AUDIO)? {
+            if packet.track_id != track_id {
+                continue;
+            }
+            let frames = u64::from(opus_packet_samples(&packet.data).map_err(|_| BAD_AUDIO)?);
+            let start = skip.min(frames);
+            skip -= start;
+            let end = frames.checked_sub(packet.trim_end.get()).ok_or(BAD_AUDIO)?;
+            let pcm = decoder
+                .decode(
+                    &EncodedAudioSample {
+                        decoded_range: SampleRange::new(0, frames).map_err(|_| BAD_AUDIO)?,
+                        data: packet.data.into_vec(),
+                    },
+                    &cancel,
+                )
+                .map_err(|_| BAD_AUDIO)?;
+            let pcm = &pcm.samples[start.min(end) as usize * channels..end as usize * channels];
+            let remaining = limit - samples.len();
+            samples.extend_from_slice(&pcm[..remaining.min(pcm.len())]);
+            if remaining < pcm.len() {
+                truncated = true;
+                break;
+            }
+        }
+        if samples.is_empty() {
+            return Err(BAD_AUDIO);
+        }
+        Ok(Self {
+            samples: SamplesBuffer::new(
+                NonZero::new(u16::from(head.channels)).ok_or(BAD_AUDIO)?,
+                NonZero::new(OPUS_SAMPLE_RATE).unwrap(),
+                samples,
+            ),
+            truncated,
+        })
+    }
 }
 
 pub(super) struct AudioPlayback {
@@ -153,7 +223,7 @@ pub(super) struct AudioPlayback {
 }
 
 impl AudioPlayback {
-    pub fn open(samples: SamplesBuffer, output: MediaOutput) -> Result<Self, &'static str> {
+    pub fn open(output: MediaOutput) -> Result<Self, &'static str> {
         let failed = Arc::new(AtomicBool::new(false));
         let error = failed.clone();
         let sink = open_media_output(output.device.as_ref(), move |_| {
@@ -163,12 +233,19 @@ impl AudioPlayback {
         let player = Player::connect_new(sink.mixer());
         player.pause();
         player.set_volume(output.volume);
-        player.append(samples);
         Ok(Self {
             player,
             _sink: sink,
             failed,
         })
+    }
+
+    pub fn attach(&self, mut samples: SamplesBuffer, position: Duration, playing: bool) {
+        let _ = samples.try_seek(position);
+        self.player.append(samples);
+        if playing {
+            self.player.play();
+        }
     }
 
     pub fn failed(&self) -> bool {
@@ -179,6 +256,18 @@ impl AudioPlayback {
 #[cfg(test)]
 mod tests {
     use super::{AudioClip, MAX_SECONDS};
+
+    #[test]
+    fn previews_ogg_opus_and_trims_encoder_delay_and_padding() {
+        use rodio::Source;
+
+        let bytes = include_bytes!("../../../../tests/fixtures/attachments/preview.ogg");
+        let clip = AudioClip::decode(bytes).expect("Ogg Opus attachment should play in-app");
+        assert_eq!(clip.samples.sample_rate().get(), 48_000);
+        assert_eq!(clip.samples.clone().count(), 12_000);
+        assert!(clip.samples.take(4_800).any(|sample| sample.abs() > 0.05));
+        assert!(!clip.truncated);
+    }
 
     #[test]
     fn limits_decoded_audio_to_the_preview_length() {

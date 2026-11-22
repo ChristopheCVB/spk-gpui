@@ -30,6 +30,7 @@ use crate::voice::{
 
 pub(super) const RATE: u32 = 48_000;
 pub(super) const FRAME: usize = RATE as usize / 100;
+const MAX_RENDER_AGE: Duration = Duration::from_millis(100);
 const _: () = assert!(dfn3_rs::SAMPLE_RATE == RATE && dfn3_rs::FRAME_SIZE == FRAME);
 
 pub(super) struct RenderBlock {
@@ -190,7 +191,7 @@ async fn send_audio(
     let mut controls = None;
     let mut apm = None;
     let mut render_stream: Option<Arc<()>> = None;
-    let mut render_time = None;
+    let mut render_delay = None;
     let mut render_resampler = AudioResampler::default();
     let mut gate = Gate::default();
     let mut denoiser = None;
@@ -219,18 +220,14 @@ async fn send_audio(
             denoiser = None;
             controls = None;
             render_stream = None;
-            render_time = None;
+            render_delay = None;
             render_resampler = AudioResampler::default();
         }
         let settings = *preferences.borrow();
-        let toggles = (
-            settings.echo_cancellation,
-            settings.noise_suppression == NoiseSuppression::Standard,
-            settings.auto_gain,
-        );
-        if controls.replace(toggles) != Some(toggles) {
-            apm = WebRtcProcessing::new(settings);
-            render_time = None;
+        let config = WebRtcSettings::from(settings);
+        if controls.replace(config) != Some(config) {
+            apm = config.processor();
+            render_delay = None;
         }
         let samples = if rate == RATE {
             block.as_mut_slice()
@@ -251,13 +248,13 @@ async fn send_audio(
                 Ok(block) => block,
                 Err(broadcast::error::TryRecvError::Lagged(_)) => {
                     render_stream = None;
+                    render_delay = None;
                     continue;
                 }
                 Err(_) => break,
             };
-            if !settings.echo_cancellation
-                || captured_at.saturating_duration_since(block.playback)
-                    > Duration::from_millis(100)
+            if !config.echo
+                || captured_at.saturating_duration_since(block.playback) > MAX_RENDER_AGE
             {
                 continue;
             }
@@ -267,7 +264,7 @@ async fn send_audio(
             {
                 render_stream = Some(block.stream.clone());
                 render_resampler = AudioResampler::default();
-                apm = WebRtcProcessing::new(settings);
+                apm = config.processor();
             }
             let reverse = &mut reverse[..FRAME * block.channels as usize];
             let pcm = if block.rate == RATE {
@@ -283,16 +280,21 @@ async fn send_audio(
                 )
             };
             reverse.copy_from_slice(pcm);
+            let reverse_at = Instant::now();
             apm.as_mut()?
                 .module
                 .process_reverse_stream(reverse, RATE as i32, block.channels as i32)
                 .ok()?;
-            render_time = Some(block.playback);
+            render_delay = Some((block.playback, reverse_at));
         }
         if let Some(apm) = apm.as_mut() {
-            let delay = render_time.map_or(Duration::ZERO, |playback: Instant| {
-                playback.saturating_duration_since(captured_at)
-            });
+            let delay = render_delay
+                .filter(|(played_at, _)| {
+                    captured_at.saturating_duration_since(*played_at) <= MAX_RENDER_AGE
+                })
+                .map_or(Duration::ZERO, |(playback, reverse_at)| {
+                    stream_delay(playback, reverse_at, captured_at, Instant::now())
+                });
             apm.process(samples, delay).ok()?;
         }
         if settings.noise_suppression == NoiseSuppression::Enhanced {
@@ -325,21 +327,53 @@ async fn send_audio(
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct WebRtcSettings {
+    echo: bool,
+    standard: bool,
+    auto_gain: bool,
+}
+
+impl From<VoiceProcessing> for WebRtcSettings {
+    fn from(settings: VoiceProcessing) -> Self {
+        Self {
+            echo: settings.echo_cancellation,
+            standard: settings.noise_suppression == NoiseSuppression::Standard,
+            auto_gain: settings.auto_gain,
+        }
+    }
+}
+
+impl WebRtcSettings {
+    fn processor(self) -> Option<WebRtcProcessing> {
+        (self.echo || self.standard || self.auto_gain).then(|| WebRtcProcessing {
+            module: AudioProcessingModule::new(self.echo, self.auto_gain, false, self.standard),
+            echo: self.echo,
+        })
+    }
+}
+
+fn stream_delay(
+    playback: Instant,
+    reverse_at: Instant,
+    captured: Instant,
+    process_at: Instant,
+) -> Duration {
+    // WebRTC expects the render and capture delays relative to its processing calls.
+    let capture_delay = process_at.saturating_duration_since(captured);
+    if playback >= reverse_at {
+        capture_delay + playback.duration_since(reverse_at)
+    } else {
+        capture_delay.saturating_sub(reverse_at.duration_since(playback))
+    }
+}
+
 struct WebRtcProcessing {
     module: AudioProcessingModule,
     echo: bool,
 }
 
 impl WebRtcProcessing {
-    fn new(settings: VoiceProcessing) -> Option<Self> {
-        let echo = settings.echo_cancellation;
-        let standard = settings.noise_suppression == NoiseSuppression::Standard;
-        (echo || standard || settings.auto_gain).then(|| Self {
-            module: AudioProcessingModule::new(echo, settings.auto_gain, false, standard),
-            echo,
-        })
-    }
-
     fn process(
         &mut self,
         samples: &mut [i16],
@@ -459,13 +493,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn combines_measured_reverse_and_capture_delay() {
+        let reference = Instant::now();
+        let at = |ms| reference + Duration::from_millis(ms);
+        assert_eq!(
+            stream_delay(at(30), at(10), at(32), at(45)),
+            Duration::from_millis(33)
+        );
+        assert_eq!(
+            stream_delay(at(10), at(15), at(20), at(30)),
+            Duration::from_millis(5)
+        );
+        assert_eq!(stream_delay(at(5), at(20), at(22), at(25)), Duration::ZERO);
+    }
+
+    #[test]
     fn echo_cancellation_combines_with_automatic_gain_and_standard_noise_suppression() {
         let settings = VoiceProcessing::default();
-        let mut processor = WebRtcProcessing::new(settings).unwrap();
-        let mut without_echo = WebRtcProcessing::new(VoiceProcessing {
+        let mut processor = WebRtcSettings::from(settings).processor().unwrap();
+        let mut without_echo = WebRtcSettings::from(VoiceProcessing {
             echo_cancellation: false,
             ..settings
         })
+        .processor()
         .unwrap();
         let mut previous = [0; FRAME];
         let mut seed = 1_u32;
