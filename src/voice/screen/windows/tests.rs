@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 #[ignore = "requires an interactive Windows display"]
-fn screen_sources_remain_available_after_camera_discovery() {
+fn screen_sources_remain_available_after_device_discovery() {
     tokio::runtime::Builder::new_current_thread()
         .max_blocking_threads(1)
         .enable_all()
@@ -12,6 +12,12 @@ fn screen_sources_remain_available_after_camera_discovery() {
             tokio::task::spawn_blocking(crate::voice::video::camera_devices)
                 .await
                 .unwrap();
+            tokio::task::spawn_blocking(|| {
+                use rodio::cpal::{self, traits::HostTrait};
+                let _ = cpal::default_host().output_devices();
+            })
+            .await
+            .unwrap();
             let choices = choices().await.expect("Screen Share source picker opens");
             assert!(choices.iter().any(|choice| choice.id == SYSTEM_PICKER));
             assert!(
@@ -114,9 +120,19 @@ fn padded_bgra_capture_is_scaled_inside_the_requested_preset() {
     assert!(screen_frame(&original[..92], 4, 6, 16, (2, 4)).is_none());
 }
 
-#[tokio::test]
+#[test]
 #[ignore = "requires the synthetic SPK Windows capture fixture"]
-async fn controlled_window_video_audio_and_source_loss() {
+fn controlled_window_video_audio_and_source_loss() {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .on_thread_start(|| wasapi::initialize_sta().ok().expect("STA capture worker"))
+        .on_thread_stop(wasapi::deinitialize)
+        .build()
+        .unwrap()
+        .block_on(check_controlled_window_capture());
+}
+
+async fn check_controlled_window_capture() {
     use ::windows::Win32::{
         Foundation::{LPARAM, WPARAM},
         UI::WindowsAndMessaging::{IsWindow, PostMessageW, WM_CLOSE},

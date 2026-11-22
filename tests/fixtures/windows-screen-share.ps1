@@ -66,7 +66,7 @@ public static extern uint waveOutGetNumDevs();
     }
 }
 
-& mise exec -- cargo test --locked --bin spk-gpui screen_sources_remain_available_after_camera_discovery -- --ignored
+& mise exec -- cargo test --locked --bin spk-gpui screen_sources_remain_available_after_device_discovery -- --ignored
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
 # Run from the repository root in an interactive Windows session.

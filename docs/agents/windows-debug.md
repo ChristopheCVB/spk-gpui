@@ -80,3 +80,14 @@ Confirm the PID has a visible SPK window. Follow the stderr log with `Get-Conten
 - For a crash, capture the first panic line and relevant backtrace frames. Check the exact action again on the rebuilt client.
 - For audio cuts, ask for the Windows clock time and which listener or route heard each cut. Test microphone and Voice Output with a web participant, then test Channel Radio or the reported media source separately. Open **Voice connection diagnostics** in the call to check jitter and incoming packet loss.
 - The app has no built-in audio log sink. Empty files are normal in a healthy stock run. For timing bugs, use a temporary debug build that emits tagged, timestamped counters to stderr. In the audio-cut investigation, callback gaps, dropped blocks and radio refill gaps distinguished a stalled session runtime from packet loss. Keep logging I/O off audio callbacks. Redact credentials and session data before sharing logs.
+
+## Run the local Screen Share fixture
+
+Start Docker Desktop. From the repository root in an interactive x64 Developer PowerShell, run the fixture with the repository's Docker Compose LiveKit server.
+
+```powershell
+$env:SPK_TEST_LIVEKIT_COMPOSE = '1'
+& .\tests\fixtures\windows-screen-share.ps1
+```
+
+The fixture starts and removes the Compose server for each LiveKit run. Check that source discovery, both LiveKit peer tests, and the controlled capture test pass.
