@@ -206,9 +206,11 @@ async fn marking_read_and_unread_changes_the_shared_read_point() {
             .await
             .unwrap();
         let around = wait_for_sidebar(&views, |view| {
-            view.chat
-                .as_ref()
-                .is_some_and(|chat| chat.jump.as_ref().is_some_and(|(id, _)| id == "older"))
+            view.chat.as_ref().is_some_and(|chat| {
+                chat.jump
+                    .as_ref()
+                    .is_some_and(|jump| jump.message_id == "older")
+            })
         })
         .await;
         let chat = around.chat.unwrap();

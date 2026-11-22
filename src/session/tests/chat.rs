@@ -236,7 +236,7 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         let request = history_request(&history, "?around=m0").await;
         request.respond(&[], &value!({"messages":[message("m0", 0, "bob", "Original reply target"), message("m1", 1, "bob", "Earlier message")],"hasMoreBefore":false,"hasMoreAfter":true}).to_string()).await;
         wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
-            chat.jump.as_ref().is_some_and(|(id, _)| id == "m0") && chat.has_more_after && chat.messages[0].id == "m0"
+            chat.jump.as_ref().is_some_and(|jump| jump.message_id == "m0") && chat.has_more_after && chat.messages[0].id == "m0"
         })).await;
         peer.close(None).await.unwrap();
         let mut peer = accept_async(sockets.accept().await.unwrap().0).await.unwrap();
