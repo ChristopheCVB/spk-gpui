@@ -25,9 +25,9 @@ const TYPES: [(SourceType, &str, &str, PortalSource); 2] = [
         SourceType::Screen,
         "display",
         "Display",
-        PortalSource::Monitor,
+        PortalSource::MONITOR,
     ),
-    (SourceType::Window, "window", "Window", PortalSource::Window),
+    (SourceType::Window, "window", "Window", PortalSource::WINDOW),
 ];
 const FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -58,8 +58,8 @@ pub async fn choices() -> Result<Vec<Choice>, CaptureError> {
                 .await
                 .map_err(|_| CaptureError::Unavailable)?;
             Ok(portal_choices(
-                sources.contains(PortalSource::Monitor),
-                sources.contains(PortalSource::Window),
+                sources.contains(PortalSource::MONITOR),
+                sources.contains(PortalSource::WINDOW),
             ))
         })
         .await

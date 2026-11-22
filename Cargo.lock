@@ -7775,7 +7775,7 @@ dependencies = [
  "windows-core 0.62.2",
  "windows-registry 0.6.1",
  "x11rb",
- "zbus 5.19.0",
+ "zbus 6.4.0",
  "zvidlib-container",
  "zvidlib-core",
  "zvidlib-opus",
