@@ -98,6 +98,9 @@ fn source_size(filter: &SCContentFilter) -> Option<(u32, u32)> {
 
 #[cfg(test)]
 pub(super) fn fixture_selection(mode: &str, title: &str) -> (Selection, (u32, u32)) {
+    // The test binary has no GPUI application to initialize CoreGraphics.
+    // SAFETY: The bridge calls CGMainDisplayID without arguments or retaining any Rust state.
+    unsafe { screencapturekit::ffi::sc_initialize_core_graphics() };
     let content = SCShareableContent::get().expect("list capturable macOS displays and windows");
     let builder = SCContentFilter::create();
     let filter = match mode {
