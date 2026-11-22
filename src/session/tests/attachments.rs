@@ -169,6 +169,16 @@ async fn attachment_queue_cancels_in_flight_uploads_and_sends_only_ready_files()
             "headers":{"content-type":"text/plain"}
         }).to_string();
 
+        tx.send(queue("general", "reserving.txt")).await.unwrap();
+        let presign = request("POST /api/attachments/presign").await;
+        let queued = wait_for_sidebar(&rx, |s| s.chat.as_ref().is_some_and(|chat|
+            chat.draft.uploads.iter().any(|upload| upload.filename == "reserving.txt"))).await;
+        let key = queued.chat.unwrap().draft.uploads[0].key;
+        tx.send(Command::CancelChatAttachment { channel_id: "general".into(), key }).await.unwrap();
+        wait_for_sidebar(&rx, |s| s.chat.as_ref().is_some_and(|chat| chat.draft.uploads.is_empty())).await;
+        presign.respond(&[], &signed("cancel-presign")).await;
+        request("POST /api/attachments/cancel-presign/cancel").await.respond(&[], "{}").await;
+
         tx.send(queue("general", "cancel.txt")).await.unwrap();
         request("POST /api/attachments/presign").await.respond(&[], &signed("cancel")).await;
         let in_flight = request("PUT /upload").await;

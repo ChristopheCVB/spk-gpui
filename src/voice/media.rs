@@ -32,6 +32,7 @@ mod livekit_audio;
 mod macos_audio;
 mod processing;
 mod remote_audio;
+mod voice_output;
 
 #[cfg(target_os = "macos")]
 pub(crate) use capture::microphone_permission;
@@ -159,6 +160,7 @@ impl Media {
         let mut resync = false;
 
         let mut diagnostics = Diagnostics::default();
+        let mut echo_reference_unavailable = false;
         let mut stats = Sampler::default();
         let mut stats_job = JoinSet::new();
 
@@ -204,27 +206,23 @@ impl Media {
                     output = next_output;
                 }
                 let playing = output.as_ref().filter(|_| !intent.mute.deafened);
-                backend.sync_remote_audio(&intent, &devices, playing);
+                echo_reference_unavailable = backend.sync_remote_audio(&intent, &devices, playing);
                 playout.sync(
                     playing.is_some(),
                     playing.and_then(|device| backend.playout_format(device)),
                     backend.macos_recording_initialized(),
                     |enabled| backend.set_playout(enabled),
                 );
+                let mut processing = intent.preferred.processing;
+                processing.echo_cancellation &= !echo_reference_unavailable;
                 if let Some(device) = wanted
                     && backend.can_start_microphone()
                 {
                     let use_system_default =
                         !cfg!(windows) && Some(device) == devices.microphones.default.as_ref();
-                    backend.start_microphone(
-                        device.clone(),
-                        intent.preferred.processing,
-                        use_system_default,
-                    );
+                    backend.start_microphone(device.clone(), processing, use_system_default);
                 }
-                backend
-                    .sync_microphone_processing(intent.preferred.processing)
-                    .await;
+                backend.sync_microphone_processing(processing).await;
                 if resync && !intent.mute.effective_muted() {
                     backend.resume_microphone();
                 }
@@ -255,6 +253,7 @@ impl Media {
                 speakers: output.clone(),
                 speaking: speaking.0.keys().cloned().collect(),
                 diagnostics,
+                echo_reference_unavailable,
             };
             if reported.as_ref() != Some(&report) {
                 reported = Some(report.clone());
@@ -285,6 +284,7 @@ impl Media {
                     }
                     MediaEvent::Reconnecting => {
                         reconnecting = true;
+                        echo_reference_unavailable = false;
                         diagnostics = Diagnostics::default();
                         stats = Sampler::default();
                         stats_job = JoinSet::new();
@@ -334,7 +334,13 @@ trait RoomAudio {
     fn devices(&self) -> Devices;
     fn switch_speakers(&self, device: &Device) -> bool;
     fn set_playout(&self, enabled: bool);
-    fn sync_remote_audio(&mut self, intent: &Intent, devices: &Devices, speakers: Option<&Device>);
+    // Reports when the active voice output cannot provide an echo reference.
+    fn sync_remote_audio(
+        &mut self,
+        intent: &Intent,
+        devices: &Devices,
+        speakers: Option<&Device>,
+    ) -> bool;
     fn suspend_remote_audio(&mut self) {}
     fn playout_format(&self, device: &Device) -> Option<Self::PlayoutFormat>;
     fn macos_recording_initialized(&self) -> bool;

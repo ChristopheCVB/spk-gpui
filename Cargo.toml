@@ -28,6 +28,8 @@ rodio = { version = "=0.23.0", default-features = false, features = ["playback"]
 # Embed GPUI Kit icons in the debug binaries distributed by CI.
 rust-embed = { version = "8.14", features = ["debug-embed"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
+rusty_h264-common = { version = "=0.17.3", default-features = false }
+rusty_h264-decoder = { version = "=0.17.3", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 symphonia = { version = "0.6", default-features = false, features = ["mp3", "aac", "isomp4", "wav", "pcm", "ogg", "vorbis", "flac"] }
@@ -36,6 +38,11 @@ tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt"
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
 url = "2.5"
 uuid = { version = "1", features = ["v4"] }
+zvidlib-container = "=0.5.0"
+zvidlib-core = "=0.5.0"
+zvidlib-opus = "=0.5.0"
+zvidlib-vp8 = { version = "=0.5.0", default-features = false }
+zvidlib-vp9-decoder = { version = "=0.5.0", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
@@ -55,13 +62,19 @@ notify-rust = "=4.19.0"
 cxx = "1.0"
 pulseaudio = "0.3.2"
 raw-window-handle = "0.6"
+wayland-backend = { version = "0.3", features = ["client_system", "dlopen"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 webrtc-sys = "=0.3.55"
 x11rb = { version = "0.13", features = ["allow-unsafe-code", "xkb"] }
+zbus = { version = "5", default-features = false, features = ["async-io"] }
 
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"
 wasapi = "=0.27.0"
-windows = { version = "0.62", features = ["Win32_Media_Audio", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.62", features = ["Data_Xml_Dom", "UI_Notifications", "Win32_Media_Audio", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_Threading", "Win32_UI_Notifications", "Win32_UI_WindowsAndMessaging"] }
+windows-core = "0.62"
+windows-registry = "0.6"
 windows-capture = "=1.5.0"
 windows-wgc = { package = "windows", version = "0.61", features = ["Graphics_Capture", "Graphics_DirectX_Direct3D11", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_System_WinRT_Direct3D11", "Win32_UI_Shell"] }
 

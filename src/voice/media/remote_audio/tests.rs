@@ -5,7 +5,7 @@ fn participant_playback_matches_watch_and_local_volume_settings() {
     let mut intent = Intent::default();
     let mic = TrackSource::Microphone;
     let screen = TrackSource::ScreenshareAudio;
-    assert_eq!(route(&intent, "alice", mic, false), Some(Route::Native));
+    assert_eq!(route(&intent, "alice", mic, false), Some(Route::Voice(1.0)));
     assert_eq!(route(&intent, "alice", screen, false), None);
     intent.watching.insert("alice".into());
     assert_eq!(
@@ -44,6 +44,32 @@ fn participant_playback_matches_watch_and_local_volume_settings() {
     intent.watching.clear();
     assert_eq!(route(&intent, "alice", mic, false), Some(Route::Silent));
     assert_eq!(route(&intent, "alice", screen, false), None);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[ignore = "requires the isolated stereo PulseAudio output from tests/fixtures/linux-screen-share.sh"]
+async fn linux_voice_output_keeps_the_mixer_when_the_render_reference_is_unavailable() {
+    let device = cpal_device(DeviceKind::Speakers, None).unwrap();
+    let failed = Arc::new(AtomicBool::new(false));
+    let output = VoiceSink::open(device, None, failed.clone()).unwrap();
+    assert!(matches!(output, VoiceSink::Playback(_)));
+    let player = Player::connect_new(output.mixer());
+    player.set_volume(0.5);
+    player.append(SamplesBuffer::new(
+        NonZero::new(2).unwrap(),
+        NonZero::new(48_000).unwrap(),
+        vec![0.25; 4_800],
+    ));
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !player.empty() {
+            assert!(!failed.load(Relaxed));
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the fallback device should play mixer samples");
+    assert_eq!(player.volume(), 0.5);
 }
 
 #[tokio::test]
@@ -86,7 +112,7 @@ async fn livekit_watch_audio_keeps_microphone_and_recovers_after_full_reconnect(
         rodio::mixer::mixer(NonZero::new(2).unwrap(), NonZero::new(48_000).unwrap());
 
     let routes = await_routes(&receiver, &intent, |routes| routes.contains_key(&mic_sid)).await;
-    assert_eq!(routes[&mic_sid].1, Route::Native);
+    assert_eq!(routes[&mic_sid].1, Route::Voice(1.0));
     assert!(
         publication(&receiver, &identity, &share_sid)
             .is_none_or(|share| !share.is_desired() && !share.is_subscribed())
@@ -94,6 +120,10 @@ async fn livekit_watch_audio_keeps_microphone_and_recovers_after_full_reconnect(
     assert!(remote.tracks.is_empty());
     assert!(media_pcm.next().is_none());
     assert!(voice_pcm.next().is_none());
+
+    sync_playback(&mut remote.tracks, routes, Some(&voice), Some(&media));
+    let voice_player = remote.tracks[&mic_sid].player.clone();
+    await_pcm(&mut voice_pcm).await;
 
     intent.watching.insert(identity.clone());
     intent
@@ -105,9 +135,12 @@ async fn livekit_watch_audio_keeps_microphone_and_recovers_after_full_reconnect(
     let routes = await_routes(&receiver, &intent, |routes| routes.contains_key(&share_sid)).await;
     assert_eq!(routes[&mic_sid].1, Route::Voice(0.5));
     assert_eq!(routes[&share_sid].1, Route::Media(1.0));
-    assert!(!routes[&mic_sid].0.is_enabled());
-    assert!(!routes[&share_sid].0.is_enabled());
+    let mic_track = routes[&mic_sid].0.clone();
+    let share_track = routes[&share_sid].0.clone();
     sync_playback(&mut remote.tracks, routes, Some(&voice), Some(&media));
+    assert!(!mic_track.is_enabled());
+    assert!(!share_track.is_enabled());
+    assert!(Arc::ptr_eq(&remote.tracks[&mic_sid].player, &voice_player));
     assert_eq!(remote.tracks[&mic_sid].player.volume(), 0.5);
     assert_eq!(remote.tracks[&share_sid].player.volume(), 1.0);
     await_pcm(&mut voice_pcm).await;
@@ -196,9 +229,19 @@ async fn livekit_watch_audio_keeps_microphone_and_recovers_after_full_reconnect(
     intent.watching.clear();
     intent.preferred.participant_volumes.clear();
     let routes = sync_subscriptions(&receiver, &intent);
-    assert_eq!(routes[&mic_sid].1, Route::Native);
+    assert_eq!(routes[&mic_sid].1, Route::Voice(1.0));
     let mic_track = routes[&mic_sid].0.clone();
     sync_playback(&mut remote.tracks, routes, Some(&voice), Some(&media));
+    assert_eq!(remote.tracks.len(), 1);
+    assert_eq!(remote.tracks[&mic_sid].player.volume(), 1.0);
+    assert!(!mic_track.is_enabled());
+    let routes = sync_subscriptions(&receiver, &intent);
+    assert!(sync_playback(
+        &mut remote.tracks,
+        routes,
+        None,
+        Some(&media)
+    ));
     assert!(remote.tracks.is_empty());
     assert!(mic_track.is_enabled());
     let screen = publication(&receiver, &identity, &replacement).unwrap();

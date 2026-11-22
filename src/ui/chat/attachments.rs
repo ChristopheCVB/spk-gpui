@@ -1,18 +1,26 @@
+mod audio;
+mod playback;
+mod video;
+
 use std::{
     collections::HashMap,
     io::Write,
     path::{Path, PathBuf},
 };
 
+use rodio::buffer::SamplesBuffer;
 use tempfile::{Builder, NamedTempFile, TempPath};
 use tokio::sync::oneshot;
 use uuid::Uuid;
+use video::VideoClip;
 
 use super::*;
 use crate::{
     api::{Attachment, MAX_ATTACHMENTS},
     session::{AttachmentInput, UploadStatus, image_preview},
 };
+use audio::AudioClip;
+use playback::Playback;
 
 #[derive(Default)]
 pub(in crate::ui) struct AttachmentUi {
@@ -20,6 +28,8 @@ pub(in crate::ui) struct AttachmentUi {
     picker_error: Option<&'static str>,
     cards: HashMap<String, AttachmentCard>,
     opened_files: HashMap<String, TempPath>,
+    playback: Option<Playback>,
+    media_start: Option<Uuid>,
 }
 
 #[derive(Default)]
@@ -33,6 +43,37 @@ struct AttachmentCard {
 enum Preview {
     Image(Arc<RenderImage>),
     Text(String),
+    Audio(AudioClip),
+    Video(VideoClip),
+}
+
+impl Preview {
+    fn is_media(&self) -> bool {
+        matches!(self, Self::Audio(_) | Self::Video(_))
+    }
+
+    fn audio_samples(&self) -> Option<SamplesBuffer> {
+        match self {
+            Self::Audio(clip) => Some(clip),
+            Self::Video(clip) => clip.audio.as_ref(),
+            _ => None,
+        }
+        .map(|clip| clip.samples.clone())
+    }
+
+    fn drop_images(self, window: &mut Window) {
+        match self {
+            Self::Image(image) => {
+                let _ = window.drop_image(image);
+            }
+            Self::Video(clip) => {
+                for image in clip.images() {
+                    let _ = window.drop_image(image);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -72,11 +113,18 @@ impl AttachmentUi {
                             .iter()
                             .any(|message| message.attachments.iter().any(|file| &file.id == id))
                     });
-                if !keep && let Some(Preview::Image(image)) = card.preview.take() {
-                    let _ = window.drop_image(image);
+                if !keep && let Some(preview) = card.preview.take() {
+                    preview.drop_images(window);
                 }
                 keep
             });
+            if self
+                .playback
+                .as_ref()
+                .is_some_and(|playback| !self.cards.contains_key(&playback.id))
+            {
+                self.playback = None;
+            }
         }
         if !signed_in {
             self.picker = None;
@@ -340,7 +388,10 @@ impl Spk {
                 let preview = card.and_then(|card| card.preview.as_ref());
                 let pending = card.is_some_and(|card| card.pending.is_some());
                 let extension = open_extension(&file.mime);
-                let inline = file.mime.starts_with("image/") || is_text(file);
+                let inline = file.mime.starts_with("image/")
+                    || is_text(file)
+                    || is_audio(&file.mime)
+                    || is_video(&file.mime);
                 row = row
                     .child(
                         div()
@@ -405,6 +456,36 @@ impl Spk {
                             .p_2()
                             .child(Label::new(text.clone()).text_xs().font_family("monospace")),
                     ),
+                    Some(Preview::Audio(clip)) => row
+                        .child(self.attachment_media_controls(file, "audio", pending, cx))
+                        .when(clip.truncated, |row| {
+                            row.child(
+                                Label::new("Short preview. Open for the full audio.").text_xs(),
+                            )
+                        }),
+                    Some(Preview::Video(clip)) => {
+                        let position = self
+                            .chat_attachments
+                            .playback
+                            .as_ref()
+                            .filter(|playback| playback.id == file.id)
+                            .map_or(Duration::ZERO, Playback::position);
+                        row.child(
+                            img(clip.image_at(position))
+                                .max_w_full()
+                                .h(px(240.))
+                                .object_fit(ObjectFit::Contain),
+                        )
+                        .child(self.attachment_media_controls(file, "video", pending, cx))
+                        .when(clip.truncated, |row| {
+                            row.child(
+                                Label::new("Short preview. Open for the full video.").text_xs(),
+                            )
+                        })
+                        .when(clip.silent, |row| {
+                            row.child(Label::new("Preview without audio").text_xs())
+                        })
+                    }
                     None => row,
                 }
             }))
@@ -420,7 +501,6 @@ impl Spk {
     ) -> Button {
         let (id, label) = match access {
             Access::Preview => ("preview", "Preview"),
-            // shortcut: audio and video open in the system player, use inline preview when GPUI has a player.
             Access::Open(_) => ("open", "Open"),
             Access::Download => ("download", "Download"),
         };
@@ -526,6 +606,23 @@ impl Spk {
             .await;
 
             let _ = app.update_in(cx, |app, window, cx| {
+                if app
+                    .chat_attachments
+                    .cards
+                    .get(&file_id)
+                    .and_then(|card| card.pending)
+                    == Some(operation)
+                    && matches!(&result, Ok(Some(AccessResult::Preview(preview))) if preview.is_media())
+                {
+                    app.chat_attachments.playback = None;
+                    for (id, card) in &mut app.chat_attachments.cards {
+                        if id != &file_id && card.preview.as_ref().is_some_and(Preview::is_media)
+                            && let Some(preview) = card.preview.take()
+                        {
+                            preview.drop_images(window);
+                        }
+                    }
+                }
                 if let Some(state) = app
                     .chat_attachments
                     .cards
@@ -535,8 +632,8 @@ impl Spk {
                     state.pending = None;
                     match result {
                         Ok(Some(AccessResult::Preview(preview))) => {
-                            if let Some(Preview::Image(image)) = state.preview.replace(preview) {
-                                let _ = window.drop_image(image);
+                            if let Some(previous) = state.preview.replace(preview) {
+                                previous.drop_images(window);
                             }
                         }
                         Ok(Some(AccessResult::Open(path))) => {
@@ -555,6 +652,33 @@ impl Spk {
         .detach();
         cx.notify();
     }
+
+    fn attachment_media_controls(
+        &self,
+        file: &Attachment,
+        kind: &'static str,
+        pending: bool,
+        cx: &Context<Self>,
+    ) -> Button {
+        let id = file.id.clone();
+        let playing = self
+            .chat_attachments
+            .playback
+            .as_ref()
+            .is_some_and(|playback| playback.id == id && playback.started.is_some());
+        Button::new("play-attachment")
+            .small()
+            .tab_stop(true)
+            .label(if playing {
+                format!("Pause {kind}")
+            } else {
+                format!("Play {kind}")
+            })
+            .disabled(pending)
+            .on_click(cx.listener(move |app, _, window, cx| {
+                app.toggle_attachment_media(id.clone(), window, cx);
+            }))
+    }
 }
 
 fn load_attachment(
@@ -568,6 +692,15 @@ fn load_attachment(
             .map(Preview::Image)
             .map(AccessResult::Preview)
             .ok_or("Image preview unavailable. Try downloading the file."),
+        Access::Preview if mime == "audio/webm" => AudioClip::decode_webm(bytes)
+            .map(Preview::Audio)
+            .map(AccessResult::Preview),
+        Access::Preview if is_audio(mime) => AudioClip::decode(&bytes)
+            .map(Preview::Audio)
+            .map(AccessResult::Preview),
+        Access::Preview if is_video(mime) => VideoClip::decode(bytes)
+            .map(Preview::Video)
+            .map(AccessResult::Preview),
         Access::Preview => {
             let text = String::from_utf8_lossy(&bytes[..bytes.len().min(64 * 1024)]);
             let mut lines = text.lines();
@@ -627,6 +760,27 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
+fn is_audio(mime: &str) -> bool {
+    matches!(
+        mime,
+        "audio/mpeg"
+            | "audio/mp4"
+            | "audio/m4a"
+            | "audio/x-m4a"
+            | "audio/wav"
+            | "audio/x-wav"
+            | "audio/ogg"
+            | "audio/webm"
+            | "audio/flac"
+            | "audio/x-flac"
+            | "audio/aac"
+    )
+}
+
+fn is_video(mime: &str) -> bool {
+    matches!(mime, "video/mp4" | "video/webm" | "video/x-matroska")
+}
+
 fn is_text(file: &Attachment) -> bool {
     file.size < 1024 * 1024
         && (file.mime.starts_with("text/")
@@ -682,7 +836,7 @@ fn open_extension(mime: &str) -> Option<&'static str> {
         "image/bmp" => ".bmp",
         "image/tiff" => ".tiff",
         "audio/mpeg" => ".mp3",
-        "audio/mp4" | "audio/x-m4a" => ".m4a",
+        "audio/mp4" | "audio/m4a" | "audio/x-m4a" => ".m4a",
         "audio/wav" | "audio/x-wav" => ".wav",
         "audio/ogg" => ".ogg",
         "audio/flac" | "audio/x-flac" => ".flac",
@@ -698,4 +852,36 @@ fn open_extension(mime: &str) -> Option<&'static str> {
         "text/plain" => ".txt",
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Access, AccessResult, Preview, is_audio, load_attachment};
+    use rodio::Source;
+
+    #[test]
+    fn previews_audio_only_webm() {
+        let bytes = include_bytes!("../../../tests/fixtures/attachments/preview.weba");
+        assert!(is_audio("audio/webm"));
+        let Ok(AccessResult::Preview(Preview::Audio(clip))) =
+            load_attachment(Access::Preview, "audio/webm", bytes.to_vec(), None)
+        else {
+            panic!("audio-only WebM should open an inline audio preview");
+        };
+        assert!(clip.samples.take(4_800).any(|sample| sample.abs() > 0.05));
+    }
+
+    #[test]
+    fn previews_audio_instead_of_rendering_it_as_text() {
+        let wav = b"RIFF\x2A\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0\x80\xBB\0\0\0\x77\x01\0\x02\0\x10\0data\x06\0\0\0\0\x80\0\0\0\x40";
+        let result = load_attachment(Access::Preview, "audio/wav", wav.to_vec(), None);
+        let Ok(AccessResult::Preview(Preview::Audio(clip))) = result else {
+            panic!("WAV attachment should produce an inline audio preview");
+        };
+        assert_eq!(clip.samples.channels().get(), 1);
+        assert_eq!(clip.samples.sample_rate().get(), 48_000);
+        assert_eq!(clip.samples.collect::<Vec<_>>(), [-1.0, 0.0, 0.5]);
+        assert!(!clip.truncated);
+        assert!(load_attachment(Access::Preview, "audio/wav", b"bad WAV".to_vec(), None).is_err());
+    }
 }

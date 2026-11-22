@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fs, io, path::Path};
 
-use livekit::{PlatformAudio, PlayoutDeviceId, RecordingDeviceId};
+use livekit::{PlatformAudio, PlayoutDeviceId};
 use rodio::cpal::{
     self,
     traits::{DeviceTrait, HostTrait},
@@ -358,12 +358,6 @@ pub(super) fn route_speakers(
 pub(super) fn switch_speakers(audio: &PlatformAudio, device: &Device) -> bool {
     audio
         .switch_playout_device(&PlayoutDeviceId::from_unchecked_guid(&device.id))
-        .is_ok()
-}
-
-pub(super) fn select_microphone(audio: &PlatformAudio, device: &Device) -> bool {
-    audio
-        .set_recording_device(&RecordingDeviceId::from_unchecked_guid(&device.id))
         .is_ok()
 }
 

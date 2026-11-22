@@ -5695,6 +5695,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
+name = "opus-pure"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5afacd236411dddcc284983066ef66b27e306e53ce4de85cd745b3da9be8a0be"
+
+[[package]]
 name = "ordered-float"
 version = "5.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7115,6 +7121,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
+name = "rusty_h264-common"
+version = "0.17.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c509b78794ac18b13b941c07cd47da2a33875489096c343a0f1e0e1a0254927"
+dependencies = [
+ "bytemuck",
+ "once_cell",
+ "portable-atomic",
+ "wide",
+]
+
+[[package]]
+name = "rusty_h264-decoder"
+version = "0.17.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6088e8adbc9287c02f99e605d9c37ecb3ce5781bb295e6201a64f19215b5512b"
+dependencies = [
+ "rusty_h264-common",
+]
+
+[[package]]
 name = "rustybuzz"
 version = "0.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7137,6 +7164,15 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
+name = "safe_arch"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96b02de82ddbe1b636e6170c21be622223aea188ef2e139be0a5b219ec215323"
+dependencies = [
+ "bytemuck",
+]
 
 [[package]]
 name = "same-file"
@@ -7703,6 +7739,8 @@ dependencies = [
  "rodio",
  "rust-embed",
  "rustls",
+ "rusty_h264-common",
+ "rusty_h264-decoder",
  "screencapturekit 11.1.2",
  "serde",
  "serde_json",
@@ -7713,11 +7751,22 @@ dependencies = [
  "url",
  "uuid",
  "wasapi",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
  "webrtc-sys",
  "windows 0.61.3",
  "windows 0.62.2",
  "windows-capture",
+ "windows-core 0.62.2",
+ "windows-registry 0.6.1",
  "x11rb",
+ "zbus 5.19.0",
+ "zvidlib-container",
+ "zvidlib-core",
+ "zvidlib-opus",
+ "zvidlib-vp8",
+ "zvidlib-vp9-decoder",
 ]
 
 [[package]]
@@ -9431,6 +9480,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "wide"
+version = "0.7.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ce5da8ecb62bcd8ec8b7ea19f69a51275e91299be594ea5cc6ef7819e16cd03"
+dependencies = [
+ "bytemuck",
+ "safe_arch",
+]
+
+[[package]]
 name = "winapi"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10788,4 +10847,108 @@ dependencies = [
  "serde",
  "syn 3.0.10",
  "winnow 1.0.5",
+]
+
+[[package]]
+name = "zvidlib-av1-syntax"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8939098d0a1e6e8da1e34eca2d4445d8bffa90e493369c04d81546a3a55bf0cf"
+dependencies = [
+ "zvidlib-core",
+]
+
+[[package]]
+name = "zvidlib-build"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4703bf6f711ae09b600c6272c6e629d4b9e9857c6aea50bb599f65bec876c169"
+
+[[package]]
+name = "zvidlib-color"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c337a4d5bae5eae15934c4d4081bf6a4be04d309332b018d8c2dfa494f95934"
+dependencies = [
+ "zvidlib-core",
+]
+
+[[package]]
+name = "zvidlib-container"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b055e7942c9f653a5b231c2bc6ff20c87551b80a1729bfa171a64795429a6cdc"
+dependencies = [
+ "zvidlib-av1-syntax",
+ "zvidlib-core",
+ "zvidlib-opus-syntax",
+ "zvidlib-vorbis-syntax",
+]
+
+[[package]]
+name = "zvidlib-core"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "568189ce764b4890342f24ed013595066b6beb0d8e30af37bb755fafae074b90"
+
+[[package]]
+name = "zvidlib-opus"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63981780caf813184e159a4e7f578dc97c5af644b38df2d145d024a33eb12fca"
+dependencies = [
+ "opus-pure",
+ "zvidlib-core",
+ "zvidlib-opus-syntax",
+]
+
+[[package]]
+name = "zvidlib-opus-syntax"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce3ecb5a3fd353a713d52c3c25a57d1ac1d0fec14ee00563d89c5e8546701057"
+dependencies = [
+ "zvidlib-core",
+]
+
+[[package]]
+name = "zvidlib-vorbis-syntax"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a17c521504be43d9123b0da8a6c028e2078900a44715fc673f27e26f0c95608c"
+dependencies = [
+ "zvidlib-core",
+]
+
+[[package]]
+name = "zvidlib-vp8"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed40a5ba17bf2b7db9b9ae08a9c5669753332be34f3b346439a1c1188aa3834a"
+dependencies = [
+ "zvidlib-build",
+ "zvidlib-color",
+ "zvidlib-core",
+]
+
+[[package]]
+name = "zvidlib-vp9-decoder"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eae92d55a3026a5ec60c3e3d3d63d7e872c831e31eb35fa764195f6779af262d"
+dependencies = [
+ "zvidlib-build",
+ "zvidlib-color",
+ "zvidlib-core",
+ "zvidlib-vp9-syntax",
+]
+
+[[package]]
+name = "zvidlib-vp9-syntax"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b0d61751ba4de74bb367a9f137aebc360322775ffb22301db0caf6f8bd60fec"
+dependencies = [
+ "zvidlib-color",
+ "zvidlib-core",
 ]

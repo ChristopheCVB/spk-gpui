@@ -1,4 +1,4 @@
-param([string]$Title, [string]$Ready)
+param([string]$Title, [string]$Ready, [switch]$IfAvailable)
 $ErrorActionPreference = 'Stop'
 
 if ($Title) {
@@ -49,6 +49,19 @@ if ($Title) {
     exit
 }
 
+if ($IfAvailable) {
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -Name Audio -Namespace SpkFixture -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("winmm.dll")]
+public static extern uint waveOutGetNumDevs();
+'@
+    if (![Environment]::UserInteractive -or [Windows.Forms.Screen]::AllScreens.Count -eq 0 -or
+        [SpkFixture.Audio]::waveOutGetNumDevs() -eq 0) {
+        Write-Host '::warning::Native Windows Screen Share remains unverified on this runner. The fixture needs an interactive display and a playback endpoint.'
+        exit 0
+    }
+}
+
 # Run from the repository root in an interactive Windows session.
 $workspace = Join-Path ([IO.Path]::GetTempPath()) ("spk-screen-" + [Guid]::NewGuid())
 New-Item -ItemType Directory -Path $workspace | Out-Null
@@ -60,12 +73,17 @@ try {
         Start-Sleep -Milliseconds 100
     }
     if (!(Test-Path -LiteralPath $readyFile)) { throw 'Synthetic Window failed to start.' }
-    & python tests/fixtures/livekit-peers.py mise exec -- cargo test --locked --bin spk-gpui livekit_screen_share_publishes_video_and_separate_audio -- --ignored
-    if ($LASTEXITCODE) { exit $LASTEXITCODE }
+    foreach ($mode in @('display', 'window')) {
+        $env:SPK_TEST_WINDOWS_SCREEN = $mode
+        Write-Host "Testing native Windows $mode sharing with a LiveKit peer."
+        & python tests/fixtures/livekit-peers.py mise exec -- cargo test --locked --bin spk-gpui livekit_screen_share_publishes_video_and_separate_audio -- --ignored
+        if ($LASTEXITCODE) { exit $LASTEXITCODE }
+    }
     & mise exec -- cargo test --locked --bin spk-gpui controlled_window_video_audio_and_source_loss -- --ignored
     exit $LASTEXITCODE
 } finally {
     if ($child -and !$child.HasExited) { Stop-Process -InputObject $child }
     Remove-Item -LiteralPath $workspace -Recurse -Force
     Remove-Item Env:SPK_TEST_SCREEN_WINDOW
+    Remove-Item Env:SPK_TEST_WINDOWS_SCREEN -ErrorAction SilentlyContinue
 }

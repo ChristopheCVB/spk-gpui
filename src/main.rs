@@ -26,11 +26,11 @@ fn main() -> std::process::ExitCode {
 
     let platform = platform::current_platform(false);
     platform.set_app_identity(APP_ID, "SPK");
-    let (activated, activations) = async_channel::unbounded::<SystemNotificationResponse>();
+    let (activated, activations) = async_channel::unbounded::<notifications::NativeActivation>();
     let startup = activated.clone();
     // The macOS notification delegate must be registered before launch finishes.
     platform.on_system_notification_response(Box::new(move |response| {
-        let _ = startup.try_send(response);
+        let _ = startup.try_send(response.into());
     }));
     Application::with_platform(platform)
         .with_assets(assets::AllAssets)
@@ -55,35 +55,7 @@ fn main() -> std::process::ExitCode {
                 cx.new(|cx| Spk::new(initial_alert, window, cx))
             })
             .expect("Failed to open the SPK window");
-            let app = app.downgrade();
-            // GPUI Kit installs its own handler at init. SPK's system alerts use exact targets.
-            cx.on_system_notification_response(move |response, _| {
-                let _ = activated.try_send(response);
-            });
-            cx.spawn(async move |cx| {
-                while let Ok(response) = activations.recv().await {
-                    if response
-                        .action_id
-                        .as_deref()
-                        .is_some_and(|action| action != "open")
-                    {
-                        continue;
-                    }
-                    let Some(target) = notifications::activation_target(&base, &response.tag)
-                    else {
-                        continue;
-                    };
-                    cx.update(|cx| {
-                        cx.dismiss_system_notification(&response.tag);
-                        cx.activate(true);
-                        let _ = window.update(cx, |_, window, cx| {
-                            window.activate_window();
-                            let _ = app.update(cx, |this, cx| this.open_alert(target, window, cx));
-                        });
-                    });
-                }
-            })
-            .detach();
+            notifications::register_window(cx, window, app, base, activated, activations);
             cx.on_window_closed(|cx, _| cx.quit()).detach();
             cx.activate(true);
         });

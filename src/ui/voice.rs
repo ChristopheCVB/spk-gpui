@@ -5,7 +5,7 @@ use crate::{
     voice::{Device, DeviceKind, DeviceList, NoiseSuppression, VoiceProcessing},
 };
 use gpui_kit::component::{
-    Disableable, IndexPath,
+    IndexPath,
     popover::Popover,
     select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState},
     slider::{Slider, SliderEvent, SliderState, SliderValue},
@@ -183,6 +183,7 @@ impl Spk {
                                             "Input device",
                                             microphone_controls(
                                                 sidebar.voice_intent.preferred.processing,
+                                                sidebar.echo_reference_unavailable(),
                                                 &app,
                                                 window,
                                                 cx,
@@ -234,7 +235,6 @@ pub(super) fn processing_switch(
     app: &Entity<Spk>,
     label: &'static str,
     checked: bool,
-    disabled: bool,
     setting: fn(bool) -> VoiceProcessingSetting,
 ) -> Switch {
     let app = app.downgrade();
@@ -242,7 +242,6 @@ pub(super) fn processing_switch(
         .label(label)
         .accessibility_label(label)
         .checked(checked)
-        .disabled(disabled)
         .tab_stop(true)
         .on_change(move |enabled, _, cx| {
             let _ = app.update(cx, |app, cx| {
@@ -259,18 +258,17 @@ const NOISE_MODES: [(NoiseSuppression, &str); 3] = [
 
 fn microphone_controls(
     settings: VoiceProcessing,
+    echo_reference_unavailable: bool,
     app: &Entity<Spk>,
     window: &mut Window,
     cx: &mut App,
 ) -> impl IntoElement + use<> {
     let echo = settings.echo_cancellation;
-    let mode = if echo {
-        NoiseSuppression::Standard
-    } else {
-        settings.noise_suppression
-    };
     let noise = window.use_keyed_state(
-        ("quick-noise-suppression", usize::from(echo)),
+        (
+            "quick-noise-suppression",
+            settings.noise_suppression as usize,
+        ),
         cx,
         |window, cx| {
             let app = app.downgrade();
@@ -290,7 +288,9 @@ fn microphone_controls(
                 }
             })
             .detach();
-            let index = NOISE_MODES.iter().position(|(noise, _)| *noise == mode);
+            let index = NOISE_MODES
+                .iter()
+                .position(|(noise, _)| *noise == settings.noise_suppression);
             SelectState::new(
                 SearchableVec::new(NOISE_MODES.map(|(_, label)| label).to_vec()),
                 index.map(|index| IndexPath::default().row(index)),
@@ -308,32 +308,31 @@ fn microphone_controls(
             Select::new(&noise)
                 .small()
                 .w_full()
-                .accessibility_label("Noise suppression")
-                .disabled(echo),
+                .accessibility_label("Noise suppression"),
         )
         .child(processing_switch(
             app,
             "Echo cancellation",
             echo,
-            false,
             VoiceProcessingSetting::EchoCancellation,
         ))
+        .when(echo && echo_reference_unavailable, |controls| {
+            controls.child(
+                Label::new("Echo cancellation is unavailable on the active speaker output.")
+                    .text_xs(),
+            )
+        })
         .child(processing_switch(
             app,
             "Auto gain",
-            echo || settings.auto_gain,
-            echo,
+            settings.auto_gain,
             VoiceProcessingSetting::AutoGain,
         ))
         .child(Label::new("Sensitivity").font_semibold())
         .child(
-            Label::new(if echo {
-                "Turn off echo cancellation to adjust processing."
-            } else {
-                "Higher picks up quieter speech."
-            })
-            .text_xs()
-            .text_color(cx.theme().muted_foreground),
+            Label::new("Higher picks up quieter speech.")
+                .text_xs()
+                .text_color(cx.theme().muted_foreground),
         )
         .child(
             Slider::new(&quick_level(
@@ -346,8 +345,7 @@ fn microphone_controls(
                 |value| Command::SetVoiceProcessing(VoiceProcessingSetting::Sensitivity(value)),
             ))
             .tab_stop(true)
-            .accessibility_label("Microphone sensitivity")
-            .disabled(echo),
+            .accessibility_label("Microphone sensitivity"),
         )
 }
 

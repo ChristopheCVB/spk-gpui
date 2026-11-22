@@ -48,6 +48,8 @@ struct State {
     hardware_format: Option<(u32, u32)>,
     output_format: Option<(u32, u32)>,
     subscribed: bool,
+    echo_reference_unavailable: bool,
+    echo_cancellation: bool,
     stats: VecDeque<SessionStats>,
 }
 
@@ -90,6 +92,15 @@ impl Peer {
 
     pub(crate) fn set_hardware_format(&self, format: Option<(u32, u32)>) {
         self.state.lock().unwrap().hardware_format = format;
+    }
+
+    pub(crate) fn set_echo_reference_unavailable(&self, unavailable: bool) {
+        self.state.lock().unwrap().echo_reference_unavailable = unavailable;
+        let _ = self.events.send(MediaEvent::RemoteAudioChanged);
+    }
+
+    pub(crate) fn echo_cancellation(&self) -> bool {
+        self.state.lock().unwrap().echo_cancellation
     }
 
     pub(crate) async fn wait_for_playout(&self, format: (u32, u32)) {
@@ -198,6 +209,8 @@ impl TestRoom {
             hardware_format: None,
             output_format: None,
             subscribed: false,
+            echo_reference_unavailable: false,
+            echo_cancellation: false,
             stats: VecDeque::new(),
         }));
         let playout_changed = Arc::new(tokio::sync::Notify::new());
@@ -277,8 +290,10 @@ impl RoomAudio for TestRoom {
         }
     }
 
-    fn sync_remote_audio(&mut self, _: &Intent, _: &Devices, _: Option<&Device>) {
-        self.state.lock().unwrap().subscribed = true;
+    fn sync_remote_audio(&mut self, _: &Intent, _: &Devices, speakers: Option<&Device>) -> bool {
+        let mut state = self.state.lock().unwrap();
+        state.subscribed = true;
+        speakers.is_some() && state.echo_reference_unavailable
     }
 
     fn playout_format(&self, _: &Device) -> Option<Self::PlayoutFormat> {
@@ -308,6 +323,10 @@ impl RoomAudio for TestRoom {
     fn start_microphone(&mut self, device: Device, _: VoiceProcessing, _: bool) {
         self.selected = Some(device);
         self.starting = true;
+    }
+
+    async fn sync_microphone_processing(&mut self, processing: VoiceProcessing) {
+        self.state.lock().unwrap().echo_cancellation = processing.echo_cancellation;
     }
 
     async fn stop_microphone(&mut self) {

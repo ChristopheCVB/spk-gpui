@@ -1,3 +1,8 @@
+#[cfg(target_os = "linux")]
+pub mod linux;
+#[cfg(target_os = "windows")]
+pub mod windows;
+
 use std::{
     collections::HashSet,
     fs, io,
@@ -195,6 +200,85 @@ impl LiveAlerts {
     pub fn disconnected(&mut self) {
         self.unlisted.clear();
     }
+}
+
+pub struct NativeActivation {
+    pub response: Option<gpui_kit::SystemNotificationResponse>,
+    #[cfg(target_os = "linux")]
+    pub token: Option<String>,
+}
+
+impl From<gpui_kit::SystemNotificationResponse> for NativeActivation {
+    fn from(response: gpui_kit::SystemNotificationResponse) -> Self {
+        Self {
+            response: Some(response),
+            #[cfg(target_os = "linux")]
+            token: None,
+        }
+    }
+}
+
+pub(crate) fn register_window(
+    cx: &mut gpui_kit::App,
+    window: gpui_kit::AnyWindowHandle,
+    app: gpui_kit::Entity<crate::ui::Spk>,
+    base: Url,
+    activated: async_channel::Sender<NativeActivation>,
+    activations: async_channel::Receiver<NativeActivation>,
+) {
+    let app = app.downgrade();
+    // GPUI Kit installs its own handler at init. SPK's system alerts use exact targets.
+    let native = activated.clone();
+    cx.on_system_notification_response(move |response, _| {
+        let _ = native.try_send(response.into());
+    });
+    #[cfg(target_os = "windows")]
+    if let Some(notifications) = windows::Notifications::register(activated) {
+        cx.set_global(notifications);
+    }
+    #[cfg(target_os = "linux")]
+    cx.spawn(async move |cx| {
+        if let Some(notifications) = linux::Notifications::register(activated).await {
+            cx.update(|cx| cx.set_global(notifications));
+        }
+    })
+    .detach();
+    cx.spawn(async move |cx| {
+        while let Ok(activation) = activations.recv().await {
+            let response = activation.response;
+            let target = if let Some(response) = &response {
+                if response
+                    .action_id
+                    .as_deref()
+                    .is_some_and(|action| action != "open")
+                {
+                    continue;
+                }
+                let Some(target) = activation_target(&base, &response.tag) else {
+                    continue;
+                };
+                Some(target)
+            } else {
+                None
+            };
+            cx.update(|cx| {
+                if let Some(response) = response {
+                    cx.dismiss_system_notification(&response.tag);
+                }
+                cx.activate(true);
+                let _ = window.update(cx, |_, window, cx| {
+                    #[cfg(target_os = "linux")]
+                    linux::activate_window(window, activation.token.as_deref());
+                    #[cfg(not(target_os = "linux"))]
+                    window.activate_window();
+                    if let Some(target) = target {
+                        let _ = app.update(cx, |this, cx| this.open_alert(target, window, cx));
+                    }
+                });
+            });
+        }
+    })
+    .detach();
 }
 
 const TAG_PREFIX: &str = "spk-alert:";

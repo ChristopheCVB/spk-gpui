@@ -21,11 +21,11 @@ pub(crate) mod screen;
 pub(crate) mod soundboard;
 pub(crate) mod video;
 
-pub(crate) use devices::MediaOutput;
 pub use devices::{
     Device, DeviceKind, DeviceList, DevicePreferences, Devices, NoiseSuppression,
     ParticipantVolumeChange, VoiceProcessing,
 };
+pub(crate) use devices::{MediaOutput, open_media_output};
 pub use media::Diagnostics;
 use media::Media;
 #[cfg(test)]
@@ -126,6 +126,7 @@ pub struct Report {
     pub speakers: Option<Device>,
     pub speaking: HashSet<String>,
     pub diagnostics: Diagnostics,
+    pub echo_reference_unavailable: bool,
 }
 
 #[derive(Clone)]
@@ -203,6 +204,7 @@ impl Call {
                             microphone: None,
                             speakers: None,
                             diagnostics: Diagnostics::default(),
+                            echo_reference_unavailable: false,
                             speaking: if muted {
                                 HashSet::new()
                             } else {

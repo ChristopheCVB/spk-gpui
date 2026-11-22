@@ -141,6 +141,21 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
     .await
     .unwrap();
     let (native, scope) = (None, AudioScope::Application);
+    let native_size = None;
+    #[cfg(target_os = "macos")]
+    let (native, scope, native_size) = if let Ok(mode) = std::env::var("SPK_TEST_MAC_SCREEN") {
+        let title = std::env::var("SPK_TEST_SCREEN_WINDOW").unwrap();
+        let (selection, size) = macos::fixture_selection(&mode, &title);
+        let scope = match mode.as_str() {
+            "display" => AudioScope::PlaybackMix,
+            "window" => AudioScope::Application,
+            _ => panic!("invalid macOS Screen Share fixture mode"),
+        };
+        assert_eq!(selection.audio, Some(scope));
+        (Some(selection.capture), scope, Some(size))
+    } else {
+        (native, scope, native_size)
+    };
     #[cfg(target_os = "linux")]
     let (native, scope) = if let Ok(output) = std::env::var("SPK_TEST_PULSE_OUTPUT") {
         let choice = linux::choices()
@@ -149,14 +164,18 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
             .into_iter()
             .find(|choice| choice.id == "display" || choice.id.starts_with("display:"))
             .expect("fixture Linux display");
-        let selected = linux::select(
-            choice,
-            Some(Device {
-                id: output.clone(),
-                name: output,
-            }),
+        let selected = timeout(
+            Duration::from_secs(6),
+            linux::select(
+                choice,
+                Some(Device {
+                    id: output.clone(),
+                    name: output,
+                }),
+            ),
         )
         .await
+        .expect("selected display delivers video")
         .unwrap();
         assert_eq!(selected.audio, Some(AudioScope::PlaybackMix));
         (Some(selected.capture), AudioScope::PlaybackMix)
@@ -164,27 +183,27 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
         (native, scope)
     };
     #[cfg(windows)]
-    let (native, scope) = if let Ok(title) = std::env::var("SPK_TEST_SCREEN_WINDOW") {
-        let choice = windows::choices()
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|choice| choice.label == format!("Window · {title}"))
-            .expect("synthetic Windows fixture");
-        let selected = windows::select(choice, None).await.unwrap();
-        assert_eq!(selected.audio, Some(AudioScope::Application));
-        (Some(selected.capture), AudioScope::Application)
+    let (native, scope, native_size) = if let Ok(title) = std::env::var("SPK_TEST_SCREEN_WINDOW") {
+        let display = std::env::var("SPK_TEST_WINDOWS_SCREEN").as_deref() == Ok("display");
+        let (selected, size) = windows::fixture_selection(&title, display).await;
+        let scope = if display {
+            AudioScope::PlaybackMix
+        } else {
+            AudioScope::Application
+        };
+        assert_eq!(selected.audio, Some(scope));
+        (Some(selected.capture), scope, size)
     } else {
-        (native, scope)
+        (native, scope, native_size)
     };
     let synthetic = native.is_none();
-    let audio_threshold = if !synthetic && scope == AudioScope::Application {
+    let audio_threshold = if !synthetic && (cfg!(windows) || scope == AudioScope::Application) {
         100
     } else {
         500
     };
     let check_peer_dimensions = |actual: (u32, u32), expected: (u32, u32)| {
-        if !synthetic && scope == AudioScope::Application {
+        if native_size.is_some() || (!synthetic && scope == AudioScope::Application) {
             // WebRTC aligns native capture dimensions for the encoder.
             assert!(actual.0.abs_diff(expected.0) <= 4 && actual.1.abs_diff(expected.1) <= 4);
         } else {
@@ -225,6 +244,11 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
         assert_eq!((fps, audio), (30, Some(scope)));
         if synthetic {
             assert_eq!((width, height), (1920, 1080));
+        } else if let Some((source_width, source_height)) = native_size {
+            assert_eq!(
+                Some((width, height)),
+                Quality::default().dimensions(source_width, source_height)
+            );
         } else if scope == AudioScope::PlaybackMix {
             assert_eq!((width, height), (640, 480));
         } else {
@@ -246,11 +270,7 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
                     TrackSource::Screenshare => {
                         assert_eq!(
                             publication.name(),
-                            if synthetic {
-                                "spk:screen:1080:30"
-                            } else {
-                                "screen"
-                            }
+                            Quality::publication_name(initial_size.0, initial_size.1, 30)
                         );
                         video = Some(publication);
                     }
@@ -314,7 +334,13 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
         height: 720,
         fps: 5,
     };
-    let replacement_size = if synthetic { (1280, 720) } else { initial_size };
+    let replacement_size = if synthetic {
+        (1280, 720)
+    } else if let Some((width, height)) = native_size {
+        preset.dimensions(width, height).unwrap()
+    } else {
+        initial_size
+    };
     requests.send_modify(|intent| intent.screen.quality = preset);
     timeout(Duration::from_secs(8), async {
         let state = report_rx
@@ -351,11 +377,7 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
     assert_ne!(replacement.sid(), video.sid());
     assert_eq!(
         replacement.name(),
-        if synthetic {
-            "spk:screen:720:5"
-        } else {
-            "screen"
-        }
+        Quality::publication_name(replacement_size.0, replacement_size.1, 5)
     );
     assert!(audio.is_desired());
 
@@ -429,8 +451,17 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
     .await
     .unwrap();
 
-    stop.send(()).unwrap();
-    let (publisher, result) = share.await.unwrap();
+    let source_stop = std::env::var_os("SPK_TEST_MAC_SCREEN_STOP")
+        .or_else(|| std::env::var_os("SPK_TEST_WAYLAND_SCREEN_STOP"));
+    if let Some(path) = source_stop {
+        std::fs::write(path, []).unwrap();
+    } else {
+        stop.send(()).unwrap();
+    }
+    let (publisher, result) = timeout(Duration::from_secs(8), share)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(result, Err(CaptureError::SourceLost));
     timeout(Duration::from_secs(8), async {
         let mut unpublished = 0;

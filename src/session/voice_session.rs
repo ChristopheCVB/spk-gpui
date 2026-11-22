@@ -9,7 +9,7 @@ use super::{Command, Sidebar, VoiceProcessingSetting};
 use crate::api::{Channel, Connection, Failure, SpkClient, VoiceModeration, VoiceSocket};
 use crate::sounds::Sound;
 use crate::voice::{
-    self, Call, DeviceKind, DevicePreferences, Intent, Issue as VoiceIssue,
+    self, Call, DeviceKind, DevicePreferences, Intent, Issue as VoiceIssue, MediaOutput,
     ParticipantVolumeChange, Report as VoiceReport, Status as VoiceStatus, Update as VoiceUpdate,
     screen::{self, Action, State},
     video::{CameraStatus, VideoReport},
@@ -77,6 +77,25 @@ impl VoiceView {
 }
 
 impl Sidebar {
+    pub(crate) fn echo_reference_unavailable(&self) -> bool {
+        self.voice
+            .as_ref()
+            .and_then(|voice| voice.media.as_ref())
+            .is_some_and(|report| report.echo_reference_unavailable)
+    }
+
+    pub(crate) fn media_output(&self) -> MediaOutput {
+        let preferred = &self.voice_intent.preferred;
+        MediaOutput {
+            device: self
+                .devices
+                .media_outputs
+                .resolve(preferred.media_output.as_ref())
+                .cloned(),
+            volume: preferred.output_gain(),
+        }
+    }
+
     pub fn camera_status(&self) -> CameraStatus {
         let camera = &self.voice_intent.camera;
         if !camera.enabled {
@@ -590,9 +609,6 @@ impl VoiceSession {
                 let processing = &mut sidebar.voice_intent.preferred.processing;
                 match setting {
                     VoiceProcessingSetting::EchoCancellation(enabled) => {
-                        if processing.echo_cancellation != enabled {
-                            sidebar.voice_intent.retry_mic += 1;
-                        }
                         processing.echo_cancellation = enabled;
                     }
                     VoiceProcessingSetting::NoiseSuppression(mode) => {

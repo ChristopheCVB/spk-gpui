@@ -238,11 +238,7 @@ impl SoundboardSession {
 pub(super) fn soundboard_output(sidebar: &Sidebar) -> MediaOutput {
     let preferred = &sidebar.voice_intent.preferred;
     MediaOutput {
-        device: sidebar
-            .devices
-            .media_outputs
-            .resolve(preferred.media_output.as_ref())
-            .cloned(),
         volume: preferred.output_gain() * f32::from(preferred.soundboard_volume.min(100)) / 100.0,
+        ..sidebar.media_output()
     }
 }

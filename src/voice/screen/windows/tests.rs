@@ -1,5 +1,65 @@
 use super::*;
 
+pub(in super::super) async fn fixture_selection(
+    title: &str,
+    display: bool,
+) -> (Selection, Option<(u32, u32)>) {
+    let window = Window::from_name(title).expect("synthetic Windows fixture");
+    let (choice, playback, size) = if display {
+        let monitor = window.monitor().expect("display showing synthetic window");
+        let choice = sources()
+            .into_iter()
+            .find(|(_, target)| {
+                matches!(target, CaptureItemTypes::Monitor(candidate)
+                    if candidate.as_raw_hmonitor() == monitor.as_raw_hmonitor())
+            })
+            .expect("fixture display in source list")
+            .0;
+        let _apartment = Apartment::new().unwrap();
+        // SoundPlayer renders through Windows' default waveform output device.
+        let endpoint = DeviceEnumerator::new()
+            .unwrap()
+            .get_default_device_for_role(Direction::Render, Role::Console)
+            .expect("fixture needs a render endpoint");
+        let playback = Device {
+            id: endpoint.get_id().unwrap(),
+            name: "Fixture playback endpoint".into(),
+        };
+        let size = (monitor.width().unwrap(), monitor.height().unwrap());
+        (choice, Some(playback), Some(size))
+    } else {
+        let choice = choices()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|choice| Some(&choice.id) == window_id(&window).as_ref())
+            .expect("fixture window in source list");
+        (choice, None, None)
+    };
+    (select(choice, playback).await.unwrap(), size)
+}
+
+#[test]
+fn windows_capture_distinguishes_denied_permission_from_picker_cancellation() {
+    use windows_wgc::{Win32::Foundation::E_FAIL, core::Error};
+
+    for code in [E_ACCESSDENIED, ERROR_ACCESS_DISABLED_BY_POLICY.to_hresult()] {
+        let denied = Error::from_hresult(code);
+        assert_eq!(graphics_error(denied.clone()), CaptureError::Permission);
+        assert_eq!(picker_error(denied), CaptureError::Permission);
+    }
+    for code in [E_POINTER, E_ABORT, ERROR_CANCELLED.to_hresult()] {
+        assert_eq!(
+            picker_error(Error::from_hresult(code)),
+            CaptureError::Cancelled
+        );
+    }
+    assert_eq!(
+        picker_error(Error::from_hresult(E_FAIL)),
+        CaptureError::Unavailable
+    );
+}
+
 #[test]
 fn selected_window_audio_never_becomes_an_endpoint_mix() {
     let endpoint = Device {
@@ -60,7 +120,31 @@ async fn controlled_window_video_audio_and_source_loss() {
     .await
     .unwrap();
     assert_eq!(video_only.audio, None);
-    drop(video_only);
+    let (video, mut frames) = mpsc::channel(1);
+    let (audio_unavailable, _) = watch::channel(false);
+    let (_quality, target) = watch::channel(Quality::default());
+    let capture = tokio::spawn(video_only.capture.start(
+        false,
+        CaptureSink {
+            video,
+            quality: target,
+            audio: None,
+            audio_unavailable,
+        },
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_secs(8), frames.recv())
+            .await
+            .expect("display video starts with no playback endpoint")
+            .is_some()
+    );
+    capture.abort();
+    assert!(capture.await.unwrap_err().is_cancelled());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while frames.recv().await.is_some() {}
+    })
+    .await
+    .expect("display capture releases its outputs after cancellation");
     let choice = choices
         .into_iter()
         .find(|choice| Some(&choice.id) == window_id(&window).as_ref())

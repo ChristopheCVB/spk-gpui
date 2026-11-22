@@ -125,15 +125,13 @@ impl Settings {
             (NoiseSuppression::Standard, "Standard"),
             (NoiseSuppression::Enhanced, "Enhanced (DeepFilterNet)"),
         ];
-        let active_mode = if echo {
-            NoiseSuppression::Standard
-        } else {
-            settings.noise_suppression
-        };
         let spk = self.spk.downgrade();
         let noise = RadioGroup::horizontal("noise-suppression")
-            .disabled(echo)
-            .selected_index(modes.iter().position(|(mode, _)| *mode == active_mode))
+            .selected_index(
+                modes
+                    .iter()
+                    .position(|(mode, _)| *mode == settings.noise_suppression),
+            )
             .children(modes.map(|(_, label)| label))
             .on_change(move |index, _, cx| {
                 let _ = spk.update(cx, |app, cx| {
@@ -147,11 +145,20 @@ impl Settings {
                 .flex()
                 .flex_col()
                 .gap_3()
-                .child(processing_switch(&self.spk, "Echo cancellation", echo, false, VoiceProcessingSetting::EchoCancellation))
-                .when(echo, |body| body.child(
-                    Label::new("Turn off echo cancellation to adjust noise suppression, automatic gain, and sensitivity.")
-                        .text_color(cx.theme().muted_foreground),
+                .child(processing_switch(
+                    &self.spk,
+                    "Echo cancellation",
+                    echo,
+                    VoiceProcessingSetting::EchoCancellation,
                 ))
+                .when(echo && sidebar.echo_reference_unavailable(), |controls| {
+                    controls.child(
+                        Label::new(
+                            "Echo cancellation is unavailable on the active speaker output.",
+                        )
+                        .text_xs(),
+                    )
+                })
                 .child(Label::new("Noise suppression"))
                 .child(noise)
                 .child(
@@ -167,18 +174,24 @@ impl Settings {
                                         .id("deepfilternet-license-text")
                                         .max_h(px(420.0))
                                         .overflow_y_scroll()
-                                        .child(include_str!("../../../assets/deepfilternet-license.txt")),
+                                        .child(include_str!(
+                                            "../../../assets/deepfilternet-license.txt"
+                                        )),
                                 )
                             });
                         }),
                 )
-                .child(processing_switch(&self.spk, "Automatic gain control", echo || settings.auto_gain, echo, VoiceProcessingSetting::AutoGain))
+                .child(processing_switch(
+                    &self.spk,
+                    "Automatic gain control",
+                    settings.auto_gain,
+                    VoiceProcessingSetting::AutoGain,
+                ))
                 .child(Label::new(format!("Sensitivity {sensitivity:.0}%")))
                 .child(
                     Slider::new(&self.sensitivity)
                         .tab_stop(true)
-                        .accessibility_label("Microphone sensitivity")
-                        .disabled(echo),
+                        .accessibility_label("Microphone sensitivity"),
                 ),
             cx,
         )
