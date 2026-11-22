@@ -290,9 +290,11 @@ impl Video {
                         if let Some(camera) = &self.publication {
                             camera.source.capture_frame(&frame);
                         }
-                        self.report.participants
+                        let frames = self.report.participants
                             .entry(room.local_participant().identity().0)
-                            .or_default().frames.entry(VideoSource::Camera).or_default().update(&frame, true);
+                            .or_default().frames.entry(VideoSource::Camera).or_default().clone();
+                        // Keep preview conversion off the runtime that feeds voice playback.
+                        let _ = tokio::task::spawn_blocking(move || frames.update(&frame, true)).await;
                     } else {
                         let message = self.capture.as_mut().expect("camera capture exists").failure().await;
                         self.stop_camera().await;
