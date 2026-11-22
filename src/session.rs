@@ -218,7 +218,7 @@ pub enum Command {
     #[cfg(windows)]
     ChooseWindowsScreenSource(
         u64,
-        Result<windows_wgc::Graphics::Capture::GraphicsCaptureItem, screen::CaptureError>,
+        Result<::windows::Graphics::Capture::GraphicsCaptureItem, screen::CaptureError>,
     ),
     StartScreenShare(u64, bool),
     StopScreenShare(u64),

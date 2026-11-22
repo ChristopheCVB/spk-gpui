@@ -212,7 +212,7 @@ pub enum Action {
     Open,
     Choose(String, Option<Device>),
     #[cfg(windows)]
-    ChooseSystem(Result<windows_wgc::Graphics::Capture::GraphicsCaptureItem, CaptureError>),
+    ChooseSystem(Result<::windows::Graphics::Capture::GraphicsCaptureItem, CaptureError>),
     Start(bool),
 }
 

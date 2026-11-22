@@ -72,11 +72,27 @@ zbus = { version = "6", default-features = false, features = ["default-rt", "pro
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"
 wasapi = "=0.27.0"
-windows = { version = "0.62", features = ["Data_Xml_Dom", "UI_Notifications", "Win32_Media_Audio", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_Threading", "Win32_UI_Notifications", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.62", features = [
+    "Data_Xml_Dom",
+    "Graphics_Capture",
+    "Graphics_DirectX_Direct3D11",
+    "UI_Notifications",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Media_Audio",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_UI_Notifications",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
 windows-core = "0.62"
 windows-registry = "0.100"
-windows-capture = "=1.5.0"
-windows-wgc = { package = "windows", version = "0.61", features = ["Graphics_Capture", "Graphics_DirectX_Direct3D11", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_System_WinRT_Direct3D11", "Win32_UI_Shell"] }
+windows-capture = "=2.0.1"
 
 [build-dependencies]
 embed-resource = "3.0"
