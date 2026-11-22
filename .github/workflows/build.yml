@@ -12,8 +12,6 @@ on:
       asset-count:
         description: Number of packages produced by the build matrix
         value: ${{ jobs.build.outputs.asset-count }}
-  push:
-    branches: [main]
 
 permissions:
   contents: read
@@ -53,6 +51,10 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ inputs.release-tag != '' && format('refs/tags/{0}', inputs.release-tag) || '' }}
+      - name: Verify the release checkout
+        if: inputs.release-tag != ''
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
       - uses: jdx/mise-action@v5.3.0
       - name: Select Xcode for ScreenCaptureKit
         if: runner.os == 'macOS'

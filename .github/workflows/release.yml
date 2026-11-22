@@ -1,11 +1,8 @@
-name: Release
+name: Main
 
 on:
   push:
     branches: [main]
-
-concurrency:
-  group: release
 
 permissions:
   contents: read
@@ -13,51 +10,66 @@ permissions:
 jobs:
   release-please:
     runs-on: ubuntu-24.04
+    concurrency:
+      group: release
+      queue: max
     permissions:
       contents: write
       issues: write
       pull-requests: write
     outputs:
-      tag: ${{ steps.draft.outputs.tag }}
+      is-release: ${{ steps.merge.outputs.is-release }}
+      tag: ${{ steps.tag.outputs.tag }}
     steps:
-      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
-        id: release
-        continue-on-error: true
-      - name: Identify the draft to build
-        id: draft
+      - name: Check whether this push merged a Release PR
+        id: merge
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.release.outputs.tag_name }}
-          RELEASE_OUTCOME: ${{ steps.release.outcome }}
         shell: bash
         run: |
-          if [[ -z "$RELEASE_TAG" ]]; then
-            # Release Please can tag a merge handled by a different push.
-            RELEASE_TAG=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" |
-              jq -rs '
-                add // [] | map(select(.draft and .author.login == "github-actions[bot]"
-                  and (.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))))
-                | min_by(.id).tag_name // empty
-              ')
-          fi
-          if [[ -z "$RELEASE_TAG" && "$RELEASE_OUTCOME" != success ]]; then
-            echo "::error::Release Please failed and no automated draft was found."
+          is_release=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" |
+            jq -r --arg sha "$GITHUB_SHA" 'any(.[];
+              .merged_at != null and .merge_commit_sha == $sha and .base.ref == "main"
+              and .head.repo.full_name == .base.repo.full_name
+              and .user.login == "github-actions[bot]"
+              and (.head.ref | test("^release-please--branches--main(--|$)"))
+            )')
+          printf 'is-release=%s\n' "$is_release" >> "$GITHUB_OUTPUT"
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          target-branch: main
+          skip-github-release: ${{ steps.merge.outputs.is-release != 'true' }}
+      - name: Verify the release tag for this push
+        if: steps.merge.outputs.is-release == 'true'
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          # The manifest still identifies this release if Release Please already created its draft.
+          version=$(gh api "repos/$GH_REPO/contents/.release-please-manifest.json?ref=$GITHUB_SHA" \
+            -H 'Accept: application/vnd.github.raw+json' | jq -er '."."')
+          tag="v$version"
+          git check-ref-format "refs/tags/$tag"
+          gh release view "$tag" --json tagName --jq .tagName > /dev/null
+          tagged_sha=$(gh api "repos/$GH_REPO/commits/refs/tags/$tag" --jq .sha)
+          if [[ "$tagged_sha" != "$GITHUB_SHA" ]]; then
+            echo "::error::Release tag $tag does not point to the pushed commit $GITHUB_SHA."
             exit 1
           fi
-          if [[ -n "$RELEASE_TAG" ]]; then
-            git check-ref-format "refs/tags/$RELEASE_TAG"
-          fi
-          printf 'tag=%s\n' "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
 
   build:
     needs: release-please
-    if: needs.release-please.outputs.tag != ''
+    if: ${{ !cancelled() && (needs.release-please.result == 'success' || needs.release-please.outputs.is-release == 'false') }}
     uses: ./.github/workflows/build.yml
     with:
       release-tag: ${{ needs.release-please.outputs.tag }}
 
   publish:
     needs: [release-please, build]
+    if: needs.release-please.outputs.tag != ''
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -86,7 +98,7 @@ jobs:
           done
           draft_id=$(gh release view "$TAG" --json databaseId,isDraft --jq 'select(.isDraft) | .databaseId')
           if [[ -n "$draft_id" ]]; then
+            test "$(gh api "repos/$GH_REPO/commits/refs/tags/$TAG" --jq .sha)" = "$GITHUB_SHA"
             gh release upload "$TAG" "${assets[@]}" --clobber
-            gh api "repos/$GH_REPO/git/ref/tags/$TAG" --silent
             gh api "repos/$GH_REPO/releases/$draft_id" --method PATCH -F draft=false -f make_latest=legacy --silent
           fi

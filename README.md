@@ -4,7 +4,7 @@ A native desktop client for the self-hosted SPK chat and voice app. Sign in with
 
 ## Download
 
-Download the package for your platform from [GitHub Releases](https://github.com/ChristopheCVB/spk-gpui/releases). Development builds are also available under **Actions → Build** on runs from `main`.
+Download the package for your platform from [GitHub Releases](https://github.com/ChristopheCVB/spk-gpui/releases). Development builds are also available under **Actions → Main** on ordinary pushes to `main`.
 
 | Platform | Download | Launch |
 | --- | --- | --- |
@@ -16,9 +16,9 @@ If macOS blocks a download you trust, use **System Settings → Privacy & Securi
 
 On Linux, use an X11 or Wayland session with Vulkan and working PulseAudio or ALSA audio.
 
-To enable downloads for your deployment, set the `SPK_URL` HTTPS origin and `LIVEKIT_URL` WSS endpoint in **Settings → Secrets and variables → Actions → Variables**. Use credential-free URLs because the binaries embed them. The next push to `main` builds for that deployment and uploads each successful platform build. If either variable is missing, CI warns and runs its checks with example URLs. [GitHub repository variables](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-variables#creating-configuration-variables-for-a-repository)
+To enable downloads for your deployment, set the `SPK_URL` HTTPS origin and `LIVEKIT_URL` WSS endpoint in **Settings → Secrets and variables → Actions → Variables**. Use credential-free URLs because the binaries embed them. On an ordinary push to `main`, CI builds for that deployment and uploads each successful platform build. If either variable is missing, CI warns and runs its checks with example URLs. [GitHub repository variables](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-variables#creating-configuration-variables-for-a-repository)
 
-For a versioned release, select **Approve workflows to run** when release-please opens or updates its PR. Review the PR after the Build checks pass and merge it when ready to ship. The Release workflow tags the commit and publishes after all three platform downloads are attached. If a release build or upload fails, use **Re-run failed jobs** on that Release run to finish the draft.
+For a versioned release, select **Approve workflows to run** when Release Please opens or updates its PR. Review the PR after the Build checks pass and merge it when ready to ship. The **Main** workflow tags the commit, builds optimized packages, and publishes after all three platform downloads are attached. If the release fails, use **Re-run failed jobs** on its original **Main** run.
 
 Review Dependabot PRs after the same Build checks pass. To receive individual security update PRs, enable Dependabot alerts and security updates in the repository's **Settings → Code security**. [GitHub security update settings](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/secure-your-dependencies/configure-security-updates)
 
