@@ -66,7 +66,7 @@ wayland-backend = { version = "0.3", features = ["client_system", "dlopen"] }
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 webrtc-sys = "=0.3.55"
-x11rb = { version = "0.13", features = ["allow-unsafe-code", "xkb"] }
+x11rb = { version = "0.14", features = ["allow-unsafe-code", "xkb"] }
 zbus = { version = "6", default-features = false, features = ["default-rt", "proxy", "service"] }
 
 [target.'cfg(windows)'.dependencies]
