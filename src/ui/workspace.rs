@@ -126,7 +126,10 @@ impl Spk {
         true
     }
 
-    fn selected_voice_destination<'a>(&self, sidebar: &'a Sidebar) -> Option<&'a Channel> {
+    pub(super) fn selected_voice_destination<'a>(
+        &self,
+        sidebar: &'a Sidebar,
+    ) -> Option<&'a Channel> {
         voice_channels(sidebar)
             .find(|channel| Some(channel.id.as_str()) == self.selected_voice_channel.as_deref())
             .or_else(|| voice_channels(sidebar).next())
@@ -171,7 +174,10 @@ impl Spk {
             sidebar.voice_moderation_notice,
             self.form_error,
         ];
-        let rejoin = sidebar.rejoin_channel().map(str::to_owned);
+        let rejoin = sidebar
+            .rejoin_channel()
+            .filter(|id| chat.is_some() || selected_channel.is_none_or(|channel| channel.id != *id))
+            .map(str::to_owned);
 
         div()
             .id("workspace")
@@ -325,7 +331,7 @@ impl Spk {
                     .child(match chat {
                         Some(chat) => self.chat_stage(sidebar, chat, cx).into_any_element(),
                         None => self
-                            .voice_channel_stage(sidebar, selected_channel, cx)
+                            .voice_channel_stage(sidebar, selected_channel, window, cx)
                             .into_any_element(),
                     })
                     .when(
@@ -742,120 +748,177 @@ impl Spk {
         &self,
         sidebar: &Sidebar,
         selected_channel: Option<&Channel>,
+        window: &Window,
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
-        let call = selected_channel.and_then(|channel| {
-            sidebar
-                .voice
-                .as_ref()
-                .filter(|call| call.channel_id == channel.id)
-        });
-        let in_voice = call.is_some_and(VoiceView::is_participating);
-        let mut participants =
-            selected_channel.map_or_else(Vec::new, |channel| sidebar.participants(&channel.id));
-        if let Some(id) = sidebar.profile.id.as_deref().filter(|_| in_voice)
-            && !participants.iter().any(|person| person.id == id)
-        {
-            // The local media can connect before SPK echoes our voice presence.
-            participants.insert(
-                0,
-                Participant {
-                    id,
-                    name: sidebar.profile.name(),
-                    flags: Default::default(),
-                    video: None,
-                },
-            );
-        }
+        let call = sidebar
+            .voice
+            .as_ref()
+            .filter(|call| selected_channel.is_some_and(|channel| call.channel_id == channel.id));
+        let joined = call.filter(|call| call.is_participating());
+        let switching = selected_channel
+            .is_some_and(|channel| sidebar.switching_to() == Some(channel.id.as_str()));
+        let departing = if switching {
+            sidebar.voice.as_ref()
+        } else {
+            call
+        };
+        let participants = joined.map_or_else(
+            || selected_channel.map_or_else(Vec::new, |channel| sidebar.participants(&channel.id)),
+            |call| super::video::joined_participants(sidebar, call),
+        );
         let message = match (selected_channel, sidebar.channels.is_some()) {
             (None, false) if !sidebar.load_failed => Some("Loading voice channels…"),
             (None, true) => Some("No voice channels"),
             (Some(_), _) if participants.is_empty() => Some("Nobody is here yet."),
             _ => None,
         };
-        let theater =
-            self.video_stage.theater.as_deref().filter(|id| {
-                in_voice && participants.iter().any(|participant| participant.id == *id)
-            });
-        let camera_status = call.and_then(|_| match sidebar.camera_status() {
+        let camera_status = joined.and_then(|_| match sidebar.camera_status() {
             CameraStatus::Starting => Some("Starting Camera…"),
             CameraStatus::Failed(message) => Some(message),
             _ => None,
         });
+        let fullscreen = self.video_stage.fullscreen;
+        let gap = if self.compact() { px(6.0) } else { px(12.0) };
+        let theater = self.video_stage.theater.as_deref().and_then(|id| {
+            joined.and_then(|call| {
+                let focused = participants.iter().find(|person| person.id == id)?;
+                Some((focused, call))
+            })
+        });
+        let show_strip = !fullscreen && !self.video_stage.participants_hidden;
+        let tile_size = if window.viewport_size().width < px(640.0) {
+            size(px(244.0), px(137.25))
+        } else {
+            size(px(320.0), px(180.0))
+        };
+
         div()
             .id("voice-stage")
-            .relative()
             .flex()
             .flex_col()
             .flex_1()
             .min_h_0()
-            .child(
+            .when_some(departing.filter(|_| !fullscreen), |stage, call| {
+                stage.child(
+                    div()
+                        .id("stage-connection-status")
+                        .role(Role::Status)
+                        .text_center()
+                        .flex_shrink_0()
+                        .px_3()
+                        .py_1()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(call_status(call, switching)),
+                )
+            })
+            .child(if let Some((focused, call)) = theater {
+                let others = || participants.iter().filter(|person| person.id != focused.id);
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .when(!fullscreen, |tiles| tiles.p_2().gap(gap))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .child(self.voice_tile(focused, call, sidebar, None, cx)),
+                    )
+                    .when(show_strip && others().next().is_some(), |stage| {
+                        self.scroll_to_focused_participant(
+                            others().map(|person| person.id),
+                            window,
+                            cx,
+                        );
+                        stage.child(
+                            div()
+                                .id("voice-participant-strip")
+                                .role(Role::Group)
+                                .aria_label("Voice participants")
+                                .flex()
+                                .flex_shrink_0()
+                                .gap(gap)
+                                .p_1()
+                                .overflow_x_scroll()
+                                .track_scroll(&self.video_stage.participant_scroll)
+                                .children(others().map(|person| {
+                                    self.voice_tile(
+                                        person,
+                                        call,
+                                        sidebar,
+                                        Some(size(px(192.0), px(108.0))),
+                                        cx,
+                                    )
+                                })),
+                        )
+                    })
+                    .into_any_element()
+            } else {
                 div()
                     .id("voice-tiles")
                     .flex()
                     .flex_col()
                     .flex_1()
                     .min_h_0()
-                    .when(theater.is_none(), |tiles| tiles.overflow_y_scroll())
+                    .overflow_y_scroll()
                     .child(
                         div()
                             .flex()
                             .flex_wrap()
-                            .items_center()
                             .justify_center()
-                            .gap(if self.compact() { px(6.0) } else { px(12.0) })
-                            .when(theater.is_none(), |tiles| {
-                                tiles
-                                    .p(if self.compact() { px(8.0) } else { px(16.0) })
-                                    .my_auto()
-                            })
-                            .when(theater.is_some(), |tiles| {
-                                tiles
-                                    .flex_1()
-                                    .min_h_0()
-                                    .when(!self.video_stage.fullscreen, |tiles| tiles.p_3())
-                            })
+                            .my_auto()
+                            .gap(gap)
+                            .p(if self.compact() { px(8.0) } else { px(16.0) })
                             .children(message.map(|message| {
                                 Label::new(message).text_color(theme.muted_foreground)
                             }))
-                            .children(
-                                participants
-                                    .into_iter()
-                                    .filter(|person| theater.is_none_or(|id| person.id == id))
-                                    .map(|person| self.voice_tile(person, call, sidebar, cx)),
-                            ),
-                    ),
-            )
-            .when_some(
-                camera_status.filter(|_| !self.video_stage.fullscreen),
-                |stage, message| {
-                    stage.child(
-                        Label::new(message)
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .px_4()
-                            .pb_2(),
+                            .children(participants.iter().map(|person| {
+                                if let Some(call) = joined {
+                                    self.voice_tile(person, call, sidebar, Some(tile_size), cx)
+                                        .into_any_element()
+                                } else {
+                                    self.voice_preview(person, sidebar, cx).into_any_element()
+                                }
+                            })),
                     )
-                },
-            )
+                    .into_any_element()
+            })
+            .when_some(camera_status.filter(|_| !fullscreen), |stage, message| {
+                stage.child(
+                    Label::new(message)
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .px_4()
+                        .pb_2(),
+                )
+            })
             .children(
-                call.filter(|_| in_voice && !self.video_stage.fullscreen)
+                joined
+                    .filter(|_| !fullscreen)
                     .and_then(|call| self.screen_options(call, sidebar, cx)),
             )
             .when_some(
-                selected_channel.filter(|_| !self.video_stage.fullscreen),
+                selected_channel.filter(|_| !fullscreen),
                 |stage, channel| {
                     let id = channel.id.clone();
-                    let switching_here = sidebar.switching_to() == Some(id.as_str());
-                    let departing = if switching_here {
-                        sidebar.voice.as_ref()
+                    let join_label = if sidebar.voice.is_some() {
+                        "Switch voice channel"
+                    } else if sidebar.rejoin_channel() == Some(id.as_str()) {
+                        "Rejoin voice"
                     } else {
-                        call
+                        "Join voice"
+                    };
+                    let participants_label = if show_strip {
+                        "Hide participants"
+                    } else {
+                        "Show participants"
                     };
                     stage.child(
                         div()
-                            .relative()
                             .flex()
                             .justify_center()
                             .px_2()
@@ -863,13 +926,16 @@ impl Spk {
                             .flex_shrink_0()
                             .child(
                                 div()
+                                    .id("voice-stage-controls")
+                                    .role(Role::Group)
+                                    .aria_label("Voice stage controls")
                                     .flex()
                                     .flex_wrap()
                                     .items_center()
                                     .justify_center()
                                     .gap_1()
                                     .rounded_lg()
-                                    .when(in_voice, |bar| {
+                                    .when(joined.is_some(), |bar| {
                                         bar.bg(theme.secondary)
                                             .p_2()
                                             .child(self.voice_controls(
@@ -877,30 +943,41 @@ impl Spk {
                                                 VoiceControls::Channel,
                                                 cx,
                                             ))
-                                            .children(self.voice_media_buttons(true, cx))
                                             .child(self.camera_controls(sidebar, cx))
                                             .child(self.screen_button(call, cx))
+                                            .children(self.voice_media_buttons(true, cx))
                                             .child(super::voice::connection_diagnostics(cx))
                                     })
                                     .children(departing.and_then(|call| {
                                         self.leave_voice(
                                             "voice-channel-leave",
                                             call,
-                                            switching_here,
+                                            switching,
                                             true,
                                             cx,
                                         )
                                     }))
-                                    .children(
-                                        departing
-                                            .filter(|call| {
-                                                matches!(
-                                                    call.status,
-                                                    Status::Reconnecting | Status::Leaving
-                                                )
-                                            })
-                                            .map(|call| call_status(call, switching_here)),
-                                    )
+                                    .when(theater.is_some() && participants.len() > 1, |bar| {
+                                        bar.child(
+                                            tool_button(
+                                                "voice-strip-toggle",
+                                                if show_strip {
+                                                    IconName::PanelBottom
+                                                } else {
+                                                    IconName::PanelBottomOpen
+                                                },
+                                                participants_label,
+                                            )
+                                            .label(participants_label)
+                                            .on_click(
+                                                cx.listener(|this, _, _, cx| {
+                                                    this.video_stage.participants_hidden =
+                                                        !this.video_stage.participants_hidden;
+                                                    cx.notify();
+                                                }),
+                                            ),
+                                        )
+                                    })
                                     .when(sidebar.can_join_voice(&id), |bar| {
                                         bar.child(
                                             Button::new("voice-channel-join")
@@ -908,11 +985,7 @@ impl Spk {
                                                 .small()
                                                 .tab_stop(true)
                                                 .icon(IconName::Phone)
-                                                .label(if sidebar.voice.is_some() {
-                                                    "Switch voice channel"
-                                                } else {
-                                                    "Join voice"
-                                                })
+                                                .label(join_label)
                                                 .on_click(cx.listener(move |this, _, _, cx| {
                                                     this.join_voice_channel(&id, cx)
                                                 })),
@@ -922,6 +995,42 @@ impl Spk {
                     )
                 },
             )
+    }
+
+    fn voice_preview(
+        &self,
+        participant: &Participant<'_>,
+        sidebar: &Sidebar,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        let flags = participant.flags;
+        let speaking = flags.speaking && !flags.muted && !flags.deafened;
+        div()
+            .id(SharedString::from(participant.id.to_owned()))
+            .role(Role::Group)
+            .flex()
+            .items_center()
+            .gap_2()
+            .max_w_full()
+            .p_2()
+            .rounded_lg()
+            .border_1()
+            .border_color(theme.border)
+            .child(profile_avatar(
+                Avatar::new().name(participant.name.to_owned()).small(),
+                sidebar.avatar(Some(participant.id)),
+                28.0,
+                speaking,
+                cx,
+            ))
+            .child(Label::new(participant.name.to_owned()).truncate())
+            .when(speaking, |row| row.child(speaking_badge(cx)))
+            .children(participant_status(flags.muted, flags.deafened, cx))
+            .when(flags.radio_listening == Some(true), |row| {
+                row.child(radio_badge(cx))
+            })
+            .children(voice_moderation_menu(participant, sidebar, cx))
     }
 
     fn leave_voice(
@@ -952,20 +1061,19 @@ impl Spk {
 
     fn voice_tile(
         &self,
-        participant: Participant<'_>,
-        call: Option<&VoiceView>,
+        participant: &Participant<'_>,
+        call: &VoiceView,
         sidebar: &Sidebar,
+        tile_size: Option<Size<Pixels>>,
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
         let is_me = sidebar.profile.id.as_deref() == Some(participant.id);
-        let media = call.and_then(|call| call.media.as_ref());
-        let flags = if is_me && call.is_some() {
+        let media = call.media.as_ref();
+        let flags = if is_me {
             crate::api::VoiceFlags {
                 muted: sidebar.voice_intent.mute.effective_muted()
-                    || call.is_some_and(|call| {
-                        matches!(call.status, Status::ListenOnly | Status::Reconnecting)
-                    }),
+                    || matches!(call.status, Status::ListenOnly | Status::Reconnecting),
                 deafened: sidebar.voice_intent.mute.deafened,
                 radio_listening: sidebar.voice_intent.radio_listening,
                 ..participant.flags
@@ -978,12 +1086,11 @@ impl Spk {
             && media.map_or(flags.speaking, |media| {
                 media.speaking.contains(participant.id)
             });
-        let theater = self.video_stage.theater.as_deref() == Some(participant.id)
-            && call.is_some_and(VoiceView::is_participating);
         let camera_live = if is_me {
             matches!(sidebar.camera_status(), CameraStatus::Live(..))
         } else {
-            call.and_then(|call| call.video.as_ref())
+            call.video
+                .as_ref()
                 .and_then(|video| video.participants.get(participant.id))
                 .map_or_else(
                     || {
@@ -994,12 +1101,12 @@ impl Spk {
                     |video| !video.live.is_empty(),
                 )
         };
-        let (image, camera_inset) = self.video_images(&participant, is_me);
+        let (image, camera_inset) = self.video_images(participant, is_me);
         let hover_id = participant.id.to_owned();
         let key_id = hover_id.clone();
         div()
             .id(SharedString::from(participant.id.to_owned()))
-            .focusable()
+            .track_focus(&self.video_stage.tile_focus[participant.id])
             .tab_index(0)
             .focus_visible(|tile| tile.border_color(theme.ring))
             .on_hover(cx.listener(move |app, hovered: &bool, _, _| {
@@ -1018,8 +1125,13 @@ impl Spk {
             .justify_center()
             .role(Role::Group)
             .when(speaking, |tile| tile.aria_description("Speaking"))
-            .when(theater, |tile| tile.size_full())
-            .when(!theater, |tile| tile.w(px(320.0)).max_w_full().h(px(180.0)))
+            .size_full()
+            .when_some(tile_size, |tile, size| {
+                tile.w(size.width)
+                    .h(size.height)
+                    .max_w_full()
+                    .flex_shrink_0()
+            })
             .overflow_hidden()
             .border_1()
             .border_color(if speaking {
@@ -1067,6 +1179,7 @@ impl Spk {
                     .justify_between()
                     .child(
                         div()
+                            .min_w_0()
                             .max_w(relative(0.84))
                             .rounded_md()
                             .px_2()
@@ -1089,19 +1202,15 @@ impl Spk {
                     })
                     .when(speaking, |row| row.child(speaking_badge(cx)))
                     .children(participant_status(flags.muted, flags.deafened, cx))
-                    .children(voice_moderation_menu(&participant, sidebar, cx))
-                    .when(
-                        !is_me && call.is_some_and(VoiceView::is_participating),
-                        |row| row.child(self.participant_volume_button(&participant, sidebar, cx)),
-                    )
+                    .children(voice_moderation_menu(participant, sidebar, cx))
+                    .when(!is_me, |row| {
+                        row.child(self.participant_volume_button(participant, sidebar, cx))
+                    })
                     .when(flags.radio_listening == Some(true), |row| {
                         row.child(radio_badge(cx))
                     }),
             )
-            .children(
-                call.filter(|call| call.is_participating())
-                    .map(|call| self.video_tile_controls(&participant, call, sidebar, cx)),
-            )
+            .child(self.video_tile_controls(participant, call, sidebar, cx))
     }
 }
 

@@ -126,7 +126,7 @@ impl Spk {
                             .when(!compact, |button| button.label(label))
                             .when_some(binding, |button, binding| {
                                 button.tooltip(format!("{label} ({})", binding.chord)).when(
-                                    location != VoiceControls::BottomBar,
+                                    location == VoiceControls::Profile,
                                     |button| {
                                         button.child(
                                             gpui_kit::component::kbd::Kbd::new(

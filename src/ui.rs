@@ -533,7 +533,7 @@ impl Spk {
 
 impl Render for Spk {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.prepare_video_stage(window);
+        self.prepare_video_stage(window, cx);
         let content = match &self.view {
             View::Busy(label) => Label::new(*label).into_any_element(),
             View::SignIn {

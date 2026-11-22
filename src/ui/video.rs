@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{cell::RefCell, collections::HashMap};
 
 use gpui_kit::component::popover::Popover;
 
@@ -15,6 +15,10 @@ use crate::{
 pub(super) struct VideoStage {
     pub theater: Option<String>,
     pub fullscreen: bool,
+    pub participants_hidden: bool,
+    pub participant_scroll: ScrollHandle,
+    pub tile_focus: HashMap<String, FocusHandle>,
+    strip_focus: RefCell<Option<FocusHandle>>,
     pub hide_preview: bool,
     pub hovered: Option<String>,
     pub frames: HashMap<(String, VideoSource), Arc<RenderImage>>,
@@ -76,21 +80,20 @@ impl TileActions {
     fn permits(&self, action: TileAction) -> bool {
         match action {
             TileAction::Watch => self.can_watch,
-            TileAction::Theater => self.show || self.theater,
+            TileAction::Theater => true,
             TileAction::Fullscreen => self.show || self.fullscreen,
         }
     }
 }
 
 impl Spk {
-    pub(super) fn prepare_video_stage(&mut self, window: &mut Window) {
+    pub(super) fn prepare_video_stage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let call = match &self.view {
             View::SignedIn(sidebar) => sidebar.voice.as_ref().filter(|call| {
                 call.is_participating()
                     && self
-                        .selected_voice_channel
-                        .as_ref()
-                        .is_none_or(|id| *id == call.channel_id)
+                        .selected_voice_destination(sidebar)
+                        .is_some_and(|channel| channel.id == call.channel_id)
             }),
             _ => None,
         };
@@ -137,18 +140,31 @@ impl Spk {
                 let _ = window.drop_image(image);
             }
         }
-        if self.video_stage.theater.as_ref().is_some_and(|id| {
-            report.is_none_or(|report| {
-                !watching.is_some_and(|ids| ids.contains(id))
-                    && screen.as_ref().is_none_or(|(me, _)| me != id)
-                    && report
-                        .participants
-                        .get(id)
-                        .is_none_or(|video| video.live.is_empty())
-            })
-        }) {
+        let participants = match (&self.view, call) {
+            (View::SignedIn(sidebar), Some(call)) => joined_participants(sidebar, call),
+            _ => Vec::new(),
+        };
+        self.video_stage
+            .tile_focus
+            .retain(|id, _| participants.iter().any(|person| person.id == id));
+        for person in participants {
+            if !self.video_stage.tile_focus.contains_key(person.id) {
+                self.video_stage
+                    .tile_focus
+                    .insert(person.id.to_owned(), cx.focus_handle());
+            }
+        }
+        if self
+            .video_stage
+            .theater
+            .as_ref()
+            .is_some_and(|id| !self.video_stage.tile_focus.contains_key(id))
+        {
             self.video_stage.theater = None;
             self.exit_video_fullscreen(window);
+        }
+        if self.video_stage.theater.is_none() {
+            self.video_stage.participants_hidden = false;
         }
         if self.video_stage.fullscreen
             && self.video_stage.theater.as_ref().is_none_or(|id| {
@@ -169,6 +185,25 @@ impl Spk {
             })
         {
             window.request_animation_frame();
+        }
+    }
+
+    pub(super) fn scroll_to_focused_participant(
+        &self,
+        ids: impl Iterator<Item = impl AsRef<str>>,
+        window: &Window,
+        cx: &App,
+    ) {
+        let focused = window.focused(cx);
+        if focused == *self.video_stage.strip_focus.borrow() {
+            return;
+        }
+        self.video_stage.strip_focus.replace(focused);
+        if let Some(index) = ids
+            .into_iter()
+            .position(|id| self.video_stage.tile_focus[id.as_ref()].contains_focused(window, cx))
+        {
+            self.video_stage.participant_scroll.scroll_to_item(index);
         }
     }
 
@@ -509,11 +544,9 @@ impl Spk {
             return;
         };
         if sidebar.chat.is_some()
-            || self.selected_voice_channel.as_deref().or_else(|| {
-                super::workspace::voice_channels(sidebar)
-                    .next()
-                    .map(|channel| channel.id.as_str())
-            }) != Some(call.channel_id.as_str())
+            || self
+                .selected_voice_destination(sidebar)
+                .is_none_or(|channel| channel.id != call.channel_id)
         {
             return;
         }
@@ -544,7 +577,7 @@ impl Spk {
         id: &str,
         action: TileAction,
         available: &TileActions,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match action {
@@ -564,6 +597,9 @@ impl Spk {
                 );
             }
             TileAction::Theater => {
+                if let Some(focus) = self.video_stage.tile_focus.get(id) {
+                    focus.focus(window, cx);
+                }
                 self.video_stage.theater = (!available.theater).then(|| id.to_owned());
                 self.exit_video_fullscreen(window);
                 cx.notify();
@@ -699,6 +735,28 @@ impl Spk {
                 )
             })
     }
+}
+
+pub(super) fn joined_participants<'a>(
+    sidebar: &'a Sidebar,
+    call: &VoiceView,
+) -> Vec<Participant<'a>> {
+    let mut participants = sidebar.participants(&call.channel_id);
+    if let Some(id) = sidebar.profile.id.as_deref()
+        && !participants.iter().any(|person| person.id == id)
+    {
+        // Local media can connect before SPK echoes our voice presence.
+        participants.insert(
+            0,
+            Participant {
+                id,
+                name: sidebar.profile.name(),
+                flags: Default::default(),
+                video: None,
+            },
+        );
+    }
+    participants
 }
 
 fn participant_video(video: Option<&ParticipantVideo>) -> bool {
