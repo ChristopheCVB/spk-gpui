@@ -98,7 +98,8 @@ print(next((obj["id"] for obj in json.load(sys.stdin)
         exit 1
     fi
 else
-    env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 xvfb-run -a -s '-screen 0 640x480x24' \
+    # Keep the X server stable when one test closes its last client before the next begins.
+    env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 xvfb-run -a -s '-noreset -screen 0 640x480x24' \
       python3 tests/fixtures/livekit-peers.py "$@"
 fi
 
