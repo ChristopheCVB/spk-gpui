@@ -452,7 +452,8 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
     .unwrap();
 
     let source_stop = std::env::var_os("SPK_TEST_MAC_SCREEN_STOP")
-        .or_else(|| std::env::var_os("SPK_TEST_WAYLAND_SCREEN_STOP"));
+        .or_else(|| std::env::var_os("SPK_TEST_WAYLAND_SCREEN_STOP"))
+        .or_else(|| std::env::var_os("SPK_TEST_WINDOWS_SCREEN_STOP"));
     if let Some(path) = source_stop {
         std::fs::write(path, []).unwrap();
     } else {
