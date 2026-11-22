@@ -462,6 +462,7 @@ impl Spk {
             for alert in std::mem::take(&mut sidebar.alerts) {
                 self.show_alert(alert, sidebar, window, cx);
             }
+            self.sync_search_conversation(sidebar, cx);
         } else if matches!(self.view, View::SignedIn(_)) {
             window.clear_notifications(cx);
         }

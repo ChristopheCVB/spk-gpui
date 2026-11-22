@@ -550,21 +550,13 @@ impl Spk {
         {
             return;
         }
-        let participants = sidebar.participants(&call.channel_id);
-        let own_tile = Participant {
-            id,
-            name: sidebar.profile.name(),
-            flags: Default::default(),
-            video: None,
-        };
-        let Some(participant) = participants
-            .iter()
+        let Some(participant) = joined_participants(sidebar, call)
+            .into_iter()
             .find(|participant| participant.id == id)
-            .or_else(|| (sidebar.profile.id.as_deref() == Some(id)).then_some(&own_tile))
         else {
             return;
         };
-        let available = TileActions::for_participant(self, participant, call, sidebar);
+        let available = TileActions::for_participant(self, &participant, call, sidebar);
         if available.permits(action) {
             self.apply_tile_action(id, action, &available, window, cx);
             cx.stop_propagation();

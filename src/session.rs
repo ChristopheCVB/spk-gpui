@@ -624,6 +624,14 @@ async fn watch_session(
         chat.fill_previews(client);
         chat.gifs.fill_previews(client);
         sidebar.chat = chat.view();
+        search.retain_conversation(
+            &mut sidebar.search,
+            sidebar
+                .chat
+                .as_ref()
+                .filter(|chat| !chat.unavailable())
+                .map(|chat| chat.channel_id.as_str()),
+        );
         sidebar.voice_moderation_pending = !voice_moderation.is_empty();
         radio.sync(&mut sidebar, &voice);
         soundboard.sync(&mut sidebar, &voice);

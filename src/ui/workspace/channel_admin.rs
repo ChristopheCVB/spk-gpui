@@ -93,6 +93,7 @@ impl Spk {
         }
 
         let app = cx.entity();
+        let opener = window.focused(cx);
         let title = form.title();
         let initial = match &form {
             ChannelForm::Rename(_, name) => name.clone(),
@@ -116,8 +117,8 @@ impl Spk {
                 if !matches!(&app.read(cx).view, View::SignedIn(sidebar) if sidebar.is_admin())
                     || editor.result(cx).is_some_and(|result| result.is_ok())
                 {
-                    editor.submitted_at = None;
                     window.close_dialog(cx);
+                    editor.restore_focus(window, cx);
                 }
                 cx.notify();
             })
@@ -126,6 +127,7 @@ impl Spk {
                 app,
                 form,
                 name,
+                opener,
                 submitted_at: None,
             }
         });
@@ -140,7 +142,9 @@ impl Spk {
                 .on_ok(|_, _, _| false)
                 .on_close({
                     let editor = editor.clone();
-                    move |_, _, cx| editor.update(cx, |editor, _| editor.submitted_at = None)
+                    move |_, window, cx| {
+                        editor.update(cx, |editor, cx| editor.restore_focus(window, cx))
+                    }
                 })
                 .child(editor.clone())
         });
@@ -272,10 +276,25 @@ struct ChannelEditor {
     app: Entity<Spk>,
     form: ChannelForm,
     name: Entity<InputState>,
+    opener: Option<FocusHandle>,
     submitted_at: Option<u64>,
 }
 
 impl ChannelEditor {
+    fn restore_focus(&mut self, window: &mut Window, cx: &mut App) {
+        self.submitted_at = None;
+        let app = self.app.read(cx);
+        if matches!(app.view, View::SignedIn(_)) && !app.sidebar_drawer_open {
+            let focus = self
+                .opener
+                .as_ref()
+                .filter(|opener| app.workspace_focus.contains(opener, window))
+                .unwrap_or(&app.sidebar_toggle_focus)
+                .clone();
+            focus.focus(window, cx);
+        }
+    }
+
     fn result(&self, cx: &App) -> Option<Result<&'static str, &'static str>> {
         let app = self.app.read(cx);
         let View::SignedIn(sidebar) = &app.view else {
@@ -362,8 +381,8 @@ impl Render for ChannelEditor {
                             .label("Cancel")
                             .disabled(pending)
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.submitted_at = None;
                                 window.close_dialog(cx);
+                                this.restore_focus(window, cx);
                             })),
                     )
                     .child(

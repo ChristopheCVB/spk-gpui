@@ -7,6 +7,7 @@ use crate::api::{Failure, SearchHit, SearchPage, SearchScope, SpkClient};
 
 #[derive(Clone, Default)]
 pub struct SearchView {
+    pub scope: Option<SearchScope>,
     pub results: Arc<Vec<SearchHit>>,
     pub next_cursor: Option<String>,
     pub loading: bool,
@@ -32,8 +33,18 @@ impl SearchSession {
         *view = SearchView::default();
         let query = query.trim().to_owned();
         if !query.is_empty() {
+            view.scope = Some(scope.clone());
             self.query = Some((query, scope));
             self.load(view, client);
+        }
+    }
+
+    pub fn retain_conversation(&mut self, view: &mut SearchView, channel: Option<&str>) {
+        if let Some(SearchScope::Conversation(id)) = &view.scope
+            && channel != Some(id.as_str())
+        {
+            *self = Self::default();
+            *view = SearchView::default();
         }
     }
 

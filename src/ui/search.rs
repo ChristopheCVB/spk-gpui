@@ -21,8 +21,7 @@ pub(super) struct SearchPanel {
     focus: FocusHandle,
     return_focus: FocusHandle,
     query: Entity<InputState>,
-    scopes: Vec<(SearchScope, &'static str)>,
-    selected: usize,
+    scope: SearchScope,
     selected_result: Option<MessageTarget>,
     results_scroll: ScrollHandle,
     _keyboard: Subscription,
@@ -46,35 +45,28 @@ impl Spk {
             return;
         }
         if let Some(panel) = &self.search_panel {
-            panel.read(cx).query.focus_handle(cx).focus(window, cx);
+            let command = panel.update(cx, |panel, cx| {
+                panel.query.focus_handle(cx).focus(window, cx);
+                if everything && panel.set_scope(SearchScope::Everything, cx) {
+                    Some(panel.search_command(cx))
+                } else {
+                    None
+                }
+            });
+            if let Some(command) = command {
+                self.send(command, None, cx);
+            }
             return;
         }
         let return_focus = window
             .focused(cx)
             .filter(|focus| focus != &self.workspace_focus)
             .unwrap_or_else(|| self.search_button_focus.clone());
-        let scopes = sidebar
-            .chat
-            .as_ref()
-            .filter(|chat| !chat.unavailable())
-            .map(|chat| {
-                (
-                    SearchScope::Conversation(chat.channel_id.clone()),
-                    if chat.direct_message_peer.is_some() {
-                        "This conversation"
-                    } else {
-                        "This channel"
-                    },
-                )
-            })
-            .into_iter()
-            .chain([
-                (SearchScope::TextChannels, "All channels"),
-                (SearchScope::DirectMessages, "DMs"),
-                (SearchScope::Everything, "Everything"),
-            ])
-            .collect::<Vec<_>>();
-        let selected = if everything { scopes.len() - 1 } else { 0 };
+        let scope = if everything {
+            SearchScope::Everything
+        } else {
+            conversation_scope(sidebar).map_or(SearchScope::TextChannels, |(scope, _)| scope)
+        };
         let query = cx.new(|cx| InputState::new(window, cx).placeholder("Search messages"));
         let spk = cx.entity();
         let panel_query = query.clone();
@@ -121,8 +113,7 @@ impl Spk {
                 focus: cx.focus_handle().tab_stop(false),
                 return_focus,
                 query: panel_query,
-                scopes,
-                selected,
+                scope,
                 selected_result: None,
                 results_scroll: ScrollHandle::new(),
                 _keyboard: keyboard,
@@ -139,6 +130,18 @@ impl Spk {
 
         query.focus_handle(cx).focus(window, cx);
         self.search_panel = Some(panel);
+    }
+
+    pub(super) fn sync_search_conversation(&self, sidebar: &Sidebar, cx: &mut Context<Self>) {
+        if let Some(panel) = &self.search_panel
+            && matches!(panel.read(cx).scope, SearchScope::Conversation(_))
+        {
+            let scope =
+                conversation_scope(sidebar).map_or(SearchScope::TextChannels, |(scope, _)| scope);
+            panel.update(cx, |panel, cx| {
+                panel.set_scope(scope, cx);
+            });
+        }
     }
 
     pub(super) fn close_message_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -241,14 +244,46 @@ impl Spk {
     }
 }
 
+fn conversation_scope(sidebar: &Sidebar) -> Option<(SearchScope, &'static str)> {
+    sidebar
+        .chat
+        .as_ref()
+        .filter(|chat| !chat.unavailable())
+        .map(|chat| {
+            (
+                SearchScope::Conversation(chat.channel_id.clone()),
+                if chat.direct_message_peer.is_some() {
+                    "This conversation"
+                } else {
+                    "This channel"
+                },
+            )
+        })
+}
+
 impl SearchPanel {
+    fn set_scope(&mut self, scope: SearchScope, cx: &mut Context<Self>) -> bool {
+        if self.scope == scope {
+            return false;
+        }
+        self.scope = scope;
+        self.selected_result = None;
+        self.results_scroll = ScrollHandle::new();
+        cx.notify();
+        true
+    }
+
+    fn search_command(&self, cx: &App) -> Command {
+        Command::SearchMessages {
+            query: self.query.read(cx).value().to_string(),
+            scope: self.scope.clone(),
+        }
+    }
+
     fn search(&mut self, cx: &mut Context<Self>) {
         self.selected_result = None;
-        let query = self.query.read(cx).value().to_string();
-        let scope = self.scopes[self.selected].0.clone();
-        let _ = self.spk.update(cx, |spk, cx| {
-            spk.send(Command::SearchMessages { query, scope }, None, cx)
-        });
+        let command = self.search_command(cx);
+        let _ = self.spk.update(cx, |spk, cx| spk.send(command, None, cx));
     }
 
     fn step_result(&mut self, backwards: bool, cx: &mut Context<Self>) -> bool {
@@ -259,7 +294,10 @@ impl SearchPanel {
             return false;
         };
         let results = &sidebar.search.results;
-        if results.is_empty() || sidebar.search.loading {
+        if sidebar.search.scope.as_ref() != Some(&self.scope)
+            || results.is_empty()
+            || sidebar.search.loading
+        {
             return false;
         }
         let index = self
@@ -391,14 +429,25 @@ impl Render for SearchPanel {
         let View::SignedIn(sidebar) = &spk.read(cx).view else {
             return div();
         };
-        let search = &sidebar.search;
-        let scope = self.scopes[self.selected].1;
-        let selected = self.selected;
-        let scopes = self
-            .scopes
-            .iter()
-            .map(|(_, label)| *label)
+        let empty = Default::default();
+        let search = if sidebar.search.scope.as_ref() == Some(&self.scope) {
+            &sidebar.search
+        } else {
+            &empty
+        };
+        let scopes = conversation_scope(sidebar)
+            .into_iter()
+            .chain([
+                (SearchScope::TextChannels, "All channels"),
+                (SearchScope::DirectMessages, "DMs"),
+                (SearchScope::Everything, "Everything"),
+            ])
             .collect::<Vec<_>>();
+        let selected = self.scope.clone();
+        let scope = scopes
+            .iter()
+            .find(|(scope, _)| scope == &selected)
+            .map_or("All channels", |(_, label)| *label);
         let panel = cx.weak_entity();
         let app = self.spk.clone();
         let status = if search.failed {
@@ -463,19 +512,18 @@ impl Render for SearchPanel {
                     .icon(IconName::ChevronDown)
                     .accessibility_label(format!("Search scope, {scope}"))
                     .dropdown_menu(move |mut menu, _, _| {
-                        for (index, label) in scopes.iter().enumerate() {
+                        for (scope, label) in &scopes {
+                            let checked = scope == &selected;
+                            let scope = scope.clone();
                             let panel = panel.clone();
-                            menu = menu.item(
-                                PopupMenuItem::new(*label)
-                                    .checked(index == selected)
-                                    .on_click(move |_, _, cx| {
-                                        let _ = panel.update(cx, |panel, cx| {
-                                            panel.selected = index;
-                                            panel.search(cx);
-                                            cx.notify();
-                                        });
-                                    }),
-                            );
+                            menu = menu.item(PopupMenuItem::new(*label).checked(checked).on_click(
+                                move |_, _, cx| {
+                                    let _ = panel.update(cx, |panel, cx| {
+                                        panel.set_scope(scope.clone(), cx);
+                                        panel.search(cx);
+                                    });
+                                },
+                            ));
                         }
                         menu
                     }),

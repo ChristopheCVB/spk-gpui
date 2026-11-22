@@ -349,6 +349,17 @@ impl Spk {
             }))
     }
 
+    pub(super) fn close_pins(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let opener = match self.chat_pins.take() {
+            Some(PinPanel::Latest) => &self.latest_pin_focus,
+            Some(PinPanel::All) => &self.all_pins_focus,
+            None => return false,
+        };
+        opener.focus(window, cx);
+        cx.notify();
+        true
+    }
+
     pub(super) fn pins(
         &self,
         sidebar: &Sidebar,
@@ -526,8 +537,7 @@ impl Spk {
                                                 .label("Go to message")
                                                 .on_click(cx.listener(
                                                     move |this, _, window, cx| {
-                                                        this.chat_pins = None;
-                                                        this.latest_pin_focus.focus(window, cx);
+                                                        this.close_pins(window, cx);
                                                         this.send(
                                                             Command::JumpToChatMessage {
                                                                 channel_id: channel_id.clone(),

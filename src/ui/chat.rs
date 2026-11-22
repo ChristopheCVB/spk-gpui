@@ -181,19 +181,13 @@ impl Spk {
     }
 
     pub(super) fn escape_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.chat_pins_focus.contains_focused(window, cx) && self.close_pins(window, cx) {
+            return true;
+        }
         let Some(chat) = chat(&self.view) else {
             return false;
         };
-        if self.chat_pins_focus.contains_focused(window, cx)
-            && let Some(panel) = self.chat_pins.take()
-        {
-            let opener = match panel {
-                PinPanel::Latest => &self.latest_pin_focus,
-                PinPanel::All => &self.all_pins_focus,
-            };
-            opener.focus(window, cx);
-            cx.notify();
-        } else if chat.gifs.is_some() {
+        if chat.gifs.is_some() {
             self.gif_button_focus.focus(window, cx);
             self.send(Command::ShowGifs(false), None, cx);
         } else if self.message_action_form.take().is_some() {
@@ -380,7 +374,6 @@ impl Spk {
             }
         }
         if reset {
-            self.close_message_search(window, cx);
             self.chat_scroll.scroll_to_bottom();
         } else if let (Some(previous), Some(next)) = (previous, next) {
             if next.history_ready()

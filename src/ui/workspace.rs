@@ -124,7 +124,15 @@ impl Spk {
             return false;
         }
         self.device_picker = None;
+        let dialog_focus = if window.has_active_dialog(cx) {
+            window.focused(cx)
+        } else {
+            None
+        };
         window.close_sheet(cx);
+        if let Some(focus) = dialog_focus {
+            focus.focus(window, cx);
+        }
         cx.notify();
         true
     }

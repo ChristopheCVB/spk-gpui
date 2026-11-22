@@ -31,7 +31,9 @@ impl Spk {
         if event.input_preference == InputPreference::CharacterInput {
             return false;
         }
+        let everything_search = primary && modifiers.shift && count == 2 && key_name == "f";
         if self.search_panel.is_some()
+            && !everything_search
             && !self.video_stage.fullscreen
             && !workspace::wide_workspace(window)
         {
