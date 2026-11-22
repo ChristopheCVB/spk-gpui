@@ -179,21 +179,21 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
         (native, scope)
     };
     #[cfg(windows)]
-    let (native, scope) = if let Ok(title) = std::env::var("SPK_TEST_SCREEN_WINDOW") {
-        let choice = windows::choices()
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|choice| choice.label == format!("Window · {title}"))
-            .expect("synthetic Windows fixture");
-        let selected = windows::select(choice, None).await.unwrap();
-        assert_eq!(selected.audio, Some(AudioScope::Application));
-        (Some(selected.capture), AudioScope::Application)
+    let (native, scope, native_size) = if let Ok(title) = std::env::var("SPK_TEST_SCREEN_WINDOW") {
+        let display = std::env::var("SPK_TEST_WINDOWS_SCREEN").as_deref() == Ok("display");
+        let (selected, size) = windows::fixture_selection(&title, display).await;
+        let scope = if display {
+            AudioScope::PlaybackMix
+        } else {
+            AudioScope::Application
+        };
+        assert_eq!(selected.audio, Some(scope));
+        (Some(selected.capture), scope, size)
     } else {
-        (native, scope)
+        (native, scope, native_size)
     };
     let synthetic = native.is_none();
-    let audio_threshold = if !synthetic && scope == AudioScope::Application {
+    let audio_threshold = if !synthetic && (cfg!(windows) || scope == AudioScope::Application) {
         100
     } else {
         500

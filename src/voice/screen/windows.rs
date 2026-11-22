@@ -9,7 +9,7 @@ use std::{
 };
 
 use ::windows::Win32::{
-    Foundation::{E_ACCESSDENIED, HANDLE, HWND, WAIT_TIMEOUT},
+    Foundation::{HANDLE, HWND, WAIT_TIMEOUT},
     System::{
         Com::{CO_MTA_USAGE_COOKIE, CoDecrementMTAUsage, CoIncrementMTAUsage},
         Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject},
@@ -37,7 +37,10 @@ use windows_wgc::{
         SizeInt32,
     },
     Win32::{
-        Foundation::{E_ABORT, E_POINTER, HMODULE, HWND as PickerHwnd},
+        Foundation::{
+            E_ABORT, E_ACCESSDENIED, E_POINTER, ERROR_ACCESS_DISABLED_BY_POLICY, ERROR_CANCELLED,
+            HMODULE, HWND as PickerHwnd,
+        },
         Graphics::{
             Direct3D::D3D_DRIVER_TYPE_HARDWARE,
             Direct3D11::{
@@ -71,13 +74,7 @@ pub(crate) async fn pick_system_source(hwnd: isize) -> Result<GraphicsCaptureIte
         .PickSingleItemAsync()
         .map_err(graphics_error)?
         .await
-        .map_err(|error| {
-            if error.code().is_ok() || matches!(error.code(), E_POINTER | E_ABORT) {
-                CaptureError::Cancelled
-            } else {
-                graphics_error(error)
-            }
-        })
+        .map_err(picker_error)
 }
 
 pub(super) async fn select_system(item: GraphicsCaptureItem) -> Result<Selection, CaptureError> {
@@ -107,7 +104,7 @@ pub(super) async fn select_system(item: GraphicsCaptureItem) -> Result<Selection
 pub(super) async fn choices() -> Result<Vec<Choice>, CaptureError> {
     tokio::task::spawn_blocking(|| {
         let _apartment = Apartment::new()?;
-        if !GraphicsCaptureSession::IsSupported().unwrap_or(false) {
+        if !GraphicsCaptureSession::IsSupported().map_err(graphics_error)? {
             return Err(CaptureError::Unavailable);
         }
         Ok(std::iter::once(Choice {
@@ -452,10 +449,21 @@ impl Selected {
 }
 
 fn graphics_error(error: windows_wgc::core::Error) -> CaptureError {
-    if error.code().0 == E_ACCESSDENIED.0 {
+    if error.code() == E_ACCESSDENIED
+        || error.code() == ERROR_ACCESS_DISABLED_BY_POLICY.to_hresult()
+    {
         CaptureError::Permission
     } else {
         CaptureError::Unavailable
+    }
+}
+
+fn picker_error(error: windows_wgc::core::Error) -> CaptureError {
+    let code = error.code();
+    if code.is_ok() || matches!(code, E_POINTER | E_ABORT) || code == ERROR_CANCELLED.to_hresult() {
+        CaptureError::Cancelled
+    } else {
+        graphics_error(error)
     }
 }
 
@@ -786,3 +794,5 @@ fn stereo_pcm(bytes: &[u8]) -> Vec<i16> {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(super) use tests::fixture_selection;

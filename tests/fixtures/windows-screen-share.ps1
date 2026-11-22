@@ -60,12 +60,17 @@ try {
         Start-Sleep -Milliseconds 100
     }
     if (!(Test-Path -LiteralPath $readyFile)) { throw 'Synthetic Window failed to start.' }
-    & python tests/fixtures/livekit-peers.py mise exec -- cargo test --locked --bin spk-gpui livekit_screen_share_publishes_video_and_separate_audio -- --ignored
-    if ($LASTEXITCODE) { exit $LASTEXITCODE }
+    foreach ($mode in @('display', 'window')) {
+        $env:SPK_TEST_WINDOWS_SCREEN = $mode
+        Write-Host "Testing native Windows $mode sharing with a LiveKit peer."
+        & python tests/fixtures/livekit-peers.py mise exec -- cargo test --locked --bin spk-gpui livekit_screen_share_publishes_video_and_separate_audio -- --ignored
+        if ($LASTEXITCODE) { exit $LASTEXITCODE }
+    }
     & mise exec -- cargo test --locked --bin spk-gpui controlled_window_video_audio_and_source_loss -- --ignored
     exit $LASTEXITCODE
 } finally {
     if ($child -and !$child.HasExited) { Stop-Process -InputObject $child }
     Remove-Item -LiteralPath $workspace -Recurse -Force
     Remove-Item Env:SPK_TEST_SCREEN_WINDOW
+    Remove-Item Env:SPK_TEST_WINDOWS_SCREEN -ErrorAction SilentlyContinue
 }
