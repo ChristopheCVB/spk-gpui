@@ -62,6 +62,10 @@ An individual post in a text channel or DM conversation.
 
 An unsent message being composed for a specific text channel or DM conversation.
 
+**Message Composer**
+
+The chat area where a user prepares and sends a message, including the draft editor and its controls.
+
 **Attachment**
 
 A file included with a message.
