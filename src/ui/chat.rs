@@ -2,7 +2,7 @@ mod actions;
 mod attachments;
 mod gifs;
 
-pub(super) use actions::MessageActionForm;
+pub(super) use actions::{MessageActionForm, PinPanel};
 pub(super) use attachments::AttachmentUi;
 
 use std::{
@@ -22,7 +22,7 @@ use super::*;
 use crate::{
     api::{ChatMessage, MessageTarget, UnreadState},
     chat_markdown::{image_preview_links, message_markdown, plain_text, safe_link},
-    session::{ChatJump, ChatView, Delivery},
+    session::{ChatJump, ChatView, Delivery, Pins},
 };
 
 pub(super) const BOLD: (&str, &str) = ("**", "**");
@@ -184,7 +184,11 @@ impl Spk {
         let Some(chat) = chat(&self.view) else {
             return false;
         };
-        if chat.gifs.is_some() {
+        if self.chat_pins.is_some() && self.chat_pins_focus.contains_focused(window, cx) {
+            self.chat_pins = None;
+            self.latest_pin_focus.focus(window, cx);
+            cx.notify();
+        } else if chat.gifs.is_some() {
             self.gif_button_focus.focus(window, cx);
             self.send(Command::ShowGifs(false), None, cx);
         } else if self.message_action_form.take().is_some() {
@@ -313,6 +317,12 @@ impl Spk {
         }
         let reset = previous.map(|chat| (&chat.channel_id, chat.unavailable()))
             != next.map(|chat| (&chat.channel_id, chat.unavailable()));
+        if reset
+            || matches!(next.and_then(|chat| chat.pins.as_ref()), Some(Pins::Ready(pins))
+                if pins.is_empty() || pins.len() == 1 && self.chat_pins == Some(PinPanel::All))
+        {
+            self.chat_pins = None;
+        }
         if reset {
             self.chat_input.update(cx, |input, cx| {
                 input.set_value(

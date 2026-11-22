@@ -26,6 +26,7 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
                     request.respond(&[], "[]").await
                 }
                 "GET /api/users/presence HTTP/1.1" => request.respond(&[], "{}").await,
+                "GET /api/channels/general/pins HTTP/1.1" | "GET /api/channels/quiet/pins HTTP/1.1" => request.respond(&[], "[]").await,
                 _ => history_tx.send((line, request)).await.unwrap(),
             }
         }
@@ -446,6 +447,7 @@ async fn direct_message_history_is_visible_only_to_a_participant_even_for_admins
             let (line, request) = Request::receive(&http).await;
             let account = request.header("cookie").unwrap();
             match (line.as_str(), account) {
+                ("GET /api/channels/private/pins HTTP/1.1", "session=alice") => request.respond(&[], "[]").await,
                 ("GET /api/unread HTTP/1.1", _) => request.respond(&[], "{}").await,
                 ("GET /api/channels HTTP/1.1", "session=alice") => {
                     request.respond(&[], r#"[{"id":"private","type":"dm","name":null,"otherUserId":"bob","lastActivityAt":2}]"#).await
@@ -588,6 +590,8 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
     let http = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = Url::parse(&format!("http://{}", http.local_addr().unwrap())).unwrap();
     let (requests_tx, requests) = async_channel::unbounded();
+    let pinned_messages = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let served_pins = pinned_messages.clone();
     let http = tokio::spawn(async move {
         let mut created = false;
         loop {
@@ -612,6 +616,10 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
                     request.respond(&[], "[]").await;
                 }
                 "GET /api/users/presence HTTP/1.1" => request.respond(&[], "{}").await,
+                "GET /api/channels/private/pins HTTP/1.1" => {
+                    let response = value!(&*served_pins.lock().unwrap()).to_string();
+                    request.respond(&[], &response).await;
+                }
                 "POST /api/dms HTTP/1.1" => {
                     assert!(!created, "an existing DM should open without a second POST");
                     assert_eq!(account, "session=alice");
@@ -646,6 +654,9 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
         bob.send(Command::OpenDirectMessage("private".into())).await.unwrap();
         page(private_history(&requests, "session=bob").await, std::slice::from_ref(&first), false).await;
         wait_for_messages(&bob_views, &["private-1"]).await;
+        timeout(Duration::from_secs(2), wait_for_sidebar(&bob_views, |view| {
+            matches!(&view.chat.as_ref().unwrap().pins, Some(Pins::Ready(pins)) if pins.is_empty())
+        })).await.expect("opening a DM should load its Pins");
 
         bob.send(Command::MutateChatMessage {
             channel_id: "private".into(), message_id: "private-1".into(),
@@ -658,18 +669,14 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
         assert!(requests.is_empty());
 
         // A standard member can pin another participant's message in a DM.
-        bob.send(Command::ShowChatPins { channel_id: "private".into(), shown: true }).await.unwrap();
-        let (line, empty) = requests.recv().await.unwrap();
-        assert_eq!(line, "GET /api/channels/private/pins HTTP/1.1");
-        assert_eq!(empty.header("cookie"), Some("session=bob"));
-        empty.respond(&[], "[]").await;
-        wait_for_sidebar(&bob_views, |view| matches!(&view.chat.as_ref().unwrap().pins, Some(Pins::Ready(pins)) if pins.is_empty())).await;
-
         bob.send(Command::MutateChatMessage {
             channel_id: "private".into(), message_id: "private-1".into(), action: MessageAction::Pin(true),
         }).await.unwrap();
         let pin = chat_action_request(&requests, "POST /api/messages/private-1/pin HTTP/1.1", value!({"on":true})).await;
         assert_eq!(pin.header("cookie"), Some("session=bob"));
+        let mut pinned_message = first.clone();
+        pinned_message["pinned"] = value!(true);
+        pinned_messages.lock().unwrap().push(pinned_message);
         let pinned = value!({"channelId":"private","messageId":"private-1","pinned":true});
         let event = value!({"type":"pin:update","channelId":"private","messageId":"private-1","pinned":true});
         for peer in [&mut alice_peer, &mut bob_peer] {
@@ -678,11 +685,6 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
         wait_for_sidebar(&alice_views, |view| view.chat.as_ref().unwrap().messages[0].pinned).await;
         wait_for_sidebar(&bob_views, |view| view.chat.as_ref().unwrap().messages[0].pinned).await;
         pin.respond(&[], &pinned.to_string()).await;
-        let (line, pins) = requests.recv().await.unwrap();
-        assert_eq!(line, "GET /api/channels/private/pins HTTP/1.1");
-        let mut pinned_message = first.clone();
-        pinned_message["pinned"] = value!(true);
-        pins.respond(&[], &value!([pinned_message]).to_string()).await;
         wait_for_sidebar(&bob_views, |view| {
             let chat = view.chat.as_ref().unwrap();
             !chat.action_pending && matches!(&chat.pins, Some(Pins::Ready(pins)) if pins.iter().any(|m| m.id == "private-1"))
@@ -696,11 +698,11 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
         denied.respond_raw("403 Forbidden", &[], b"").await;
         let denied = wait_for_sidebar(&bob_views, |view| view.chat.as_ref().unwrap().action_outcome.as_ref().is_some_and(|outcome| outcome.error.is_some())).await;
         assert!(denied.chat.unwrap().messages[0].pinned);
-        bob.send(Command::ShowChatPins { channel_id: "private".into(), shown: false }).await.unwrap();
         bob.send(Command::MutateChatMessage {
             channel_id: "private".into(), message_id: "private-1".into(), action: MessageAction::Pin(false),
         }).await.unwrap();
         let unpin = chat_action_request(&requests, "POST /api/messages/private-1/pin HTTP/1.1", value!({"on":false})).await;
+        pinned_messages.lock().unwrap().clear();
         let update = value!({"type":"pin:update","channelId":"private","messageId":"private-1","pinned":false});
         for peer in [&mut alice_peer, &mut bob_peer] {
             peer.send(Message::text(update.to_string())).await.unwrap();
@@ -799,6 +801,29 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
                 message.id == "private-2" && message.reply_to.as_ref().is_some_and(|reply| reply.deleted && reply.preview.is_empty())
             })
         })).await;
+        // The server orders Pins by pin time, even when the most recently pinned Message is oldest.
+        let older = value!({"id":"older-pin","channelId":"private","userId":"bob","body":"Older pin outside history","createdAt":0,"pinned":true,"pinnedAt":5});
+        let recent = value!({"id":"private-2","channelId":"private","userId":"bob","body":body,"createdAt":2,"pinned":true,"pinnedAt":4});
+        *pinned_messages.lock().unwrap() = vec![older.clone(), recent];
+        bob_peer.send(Message::text(value!({
+            "type":"pin:update","channelId":"private","messageId":"older-pin","pinned":true
+        }).to_string())).await.unwrap();
+        let view = wait_for_sidebar(&bob_views, |view| {
+            matches!(&view.chat.as_ref().unwrap().pins, Some(Pins::Ready(pins))
+                if pins.iter().map(|pin| pin.id.as_str()).eq(["older-pin", "private-2"]))
+        }).await;
+        let chat = view.chat.as_ref().unwrap();
+        assert!(chat.messages.iter().all(|message| message.id != "older-pin"));
+        bob.send(Command::JumpToChatMessage {
+            channel_id: chat.channel_id.clone(), message_id: "older-pin".into()
+        }).await.unwrap();
+        let (line, request) = requests.recv().await.unwrap();
+        assert_eq!(line, "GET /api/channels/private/messages?around=older-pin HTTP/1.1");
+        assert_eq!(request.header("cookie"), Some("session=bob"));
+        page(request, &[older], false).await;
+        wait_for_sidebar(&bob_views, |view| {
+            view.chat.as_ref().unwrap().jump.as_ref().is_some_and(|jump| jump.message_id == "older-pin")
+        }).await;
         alice.close();
         bob.close();
         assert!(matches!(alice_session.await.unwrap(), SessionEnd::Closed));
@@ -832,7 +857,9 @@ async fn admin_message_moderation_is_role_gated_and_updates_a_peer() {
                         )
                         .await;
                 }
-                "GET /api/voice HTTP/1.1" => request.respond(&[], "[]").await,
+                "GET /api/voice HTTP/1.1" | "GET /api/channels/general/pins HTTP/1.1" => {
+                    request.respond(&[], "[]").await
+                }
                 "GET /api/unread HTTP/1.1" | "GET /api/users/presence HTTP/1.1" => {
                     request.respond(&[], "{}").await;
                 }
@@ -866,6 +893,7 @@ async fn admin_message_moderation_is_role_gated_and_updates_a_peer() {
             let message = &view.chat.as_ref().unwrap().messages[0];
             assert_eq!(view.can_remove_message_content(message), cookie == "session=alice");
             assert_eq!(message.previews.len(), 1);
+            assert_eq!(view.chat.as_ref().unwrap().can_pin(view.is_admin()), cookie == "session=alice");
         }
 
         let mutate = |action| Command::MutateChatMessage {
