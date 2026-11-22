@@ -265,6 +265,13 @@ impl Spk {
     }
 
     pub(super) fn escape_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self
+            .message_menu_focus
+            .as_ref()
+            .is_some_and(|(_, _, focus)| focus.is_focused(window))
+        {
+            return false;
+        }
         if self.chat_pins_focus.contains_focused(window, cx) && self.close_pins(window, cx) {
             return true;
         }
