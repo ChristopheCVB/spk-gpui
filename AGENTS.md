@@ -12,6 +12,7 @@ Implement every feature available in the SPK web app. Use the upstream web clien
 
 - Use mise to manage Rust and other versioned development tools. Pin shared tool versions in the repository's mise configuration.
 - Use Conventional Commits for commit messages and PR titles to maintain a consistent and meaningful history.
+- For a Windows debug build, native launch from WSL, or crash log capture, use [Windows client debugging](docs/agents/windows-debug.md).
 
 ## Server integration
 
