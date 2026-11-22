@@ -83,10 +83,11 @@ impl Spk {
                     let View::SignedIn(sidebar) = &this.view else {
                         return None;
                     };
-                    Some(
+                    Some((
                         this.navigation(sidebar, this.selected_voice_destination(sidebar), cx)
                             .into_any_element(),
-                    )
+                        this.navigation_footer(sidebar, cx).into_any_element(),
+                    ))
                 });
                 let app = app.clone();
                 sheet
@@ -96,7 +97,9 @@ impl Spk {
                     .bg(cx.theme().sidebar)
                     .text_color(cx.theme().sidebar_foreground)
                     .px_0()
-                    .children(drawer.ok().flatten())
+                    .when_some(drawer.ok().flatten(), |sheet, (navigation, footer)| {
+                        sheet.child(navigation).footer(footer)
+                    })
                     .on_close(move |_, _, cx| {
                         let _ = app.update(cx, |this, cx| {
                             this.sidebar_drawer_open = false;
@@ -186,8 +189,20 @@ impl Spk {
                     div()
                         .relative()
                         .w(self.sidebar_width)
+                        .h_full()
                         .flex_shrink_0()
+                        .flex()
+                        .flex_col()
+                        .min_h_0()
+                        .bg(theme.sidebar)
+                        .text_color(theme.sidebar_foreground)
                         .child(self.navigation(sidebar, selected_channel, cx))
+                        .child(
+                            div()
+                                .px_2()
+                                .pb_2()
+                                .child(self.navigation_footer(sidebar, cx)),
+                        )
                         .child(
                             resize_handle("sidebar-edge", Axis::Horizontal)
                                 .inside(HandleEdge::Trailing)
@@ -229,6 +244,7 @@ impl Spk {
                                             "Open sidebar"
                                         },
                                     )
+                                    .flex_shrink_0()
                                     .track_focus(&self.sidebar_toggle_focus)
                                     .on_click(cx.listener(
                                         |this, _, window, cx| {
@@ -238,7 +254,12 @@ impl Spk {
                                     )),
                                 )
                                 .child(themed_icon(stage_icon, theme.muted_foreground, 16.0))
-                                .child(Label::new(stage_name.to_owned()).font_semibold().truncate())
+                                .child(
+                                    Label::new(stage_name.to_owned())
+                                        .font_semibold()
+                                        .min_w_0()
+                                        .truncate(),
+                                )
                                 .child(
                                     tool_button(
                                         "message-search",
@@ -340,163 +361,142 @@ impl Spk {
             .iter()
             .flatten()
             .any(|channel| channel.kind == "text");
-        let name = sidebar.profile.name();
 
         div()
-            .size_full()
+            .id("channel-navigation")
             .flex()
             .flex_col()
-            .bg(theme.sidebar)
-            .text_color(theme.sidebar_foreground)
             .px_2()
-            .pb_2()
-            .gap(if self.compact() { px(4.0) } else { px(8.0) })
+            .gap(if self.compact() { px(4.0) } else { px(12.0) })
+            .when(!self.sidebar_drawer_open, |nav| {
+                nav.flex_1().min_h_0().overflow_y_scroll().child(
+                    div()
+                        .flex()
+                        .h_16()
+                        .items_center()
+                        .justify_center()
+                        .flex_shrink_0()
+                        .gap_1()
+                        .text_2xl()
+                        .font_bold()
+                        .text_color(theme.primary)
+                        .child(logo(26.0))
+                        .child("spk"),
+                )
+            })
+            .when(!people.is_empty(), |nav| {
+                nav.child(
+                    div()
+                        .flex_shrink_0()
+                        .child(section_title(
+                            "Direct messages",
+                            IconName::MessageCircle,
+                            cx,
+                        ))
+                        .children(
+                            people
+                                .into_iter()
+                                .map(|(id, name)| self.person_row(sidebar, id, name, cx)),
+                        ),
+                )
+            })
+            .when(has_text, |nav| {
+                nav.child(
+                    div()
+                        .flex_shrink_0()
+                        .child(section_title("Text channels", IconName::Hash, cx))
+                        .children(
+                            sidebar
+                                .channels
+                                .iter()
+                                .flatten()
+                                .filter(|channel| channel.kind == "text")
+                                .map(|channel| {
+                                    let id = channel.id.clone();
+                                    let name = channel_name(channel).to_owned();
+                                    let active = sidebar
+                                        .chat
+                                        .as_ref()
+                                        .is_some_and(|chat| chat.channel_id == id);
+                                    let counts = sidebar.unread(&id);
+                                    let muted = self.notification_preferences.muted.contains(&id);
+                                    let menu_id = id.clone();
+                                    let app = cx.weak_entity();
+                                    div()
+                                        .id(SharedString::from(format!("text-{id}")))
+                                        .child(
+                                            Button::new("select")
+                                                .ghost()
+                                                .small()
+                                                .tab_stop(true)
+                                                .selected(active)
+                                                .accessibility_label(unread_label(&name, counts))
+                                                .w_full()
+                                                .h_8()
+                                                .when(active || counts.mentions > 0, |button| {
+                                                    button.bg(theme.primary.opacity(0.10))
+                                                })
+                                                .child(
+                                                    div()
+                                                        .flex()
+                                                        .items_center()
+                                                        .gap_2()
+                                                        .w_full()
+                                                        .min_w_0()
+                                                        .child(
+                                                            Label::new(name)
+                                                                .flex_1()
+                                                                .truncate()
+                                                                .when(counts.unread > 0, |label| {
+                                                                    label.font_bold()
+                                                                }),
+                                                        )
+                                                        .child(unread_badges(counts, cx)),
+                                                )
+                                                .on_click(cx.listener(
+                                                    move |this, _, window, cx| {
+                                                        this.close_sidebar_drawer(window, cx);
+                                                        this.device_picker = None;
+                                                        this.send(
+                                                            Command::OpenTextChannel(id.clone()),
+                                                            None,
+                                                            cx,
+                                                        );
+                                                    },
+                                                )),
+                                        )
+                                        .context_menu(move |menu, _, _| {
+                                            menu.item(mark_read_item(menu_id.clone(), app.clone()))
+                                                .item(notifications::mute_item(
+                                                    menu_id.clone(),
+                                                    muted,
+                                                    app.clone(),
+                                                ))
+                                        })
+                                }),
+                        ),
+                )
+            })
             .child(
                 div()
-                    .id("channel-navigation")
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .gap(if self.compact() { px(4.0) } else { px(12.0) })
-                    .when(!self.sidebar_drawer_open, |nav| {
-                        nav.child(
-                            div()
-                                .flex()
-                                .h_16()
-                                .items_center()
-                                .justify_center()
-                                .flex_shrink_0()
-                                .gap_1()
-                                .text_2xl()
-                                .font_bold()
-                                .text_color(theme.primary)
-                                .child(logo(26.0))
-                                .child("spk"),
-                        )
-                    })
-                    .when(!people.is_empty(), |nav| {
-                        nav.child(
-                            div()
-                                .flex_shrink_0()
-                                .child(section_title(
-                                    "Direct messages",
-                                    IconName::MessageCircle,
-                                    cx,
-                                ))
-                                .children(
-                                    people
-                                        .into_iter()
-                                        .map(|(id, name)| self.person_row(sidebar, id, name, cx)),
-                                ),
-                        )
-                    })
-                    .when(has_text, |nav| {
-                        nav.child(
-                            div()
-                                .flex_shrink_0()
-                                .child(section_title("Text channels", IconName::Hash, cx))
-                                .children(
-                                    sidebar
-                                        .channels
-                                        .iter()
-                                        .flatten()
-                                        .filter(|channel| channel.kind == "text")
-                                        .map(|channel| {
-                                            let id = channel.id.clone();
-                                            let name = channel_name(channel).to_owned();
-                                            let active = sidebar
-                                                .chat
-                                                .as_ref()
-                                                .is_some_and(|chat| chat.channel_id == id);
-                                            let counts = sidebar.unread(&id);
-                                            let muted =
-                                                self.notification_preferences.muted.contains(&id);
-                                            let menu_id = id.clone();
-                                            let app = cx.weak_entity();
-                                            div()
-                                                .id(SharedString::from(format!("text-{id}")))
-                                                .child(
-                                                    Button::new("select")
-                                                        .ghost()
-                                                        .small()
-                                                        .tab_stop(true)
-                                                        .selected(active)
-                                                        .accessibility_label(unread_label(
-                                                            &name, counts,
-                                                        ))
-                                                        .w_full()
-                                                        .h_8()
-                                                        .when(
-                                                            active || counts.mentions > 0,
-                                                            |button| {
-                                                                button
-                                                                    .bg(theme.primary.opacity(0.10))
-                                                            },
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .flex()
-                                                                .items_center()
-                                                                .gap_2()
-                                                                .w_full()
-                                                                .min_w_0()
-                                                                .child(
-                                                                    Label::new(name)
-                                                                        .flex_1()
-                                                                        .truncate()
-                                                                        .when(
-                                                                            counts.unread > 0,
-                                                                            |label| {
-                                                                                label.font_bold()
-                                                                            },
-                                                                        ),
-                                                                )
-                                                                .child(unread_badges(counts, cx)),
-                                                        )
-                                                        .on_click(cx.listener(
-                                                            move |this, _, window, cx| {
-                                                                this.close_sidebar_drawer(
-                                                                    window, cx,
-                                                                );
-                                                                this.device_picker = None;
-                                                                this.send(
-                                                                    Command::OpenTextChannel(
-                                                                        id.clone(),
-                                                                    ),
-                                                                    None,
-                                                                    cx,
-                                                                );
-                                                            },
-                                                        )),
-                                                )
-                                                .context_menu(move |menu, _, _| {
-                                                    menu.item(mark_read_item(
-                                                        menu_id.clone(),
-                                                        app.clone(),
-                                                    ))
-                                                    .item(notifications::mute_item(
-                                                        menu_id.clone(),
-                                                        muted,
-                                                        app.clone(),
-                                                    ))
-                                                })
-                                        }),
-                                ),
-                        )
-                    })
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .child(section_title("Voice channels", IconName::Volume2, cx))
-                            .children(
-                                voice_channels(sidebar).map(|channel| {
-                                    self.channel_row(sidebar, channel, selected, cx)
-                                }),
-                            ),
+                    .flex_shrink_0()
+                    .child(section_title("Voice channels", IconName::Volume2, cx))
+                    .children(
+                        voice_channels(sidebar)
+                            .map(|channel| self.channel_row(sidebar, channel, selected, cx)),
                     ),
             )
+    }
+
+    fn navigation_footer(&self, sidebar: &Sidebar, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let name = sidebar.profile.name();
+        div()
+            .w_full()
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .gap(if self.compact() { px(4.0) } else { px(8.0) })
             .children(
                 sidebar
                     .voice
@@ -597,6 +597,7 @@ impl Spk {
                     .child(
                         Label::new(call_status(call, switching))
                             .text_xs()
+                            .truncate()
                             .text_color(theme.muted_foreground),
                     ),
             )
@@ -604,7 +605,7 @@ impl Spk {
                 card.children(self.voice_media_buttons(false, cx))
             })
             .when(bottom_bar && call.is_participating(), |bar| {
-                bar.child(self.voice_controls(sidebar, VoiceControls::Profile, cx))
+                bar.child(self.voice_controls(sidebar, VoiceControls::BottomBar, cx))
             })
             .children(self.leave_voice("persistent-voice-leave", call, switching, bottom_bar, cx))
     }
