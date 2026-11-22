@@ -7757,7 +7757,7 @@ dependencies = [
  "webrtc-sys",
  "windows 0.61.3",
  "windows 0.62.2",
- "windows-capture",
+ "windows-capture 2.0.1",
  "windows-core 0.62.2",
  "windows-registry 0.6.1",
  "x11rb 0.14.0",
@@ -9579,6 +9579,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "windows-capture"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09046acbe9b6d039cde50e8c8178d95bb0f9b33ed7feccc4465dadc5404b31b4"
+dependencies = [
+ "parking_lot",
+ "rayon",
+ "thiserror 2.0.21",
+ "windows 0.62.2",
+ "windows-future 0.3.2",
+]
+
+[[package]]
 name = "windows-collections"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10622,7 +10635,7 @@ dependencies = [
  "sysinfo",
  "tao-core-video-sys",
  "windows 0.61.3",
- "windows-capture",
+ "windows-capture 1.5.0",
  "x11",
  "xcb",
 ]
