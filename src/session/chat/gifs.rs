@@ -1,12 +1,12 @@
-use super::*;
+use super::{
+    preview_images::{PreviewImage, load_image},
+    *,
+};
 
 use gpui_kit::RenderImage;
 use reqwest::StatusCode;
 
-use crate::{
-    api::{GifItem, GifPage},
-    chat_markdown::{image_preview_links, message_markdown},
-};
+use crate::api::{GifItem, GifPage};
 
 #[derive(Clone)]
 pub struct StagedGif {
@@ -51,22 +51,15 @@ impl GifPickerView {
     pub fn image(&self, url: &str) -> Option<Arc<RenderImage>> {
         self.images.get(url)?.clone()
     }
+
+    pub fn images(&self) -> impl Iterator<Item = &Arc<RenderImage>> {
+        self.images.values().filter_map(Option::as_ref)
+    }
 }
 
 pub(in crate::session) enum FavoriteResult {
     List(Vec<GifItem>),
     Changed { gif: GifItem, saved: bool },
-}
-
-pub(in crate::session) type PreviewImage = Option<Arc<RenderImage>>;
-pub(in crate::session) type MessageImageResult = (String, String, PreviewImage);
-
-#[derive(Clone)]
-pub struct MessageImage {
-    pub message_id: String,
-    pub url: String,
-    pub image: Option<Arc<RenderImage>>,
-    pub loading: bool,
 }
 
 #[derive(Default)]
@@ -78,7 +71,6 @@ pub(in crate::session) struct GifPicker {
     pub browsing: JoinSet<Result<GifPage, Failure>>,
     pub favorites: JoinSet<Result<FavoriteResult, Failure>>,
     pub previews: JoinSet<(String, PreviewImage)>,
-    pub message_preview: JoinSet<MessageImageResult>,
 }
 
 impl GifPicker {
@@ -94,11 +86,6 @@ impl GifPicker {
         self.view = None;
         self.browsing = JoinSet::new();
         self.previews = JoinSet::new();
-    }
-
-    pub fn reset_conversation(&mut self) {
-        self.close();
-        self.message_preview = JoinSet::new();
     }
 
     pub fn show_favorites(&mut self, client: &SpkClient, show: bool) {
@@ -364,72 +351,4 @@ impl ChatSession {
         };
         self.drafts.entry(view.channel_id.clone()).or_default().gif = gif;
     }
-
-    pub fn preview_message_image(&mut self, client: &SpkClient, message_id: String, url: String) {
-        let Some(view) = self
-            .selected
-            .as_mut()
-            .filter(|view| view.history == History::Ready)
-        else {
-            return;
-        };
-        let Some(message) = view
-            .messages
-            .iter()
-            .find(|message| message.id == message_id)
-        else {
-            return;
-        };
-        let rendered = message_markdown(&message.body, |_| "", |_| true, Some("spk-spoiler:"));
-        if !image_preview_links(&rendered)
-            .iter()
-            .any(|link| link.as_str() == url)
-        {
-            return;
-        }
-        view.message_image = Some(MessageImage {
-            message_id: message_id.clone(),
-            url: url.clone(),
-            image: None,
-            loading: true,
-        });
-        self.gifs.message_preview = JoinSet::new();
-        let client = client.clone();
-        self.gifs.message_preview.spawn(async move {
-            let image = load_image(&client, &url, 480, 300).await;
-            (message_id, url, image)
-        });
-    }
-
-    pub fn message_image_complete(&mut self, (id, url, image): MessageImageResult) {
-        if let Some(preview) = self
-            .selected
-            .as_mut()
-            .and_then(|view| view.message_image.as_mut())
-            && preview.message_id == id
-            && preview.url == url
-        {
-            preview.loading = false;
-            preview.image = image;
-        }
-    }
-}
-
-async fn load_image(client: &SpkClient, url: &str, width: u32, height: u32) -> PreviewImage {
-    let bytes = client.public_image_preview(url).await.ok()?;
-    tokio::task::spawn_blocking(move || {
-        if matches!(
-            image::guess_format(&bytes).ok()?,
-            image::ImageFormat::Gif
-                | image::ImageFormat::WebP
-                | image::ImageFormat::Png
-                | image::ImageFormat::Jpeg
-        ) {
-            return attachments::raster_thumbnail(&bytes, width, height);
-        }
-        None
-    })
-    .await
-    .ok()
-    .flatten()
 }

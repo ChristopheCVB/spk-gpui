@@ -61,6 +61,17 @@ async fn searches_messages_and_opens_authenticated_exact_targets() {
             .unwrap();
         let (line, request) = search.recv().await.unwrap();
         assert_eq!(line, "GET /api/channels/general/messages?around=startup HTTP/1.1");
+        request.respond_raw("401 Unauthorized", &[], b"").await;
+        while !matches!(rx.recv().await.unwrap(), View::SignIn { .. }) {}
+        tx.send(Command::SignIn {
+            email: "alice@example.test".into(),
+            password: "test password".into(),
+        }).await.unwrap();
+        let _peer = accept_async(sockets.accept().await.unwrap().0)
+            .await
+            .unwrap();
+        let (line, request) = search.recv().await.unwrap();
+        assert_eq!(line, "GET /api/channels/general/messages?around=startup HTTP/1.1");
         request.respond(&[], &value!({
             "messages":[{"id":"startup","channelId":"general","userId":"bob","body":"First alert","createdAt":12}],
             "hasMoreBefore": false,
@@ -174,6 +185,14 @@ async fn searches_messages_and_opens_authenticated_exact_targets() {
         let unknown = MessageTarget::new("unknown", "private").unwrap();
         tx.send(Command::OpenMessageTarget(unknown)).await.unwrap();
         wait_for_sidebar(&rx, |view| view.chat_notice == Some("Message unavailable.")).await;
+
+        tx.send(Command::OpenConversationTarget("dm-1".into())).await.unwrap();
+        let (line, request) = search.recv().await.unwrap();
+        assert_eq!(line, "GET /api/channels/dm-1/messages?unread=1 HTTP/1.1");
+        request.respond(&[], r#"{"messages":[],"hasMoreBefore":false,"hasMoreAfter":false}"#).await;
+        wait_for_sidebar(&rx, |view| {
+            view.chat.as_ref().is_some_and(|chat| chat.channel_id == "dm-1" && chat.history_ready())
+        }).await;
 
         tx.close();
         session.await.unwrap();

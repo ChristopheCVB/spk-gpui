@@ -239,6 +239,35 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
             chat.jump.as_ref().is_some_and(|(id, _)| id == "m0") && chat.has_more_after && chat.messages[0].id == "m0"
         })).await;
+        peer.close(None).await.unwrap();
+        let mut peer = accept_async(sockets.accept().await.unwrap().0).await.unwrap();
+        let request = history_request(&history, "?around=m0").await;
+        request.respond(&[], &value!({
+            "messages":[message("m0", 0, "bob", "Edited reply target"), message("m1", 1, "bob", "Earlier message"), message("m2", 2, "bob", "Outside the window")],
+            "hasMoreBefore":false,"hasMoreAfter":true
+        }).to_string()).await;
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
+            chat.history_ready() && chat.has_more_after && chat.messages.len() == 2
+                && chat.messages[0].body == "Edited reply target"
+        })).await;
+        tx.send(Command::LoadNewerMessages).await.unwrap();
+        let request = history_request(&history, "?after=m1").await;
+        request.respond(&[], &value!({
+            "messages":[message("m2", 2, "bob", "Outside the window")],
+            "hasMoreBefore":true,"hasMoreAfter":true
+        }).to_string()).await;
+        wait_for_messages(&rx, &["m0", "m1", "m2"]).await;
+        tx.send(Command::LoadNewerMessages).await.unwrap();
+        let request = history_request(&history, "?after=m2").await;
+        live(&mut peer, &message("m7", 7, "bob", "Arrived during pagination"), None).await;
+        request.respond(&[], &value!({
+            "messages":[message("m6", 6, "bob", "After history was read")],
+            "hasMoreBefore":true,"hasMoreAfter":false
+        }).to_string()).await;
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
+            chat.latest_ready() && !chat.has_more_before && chat.messages.len() == 5
+                && chat.messages.last().is_some_and(|message| message.id == "m7")
+        })).await;
         tx.send(Command::JumpToChatMessage {
             channel_id: "general".into(),
             message_id: "removed".into(),
@@ -250,9 +279,8 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         wait_for_messages(&rx, &["m6"]).await;
 
         tx.send(Command::RetryChatSend).await.unwrap();
-        tx.send(Command::DismissChatSend).await.unwrap();
-        let kept = wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| chat.outgoing.is_none() && chat.draft.body == "Closed before confirmation")).await;
-        assert_eq!(kept.chat.unwrap().draft.body, "Closed before confirmation");
+        tx.send(Command::MarkChatSendDelivered("general".into())).await.unwrap();
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| chat.outgoing.is_none() && chat.draft.body.is_empty())).await;
         tx.send(Command::SendChatMessage {
             channel_id: "general".into(),
             body: "Still here".into(),

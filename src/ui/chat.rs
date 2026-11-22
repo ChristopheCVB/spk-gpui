@@ -7,6 +7,7 @@ pub(super) use attachments::AttachmentUi;
 
 use std::{
     cell::RefCell,
+    collections::HashSet,
     hash::{DefaultHasher, Hash, Hasher},
 };
 
@@ -29,6 +30,24 @@ fn chat(view: &View) -> Option<&ChatView> {
         View::SignedIn(sidebar) => sidebar.chat.as_ref(),
         _ => None,
     }
+}
+
+fn chat_images(chat: &ChatView) -> impl Iterator<Item = &Arc<RenderImage>> {
+    chat.preview_images
+        .images()
+        .chain(chat.gifs.iter().flat_map(|picker| picker.images()))
+        .chain(chat.draft.gif.iter().filter_map(|gif| gif.image.as_ref()))
+        .chain(
+            chat.message_image
+                .iter()
+                .filter_map(|preview| preview.image.as_ref()),
+        )
+        .chain(
+            chat.draft
+                .uploads
+                .iter()
+                .filter_map(|upload| upload.preview.as_ref()),
+        )
 }
 
 pub(super) fn unread_badges(counts: UnreadState, cx: &App) -> impl IntoElement {
@@ -181,7 +200,18 @@ impl Spk {
         let previous = chat(&self.view);
         let signed_in = matches!(next, View::SignedIn(_));
         let next = chat(next);
-        self.chat_attachments.sync(previous, next, signed_in);
+        self.chat_attachments
+            .sync(previous, next, signed_in, window);
+        let mut retained: HashSet<_> = next
+            .into_iter()
+            .flat_map(chat_images)
+            .map(Arc::as_ptr)
+            .collect();
+        for image in previous.into_iter().flat_map(chat_images) {
+            if retained.insert(Arc::as_ptr(image)) {
+                let _ = window.drop_image(image.clone());
+            }
+        }
         self.update_gif_input(previous, next, window, cx);
         Self::update_message_actions(&mut self.message_action_form, previous, next);
         if let Some(next) = next.filter(|chat| chat.latest_ready())
@@ -209,9 +239,20 @@ impl Spk {
                 )
             });
             self.chat_spoilers.clear();
+            self.chat_scroll_anchor = None;
             self.chat_scroll = ScrollHandle::new();
             self.chat_scroll.scroll_to_bottom();
         } else if let (Some(previous), Some(next)) = (previous, next) {
+            if previous.has_more_after
+                && next.direct_message_peer.is_some()
+                && next.loading()
+                && next.messages.is_empty()
+            {
+                self.chat_scroll_anchor = previous
+                    .messages
+                    .get(self.chat_scroll.top_item())
+                    .map(|message| message.id.clone());
+            }
             let acknowledged = previous.outgoing.as_ref().is_some_and(|pending| {
                 next.outgoing.is_none()
                     && !next.loading()
@@ -230,6 +271,18 @@ impl Spk {
             if previous.jump != next.jump
                 && let Some((id, _)) = &next.jump
                 && let Some(index) = next.messages.iter().position(|message| message.id == *id)
+            {
+                self.chat_scroll_anchor = None;
+                self.chat_scroll.scroll_to_top_of_item(index);
+                return;
+            }
+            if next.history_ready()
+                && let Some(anchor) = self.chat_scroll_anchor.take()
+                && next.has_more_after
+                && let Some(index) = next
+                    .messages
+                    .iter()
+                    .position(|message| message.id == anchor)
             {
                 self.chat_scroll.scroll_to_top_of_item(index);
                 return;
@@ -424,7 +477,16 @@ impl Spk {
             )
             .when(chat.has_more_after && !chat.loading(), |area| {
                 area.child(
-                    div().px_4().py_2().child(
+                    div().px_4().py_2().flex().gap_2().child(
+                        Button::new("newer-messages")
+                            .small()
+                            .tab_stop(true)
+                            .label("Load newer messages")
+                            .disabled(!chat.history_ready() || chat.messages.is_empty())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.send(Command::LoadNewerMessages, None, cx)
+                            })),
+                    ).child(
                         Button::new("latest-messages")
                             .small()
                             .tab_stop(true)
@@ -513,13 +575,14 @@ impl Spk {
                         )
                     })
                     .when_some(chat.outgoing.as_ref(), |composer, outgoing| {
+                        let channel_id = chat.channel_id.clone();
                         let (status, retry, dismiss) = match &outgoing.status {
                             Delivery::Sending(_) => ("Sending…".into(), false, false),
                             Delivery::Failed(error) => {
                                 (format!("Could not send message. {error}"), true, true)
                             }
                             Delivery::Unconfirmed => (
-                                "Delivery unconfirmed. Check message history before sending again."
+                                "Delivery unconfirmed. Resending may post a duplicate. Check message history."
                                     .into(),
                                 false,
                                 true,
@@ -567,7 +630,7 @@ impl Spk {
                                                     .label(if retry {
                                                         "Edit message"
                                                     } else {
-                                                        "Keep draft"
+                                                        "Edit and resend"
                                                     })
                                                     .on_click(cx.listener(|this, _, _, cx| {
                                                         this.send(
@@ -575,6 +638,17 @@ impl Spk {
                                                             None,
                                                             cx,
                                                         )
+                                                    })),
+                                            )
+                                        })
+                                        .when(matches!(outgoing.status, Delivery::Unconfirmed), |bar| {
+                                            bar.child(
+                                                Button::new("mark-send-delivered")
+                                                    .small()
+                                                    .tab_stop(true)
+                                                    .label("Already sent")
+                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                        this.send(Command::MarkChatSendDelivered(channel_id.clone()), None, cx)
                                                     })),
                                             )
                                         }),

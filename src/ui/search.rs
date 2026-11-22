@@ -8,7 +8,7 @@ use url::Url;
 
 use super::*;
 use crate::{
-    api::{MessageTarget, SearchHit, SearchScope},
+    api::{MessageTarget, SearchHit, SearchScope, conversation_link},
     chat_markdown::{message_markdown, plain_text},
 };
 
@@ -391,6 +391,14 @@ pub(super) fn activate_chat_link(app: &WeakEntity<Spk>, link: Url, cx: &mut App)
     if let Some(target) = MessageTarget::parse(&SPK_BASE, &link) {
         let _ = app.update(cx, |spk, cx| {
             spk.send(Command::OpenMessageTarget(target), None, cx)
+        });
+    } else if let Some(channel) = conversation_link(&SPK_BASE, &link) {
+        let _ = app.update(cx, |spk, cx| {
+            spk.send(
+                Command::OpenConversationTarget(channel.to_owned()),
+                None,
+                cx,
+            )
         });
     } else {
         cx.open_url(link.as_str());

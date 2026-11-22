@@ -54,20 +54,28 @@ impl AttachmentUi {
         previous: Option<&ChatView>,
         next: Option<&ChatView>,
         signed_in: bool,
+        window: &mut Window,
     ) {
-        if previous.map(|chat| &chat.channel_id) != next.map(|chat| &chat.channel_id) {
+        let switched = previous.map(|chat| &chat.channel_id) != next.map(|chat| &chat.channel_id);
+        if switched {
             self.picker_error = None;
-            self.cards.clear();
-        } else if !previous
-            .zip(next)
-            .is_some_and(|(previous, next)| Arc::ptr_eq(&previous.messages, &next.messages))
+        }
+        if switched
+            || !previous
+                .zip(next)
+                .is_some_and(|(previous, next)| Arc::ptr_eq(&previous.messages, &next.messages))
         {
-            self.cards.retain(|id, _| {
-                next.is_some_and(|chat| {
-                    chat.messages
-                        .iter()
-                        .any(|message| message.attachments.iter().any(|file| &file.id == id))
-                })
+            self.cards.retain(|id, card| {
+                let keep = !switched
+                    && next.is_some_and(|chat| {
+                        chat.messages
+                            .iter()
+                            .any(|message| message.attachments.iter().any(|file| &file.id == id))
+                    });
+                if !keep && let Some(Preview::Image(image)) = card.preview.take() {
+                    let _ = window.drop_image(image);
+                }
+                keep
             });
         }
         if !signed_in {
@@ -517,7 +525,7 @@ impl Spk {
             }
             .await;
 
-            let _ = app.update_in(cx, |app, _, cx| {
+            let _ = app.update_in(cx, |app, window, cx| {
                 if let Some(state) = app
                     .chat_attachments
                     .cards
@@ -526,7 +534,11 @@ impl Spk {
                 {
                     state.pending = None;
                     match result {
-                        Ok(Some(AccessResult::Preview(preview))) => state.preview = Some(preview),
+                        Ok(Some(AccessResult::Preview(preview))) => {
+                            if let Some(Preview::Image(image)) = state.preview.replace(preview) {
+                                let _ = window.drop_image(image);
+                            }
+                        }
                         Ok(Some(AccessResult::Open(path))) => {
                             cx.open_with_system(&path);
                             app.chat_attachments

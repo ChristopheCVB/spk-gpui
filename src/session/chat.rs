@@ -8,8 +8,8 @@ use actions::{ActionOutcome, PendingAction, change_message};
 pub use attachments::{AttachmentInput, UploadStatus, image_preview};
 use attachments::{AttachmentWork, QueuedAttachment};
 pub use gifs::GifPickerView;
-use gifs::{GifPicker, MessageImage, StagedGif};
-use preview_images::{PreviewImages, PreviewResult};
+use gifs::{GifPicker, StagedGif};
+use preview_images::{MessageImage, MessageImageResult, PreviewImages, PreviewResult};
 
 use std::{
     collections::{HashMap, HashSet},
@@ -133,6 +133,7 @@ pub enum Delivery {
 enum HistoryRequest {
     Refresh,
     Older(String),
+    Newer(String),
     Around(String),
     Latest,
 }
@@ -153,6 +154,7 @@ pub(super) struct ChatSession {
     pub action_tasks: JoinSet<Result<MessageChange, Failure>>,
     pub pin_tasks: JoinSet<Result<Vec<ChatMessage>, Failure>>,
     pub preview_tasks: JoinSet<PreviewResult>,
+    pub message_preview: JoinSet<MessageImageResult>,
     deleted_during_load: HashSet<String>,
     pub tasks: JoinSet<Result<MessagePage, Failure>>,
     pub(super) attachments: AttachmentWork,
@@ -216,7 +218,8 @@ impl ChatSession {
         self.typers.clear();
         self.last_typing = None;
         self.reset_actions();
-        self.gifs.reset_conversation();
+        self.gifs.close();
+        self.message_preview = JoinSet::new();
         self.selected = Some(ChatView {
             channel_id: channel.id.clone(),
             direct_message_peer: channel
@@ -255,27 +258,22 @@ impl ChatSession {
     pub fn close(&mut self) {
         self.cancel_history();
         self.reset_actions();
-        self.gifs.reset_conversation();
+        self.gifs.close();
+        self.message_preview = JoinSet::new();
         self.selected = None;
         self.typers.clear();
     }
 
     pub fn connected(&mut self, client: &SpkClient, socket: VoiceSocket) {
         self.socket = Some(socket);
-        if matches!(self.history, Some(HistoryRequest::Around(_)))
-            && self.selected.as_ref().is_some_and(ChatView::loading)
+        if matches!(
+            self.history,
+            Some(HistoryRequest::Around(_) | HistoryRequest::Latest)
+        ) && self.selected.as_ref().is_some_and(ChatView::loading)
         {
             return;
         }
-        if self
-            .selected
-            .as_ref()
-            .is_some_and(|view| view.has_more_after)
-        {
-            self.latest(client);
-        } else {
-            self.load(client, HistoryRequest::Refresh);
-        }
+        self.load(client, HistoryRequest::Refresh);
     }
 
     pub fn disconnected(&mut self) {
@@ -296,6 +294,16 @@ impl ChatSession {
             && let Some(oldest) = view.messages.first()
         {
             self.load(client, HistoryRequest::Older(oldest.id.clone()));
+        }
+    }
+
+    pub fn newer(&mut self, client: &SpkClient) {
+        if let Some(view) = &self.selected
+            && view.history == History::Ready
+            && view.has_more_after
+            && let Some(newest) = view.messages.last()
+        {
+            self.load(client, HistoryRequest::Newer(newest.id.clone()));
         }
     }
 
@@ -346,14 +354,19 @@ impl ChatSession {
         view.jump_failed = false;
         let channel = view.channel_id.clone();
         let messages = view.messages.clone();
+        let historical = view.has_more_after;
         let client = client.clone();
         self.history = Some(request.clone());
         self.tasks.spawn(async move {
             match request {
+                HistoryRequest::Refresh if historical && !messages.is_empty() => {
+                    refresh_window(&client, &channel, &messages).await
+                }
                 HistoryRequest::Refresh => {
                     refresh_history(&client, &channel, messages.first()).await
                 }
                 HistoryRequest::Older(before) => client.messages(&channel, Some(&before)).await,
+                HistoryRequest::Newer(after) => client.messages_after(&channel, &after).await,
                 HistoryRequest::Around(id) => {
                     let page = client.messages_around(&channel, &id).await?;
                     if !page.messages.iter().any(|message| message.id == id) {
@@ -377,16 +390,15 @@ impl ChatSession {
                 }
                 if matches!(request, HistoryRequest::Older(_)) {
                     view.merge(page.messages);
+                } else if matches!(request, HistoryRequest::Newer(_)) {
+                    view.merge(page.messages);
+                    view.has_more_after = page.has_more_after;
                 } else {
                     if view.first_unread_id.is_none() {
                         view.first_unread_id = page.first_unread_id;
                     }
                     view.messages = Arc::new(page.messages);
                     view.has_more_after = page.has_more_after;
-                    let buffered = std::mem::take(&mut self.buffered);
-                    if !view.has_more_after {
-                        view.merge(buffered);
-                    }
                     if let HistoryRequest::Around(id) = request {
                         if view.messages.iter().any(|message| message.id == *id) {
                             view.mark_jump(id.clone());
@@ -396,10 +408,16 @@ impl ChatSession {
                         }
                     }
                 }
+                let buffered = std::mem::take(&mut self.buffered);
+                if !view.has_more_after {
+                    view.merge(buffered);
+                }
                 for (id, change) in self.buffered_changes.drain(..) {
                     change_message(&mut view.messages, &id, &change);
                 }
-                view.has_more_before = page.has_more_before;
+                if !matches!(request, HistoryRequest::Newer(_)) {
+                    view.has_more_before = page.has_more_before;
+                }
                 view.history = History::Ready;
                 if matches!(request, HistoryRequest::Refresh | HistoryRequest::Latest)
                     || matches!(view.pins, Some(Pins::Loading))
@@ -418,7 +436,7 @@ impl ChatSession {
                     return;
                 }
                 if matches!(error, Failure::Http(reqwest::StatusCode::NOT_FOUND))
-                    && matches!(request, HistoryRequest::Older(_))
+                    && matches!(request, HistoryRequest::Older(_) | HistoryRequest::Newer(_))
                 {
                     self.history = Some(HistoryRequest::Refresh);
                 }
@@ -427,7 +445,8 @@ impl ChatSession {
                     view.pins = None;
                     view.preview_images = PreviewImages::default();
                     view.message_image = None;
-                    self.gifs.reset_conversation();
+                    self.gifs.close();
+                    self.message_preview = JoinSet::new();
                     self.pin_tasks = JoinSet::new();
                     self.preview_tasks = JoinSet::new();
                     view.has_more_before = false;
@@ -666,6 +685,35 @@ impl ChatSession {
         }
     }
 
+    pub fn mark_send_delivered(&mut self, channel_id: &str) {
+        if self
+            .selected
+            .as_ref()
+            .is_some_and(|view| view.channel_id == channel_id)
+            && self
+                .outgoing
+                .get(channel_id)
+                .is_some_and(|outgoing| matches!(outgoing.status, Delivery::Unconfirmed))
+        {
+            self.clear_delivered_send(channel_id);
+        }
+    }
+
+    fn clear_delivered_send(&mut self, channel_id: &str) {
+        let outgoing = self.outgoing.remove(channel_id).unwrap();
+        if let Some(draft) = self.drafts.get_mut(channel_id) {
+            draft.uploads.clear();
+            if draft.gif.as_ref().map(|gif| &gif.item.url) == outgoing.gif_url.as_ref() {
+                draft.gif = None;
+            }
+            if draft.body == outgoing.body && draft.reply == outgoing.reply {
+                draft.body.clear();
+                draft.reply = None;
+                draft.upload_notice = None;
+            }
+        }
+    }
+
     pub fn message(&mut self, message: ChatMessage, nonce: Option<&str>, own_id: Option<&str>) {
         if own_id == Some(message.user_id.as_str())
             && self
@@ -673,18 +721,7 @@ impl ChatSession {
                 .get(&message.channel_id)
                 .is_some_and(|pending| Some(pending.nonce.as_str()) == nonce)
         {
-            let outgoing = self.outgoing.remove(&message.channel_id).unwrap();
-            if let Some(draft) = self.drafts.get_mut(&message.channel_id) {
-                draft.uploads.clear();
-                if draft.gif.as_ref().map(|gif| &gif.item.url) == outgoing.gif_url.as_ref() {
-                    draft.gif = None;
-                }
-                if draft.body == outgoing.body && draft.reply == outgoing.reply {
-                    draft.body.clear();
-                    draft.reply = None;
-                    draft.upload_notice = None;
-                }
-            }
+            self.clear_delivered_send(&message.channel_id);
         }
         if let Some(view) = &mut self.selected
             && view.channel_id == message.channel_id
@@ -692,7 +729,12 @@ impl ChatSession {
         {
             if matches!(
                 self.history,
-                Some(HistoryRequest::Refresh | HistoryRequest::Around(_) | HistoryRequest::Latest)
+                Some(
+                    HistoryRequest::Refresh
+                        | HistoryRequest::Around(_)
+                        | HistoryRequest::Latest
+                        | HistoryRequest::Newer(_)
+                )
             ) && view.history != History::Ready
             {
                 if view.loading() {
@@ -808,4 +850,42 @@ async fn refresh_history(
     page.messages.extend(pages.into_iter().rev().flatten());
     page.first_unread_id = first_unread_id;
     Ok(page)
+}
+
+async fn refresh_window(
+    client: &SpkClient,
+    channel: &str,
+    messages: &[ChatMessage],
+) -> Result<MessagePage, Failure> {
+    let last = position(messages.last().expect("loaded history window"));
+    for anchor in messages {
+        let mut page = match client.messages_around(channel, &anchor.id).await {
+            Err(Failure::Http(reqwest::StatusCode::NOT_FOUND)) => continue,
+            result => result?,
+        };
+        while page.has_more_after {
+            let cursor = page.messages.last().ok_or(Failure::InvalidResponse)?;
+            if position(cursor) >= last {
+                break;
+            }
+            let next = client.messages_after(channel, &cursor.id).await?;
+            if next
+                .messages
+                .first()
+                .is_some_and(|message| position(message) <= position(cursor))
+                || (next.has_more_after && next.messages.is_empty())
+            {
+                return Err(Failure::InvalidResponse);
+            }
+            page.has_more_after = next.has_more_after;
+            page.messages.extend(next.messages);
+        }
+        let end = page
+            .messages
+            .partition_point(|message| position(message) <= last);
+        page.has_more_after |= end < page.messages.len();
+        page.messages.truncate(end);
+        return Ok(page);
+    }
+    refresh_history(client, channel, messages.first()).await
 }

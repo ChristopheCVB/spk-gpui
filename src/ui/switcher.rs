@@ -65,7 +65,7 @@ impl Destination {
         let id = channel.id.clone();
         match channel.kind.as_str() {
             "text" => Some((Group::Text, Self::Text(id))),
-            "dm" if channel.other_user_id.is_some() => Some((Group::Direct, Self::Direct(id))),
+            "dm" if channel.is_conversation() => Some((Group::Direct, Self::Direct(id))),
             "voice" => Some((Group::Voice, Self::Voice(id))),
             _ => None,
         }
@@ -215,7 +215,7 @@ impl Spk {
                     .flatten()
                     .filter(move |channel| channel.kind == kind)
             })
-            .filter(|channel| channel.kind != "dm" || channel.other_user_id.is_some())
+            .filter(|channel| channel.kind == "voice" || channel.is_conversation())
             .collect::<Vec<_>>();
         let ids: Vec<_> = channels.iter().map(|channel| channel.id.as_str()).collect();
         if let Some(index) = step_channel(&ids, current, backwards, |id| {

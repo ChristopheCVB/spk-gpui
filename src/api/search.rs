@@ -26,12 +26,7 @@ impl MessageTarget {
     pub fn new(channel_id: &str, message_id: &str) -> Option<Self> {
         [channel_id, message_id]
             .iter()
-            .all(|id| {
-                !id.is_empty()
-                    && id
-                        .bytes()
-                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
-            })
+            .all(|id| valid_id(id))
             .then(|| Self {
                 channel_id: channel_id.into(),
                 message_id: message_id.into(),
@@ -39,14 +34,7 @@ impl MessageTarget {
     }
 
     pub fn parse(base: &Url, link: &Url) -> Option<Self> {
-        if link.origin() != base.origin()
-            || !link.username().is_empty()
-            || link.password().is_some()
-        {
-            return None;
-        }
-        let path = link.path().strip_suffix('/').unwrap_or(link.path());
-        let mut segments = path.strip_prefix("/c/")?.split('/');
+        let mut segments = conversation_path(base, link)?.split('/');
         let channel = segments.next()?;
         if segments.next()? != "m" {
             return None;
@@ -70,6 +58,25 @@ impl MessageTarget {
     pub fn message_id(&self) -> &str {
         &self.message_id
     }
+}
+
+pub fn conversation_link<'a>(base: &Url, link: &'a Url) -> Option<&'a str> {
+    conversation_path(base, link).filter(|id| valid_id(id))
+}
+
+fn conversation_path<'a>(base: &Url, link: &'a Url) -> Option<&'a str> {
+    if link.origin() != base.origin() || !link.username().is_empty() || link.password().is_some() {
+        return None;
+    }
+    let path = link.path();
+    path.strip_suffix('/').unwrap_or(path).strip_prefix("/c/")
+}
+
+fn valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -138,6 +145,12 @@ mod tests {
         assert_eq!(target.channel_id(), "channel-1");
         assert_eq!(target.message_id(), "message_123");
         assert_eq!(target.permalink(&base), canonical);
+        assert_eq!(conversation_link(&base, &canonical), None);
+        let conversation = base.join("/c/channel-1/").unwrap();
+        assert_eq!(conversation_link(&base, &conversation), Some("channel-1"));
+        assert_eq!(MessageTarget::parse(&base, &conversation), None);
+        let escaped = base.join("/c/channel%2Fother").unwrap();
+        assert_eq!(conversation_link(&base, &escaped), None);
 
         for invalid in [
             "http://spk.example.test/c/channel/m/message",
