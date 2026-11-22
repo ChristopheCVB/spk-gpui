@@ -22,10 +22,11 @@ fn main() {
         Ok("windows") => {
             println!("cargo::rerun-if-changed=build/windows.rc");
             println!("cargo::rerun-if-changed=assets/logo.ico");
+            println!("cargo::rerun-if-changed=build/zvidlib-license.txt");
             embed_resource::compile_for(
                 "build/windows.rc",
                 ["spk-gpui"],
-                embed_resource::ParamsIncludeDirs(["assets"]),
+                embed_resource::ParamsIncludeDirs(["assets", "build"]),
             )
             .manifest_required()
             .expect("Could not embed the Windows app icon");
