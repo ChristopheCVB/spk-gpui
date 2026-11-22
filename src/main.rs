@@ -26,11 +26,11 @@ fn main() -> std::process::ExitCode {
 
     let platform = platform::current_platform(false);
     platform.set_app_identity(APP_ID, "SPK");
-    let (activated, activations) = async_channel::unbounded::<SystemNotificationResponse>();
+    let (activated, activations) = async_channel::unbounded::<notifications::NativeActivation>();
     let startup = activated.clone();
     // The macOS notification delegate must be registered before launch finishes.
     platform.on_system_notification_response(Box::new(move |response| {
-        let _ = startup.try_send(response);
+        let _ = startup.try_send(response.into());
     }));
     Application::with_platform(platform)
         .with_assets(assets::AllAssets)
@@ -57,28 +57,60 @@ fn main() -> std::process::ExitCode {
             .expect("Failed to open the SPK window");
             let app = app.downgrade();
             // GPUI Kit installs its own handler at init. SPK's system alerts use exact targets.
+            let native = activated.clone();
             cx.on_system_notification_response(move |response, _| {
-                let _ = activated.try_send(response);
+                let _ = native.try_send(response.into());
             });
+            #[cfg(target_os = "windows")]
+            if let Some(notifications) = notifications::windows::Notifications::register(activated)
+            {
+                cx.set_global(notifications);
+            }
+            #[cfg(target_os = "linux")]
             cx.spawn(async move |cx| {
-                while let Ok(response) = activations.recv().await {
-                    if response
-                        .action_id
-                        .as_deref()
-                        .is_some_and(|action| action != "open")
-                    {
-                        continue;
-                    }
-                    let Some(target) = notifications::activation_target(&base, &response.tag)
-                    else {
-                        continue;
+                if let Some(notifications) =
+                    notifications::linux::Notifications::register(activated).await
+                {
+                    cx.update(|cx| cx.set_global(notifications));
+                }
+            })
+            .detach();
+            cx.spawn(async move |cx| {
+                while let Ok(activation) = activations.recv().await {
+                    let response = activation.response;
+                    let target = if let Some(response) = &response {
+                        if response
+                            .action_id
+                            .as_deref()
+                            .is_some_and(|action| action != "open")
+                        {
+                            continue;
+                        }
+                        let Some(target) = notifications::activation_target(&base, &response.tag)
+                        else {
+                            continue;
+                        };
+                        Some(target)
+                    } else {
+                        None
                     };
                     cx.update(|cx| {
-                        cx.dismiss_system_notification(&response.tag);
+                        if let Some(response) = response {
+                            cx.dismiss_system_notification(&response.tag);
+                        }
                         cx.activate(true);
                         let _ = window.update(cx, |_, window, cx| {
+                            #[cfg(target_os = "linux")]
+                            notifications::linux::activate_window(
+                                window,
+                                activation.token.as_deref(),
+                            );
+                            #[cfg(not(target_os = "linux"))]
                             window.activate_window();
-                            let _ = app.update(cx, |this, cx| this.open_alert(target, window, cx));
+                            if let Some(target) = target {
+                                let _ =
+                                    app.update(cx, |this, cx| this.open_alert(target, window, cx));
+                            }
                         });
                     });
                 }

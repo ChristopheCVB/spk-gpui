@@ -72,6 +72,12 @@ jobs:
       - name: Test native X11 Screen Share with a controlled peer
         if: runner.os == 'Linux'
         run: bash tests/fixtures/linux-screen-share.sh mise exec -- cargo test --locked --bin spk-gpui screen_share -- --ignored --test-threads=1
+      - name: Test relaunch from a retained notification on Linux
+        if: runner.os == 'Linux'
+        run: |
+          data_dir="$(mktemp -d)"
+          XDG_DATA_HOME="$data_dir" SPK_TEST_NOTIFICATION_DATA="$data_dir" dbus-run-session -- \
+            mise exec -- cargo test --locked --bin spk-gpui retained_notification_starts_the_registered_application -- --ignored
       - name: Test the PulseAudio voice reference
         if: runner.os == 'Linux'
         run: bash tests/fixtures/linux-screen-share.sh mise exec -- cargo test --locked --bin spk-gpui linux_voice_output -- --ignored
