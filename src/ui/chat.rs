@@ -104,35 +104,34 @@ fn chat_history_viewport(
     position: &Rc<Cell<Option<HistoryPosition>>>,
     latest_ready: bool,
 ) -> Div {
+    if latest_ready && position.get() == Some(HistoryPosition::Opening) {
+        // Apply the new bottom before GPUI positions the message rows.
+        position.set(None);
+        scroll.scroll_to_bottom();
+    }
     let history = div().when(
-        position
-            .get()
-            .is_some_and(|position| position != HistoryPosition::Opening || latest_ready),
+        matches!(
+            position.get(),
+            Some(HistoryPosition::Jump(_) | HistoryPosition::Anchor(_, _))
+        ),
         |history| {
             let position = position.clone();
             let scroll = scroll.clone();
             // The viewport and the target row have their current bounds after layout.
             history.on_children_prepainted(move |_, window, _| {
-                let Some(position) = position.take() else {
+                let (index, offset) = match position.take() {
+                    Some(HistoryPosition::Jump(index)) => (index, px(0.)),
+                    Some(HistoryPosition::Anchor(index, offset)) => (index, offset),
+                    _ => return,
+                };
+                let Some(row) = scroll.bounds_for_item(index) else {
                     return;
                 };
-                let bottom = -scroll.max_offset().y;
-                let row = match position {
-                    HistoryPosition::Opening => None,
-                    HistoryPosition::Jump(index) => Some((index, px(0.))),
-                    HistoryPosition::Anchor(index, offset) => Some((index, offset)),
-                };
-                let offset = if let Some((index, offset)) = row {
-                    let Some(row) = scroll.bounds_for_item(index) else {
-                        return;
-                    };
-                    (scroll.bounds().top() - row.top() + offset).clamp(bottom, px(0.))
-                } else {
-                    bottom
-                };
+                let offset = (scroll.bounds().top() - row.top() + offset)
+                    .clamp(-scroll.max_offset().y, px(0.));
                 if scroll.offset().y != offset {
                     scroll.set_offset(point(scroll.offset().x, offset));
-                    window.request_animation_frame();
+                    window.on_next_frame(|window, _| window.refresh());
                 }
             })
         },
@@ -1414,7 +1413,7 @@ mod tests {
     fn delayed_history_opens_at_the_latest_message_and_shares_scrollbar_position() {
         use std::{cell::Cell, rc::Rc, time::Duration};
 
-        use gpui_kit::*;
+        use gpui_kit::{prelude::FluentBuilder, *};
 
         use super::{HistoryPosition, chat_history_viewport};
 
@@ -1423,6 +1422,7 @@ mod tests {
             height: Pixels,
             scroll: ScrollHandle,
             position: Rc<Cell<Option<HistoryPosition>>>,
+            latest_visible_on_first_paint: Rc<Cell<Option<bool>>>,
         }
 
         impl Render for ChatLayout {
@@ -1432,7 +1432,29 @@ mod tests {
                     .flex()
                     .flex_col()
                     .child(chat_history_viewport(
-                        (0..self.rows).map(|_| div().h(px(24.)).flex_shrink_0()),
+                        (0..self.rows).map(|index| {
+                            div().h(px(24.)).flex_shrink_0().when(
+                                self.rows > 1 && index + 1 == self.rows,
+                                |row| {
+                                    let visible = self.latest_visible_on_first_paint.clone();
+                                    row.child(
+                                        canvas(
+                                            |_, _, _| (),
+                                            move |bounds, (), window, _| {
+                                                if visible.get().is_none() {
+                                                    let viewport = window.content_mask().bounds;
+                                                    visible.set(Some(
+                                                        bounds.top() >= viewport.top()
+                                                            && bounds.bottom() <= viewport.bottom(),
+                                                    ));
+                                                }
+                                            },
+                                        )
+                                        .size_full(),
+                                    )
+                                },
+                            )
+                        }),
                         &self.scroll,
                         &self.position,
                         self.rows > 1,
@@ -1445,6 +1467,7 @@ mod tests {
         application().run(move |cx| {
             gpui_kit::init(cx);
             let scroll = ScrollHandle::new();
+            let latest_visible_on_first_paint = Rc::new(Cell::new(None));
             let handle = cx
                 .open_window(WindowOptions::default(), |_, cx| {
                     cx.new(|_| ChatLayout {
@@ -1452,6 +1475,7 @@ mod tests {
                         height: px(120.),
                         scroll: scroll.clone(),
                         position: Rc::new(Cell::new(Some(HistoryPosition::Opening))),
+                        latest_visible_on_first_paint: latest_visible_on_first_paint.clone(),
                     })
                 })
                 .unwrap();
@@ -1470,7 +1494,11 @@ mod tests {
                     .await;
                 let aligned = handle
                     .update(cx, |_, window, cx| {
-                        let aligned = (scroll.bottom_item(), scroll.logical_scroll_bottom().1);
+                        let aligned = (
+                            scroll.bottom_item(),
+                            scroll.logical_scroll_bottom().1,
+                            latest_visible_on_first_paint.get(),
+                        );
                         window.dispatch_event(
                             ScrollEvent {
                                 position: scroll.bounds().center(),
@@ -1556,7 +1584,7 @@ mod tests {
         });
         let (aligned, after_wheel, after_append, after_drag, max_after_resize) =
             outcome.take().expect("history must finish layout");
-        assert_eq!(aligned, (19, px(0.)));
+        assert_eq!(aligned, (19, px(0.), Some(true)));
         assert_eq!(after_wheel, px(-340.));
         assert_eq!(after_append, after_wheel);
         assert_eq!(after_drag, px(0.));
