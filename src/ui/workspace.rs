@@ -66,14 +66,10 @@ impl Spk {
             .as_ref()
             .filter(|_| !self.video_stage.fullscreen);
         let (stage_icon, stage_name) = match chat {
-            Some(chat) if chat.direct_message_peer.is_some() => (
-                IconName::MessageCircle,
-                chat_destination(sidebar, chat).map_or("Direct message", |(_, name)| name),
-            ),
-            Some(chat) => (
-                IconName::Hash,
-                chat_destination(sidebar, chat).map_or("Text channel", |(_, name)| name),
-            ),
+            Some(chat) => {
+                let destination = chat_destination(sidebar, chat);
+                (destination.icon, destination.name)
+            }
             None => (
                 IconName::Volume2,
                 selected_channel.map_or("Voice channels", channel_name),

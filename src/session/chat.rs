@@ -119,6 +119,13 @@ pub struct Draft {
     pub upload_notice: Option<&'static str>,
 }
 
+impl Draft {
+    pub fn can_send(&self, body: &str) -> bool {
+        !self.attachments_block_send()
+            && (!body.trim().is_empty() || self.gif.is_some() || self.attachments_ready())
+    }
+}
+
 #[derive(Clone)]
 pub struct Outgoing {
     pub body: String,
@@ -657,9 +664,7 @@ impl ChatSession {
             return;
         }
         let draft = self.drafts.entry(channel_id.clone()).or_default();
-        if draft.attachments_block_send()
-            || (body.trim().is_empty() && draft.gif.is_none() && !draft.attachments_ready())
-        {
+        if !draft.can_send(&body) {
             return;
         }
         draft.body.clone_from(&body);
@@ -966,4 +971,26 @@ async fn append_newer(
     page.has_more_after = next.has_more_after;
     page.messages.extend(next.messages);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn draft_requires_content_and_waits_for_uploads() {
+        let mut draft = Draft::default();
+        assert!(!draft.can_send(" \n "));
+        assert!(draft.can_send("message"));
+        draft.uploads.push(QueuedAttachment {
+            key: uuid::Uuid::nil(),
+            filename: "attachment.txt".into(),
+            status: UploadStatus::Uploading(50),
+            spoiler: false,
+            preview: None,
+        });
+        assert!(!draft.can_send("message"));
+        draft.uploads[0].status = UploadStatus::Ready("file".into());
+        assert!(draft.can_send(""));
+    }
 }
