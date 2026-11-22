@@ -5,6 +5,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Duration,
 };
 
 use rodio::{MixerDeviceSink, Player, buffer::SamplesBuffer};
@@ -12,6 +13,9 @@ use symphonia::core::{
     formats::{TrackType, probe::Hint},
     io::MediaSourceStream,
 };
+use zvidlib_container::container::open_audio_track;
+use zvidlib_core::{AudioSampleReader, CancellationToken, Limits, SampleRange, io::MemorySource};
+use zvidlib_opus::{NativeOpusDecoder, OPUS_SAMPLE_RATE};
 
 use crate::voice::{MediaOutput, open_media_output};
 
@@ -27,6 +31,54 @@ pub(super) struct AudioClip {
 }
 
 impl AudioClip {
+    pub(super) async fn decode_opus(
+        source: &MemorySource,
+        duration: Duration,
+        limits: Limits,
+    ) -> Result<Self, &'static str> {
+        let limits = Limits {
+            max_audio_channels: 8,
+            ..limits
+        };
+        let (track, timing) = open_audio_track(source, 0, &limits)
+            .await
+            .map_err(|_| BAD_AUDIO)?;
+        let head = track.opus_config().map_err(|_| BAD_AUDIO)?;
+        let decoder = NativeOpusDecoder::new(&head, limits).map_err(|_| BAD_AUDIO)?;
+        let packets = track
+            .to_encoded_audio_samples(source, &limits)
+            .await
+            .map_err(|_| BAD_AUDIO)?;
+        let channels = u16::from(head.channels);
+        let mut reader = AudioSampleReader::new(
+            decoder,
+            packets,
+            OPUS_SAMPLE_RATE,
+            channels,
+            timing,
+            0,
+            limits,
+        )
+        .map_err(|_| BAD_AUDIO)?;
+        let frames = (duration.as_secs_f64() * f64::from(OPUS_SAMPLE_RATE)).floor() as u64;
+        let end = reader.presentation_length().min(frames);
+        if end == 0 {
+            return Err(BAD_AUDIO);
+        }
+        let range = SampleRange::new(0, end).map_err(|_| BAD_AUDIO)?;
+        let audio = reader
+            .get_range(range, &CancellationToken::new())
+            .map_err(|_| BAD_AUDIO)?;
+        Ok(Self {
+            samples: SamplesBuffer::new(
+                NonZero::new(channels).ok_or(BAD_AUDIO)?,
+                NonZero::new(OPUS_SAMPLE_RATE).ok_or(BAD_AUDIO)?,
+                audio.samples,
+            ),
+            truncated: end < reader.presentation_length(),
+        })
+    }
+
     pub fn decode(bytes: &[u8]) -> Result<Self, &'static str> {
         Self::decode_limited(bytes, MAX_SECONDS)
     }

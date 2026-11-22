@@ -5695,6 +5695,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
+name = "opus-pure"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5afacd236411dddcc284983066ef66b27e306e53ce4de85cd745b3da9be8a0be"
+
+[[package]]
 name = "ordered-float"
 version = "5.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7726,6 +7732,7 @@ dependencies = [
  "zbus 5.19.0",
  "zvidlib-container",
  "zvidlib-core",
+ "zvidlib-opus",
  "zvidlib-vp8",
  "zvidlib-vp9-decoder",
 ]
@@ -10841,6 +10848,17 @@ name = "zvidlib-core"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "568189ce764b4890342f24ed013595066b6beb0d8e30af37bb755fafae074b90"
+
+[[package]]
+name = "zvidlib-opus"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63981780caf813184e159a4e7f578dc97c5af644b38df2d145d024a33eb12fca"
+dependencies = [
+ "opus-pure",
+ "zvidlib-core",
+ "zvidlib-opus-syntax",
+]
 
 [[package]]
 name = "zvidlib-opus-syntax"

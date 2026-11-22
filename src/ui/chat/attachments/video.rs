@@ -111,15 +111,19 @@ impl VideoClip {
         if frames.is_empty() || duration.is_zero() {
             return Err(BAD_VIDEO);
         }
-        let has_audio = tracks.iter().any(|track| track.kind == TrackKind::Audio);
-        let audio = has_audio
-            .then(|| AudioClip::decode_limited(source.as_slice(), MAX_SECONDS).ok())
-            .flatten();
+        let audio_track = tracks.iter().find(|track| track.kind == TrackKind::Audio);
+        let audio = match audio_track {
+            Some(track) if track.codec == Codec::Opus => {
+                AudioClip::decode_opus(&source, duration, limits).await.ok()
+            }
+            Some(_) => AudioClip::decode_limited(source.as_slice(), MAX_SECONDS).ok(),
+            None => None,
+        };
         Ok(Self {
             frames,
             duration,
             truncated,
-            silent: has_audio && audio.is_none(),
+            silent: audio_track.is_some() && audio.is_none(),
             audio,
         })
     }
@@ -159,10 +163,11 @@ fn preview_image(frame: VideoFrame) -> Result<Arc<RenderImage>, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::VideoClip;
+    use rodio::Source;
     use std::time::Duration;
 
     #[test]
-    fn previews_multiple_frames_of_a_webm_attachment() {
+    fn previews_multiple_frames_and_opus_audio_from_a_webm_attachment() {
         let bytes = include_bytes!("../../../../tests/fixtures/attachments/preview.webm");
         let clip = VideoClip::decode(bytes.to_vec()).expect("VP9 attachment should play in-app");
         assert_eq!(clip.duration, Duration::from_secs(1));
@@ -173,6 +178,11 @@ mod tests {
             .as_bytes(0)
             .unwrap();
         assert_ne!(first, later);
+        assert!(!clip.silent);
+        let audio = clip.audio.expect("WebM Opus soundtrack should play in-app");
+        assert_eq!(audio.samples.sample_rate().get(), 48_000);
+        assert_eq!(audio.samples.clone().count(), 48_000);
+        assert!(audio.samples.take(4800).any(|sample| sample.abs() > 0.05));
         assert!(VideoClip::decode(b"broken video".to_vec()).is_err());
     }
 
