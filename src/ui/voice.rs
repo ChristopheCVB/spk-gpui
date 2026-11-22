@@ -801,7 +801,7 @@ impl Render for ParticipantVolumeDialog {
                             .flex()
                             .flex_col()
                             .gap_1()
-                            .child(Label::new(format!("{label} {value:.0}%")))
+                            .child(Label::new(format!("{label} {value:.0}%")).id(label))
                             .child(
                                 Slider::new(slider)
                                     .tab_stop(true)
