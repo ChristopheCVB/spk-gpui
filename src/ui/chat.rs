@@ -380,6 +380,7 @@ impl Spk {
             }
         }
         if reset {
+            self.close_message_search(window, cx);
             self.chat_scroll.scroll_to_bottom();
         } else if let (Some(previous), Some(next)) = (previous, next) {
             if next.history_ready()

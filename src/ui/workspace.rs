@@ -76,6 +76,7 @@ impl Spk {
         if wide_workspace(window) {
             self.sidebar_open = !self.sidebar_open;
         } else {
+            self.close_message_search(window, cx);
             self.sidebar_drawer_open = true;
             let app = cx.weak_entity();
             window.open_sheet_at(Placement::Left, cx, move |sheet, _, cx| {
@@ -176,6 +177,7 @@ impl Spk {
         div()
             .id("workspace")
             .size_full()
+            .relative()
             .flex()
             .when(inline_sidebar, |page| {
                 page.on_drag_move(cx.listener(
@@ -268,8 +270,11 @@ impl Spk {
                                     )
                                     .ml_auto()
                                     .flex_shrink_0()
+                                    .track_focus(&self.search_button_focus)
+                                    .selected(self.search_panel.is_some())
                                     .on_click(cx.listener(
                                         |this, _, window, cx| {
+                                            this.search_button_focus.focus(window, cx);
                                             this.open_message_search(window, cx);
                                         },
                                     )),
@@ -340,6 +345,10 @@ impl Spk {
                             )
                         },
                     ),
+            )
+            .when(
+                !self.video_stage.fullscreen && self.search_panel.is_some(),
+                |page| page.child(self.search_surface(wide, window, cx)),
             )
     }
 

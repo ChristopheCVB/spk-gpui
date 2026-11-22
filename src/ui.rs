@@ -74,6 +74,8 @@ pub(super) struct Spk {
     sidebar_width: Pixels,
     sidebar_drawer_open: bool,
     sidebar_toggle_focus: FocusHandle,
+    search_button_focus: FocusHandle,
+    search_panel: Option<Entity<search::SearchPanel>>,
     quick_switcher: Option<WeakEntity<gpui_kit::component::command::CommandState>>,
     video_stage: video::VideoStage,
     workspace_focus: FocusHandle,
@@ -237,6 +239,8 @@ impl Spk {
         cx.observe_window_bounds(window, |this, window, cx| {
             if workspace::wide_workspace(window) {
                 this.close_sidebar_drawer(window, cx);
+            } else {
+                this.focus_search_slideover(window, cx);
             }
         })
         .detach();
@@ -312,6 +316,7 @@ impl Spk {
                             this.selected_voice_channel = None;
                             this.device_picker = None;
                             this.close_sidebar_drawer(window, cx);
+                            this.search_panel = None;
                             window.close_all_dialogs(cx);
                         }
                         this.focus_account_input(&view, window, cx);
@@ -326,6 +331,7 @@ impl Spk {
             let _ = this.update_in(cx, |this, window, cx| {
                 this.shortcuts.signed_in(false);
                 this.close_sidebar_drawer(window, cx);
+                this.search_panel = None;
                 window.close_all_dialogs(cx);
                 this.set_session_view(
                     View::SignIn {
@@ -368,6 +374,8 @@ impl Spk {
             sidebar_width: workspace::SIDEBAR_WIDTH,
             sidebar_drawer_open: false,
             sidebar_toggle_focus: cx.focus_handle(),
+            search_button_focus: cx.focus_handle(),
+            search_panel: None,
             quick_switcher: None,
             video_stage: video::VideoStage::default(),
             workspace_focus,
@@ -568,6 +576,7 @@ impl Render for Spk {
         div()
             .id("spk-window")
             .track_focus(&self.workspace_focus)
+            .on_key_down(cx.listener(Self::dismiss_search_on_escape))
             .on_key_down(cx.listener(Self::dismiss_video_fullscreen))
             .on_key_down(cx.listener(Self::hovered_video_key))
             .size_full()

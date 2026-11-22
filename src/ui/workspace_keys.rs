@@ -31,6 +31,12 @@ impl Spk {
         if event.input_preference == InputPreference::CharacterInput {
             return false;
         }
+        if self.search_panel.is_some()
+            && !self.video_stage.fullscreen
+            && !workspace::wide_workspace(window)
+        {
+            return false;
+        }
         if primary && count == 1 && key_name == "k" {
             if window.has_active_dialog(cx) {
                 if self
@@ -139,7 +145,9 @@ impl Spk {
             }
             (false, false, false, 0, "up") if composer && self.edit_last_message(window, cx) => {}
             (false, false, false, 0, "escape")
-                if !self.video_stage.fullscreen && !self.sidebar_drawer_open =>
+                if !self.video_stage.fullscreen
+                    && !self.sidebar_drawer_open
+                    && self.search_panel.is_none() =>
             {
                 return self.escape_chat(window, cx);
             }
