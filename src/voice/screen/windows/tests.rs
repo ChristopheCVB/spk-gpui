@@ -149,7 +149,10 @@ async fn controlled_window_video_audio_and_source_loss() {
         .into_iter()
         .find(|choice| Some(&choice.id) == window_id(&window).as_ref())
         .expect("fixture in window list");
-    let selection = select(choice.clone(), None).await.unwrap();
+    let mut listed_choice = choice.clone();
+    listed_choice.label = "Window · Title before selection".into();
+    let selection = select(listed_choice, None).await.unwrap();
+    assert_eq!(selection.label, choice.label);
     let pending = select(choice, None).await.unwrap();
     assert_eq!(selection.audio, Some(AudioScope::Application));
     let (video, mut frames) = mpsc::channel(1);

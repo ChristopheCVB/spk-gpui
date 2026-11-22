@@ -97,7 +97,6 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
                 chat.messages.iter().any(|message| message.id == "m2")
             })
         }).await;
-        live(&mut peer, &latest, None).await;
         tx.send(Command::LoadOlderMessages).await.unwrap();
         let older = message("m1", 1, "bob", "Earlier message");
         page(
@@ -132,7 +131,7 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         live(&mut peer, &sent, retry["nonce"].as_str()).await;
         live(&mut peer, &sent, retry["nonce"].as_str()).await;
         wait_for_sidebar(&rx, |view| {
-            assert!(view.alerts.is_empty(), "loaded and self-authored frames must stay silent");
+            assert!(view.alerts.is_empty(), "self-authored frames must stay silent");
             view.chat.as_ref().is_some_and(|chat| chat.messages.iter().map(|message| message.id.as_str()).eq(["m1", "m2", "m3"]))
         }).await;
         tx.send(Command::MutateChatMessage {
@@ -227,7 +226,7 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
             let state = view.unread("general");
             state.unread == 2 && state.mentions == 1
         }).await;
-        page(overlap_request, &[older, latest, sent], false).await;
+        page(overlap_request, &[older, latest.clone(), sent], false).await;
         wait_for_messages(&rx, &["m1", "m2", "m3", "m4", "m5", "m6"]).await;
 
         tx.send(Command::JumpToChatMessage {
@@ -320,6 +319,16 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
             })
         })
         .await;
+
+        live(&mut peer, &latest, None).await;
+        peer.send(Message::text(value!({
+            "type": "unread:update", "channelId": "general", "unread": 3, "mentions": 2
+        }).to_string())).await.unwrap();
+        wait_for_sidebar(&rx, |view| {
+            assert!(view.alerts.is_empty(), "the first live replay of a history message must stay silent after switching conversations");
+            let state = view.unread("general");
+            state.unread == 3 && state.mentions == 2
+        }).await;
 
         tx.send(Command::UpdateChatDraft { channel_id: "quiet".into(), body: "Quiet draft".into() }).await.unwrap();
         receive_typing(&mut peer, "quiet").await;

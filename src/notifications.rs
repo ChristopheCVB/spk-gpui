@@ -160,6 +160,11 @@ pub struct LiveAlerts {
 }
 
 impl LiveAlerts {
+    pub fn remember_history(&mut self, messages: &[ChatMessage]) {
+        self.seen
+            .extend(messages.iter().map(|message| message.id.clone()));
+    }
+
     pub fn receive(&mut self, sidebar: &Sidebar, message: &ChatMessage) {
         if sidebar
             .profile

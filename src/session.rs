@@ -649,6 +649,9 @@ async fn watch_session(
                 if result.as_ref().is_err_and(Failure::unauthorized) {
                     break SessionEnd::Invalidated(SESSION_EXPIRED);
                 }
+                if let Ok(page) = &result {
+                    alerts.remember_history(&page.messages);
+                }
                 chat.complete(client, sidebar.profile.id.as_deref(), result);
             }
             Some(result) = chat.action_tasks.join_next() => {
@@ -986,12 +989,7 @@ async fn watch_session(
                         {
                             refresh.fetch(client, Resource::Channels);
                         }
-                        if !sidebar.chat.as_ref().is_some_and(|chat| {
-                            chat.channel_id == message.channel_id
-                                && chat.messages.iter().any(|loaded| loaded.id == message.id)
-                        }) {
-                            alerts.receive(&sidebar, &message);
-                        }
+                        alerts.receive(&sidebar, &message);
                         chat.message(*message, nonce.as_deref(), sidebar.profile.id.as_deref());
                     }
                     Frame::UnreadUpdate { channel_id, state } => {

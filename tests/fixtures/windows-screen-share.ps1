@@ -1,4 +1,4 @@
-param([string]$Title, [string]$Ready, [switch]$IfAvailable)
+param([string]$Title, [string]$Ready, [string]$Stop, [switch]$IfAvailable)
 $ErrorActionPreference = 'Stop'
 
 if ($Title) {
@@ -30,6 +30,10 @@ if ($Title) {
     $timer = [Windows.Forms.Timer]::new()
     $timer.Interval = 50
     $timer.add_Tick({
+        if (Test-Path -LiteralPath $Stop) {
+            $form.Close()
+            return
+        }
         if ($form.BackColor -eq [Drawing.Color]::SteelBlue) {
             $form.BackColor = [Drawing.Color]::MediumPurple
         } else {
@@ -65,25 +69,33 @@ public static extern uint waveOutGetNumDevs();
 # Run from the repository root in an interactive Windows session.
 $workspace = Join-Path ([IO.Path]::GetTempPath()) ("spk-screen-" + [Guid]::NewGuid())
 New-Item -ItemType Directory -Path $workspace | Out-Null
-$env:SPK_TEST_SCREEN_WINDOW = [IO.Path]::GetFileName($workspace)
-$readyFile = Join-Path $workspace 'ready'
 try {
-    $child = Start-Process powershell.exe -ArgumentList ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -Title "{1}" -Ready "{2}"' -f $PSCommandPath, $env:SPK_TEST_SCREEN_WINDOW, $readyFile) -WindowStyle Hidden -PassThru
-    for ($i = 0; $i -lt 80 -and !(Test-Path -LiteralPath $readyFile) -and !$child.HasExited; $i++) {
-        Start-Sleep -Milliseconds 100
-    }
-    if (!(Test-Path -LiteralPath $readyFile)) { throw 'Synthetic Window failed to start.' }
-    foreach ($mode in @('display', 'window')) {
+    foreach ($mode in @('display', 'window', 'adapter')) {
+        $env:SPK_TEST_SCREEN_WINDOW = "$(Split-Path -Leaf $workspace)-$mode"
         $env:SPK_TEST_WINDOWS_SCREEN = $mode
-        Write-Host "Testing native Windows $mode sharing with a LiveKit peer."
-        & python tests/fixtures/livekit-peers.py mise exec -- cargo test --locked --bin spk-gpui livekit_screen_share_publishes_video_and_separate_audio -- --ignored
-        if ($LASTEXITCODE) { exit $LASTEXITCODE }
+        $readyFile = Join-Path $workspace "ready-$mode"
+        $stopFile = Join-Path $workspace "stop-$mode"
+        if ($mode -eq 'window') { $env:SPK_TEST_WINDOWS_SCREEN_STOP = $stopFile }
+        $child = Start-Process powershell.exe -ArgumentList ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -Title "{1}" -Ready "{2}" -Stop "{3}"' -f $PSCommandPath, $env:SPK_TEST_SCREEN_WINDOW, $readyFile, $stopFile) -WindowStyle Hidden -PassThru
+        try {
+            for ($i = 0; $i -lt 80 -and !(Test-Path -LiteralPath $readyFile) -and !$child.HasExited; $i++) {
+                Start-Sleep -Milliseconds 100
+            }
+            if (!(Test-Path -LiteralPath $readyFile)) { throw 'Synthetic Window failed to start.' }
+            if ($mode -eq 'adapter') {
+                & mise exec -- cargo test --locked --bin spk-gpui controlled_window_video_audio_and_source_loss -- --ignored
+            } else {
+                Write-Host "Testing native Windows $mode sharing with a LiveKit peer."
+                & python tests/fixtures/livekit-peers.py mise exec -- cargo test --locked --bin spk-gpui livekit_screen_share_publishes_video_and_separate_audio -- --ignored
+            }
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+        } finally {
+            if (!$child.HasExited) { Stop-Process -InputObject $child }
+        }
     }
-    & mise exec -- cargo test --locked --bin spk-gpui controlled_window_video_audio_and_source_loss -- --ignored
-    exit $LASTEXITCODE
 } finally {
-    if ($child -and !$child.HasExited) { Stop-Process -InputObject $child }
     Remove-Item -LiteralPath $workspace -Recurse -Force
     Remove-Item Env:SPK_TEST_SCREEN_WINDOW
     Remove-Item Env:SPK_TEST_WINDOWS_SCREEN -ErrorAction SilentlyContinue
+    Remove-Item Env:SPK_TEST_WINDOWS_SCREEN_STOP -ErrorAction SilentlyContinue
 }

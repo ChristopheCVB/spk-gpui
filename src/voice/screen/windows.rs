@@ -122,13 +122,12 @@ pub(super) async fn select(
     choice: Choice,
     playback: Option<Device>,
 ) -> Result<Selection, CaptureError> {
-    let label = choice.label.clone();
-    let (item, window, fps, audio) = tokio::task::spawn_blocking(move || {
+    let (label, item, window, fps, audio) = tokio::task::spawn_blocking(move || {
         let _apartment = Apartment::new()?;
         let apartment = GraphicsApartment::new()?;
-        let (_, target) = sources()
+        let (available, target) = sources()
             .into_iter()
-            .find(|(available, _)| available == &choice)
+            .find(|(available, _)| available.id == choice.id)
             .ok_or(CaptureError::SourceLost)?;
         let fps = match &target {
             CaptureItemTypes::Monitor(monitor) => monitor.refresh_rate().ok(),
@@ -154,7 +153,13 @@ pub(super) async fn select(
                 Some((window, pid))
             }
         };
-        Ok::<_, CaptureError>((SelectedItem(item, apartment), window, fps, audio))
+        Ok::<_, CaptureError>((
+            available.label,
+            SelectedItem(item, apartment),
+            window,
+            fps,
+            audio,
+        ))
     })
     .await
     .map_err(|_| CaptureError::Unavailable)??;

@@ -447,6 +447,7 @@ impl Spk {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap_1()
                     .px_2()
@@ -466,7 +467,7 @@ impl Spk {
                             .flex_col()
                             .items_start()
                             .flex_1()
-                            .min_w_0()
+                            .min_w(px(48.0))
                             .ml_1()
                             .child(Label::new(name.to_owned()).font_semibold().truncate())
                             .child(profile::user_status_picker(
@@ -475,12 +476,12 @@ impl Spk {
                                 cx.weak_entity(),
                             )),
                     )
-                    .child(self.voice_controls(sidebar, VoiceControls::Profile, cx))
                     .child(
                         tool_button("settings", IconName::Settings, "Settings").on_click(
                             cx.listener(|this, _, window, cx| this.open_settings(window, cx)),
                         ),
-                    ),
+                    )
+                    .child(self.voice_controls(sidebar, VoiceControls::Profile, cx)),
             )
     }
 

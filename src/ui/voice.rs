@@ -77,6 +77,7 @@ impl Spk {
             .flex()
             .items_center()
             .gap_1()
+            .when(compact, |controls| controls.flex_wrap().max_w_full())
             .children(
                 [
                     (
@@ -123,17 +124,14 @@ impl Spk {
                             )
                             .when(!compact, |button| button.label(label))
                             .when_some(binding, |button, binding| {
-                                button.tooltip(format!("{label} ({})", binding.chord)).when(
-                                    !compact,
-                                    |button| {
-                                        button.child(
-                                            gpui_kit::component::kbd::Kbd::new(
-                                                binding.chord.keystroke(),
-                                            )
-                                            .outline(),
+                                button
+                                    .tooltip(format!("{label} ({})", binding.chord))
+                                    .child(
+                                        gpui_kit::component::kbd::Kbd::new(
+                                            binding.chord.keystroke(),
                                         )
-                                    },
-                                )
+                                        .outline(),
+                                    )
                             })
                             .on_click(
                                 cx.listener(move |this, _, _, cx| this.voice_action(action, cx)),
