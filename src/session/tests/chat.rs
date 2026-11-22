@@ -227,7 +227,7 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
             let state = view.unread("general");
             state.unread == 2 && state.mentions == 1
         }).await;
-        page(overlap_request, &[older, latest, sent], false).await;
+        page(overlap_request, &[older, latest.clone(), sent], false).await;
         wait_for_messages(&rx, &["m1", "m2", "m3", "m4", "m5", "m6"]).await;
 
         tx.send(Command::JumpToChatMessage {
@@ -320,6 +320,16 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
             })
         })
         .await;
+
+        live(&mut peer, &latest, None).await;
+        peer.send(Message::text(value!({
+            "type": "unread:update", "channelId": "general", "unread": 3, "mentions": 2
+        }).to_string())).await.unwrap();
+        wait_for_sidebar(&rx, |view| {
+            assert!(view.alerts.is_empty(), "switching conversations must not re-alert a replayed message");
+            let state = view.unread("general");
+            state.unread == 3 && state.mentions == 2
+        }).await;
 
         tx.send(Command::UpdateChatDraft { channel_id: "quiet".into(), body: "Quiet draft".into() }).await.unwrap();
         receive_typing(&mut peer, "quiet").await;
