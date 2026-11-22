@@ -290,9 +290,24 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
             "hasMoreBefore":false,"hasMoreAfter":true
         }).to_string()).await;
         wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| chat.history_ready() && chat.has_more_after)).await;
-        tx.send(Command::OpenConversationTarget("general".into())).await.unwrap();
+        tx.send(Command::OpenTextChannel("general".into())).await.unwrap();
         page(history_request(&history, "?unread=1").await, &[message("m6", 6, "bob", "After history was read")], true).await;
-        wait_for_messages(&rx, &["m6"]).await;
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
+            chat.latest_ready() && chat.jump.is_none() && chat.messages.len() == 1 && chat.messages[0].id == "m6"
+        })).await;
+
+        tx.send(Command::JumpToChatMessage {
+            channel_id: "general".into(),
+            message_id: "m6".into(),
+        }).await.unwrap();
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
+            chat.latest_ready() && chat.jump.as_ref().is_some_and(|jump| jump.message_id == "m6")
+        })).await;
+        tx.send(Command::OpenTextChannel("general".into())).await.unwrap();
+        page(history_request(&history, "?unread=1").await, &[message("m6", 6, "bob", "After history was read")], true).await;
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
+            chat.latest_ready() && chat.jump.is_none()
+        })).await;
 
         tx.send(Command::RetryChatSend).await.unwrap();
         tx.send(Command::MarkChatSendDelivered("general".into())).await.unwrap();

@@ -1,4 +1,4 @@
-use super::*;
+use super::{actions::ReactionSelection, *};
 
 use gpui_kit::{
     base::{Align, Positioner},
@@ -82,12 +82,9 @@ impl Spk {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !chat(&self.view).is_some_and(|chat| {
-            chat.channel_id == channel_id
-                && chat.can_send()
-                && !chat.action_pending
-                && chat.messages.iter().any(|message| message.id == message_id)
-        }) {
+        if !reaction_message(chat(&self.view), channel_id, message_id)
+            .is_some_and(|(chat, _)| !chat.action_pending)
+        {
             return;
         }
         self.reaction_input.update(cx, |input, cx| {
@@ -134,7 +131,13 @@ impl Spk {
     fn pick_reaction(&mut self, emoji: &str, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(picker) = self.reaction_picker.take() {
             picker.return_focus.focus(window, cx);
-            self.toggle_reaction(&picker.channel_id, &picker.message_id, emoji, cx);
+            self.toggle_reaction(
+                &picker.channel_id,
+                &picker.message_id,
+                emoji,
+                ReactionSelection::Choice,
+                cx,
+            );
             cx.notify();
         }
     }
@@ -281,5 +284,32 @@ impl Spk {
             .absolute()
             .inset_0(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::emoji_results;
+
+    #[test]
+    fn emoji_search_browses_and_ranks_matches_by_name_shortcode_and_keyword() {
+        assert_eq!(emoji_results("  ")[0].annotation, "grinning face");
+        assert_eq!(emoji_results(" Grinning Face ")[0].emoji, "😀");
+        assert_eq!(emoji_results(" :THUMBSUP: ")[0].annotation, "thumbs up");
+        assert_eq!(
+            emoji_results(":stuck out tongue:")[0].annotation,
+            "face with tongue"
+        );
+        assert_eq!(emoji_results("pepperoni")[0].annotation, "pizza");
+        let party = emoji_results("party");
+        let position = |name| {
+            party
+                .iter()
+                .position(|emoji| emoji.annotation == name)
+                .unwrap()
+        };
+        assert!(position("party popper") < position("face with tongue"));
+        assert!(position("face with tongue") < position("partying face"));
+        assert!(emoji_results("zzz no matching emoji").is_empty());
     }
 }

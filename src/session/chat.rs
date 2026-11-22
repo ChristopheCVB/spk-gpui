@@ -60,6 +60,7 @@ pub struct ChatView {
     pub action_pending: bool,
     pub action_outcome: Option<ActionOutcome>,
     pub paging_forward: bool,
+    opening_latest: bool,
     history: History,
 }
 
@@ -82,6 +83,10 @@ impl ChatView {
 
     pub fn latest_ready(&self) -> bool {
         self.history_ready() && !self.has_more_after
+    }
+
+    pub fn opening_latest(&self) -> bool {
+        self.loading() && self.opening_latest
     }
 
     pub fn can_send(&self) -> bool {
@@ -223,6 +228,14 @@ impl ChatSession {
 
     pub fn open(&mut self, client: &SpkClient, channel: &Channel) -> bool {
         if !self.select(channel) {
+            if channel.kind == "text"
+                && self.selected.as_ref().is_some_and(|view| {
+                    view.history_ready() && (view.has_more_after || view.jump.is_some())
+                })
+            {
+                self.latest(client);
+                return true;
+            }
             return false;
         }
         self.load(client, HistoryRequest::Refresh { load_newer: false });
@@ -278,6 +291,7 @@ impl ChatSession {
             action_pending: false,
             action_outcome: None,
             paging_forward: false,
+            opening_latest: false,
             history: History::Loading,
         });
         true
@@ -390,6 +404,7 @@ impl ChatSession {
             return;
         };
         view.history = History::Loading;
+        view.opening_latest = matches!(request, HistoryRequest::Latest);
         view.paging_forward = matches!(
             request,
             HistoryRequest::Newer(_) | HistoryRequest::Refresh { load_newer: true }

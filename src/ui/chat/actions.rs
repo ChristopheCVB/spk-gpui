@@ -189,24 +189,18 @@ impl Spk {
         channel_id: &str,
         message_id: &str,
         emoji: &str,
+        selection: ReactionSelection,
         cx: &mut Context<Self>,
     ) {
         let View::SignedIn(sidebar) = &self.view else {
             return;
         };
-        let Some(view) = sidebar.chat.as_ref().filter(|view| {
-            view.channel_id == channel_id && !view.action_pending && view.can_send()
-        }) else {
-            return;
-        };
-        let Some(message) = view
-            .messages
-            .iter()
-            .find(|message| message.id == message_id)
+        let Some((_, message)) = reaction_message(sidebar.chat.as_ref(), channel_id, message_id)
+            .filter(|(chat, _)| !chat.action_pending)
         else {
             return;
         };
-        let action = reaction_action(message, emoji, sidebar.profile.id.as_deref());
+        let action = reaction_action(message, emoji, selection, sidebar.profile.id.as_deref());
         self.send(
             Command::MutateChatMessage {
                 channel_id: channel_id.to_owned(),
@@ -246,7 +240,7 @@ impl Spk {
                 } else {
                     "React"
                 };
-                reaction_button(chat, message, emoji, mine, cx)
+                reaction_button(chat, message, emoji, mine, ReactionSelection::Chip, cx)
                     .outline()
                     .xsmall()
                     .rounded(px(10.))
@@ -586,7 +580,43 @@ impl Spk {
     }
 }
 
-fn reaction_action(message: &ChatMessage, emoji: &str, own_id: Option<&str>) -> MessageAction {
+#[derive(Clone, Copy)]
+pub(super) enum ReactionSelection {
+    Choice,
+    Chip,
+}
+
+fn reaction_choice_key<'a>(message: &'a ChatMessage, emoji: &'a str) -> &'a str {
+    const EMOJI_PRESENTATION: char = '\u{fe0f}';
+    let base = emoji.trim_end_matches(EMOJI_PRESENTATION);
+    let Some((canonical, _)) = QUICK_REACTIONS
+        .into_iter()
+        .find(|(key, _)| key.trim_end_matches(EMOJI_PRESENTATION) == base)
+    else {
+        return emoji;
+    };
+    // SPK stores exact string keys. Use the existing variant if there is only one.
+    let mut existing = message
+        .reactions
+        .iter()
+        .map(|reaction| reaction.emoji.as_str())
+        .filter(|key| key.trim_end_matches(EMOJI_PRESENTATION) == base);
+    match (existing.next(), existing.next()) {
+        (Some(key), None) => key,
+        _ => canonical,
+    }
+}
+
+fn reaction_action(
+    message: &ChatMessage,
+    emoji: &str,
+    selection: ReactionSelection,
+    own_id: Option<&str>,
+) -> MessageAction {
+    let emoji = match selection {
+        ReactionSelection::Choice => reaction_choice_key(message, emoji),
+        ReactionSelection::Chip => emoji,
+    };
     MessageAction::React {
         emoji: emoji.to_owned(),
         on: !message.reacted_with(emoji, own_id),
@@ -598,6 +628,7 @@ fn reaction_button(
     message: &ChatMessage,
     emoji: &str,
     mine: bool,
+    selection: ReactionSelection,
     cx: &Context<Spk>,
 ) -> Button {
     let channel_id = chat.channel_id.clone();
@@ -609,7 +640,7 @@ fn reaction_button(
         .toggled(mine)
         .disabled(chat.action_pending || !chat.can_send())
         .on_click(cx.listener(move |this, _, _, cx| {
-            this.toggle_reaction(&channel_id, &message_id, &emoji, cx);
+            this.toggle_reaction(&channel_id, &message_id, &emoji, selection, cx);
         }))
 }
 
@@ -674,9 +705,10 @@ impl MessageActions {
                     .group_hover("message-row", |style| style.visible())
             })
             .children(QUICK_REACTIONS.into_iter().map(|(emoji, name)| {
-                let own = message.reacted_with(emoji, sidebar.profile.id.as_deref());
+                let key = reaction_choice_key(message, emoji);
+                let own = message.reacted_with(key, sidebar.profile.id.as_deref());
                 let label = format!("{} {name} reaction", if own { "Remove" } else { "Add" });
-                reaction_button(chat, message, emoji, own, cx)
+                reaction_button(chat, message, emoji, own, ReactionSelection::Choice, cx)
                     .xsmall()
                     .w(px(24.))
                     .h(px(24.))
@@ -697,7 +729,7 @@ impl MessageActions {
                         .size(px(24.))
                         .open(picker_open)
                         .disabled(self.disabled)
-                        .on_click(self.reaction_action()),
+                        .on_click(self.open_reaction_picker()),
                     )
                     .when(picker_open, |anchor| {
                         anchor.children(app.reaction_picker_anchor(cx))
@@ -861,7 +893,7 @@ impl MessageActions {
             PopupMenuItem::new("Add reaction…")
                 .icon(IconName::FaceSlightlySmilingPlus)
                 .disabled(self.disabled)
-                .on_click(self.reaction_action()),
+                .on_click(self.open_reaction_picker()),
         );
         let menu = if self.can_edit {
             menu.item(
@@ -911,7 +943,7 @@ impl MessageActions {
             .on_click(self.form_action(kind))
     }
 
-    fn reaction_action(&self) -> impl Fn(&ClickEvent, &mut Window, &mut App) + use<> {
+    fn open_reaction_picker(&self) -> impl Fn(&ClickEvent, &mut Window, &mut App) + use<> {
         let (app, channel, message, focus) = (
             self.app.clone(),
             self.channel.clone(),
@@ -938,5 +970,64 @@ impl MessageActions {
                 this.begin_message_action(&channel, &message, kind, window, cx)
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ChatMessage, MessageAction, ReactionSelection, reaction_action};
+
+    #[test]
+    fn quick_and_picker_reactions_share_keys_and_chips_keep_legacy_targets() {
+        const PICKER_THUMBS_UP: &str = "👍\u{fe0f}";
+        let mut message: ChatMessage = serde_json::from_value(serde_json::json!({
+            "id":"m1","channelId":"general","userId":"bob","body":"","createdAt":1,
+            "reactions":[{"emoji":PICKER_THUMBS_UP,"userIds":["alice"]},{"emoji":"❤","userIds":["bob"]}]
+        }))
+        .unwrap();
+        let toggle = |message: &ChatMessage, emoji, selection| {
+            let MessageAction::React { emoji, on } =
+                reaction_action(message, emoji, selection, Some("alice"))
+            else {
+                panic!("expected reaction mutation");
+            };
+            (emoji, on)
+        };
+
+        for emoji in ["👍", PICKER_THUMBS_UP] {
+            assert_eq!(
+                toggle(&message, emoji, ReactionSelection::Choice),
+                (PICKER_THUMBS_UP.into(), false)
+            );
+        }
+        assert_eq!(
+            toggle(&message, "❤️", ReactionSelection::Choice),
+            ("❤".into(), true)
+        );
+
+        message.reactions.push(
+            serde_json::from_value(serde_json::json!({
+                "emoji":"👍","userIds":["bob"]
+            }))
+            .unwrap(),
+        );
+        assert_eq!(
+            toggle(&message, PICKER_THUMBS_UP, ReactionSelection::Choice),
+            ("👍".into(), true)
+        );
+        assert_eq!(
+            toggle(&message, PICKER_THUMBS_UP, ReactionSelection::Chip),
+            (PICKER_THUMBS_UP.into(), false)
+        );
+        assert_eq!(
+            toggle(&message, "👍", ReactionSelection::Chip),
+            ("👍".into(), true)
+        );
+
+        message.reactions.clear();
+        assert_eq!(
+            toggle(&message, PICKER_THUMBS_UP, ReactionSelection::Choice),
+            ("👍".into(), true)
+        );
     }
 }

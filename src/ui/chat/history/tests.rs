@@ -1,7 +1,12 @@
+use std::time::Duration;
+
 use chrono::{FixedOffset, TimeZone};
 use gpui_kit::{component::Theme, rgb};
 
-use super::{HistoryRow, date_label, history_rows, message_row_background, message_row_index};
+use super::{
+    HistoryRow, date_label, history_rows, jump_highlight_opacity, message_row_background,
+    message_row_index,
+};
 use crate::api::ChatMessage;
 
 #[test]
@@ -112,7 +117,7 @@ fn history_distinguishes_pings_and_the_active_jump() {
     ]))
     .unwrap();
     let timezone = FixedOffset::east_opt(0).unwrap();
-    let backgrounds = |direct_message, target: Option<&str>| {
+    let backgrounds = |direct_message, target: Option<(&str, f32)>| {
         history_rows(&messages, None, &timezone)
             .filter_map(|row| row.message())
             .map(|message| {
@@ -125,12 +130,20 @@ fn history_distinguishes_pings_and_the_active_jump() {
     assert_ne!(ping, jump);
     assert_eq!(backgrounds(false, None), [ping, ping, None, None, None]);
     assert_eq!(
-        backgrounds(false, Some("reply")),
+        backgrounds(false, Some(("reply", 1.))),
         [ping, jump, None, None, None]
     );
     assert_eq!(backgrounds(true, None), [None, None, None, None, None]);
     assert_eq!(
-        backgrounds(true, Some("mention")),
+        backgrounds(true, Some(("mention", 1.))),
         [jump, None, None, None, None]
     );
+    let target = |ms| Some(("reply", jump_highlight_opacity(Duration::from_millis(ms))));
+    assert_eq!(backgrounds(false, target(2_500))[1], jump);
+    let fading = backgrounds(false, target(2_850))[1];
+    assert_ne!(fading, jump);
+    assert_ne!(fading, ping);
+    assert_eq!(fading.unwrap().a, ping.unwrap().a);
+    assert_eq!(backgrounds(false, target(3_200))[1], ping);
+    assert_eq!(backgrounds(true, target(3_200))[1], None);
 }

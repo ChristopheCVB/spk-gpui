@@ -25,8 +25,8 @@ use gpui_kit::component::{
 };
 
 use history::{
-    HistoryRow, date_label, history_message_at, history_message_index, history_rows,
-    message_row_background, relative_time,
+    HistoryRow, JUMP_HIGHLIGHT_HOLD, date_label, history_message_at, history_message_index,
+    history_rows, jump_highlight_opacity, message_row_background, relative_time,
 };
 
 use super::*;
@@ -50,6 +50,19 @@ fn chat(view: &View) -> Option<&ChatView> {
         View::SignedIn(sidebar) => sidebar.chat.as_ref(),
         _ => None,
     }
+}
+
+fn reaction_message<'a>(
+    chat: Option<&'a ChatView>,
+    channel_id: &str,
+    message_id: &str,
+) -> Option<(&'a ChatView, &'a ChatMessage)> {
+    let chat = chat.filter(|chat| chat.channel_id == channel_id && chat.can_send())?;
+    let message = chat
+        .messages
+        .iter()
+        .find(|message| message.id == message_id)?;
+    Some((chat, message))
 }
 
 pub(super) struct ChatDestination<'a> {
@@ -423,14 +436,7 @@ impl Spk {
         self.update_gif_input(previous, next, window, cx);
         Self::update_message_actions(&mut self.message_action_form, previous, next);
         if self.reaction_picker.as_ref().is_some_and(|picker| {
-            !next.is_some_and(|chat| {
-                chat.channel_id == picker.channel_id
-                    && chat.can_send()
-                    && chat
-                        .messages
-                        .iter()
-                        .any(|message| message.id == picker.message_id)
-            })
+            reaction_message(next, &picker.channel_id, &picker.message_id).is_none()
         }) {
             self.reaction_picker = None;
         }
@@ -470,6 +476,11 @@ impl Spk {
                 .set(next.map(|_| HistoryPosition::Opening));
             self.chat_scroll = ScrollHandle::new();
         } else if let (Some(previous), Some(next)) = (previous, next) {
+            if next.opening_latest() && next.direct_message_peer.is_none() {
+                self.chat_scroll_anchor = None;
+                self.chat_history_position
+                    .set(Some(HistoryPosition::Opening));
+            }
             if previous.has_more_after
                 && next.direct_message_peer.is_some()
                 && next.loading()
@@ -498,6 +509,17 @@ impl Spk {
             .filter(|_| !reset)
             .and_then(|chat| chat.jump.as_ref());
         let next_jump = next.and_then(|chat| chat.jump.as_ref());
+        if previous_jump != next_jump {
+            self.chat_jump_started = next_jump.map(|_| Instant::now());
+            if next_jump.is_some() {
+                let clock = cx.background_executor().clone();
+                cx.spawn(async move |app, cx| {
+                    clock.timer(JUMP_HIGHLIGHT_HOLD).await;
+                    let _ = app.update(cx, |_, cx| cx.notify());
+                })
+                .detach();
+            }
+        }
         let jump_pending = matches!(
             self.chat_history_position.get(),
             Some(HistoryPosition::Jump(_))
@@ -1247,6 +1269,23 @@ impl Spk {
             .when(!message.reactions.is_empty(), |row| {
                 row.child(self.reactions(sidebar, chat, message, cx))
             });
+        let jump_highlight = chat
+            .jump
+            .as_ref()
+            .filter(|jump| jump.message_id == message.id)
+            .zip(self.chat_jump_started)
+            .map(|(jump, started)| {
+                let elapsed = started.elapsed();
+                let opacity = if cx.reduce_motion() && elapsed >= JUMP_HIGHLIGHT_HOLD {
+                    0.
+                } else {
+                    jump_highlight_opacity(elapsed)
+                };
+                if elapsed >= JUMP_HIGHLIGHT_HOLD && opacity > 0. {
+                    window.request_animation_frame();
+                }
+                (jump.message_id.as_str(), opacity)
+            });
         div()
             .id(SharedString::from(format!("message-{}", message.id)))
             .relative()
@@ -1284,7 +1323,7 @@ impl Spk {
                     message,
                     chat.direct_message_peer.is_some(),
                     sidebar.profile.id.as_deref(),
-                    chat.jump.as_ref().map(|jump| jump.message_id.as_str()),
+                    jump_highlight,
                     theme,
                 ),
                 |row, background| row.bg(background),

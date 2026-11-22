@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use chrono::{DateTime, Datelike, Local, NaiveDate, TimeZone};
 use gpui_kit::{Hsla, component::Theme};
 
@@ -80,20 +82,35 @@ pub(super) fn history_message_at(
         .find_map(|(index, row)| Some((index, row.message()?)))
 }
 
+pub(super) const JUMP_HIGHLIGHT_HOLD: Duration = Duration::from_millis(2_500);
+const JUMP_HIGHLIGHT_FADE: Duration = Duration::from_millis(700);
+
+pub(super) fn jump_highlight_opacity(elapsed: Duration) -> f32 {
+    let fading = elapsed.saturating_sub(JUMP_HIGHLIGHT_HOLD);
+    (1. - fading.as_secs_f32() / JUMP_HIGHLIGHT_FADE.as_secs_f32()).max(0.)
+}
+
 pub(super) fn message_row_background(
     message: &ChatMessage,
     direct_message: bool,
     viewer_id: Option<&str>,
-    jump_target: Option<&str>,
+    jump_target: Option<(&str, f32)>,
     theme: &Theme,
 ) -> Option<Hsla> {
-    if jump_target == Some(message.id.as_str()) {
-        Some(theme.foreground.opacity(0.1))
-    } else if !direct_message && viewer_id.is_some_and(|id| message.pings(id)) {
-        Some(theme.primary.opacity(0.1))
+    let ping = (!direct_message && viewer_id.is_some_and(|id| message.pings(id)))
+        .then(|| theme.primary.opacity(0.1));
+    let Some((_, opacity)) = jump_target.filter(|(id, opacity)| *id == message.id && *opacity > 0.)
+    else {
+        return ping;
+    };
+    Some(if ping.is_some() && opacity < 1. {
+        theme
+            .primary
+            .blend(theme.foreground.opacity(opacity))
+            .opacity(0.1)
     } else {
-        None
-    }
+        theme.foreground.opacity(0.1 * opacity)
+    })
 }
 
 pub(super) fn date_label(date: NaiveDate, today: NaiveDate) -> String {
