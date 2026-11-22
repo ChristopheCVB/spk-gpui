@@ -1132,9 +1132,20 @@ impl Spk {
                     }),
             )
             .when_some(message.reply_to.as_ref(), |row, reply| {
+                let icon = themed_icon(IconName::CornerUpRight, theme.muted_foreground, 14.);
                 row.child(if reply.deleted {
-                    Label::new("Original message deleted")
-                        .text_color(theme.muted_foreground)
+                    div()
+                        .h(px(18.))
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(icon)
+                        .child(
+                            Label::new("Original message deleted")
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .italic(),
+                        )
                         .into_any_element()
                 } else {
                     let channel_id = chat.channel_id.clone();
@@ -1145,15 +1156,37 @@ impl Spk {
                         |_| false,
                         None,
                     );
+                    let sender = sidebar.message_author(&reply.user_id);
+                    let preview = preview.replace(['\r', '\n'], " ");
                     Button::new("jump-reply")
                         .ghost()
-                        .small()
+                        .xsmall()
+                        .self_start()
+                        .max_w_full()
+                        .h(px(18.))
+                        .px_0()
+                        .cursor_pointer()
                         .tab_stop(true)
-                        .label(format!(
-                            "{} · {preview}",
-                            sidebar.message_author(&reply.user_id)
-                        ))
                         .accessibility_label("Jump to the original message")
+                        .child(icon)
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(
+                                    StyledText::new(format!("{sender} {preview}")).with_highlights(
+                                        [(
+                                            0..sender.len(),
+                                            HighlightStyle {
+                                                font_weight: Some(FontWeight::SEMIBOLD),
+                                                ..Default::default()
+                                            },
+                                        )],
+                                    ),
+                                ),
+                        )
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.send(
                                 Command::JumpToChatMessage {
