@@ -82,6 +82,12 @@ impl CameraResolution {
     }
 }
 
+#[cfg(windows)]
+pub fn devices() -> Vec<CameraDevice> {
+    windows::devices().unwrap_or_default()
+}
+
+#[cfg(not(windows))]
 pub fn devices() -> Vec<CameraDevice> {
     nokhwa::query(ApiBackend::Auto)
         .unwrap_or_default()

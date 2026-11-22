@@ -1,5 +1,27 @@
 use super::*;
 
+#[test]
+#[ignore = "requires an interactive Windows display"]
+fn screen_sources_remain_available_after_camera_discovery() {
+    tokio::runtime::Builder::new_current_thread()
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            tokio::task::spawn_blocking(crate::voice::video::camera_devices)
+                .await
+                .unwrap();
+            let choices = choices().await.expect("Screen Share source picker opens");
+            assert!(choices.iter().any(|choice| choice.id == SYSTEM_PICKER));
+            assert!(
+                choices
+                    .iter()
+                    .any(|choice| choice.id.starts_with("display:"))
+            );
+        });
+}
+
 pub(in super::super) async fn fixture_selection(
     title: &str,
     display: bool,

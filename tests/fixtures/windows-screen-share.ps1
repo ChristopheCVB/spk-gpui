@@ -66,6 +66,9 @@ public static extern uint waveOutGetNumDevs();
     }
 }
 
+& mise exec -- cargo test --locked --bin spk-gpui screen_sources_remain_available_after_camera_discovery -- --ignored
+if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
 # Run from the repository root in an interactive Windows session.
 $workspace = Join-Path ([IO.Path]::GetTempPath()) ("spk-screen-" + [Guid]::NewGuid())
 New-Item -ItemType Directory -Path $workspace | Out-Null
