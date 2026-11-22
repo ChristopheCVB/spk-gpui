@@ -14,6 +14,10 @@ Implement every feature available in the SPK web app. Use the upstream web clien
 - Use Conventional Commits for commit messages and PR titles to maintain a consistent and meaningful history.
 - For Windows debug builds, native launches from WSL, crash logs, or local Screen Share fixtures, use [Windows client debugging](docs/agents/windows-debug.md).
 
+## Pull requests
+
+For user-facing visual changes, capture the affected UI in Dark mode and embed the screenshots directly in the pull request body.
+
 ## Server integration
 
 - Embed the SPK and LiveKit URLs supplied at build time. Use the SPK URL for HTTP and WebSocket connections and the LiveKit URL for voice.

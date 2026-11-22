@@ -3,6 +3,7 @@
 mod api;
 mod chat_markdown;
 mod notifications;
+mod reaction_artwork;
 mod session;
 mod shortcuts;
 mod sounds;
@@ -38,7 +39,7 @@ fn main() -> std::process::ExitCode {
         let _ = startup.try_send(response.into());
     }));
     Application::with_platform(platform)
-        .with_assets(assets::AllAssets)
+        .with_assets(reaction_artwork::DesktopAssets)
         .run(move |cx| {
             init(cx);
             load_fonts(cx);
@@ -94,11 +95,32 @@ fn load_fonts(cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use gpui_kit::{
-        AssetSource,
-        assets::{AllAssets, IconName},
-    };
+    use super::reaction_artwork::{DesktopAssets, reaction_artwork_path};
+    use gpui_kit::{AssetSource, assets::IconName};
     use std::borrow::Cow;
+
+    #[test]
+    fn reaction_artwork_uses_the_spk_web_keys_and_falls_back_for_missing_emoji() {
+        for (emoji, path) in [
+            ("👍", "twemoji/1f44d.svg"),
+            ("❤️", "twemoji/2764.svg"),
+            ("1️⃣", "twemoji/0031-20e3.svg"),
+            ("👩🏽‍💻", "twemoji/1f469-1f3fd-200d-1f4bb.svg"),
+            ("👁️‍🗨️", "twemoji/1f441-200d-1f5e8.svg"),
+            ("🇫🇷", "twemoji/1f1eb-1f1f7.svg"),
+        ] {
+            assert_eq!(reaction_artwork_path(emoji).as_deref(), Some(path));
+            assert!(
+                DesktopAssets
+                    .load(path)
+                    .unwrap()
+                    .unwrap()
+                    .starts_with(b"<svg")
+            );
+        }
+        assert_eq!(reaction_artwork_path("🦰"), None);
+        assert!(DesktopAssets.load("twemoji/1f9b0.svg").unwrap().is_none());
+    }
 
     #[test]
     fn desktop_icons_are_embedded() {
@@ -115,7 +137,7 @@ mod tests {
             IconName::HeadphoneOff,
         ] {
             let path = icon.path();
-            let data = AllAssets.load(&path).unwrap();
+            let data = DesktopAssets.load(&path).unwrap();
             assert!(
                 matches!(data, Some(Cow::Borrowed(svg)) if !svg.is_empty()),
                 "{path} should be embedded"

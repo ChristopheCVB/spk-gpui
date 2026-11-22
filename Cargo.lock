@@ -7728,6 +7728,7 @@ dependencies = [
  "dfn3_rs",
  "dirs 7.0.0",
  "embed-resource",
+ "flate2",
  "futures",
  "global-hotkey",
  "gpui-kit",

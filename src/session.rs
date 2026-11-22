@@ -59,10 +59,7 @@ pub use {
     accounts::AccountLinkForm,
     avatars::AvatarPhoto,
     channel_admin::{ChannelAction, ChannelAdmin, ChannelKind},
-    chat::{
-        AttachmentInput, ChatJump, ChatView, Delivery, GifPickerView, Pins, UploadStatus,
-        image_preview,
-    },
+    chat::{AttachmentInput, ChatView, Delivery, GifPickerView, Pins, UploadStatus, image_preview},
     presence::Participant,
     profiles::ProfileEdit,
     radio::RadioPlayback,

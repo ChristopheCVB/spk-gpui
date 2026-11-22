@@ -344,7 +344,9 @@ impl Spk {
                         )
                     })
                     .child(match chat {
-                        Some(chat) => self.chat_stage(sidebar, chat, cx).into_any_element(),
+                        Some(chat) => self
+                            .chat_stage(sidebar, chat, window, cx)
+                            .into_any_element(),
                         None => self
                             .voice_channel_stage(sidebar, selected_channel, window, cx)
                             .into_any_element(),

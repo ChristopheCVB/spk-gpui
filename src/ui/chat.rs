@@ -1,9 +1,12 @@
 mod actions;
 mod attachments;
 mod gifs;
+mod history;
+mod reaction_picker;
 
 pub(super) use actions::{MessageActionForm, PinPanel};
 pub(super) use attachments::AttachmentUi;
+pub(super) use reaction_picker::ReactionPicker;
 
 use std::{
     cell::RefCell,
@@ -11,18 +14,28 @@ use std::{
     hash::{DefaultHasher, Hash, Hasher},
 };
 
+use chrono::{DateTime, Local};
+use gpui_kit::base::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::{
     Disableable,
-    menu::{DropdownMenu, PopupMenuItem},
+    menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
+    separator::Separator,
     text::{MarkdownExtensions, TextView},
+    tooltip::Tooltip,
+};
+
+use history::{
+    HistoryRow, JUMP_HIGHLIGHT_HOLD, date_label, history_message_at, history_message_index,
+    history_rows, jump_highlight_opacity, message_row_background, relative_time,
 };
 
 use super::*;
 
 use crate::{
     api::{ChatMessage, MessageTarget, UnreadState},
-    chat_markdown::{image_preview_links, message_markdown, plain_text, safe_link},
-    session::{ChatJump, ChatView, Delivery, Pins},
+    chat_markdown::{image_preview_links, message_markdown, safe_link},
+    reaction_artwork::reaction_artwork_path,
+    session::{ChatView, Delivery, Pins},
 };
 
 pub(super) const BOLD: (&str, &str) = ("**", "**");
@@ -37,6 +50,19 @@ fn chat(view: &View) -> Option<&ChatView> {
         View::SignedIn(sidebar) => sidebar.chat.as_ref(),
         _ => None,
     }
+}
+
+fn reaction_message<'a>(
+    chat: Option<&'a ChatView>,
+    channel_id: &str,
+    message_id: &str,
+) -> Option<(&'a ChatView, &'a ChatMessage)> {
+    let chat = chat.filter(|chat| chat.channel_id == channel_id && chat.can_send())?;
+    let message = chat
+        .messages
+        .iter()
+        .find(|message| message.id == message_id)?;
+    Some((chat, message))
 }
 
 pub(super) struct ChatDestination<'a> {
@@ -81,25 +107,78 @@ fn composer_destination(view: &View) -> Option<(char, &str)> {
     Some((destination.placeholder_prefix?, destination.name))
 }
 
-fn chat_jump_index(jump: Option<&ChatJump>, messages: &[ChatMessage]) -> Option<usize> {
-    let jump = jump?;
-    messages
-        .iter()
-        .position(|message| message.id == jump.message_id)
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum HistoryPosition {
+    Opening,
+    Jump(usize),
+    Anchor(usize, Pixels),
 }
 
-fn scroll_to_chat_jump(
-    history: Div,
-    jump_row: Rc<Cell<Option<usize>>>,
-    scroll: ScrollHandle,
+fn chat_history_viewport(
+    rows: impl IntoIterator<Item = impl IntoElement>,
+    scroll: &ScrollHandle,
+    position: &Rc<Cell<Option<HistoryPosition>>>,
+    latest_ready: bool,
 ) -> Div {
-    // GPUI can align a row only after the history viewport has been measured.
-    history.on_children_prepainted(move |_, window, _| {
-        if let Some(index) = jump_row.take() {
-            scroll.scroll_to_top_of_item(index);
-            window.request_animation_frame();
-        }
-    })
+    if latest_ready && position.get() == Some(HistoryPosition::Opening) {
+        // Apply the new bottom before GPUI positions the message rows.
+        position.set(None);
+        scroll.scroll_to_bottom();
+    }
+    let history = div().when(
+        matches!(
+            position.get(),
+            Some(HistoryPosition::Jump(_) | HistoryPosition::Anchor(_, _))
+        ),
+        |history| {
+            let position = position.clone();
+            let scroll = scroll.clone();
+            // The viewport and the target row have their current bounds after layout.
+            history.on_children_prepainted(move |_, window, _| {
+                let (index, offset) = match position.take() {
+                    Some(HistoryPosition::Jump(index)) => (index, px(0.)),
+                    Some(HistoryPosition::Anchor(index, offset)) => (index, offset),
+                    _ => return,
+                };
+                let Some(row) = scroll.bounds_for_item(index) else {
+                    return;
+                };
+                let offset = (scroll.bounds().top() - row.top() + offset)
+                    .clamp(-scroll.max_offset().y, px(0.));
+                if scroll.offset().y != offset {
+                    scroll.set_offset(point(scroll.offset().x, offset));
+                    window.on_next_frame(|window, _| window.refresh());
+                }
+            })
+        },
+    );
+    div()
+        .relative()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .child(
+            history
+                .id("chat-history")
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .track_scroll(scroll)
+                .children(rows),
+        )
+        .child(Scrollbar::vertical(scroll).mode(ScrollbarMode::Always))
+}
+
+fn history_anchor<'a>(chat: &'a ChatView, scroll: &ScrollHandle) -> Option<(&'a str, Pixels)> {
+    let (index, message) = history_message_at(chat, scroll.top_item())?;
+    let bounds = scroll.bounds_for_item(index)?;
+    Some((
+        &message.id,
+        bounds.top() + scroll.offset().y - scroll.bounds().top(),
+    ))
 }
 
 fn chat_images(chat: &ChatView) -> impl Iterator<Item = &Arc<RenderImage>> {
@@ -168,7 +247,38 @@ pub(super) fn mark_read_item(channel_id: String, app: WeakEntity<Spk>) -> PopupM
     })
 }
 
+fn reaction_glyph(emoji: &str, size: Pixels) -> AnyElement {
+    match reaction_artwork_path(emoji) {
+        Some(path) => img(path).size(size).flex_shrink_0().into_any_element(),
+        None => div()
+            .flex_none()
+            .text_size(size)
+            .child(emoji.to_owned())
+            .into_any_element(),
+    }
+}
+
 impl Spk {
+    pub(super) fn track_chat_time(window: &mut Window, cx: &mut Context<Self>) {
+        let clock = cx.background_executor().clone();
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                clock.timer(Duration::from_secs(60)).await;
+                if this
+                    .update_in(cx, |this, _, cx| {
+                        if chat(&this.view).is_some_and(|chat| !chat.messages.is_empty()) {
+                            cx.notify();
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     pub(super) fn read_visible_chat(&self, window: &Window) {
         if let Some(chat) = chat(&self.view).filter(|chat| chat.latest_ready())
             && window.is_window_active()
@@ -181,6 +291,16 @@ impl Spk {
     }
 
     pub(super) fn escape_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self
+            .message_menu_focus
+            .as_ref()
+            .is_some_and(|(_, _, focus)| focus.is_focused(window))
+        {
+            return false;
+        }
+        if self.close_reaction_picker(window, cx) {
+            return true;
+        }
         if self.chat_pins_focus.contains_focused(window, cx) && self.close_pins(window, cx) {
             return true;
         }
@@ -286,6 +406,21 @@ impl Spk {
         let previous = chat(&self.view);
         let signed_in = matches!(next, View::SignedIn(_));
         let next = chat(next);
+        if previous
+            .map(|chat| (&chat.channel_id, &chat.messages))
+            .zip(next.map(|chat| (&chat.channel_id, &chat.messages)))
+            .is_none_or(|((previous_id, previous), (next_id, next))| {
+                previous_id != next_id || !Arc::ptr_eq(previous, next)
+            })
+        {
+            let retained: HashSet<_> = next
+                .into_iter()
+                .flat_map(|chat| chat.messages.iter().map(|message| &message.id))
+                .collect();
+            self.chat_row_focus
+                .get_mut()
+                .retain(|message_id, _| retained.contains(message_id));
+        }
         self.chat_attachments
             .sync(previous, next, signed_in, window);
         let mut retained: HashSet<_> = next
@@ -300,6 +435,11 @@ impl Spk {
         }
         self.update_gif_input(previous, next, window, cx);
         Self::update_message_actions(&mut self.message_action_form, previous, next);
+        if self.reaction_picker.as_ref().is_some_and(|picker| {
+            reaction_message(next, &picker.channel_id, &picker.message_id).is_none()
+        }) {
+            self.reaction_picker = None;
+        }
         if let Some(next) = next.filter(|chat| chat.latest_ready())
             && previous.is_none_or(|previous| {
                 previous.channel_id != next.channel_id
@@ -332,18 +472,22 @@ impl Spk {
             });
             self.chat_spoilers.clear();
             self.chat_scroll_anchor = None;
-            self.chat_jump_row.set(None);
+            self.chat_history_position
+                .set(next.map(|_| HistoryPosition::Opening));
             self.chat_scroll = ScrollHandle::new();
         } else if let (Some(previous), Some(next)) = (previous, next) {
+            if next.opening_latest() && next.direct_message_peer.is_none() {
+                self.chat_scroll_anchor = None;
+                self.chat_history_position
+                    .set(Some(HistoryPosition::Opening));
+            }
             if previous.has_more_after
                 && next.direct_message_peer.is_some()
                 && next.loading()
                 && next.messages.is_empty()
             {
-                self.chat_scroll_anchor = previous
-                    .messages
-                    .get(self.chat_scroll.top_item())
-                    .map(|message| message.id.clone());
+                self.chat_scroll_anchor = history_anchor(previous, &self.chat_scroll)
+                    .map(|(id, offset)| (id.to_owned(), offset));
             }
             let acknowledged = previous.outgoing.as_ref().is_some_and(|pending| {
                 next.outgoing.is_none()
@@ -365,26 +509,49 @@ impl Spk {
             .filter(|_| !reset)
             .and_then(|chat| chat.jump.as_ref());
         let next_jump = next.and_then(|chat| chat.jump.as_ref());
-        if previous_jump != next_jump || self.chat_jump_row.get().is_some() {
-            let row = next.and_then(|chat| chat_jump_index(next_jump, &chat.messages));
-            self.chat_jump_row.set(row);
-            if row.is_some() {
+        if previous_jump != next_jump {
+            self.chat_jump_started = next_jump.map(|_| Instant::now());
+            if next_jump.is_some() {
+                let clock = cx.background_executor().clone();
+                cx.spawn(async move |app, cx| {
+                    clock.timer(JUMP_HIGHLIGHT_HOLD).await;
+                    let _ = app.update(cx, |_, cx| cx.notify());
+                })
+                .detach();
+            }
+        }
+        let jump_pending = matches!(
+            self.chat_history_position.get(),
+            Some(HistoryPosition::Jump(_))
+        );
+        if previous_jump != next_jump || jump_pending {
+            let row = next
+                .zip(next_jump)
+                .and_then(|(chat, jump)| history_message_index(chat, &jump.message_id));
+            if let Some(row) = row {
+                self.chat_history_position
+                    .set(Some(HistoryPosition::Jump(row)));
                 self.chat_scroll_anchor = None;
                 return;
             }
+            if jump_pending {
+                self.chat_history_position.set(None);
+            }
         }
-        if reset {
-            self.chat_scroll.scroll_to_bottom();
-        } else if let (Some(previous), Some(next)) = (previous, next) {
+        if self.chat_history_position.get() == Some(HistoryPosition::Opening) {
+            if next.is_some_and(|chat| chat.jump_failed) {
+                self.chat_history_position.set(None);
+            }
+            return;
+        }
+        if let (Some(previous), Some(next)) = (previous, next) {
             if next.history_ready()
-                && let Some(anchor) = self.chat_scroll_anchor.take()
+                && let Some((anchor, offset)) = self.chat_scroll_anchor.take()
                 && (next.has_more_after || next.paging_forward)
-                && let Some(index) = next
-                    .messages
-                    .iter()
-                    .position(|message| message.id == anchor)
+                && let Some(index) = history_message_index(next, &anchor)
             {
-                self.chat_scroll.scroll_to_top_of_item(index);
+                self.chat_history_position
+                    .set(Some(HistoryPosition::Anchor(index, offset)));
                 return;
             }
             if next.history_ready() && next.paging_forward && previous.loading() {
@@ -399,14 +566,12 @@ impl Spk {
             }
             if previous.messages.first().map(|message| &message.id)
                 != next.messages.first().map(|message| &message.id)
-                && let Some(anchor) = previous.messages.get(self.chat_scroll.top_item())
-                && let Some(index) = next
-                    .messages
-                    .iter()
-                    .position(|message| message.id == anchor.id)
+                && let Some((anchor, offset)) = history_anchor(previous, &self.chat_scroll)
+                && let Some(index) = history_message_index(next, anchor)
             {
-                self.chat_scroll.scroll_to_top_of_item(index);
-            } else if self.chat_scroll.max_offset().y + self.chat_scroll.offset().y < px(32.)
+                self.chat_history_position
+                    .set(Some(HistoryPosition::Anchor(index, offset)));
+            } else if self.chat_scroll.offset().y == -self.chat_scroll.max_offset().y
                 || previous.messages.is_empty()
             {
                 self.chat_scroll.scroll_to_bottom();
@@ -454,9 +619,61 @@ impl Spk {
         &self,
         sidebar: &Sidebar,
         chat: &ChatView,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let keyboard_focus = window
+            .last_input_was_keyboard()
+            .then(|| window.focused(cx))
+            .flatten();
+        if self
+            .chat_history_keyboard_focus
+            .replace(keyboard_focus.clone())
+            != keyboard_focus
+            && let Some(focus) = keyboard_focus
+            && self.chat_history_position.get().is_none()
+            && let Some((message_id, _)) = self
+                .chat_row_focus
+                .borrow()
+                .iter()
+                .find(|(_, row)| row.contains(&focus, window))
+            && let Some(index) = history_message_index(chat, message_id)
+        {
+            self.chat_scroll.scroll_to_item(index);
+        }
         let theme = cx.theme();
+        let now = Local::now();
+        let divider = |label, color| {
+            div()
+                .px_4()
+                .py_1()
+                .flex_shrink_0()
+                .child(Separator::horizontal().label(label).color(color))
+                .into_any_element()
+        };
+        let rows =
+            history_rows(&chat.messages, chat.first_unread_id.as_deref(), &Local).map(|row| {
+                match row {
+                    HistoryRow::Date(date) => {
+                        divider(date_label(date, now.date_naive()), theme.border)
+                    }
+                    HistoryRow::Unread => divider("New messages".into(), theme.danger),
+                    HistoryRow::Message {
+                        message,
+                        starts_group,
+                    } => self
+                        .chat_message(
+                            sidebar,
+                            chat,
+                            message,
+                            starts_group,
+                            now.timestamp_millis(),
+                            window,
+                            cx,
+                        )
+                        .into_any_element(),
+                }
+            });
         let status = if chat.jump_failed {
             Some("Message unavailable.")
         } else if chat.unavailable() {
@@ -558,28 +775,12 @@ impl Spk {
                     )
                 },
             )
-            .child(
-                div()
-                    .when(self.chat_jump_row.get().is_some(), |history| {
-                        scroll_to_chat_jump(
-                            history,
-                            self.chat_jump_row.clone(),
-                            self.chat_scroll.clone(),
-                        )
-                    })
-                    .id("chat-history")
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.chat_scroll)
-                    .children(
-                        chat.messages
-                            .iter()
-                            .map(|message| self.chat_message(sidebar, chat, message, cx)),
-                    ),
-            )
+            .child(chat_history_viewport(
+                rows,
+                &self.chat_scroll,
+                &self.chat_history_position,
+                chat.latest_ready(),
+            ))
             .when(chat.has_more_after && !chat.loading(), |area| {
                 area.child(
                     div().px_4().py_2().flex().gap_2().child(
@@ -836,6 +1037,9 @@ impl Spk {
         sidebar: &Sidebar,
         chat: &ChatView,
         message: &ChatMessage,
+        starts_group: bool,
+        now: i64,
+        window: &Window,
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
@@ -894,28 +1098,202 @@ impl Spk {
                     search::activate_chat_link(&link_app, url, cx);
                 }
             });
+        let row_focus = self
+            .chat_row_focus
+            .borrow_mut()
+            .entry(message.id.clone())
+            .or_insert_with(|| cx.focus_handle().tab_stop(true))
+            .clone();
         let composer_busy = chat.outgoing.is_some() || !chat.can_send();
-        let message_actions = actions::MessageActions {
+        let message_actions = Rc::new(actions::MessageActions {
             app: app.clone(),
             channel: channel.clone(),
             message: message_id.clone(),
+            row_focus: row_focus.clone(),
             can_edit: sidebar.profile.id.as_deref() == Some(&message.user_id),
             can_delete: sidebar.can_remove_message_content(message),
             pin_to: chat.can_pin(sidebar.is_admin()).then_some(!message.pinned),
             disabled: chat.action_pending || !chat.can_send(),
-        };
-        let pinged = chat.direct_message_peer.is_none()
-            && sidebar
-                .profile
-                .id
-                .as_deref()
-                .is_some_and(|id| message.pings(id));
+            composer_busy,
+            body,
+            share_text,
+            target,
+            spoiler_key,
+            hidden,
+        });
         let reply_channel = channel.clone();
         let reply_id = message_id.clone();
+        let keyboard_focused = row_focus.is_focused(window) && window.last_input_was_keyboard();
+        let row_focused = row_focus.contains_focused(window, cx);
+        let author = sidebar.message_author(&message.user_id);
+        let time = DateTime::from_timestamp_millis(message.created_at)
+            .map(|time| time.with_timezone(&Local));
+        let exact_time = time.map(|time| time.format("%b %-d, %Y, %H:%M:%S").to_string());
+        let menu_focused = self
+            .message_menu_focus
+            .as_ref()
+            .is_some_and(|(channel, id, focus)| {
+                channel == &chat.channel_id && id == &message.id && focus.is_focused(window)
+            });
+        let toolbar = message_actions.toolbar(
+            self,
+            sidebar,
+            chat,
+            message,
+            row_focused || menu_focused,
+            cx,
+        );
+        let content = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .when(starts_group, |header| {
+                        header.child(Label::new(author.to_owned()).font_semibold())
+                    })
+                    .when_some(
+                        exact_time.clone().filter(|_| starts_group),
+                        |header, exact| {
+                            header.child(
+                                div()
+                                    .id("sent-at")
+                                    .tooltip(move |window, cx| {
+                                        Tooltip::new(exact.clone()).build(window, cx)
+                                    })
+                                    .child(
+                                        Label::new(relative_time(message.created_at, now))
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground),
+                                    ),
+                            )
+                        },
+                    )
+                    .when(message.pinned, |row| {
+                        row.child(
+                            Label::new("Pinned")
+                                .text_xs()
+                                .text_color(theme.muted_foreground),
+                        )
+                    })
+                    .when(message.edited_at.is_some(), |row| {
+                        row.child(
+                            Label::new("(edited)")
+                                .text_xs()
+                                .text_color(theme.muted_foreground),
+                        )
+                    }),
+            )
+            .when_some(message.reply_to.as_ref(), |row, reply| {
+                let icon = themed_icon(IconName::CornerUpRight, theme.muted_foreground, 14.);
+                row.child(if reply.deleted {
+                    div()
+                        .h(px(18.))
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(icon)
+                        .child(
+                            Label::new("Original message deleted")
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .italic(),
+                        )
+                        .into_any_element()
+                } else {
+                    let channel_id = chat.channel_id.clone();
+                    let message_id = reply.id.clone();
+                    let preview = message_markdown(
+                        &reply.preview,
+                        |id| sidebar.message_author(id),
+                        |_| false,
+                        None,
+                    );
+                    let sender = sidebar.message_author(&reply.user_id);
+                    let preview = preview.replace(['\r', '\n'], " ");
+                    Button::new("jump-reply")
+                        .ghost()
+                        .xsmall()
+                        .self_start()
+                        .max_w_full()
+                        .h(px(18.))
+                        .px_0()
+                        .cursor_pointer()
+                        .tab_stop(true)
+                        .accessibility_label("Jump to the original message")
+                        .child(icon)
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(
+                                    StyledText::new(format!("{sender} {preview}")).with_highlights(
+                                        [(
+                                            0..sender.len(),
+                                            HighlightStyle {
+                                                font_weight: Some(FontWeight::SEMIBOLD),
+                                                ..Default::default()
+                                            },
+                                        )],
+                                    ),
+                                ),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.send(
+                                Command::JumpToChatMessage {
+                                    channel_id: channel_id.clone(),
+                                    message_id: message_id.clone(),
+                                },
+                                None,
+                                cx,
+                            );
+                        }))
+                        .into_any_element()
+                })
+            })
+            .when(!message.body.is_empty(), |row| row.child(text))
+            .child(images)
+            .when(!message.attachments.is_empty(), |row| {
+                row.child(self.attachment_cards(message, cx))
+            })
+            .children(self.message_action_form(chat, message, cx))
+            .when(!message.previews.is_empty(), |row| {
+                row.child(self.link_previews(sidebar, chat, message, cx))
+            })
+            .when(!message.reactions.is_empty(), |row| {
+                row.child(self.reactions(sidebar, chat, message, cx))
+            });
+        let jump_highlight = chat
+            .jump
+            .as_ref()
+            .filter(|jump| jump.message_id == message.id)
+            .zip(self.chat_jump_started)
+            .map(|(jump, started)| {
+                let elapsed = started.elapsed();
+                let opacity = if cx.reduce_motion() && elapsed >= JUMP_HIGHLIGHT_HOLD {
+                    0.
+                } else {
+                    jump_highlight_opacity(elapsed)
+                };
+                if elapsed >= JUMP_HIGHLIGHT_HOLD && opacity > 0. {
+                    window.request_animation_frame();
+                }
+                (jump.message_id.as_str(), opacity)
+            });
         div()
             .id(SharedString::from(format!("message-{}", message.id)))
-            .focusable()
-            .tab_index(0)
+            .relative()
+            .group("message-row")
+            .track_focus(&row_focus)
+            .when_some(exact_time.clone(), |row, time| {
+                row.aria_description(format!("{author}, {time}"))
+            })
             .border_l_2()
             .border_color(theme.transparent)
             .focus_visible(|row| row.border_color(theme.ring))
@@ -932,231 +1310,80 @@ impl Spk {
                 }
             }))
             .px_4()
-            .py(if self.compact() { px(4.0) } else { px(8.0) })
+            .py(px(2.))
+            .when(starts_group, |row| {
+                row.pt(if self.compact() { px(4.) } else { px(8.) })
+            })
+            .flex()
+            .items_start()
+            .gap_2()
             .flex_shrink_0()
-            .when(
-                pinged
-                    || chat
-                        .jump
-                        .as_ref()
-                        .is_some_and(|jump| jump.message_id == message.id),
-                |row| row.bg(theme.primary.opacity(0.1)),
+            .when_some(
+                message_row_background(
+                    message,
+                    chat.direct_message_peer.is_some(),
+                    sidebar.profile.id.as_deref(),
+                    jump_highlight,
+                    theme,
+                ),
+                |row, background| row.bg(background),
             )
-            .when(chat.first_unread_id.as_ref() == Some(&message.id), |row| {
-                row.child(
-                    Label::new("New messages")
-                        .text_xs()
-                        .text_color(theme.primary)
-                        .font_semibold()
-                        .mb_1()
-                        .border_t_1()
-                        .border_color(theme.primary)
-                        .w_full(),
-                )
-            })
-            .when_some(message.reply_to.as_ref(), |row, reply| {
-                row.child(if reply.deleted {
-                    Label::new("Original message deleted")
-                        .text_color(theme.muted_foreground)
-                        .into_any_element()
-                } else {
-                    let channel_id = chat.channel_id.clone();
-                    let message_id = reply.id.clone();
-                    let preview = message_markdown(
-                        &reply.preview,
-                        |id| sidebar.message_author(id),
-                        |_| false,
-                        None,
-                    );
-                    Button::new("jump-reply")
-                        .ghost()
-                        .small()
-                        .tab_stop(true)
-                        .label(format!(
-                            "{} · {preview}",
-                            sidebar.message_author(&reply.user_id)
-                        ))
-                        .accessibility_label("Jump to the original message")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.send(
-                                Command::JumpToChatMessage {
-                                    channel_id: channel_id.clone(),
-                                    message_id: message_id.clone(),
-                                },
-                                None,
-                                cx,
-                            );
-                        }))
-                        .into_any_element()
-                })
-            })
+            .when_some(
+                exact_time.clone().filter(|_| keyboard_focused),
+                |row, time| {
+                    row.child(deferred(
+                        div()
+                            .absolute()
+                            .left_4()
+                            .bottom_full()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.tokens.popover)
+                            .child(Label::new(time).text_xs()),
+                    ))
+                },
+            )
             .child(
                 div()
+                    .w(px(36.))
+                    .flex_shrink_0()
                     .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                Label::new(sidebar.message_author(&message.user_id).to_owned())
-                                    .font_semibold(),
-                            )
-                            .when(pinged, |author| {
-                                author.child(Label::new("Ping").text_xs().text_color(theme.primary))
-                            }),
-                    )
-                    .when(message.pinned, |row| {
-                        row.child(
-                            Label::new("Pinned")
-                                .text_xs()
-                                .text_color(theme.muted_foreground),
-                        )
+                    .justify_center()
+                    .when(starts_group, |lane| {
+                        lane.child(profile_avatar(
+                            Avatar::new().name(author.to_owned()),
+                            sidebar.avatar(Some(&message.user_id)),
+                            32.,
+                            false,
+                            cx,
+                        ))
                     })
-                    .when(message.edited_at.is_some(), |row| {
-                        row.child(
-                            Label::new("(edited)")
-                                .text_xs()
-                                .text_color(theme.muted_foreground),
-                        )
-                    })
-                    .child(
-                        Button::new("message-actions")
-                            .ghost()
-                            .small()
-                            .label("Actions")
-                            .tab_stop(true)
-                            .dropdown_menu(move |menu, _, _| {
-                                let channel_id = channel.clone();
-                                let quote_channel = channel.clone();
-                                let message_id = message_id.clone();
-                                let mark_channel = channel.clone();
-                                let mark_message = message_id.clone();
-                                let reply_app = app.clone();
-                                let quote_app = app.clone();
-                                let mark_app = app.clone();
-                                let quoted = body
-                                    .lines()
-                                    .map(|line| format!("> {line}"))
-                                    .collect::<Vec<_>>()
-                                    .join("\n");
-                                let menu = menu
-                                    .item(
-                                        PopupMenuItem::new("Reply")
-                                            .disabled(composer_busy)
-                                            .on_click(move |_, window, cx| {
-                                                let _ = reply_app.update(cx, |this, cx| {
-                                                    this.reply_to_message(
-                                                        channel_id.clone(),
-                                                        message_id.clone(),
-                                                        window,
-                                                        cx,
-                                                    );
-                                                });
-                                            }),
-                                    )
-                                    .item(
-                                        PopupMenuItem::new("Quote")
-                                            .disabled(composer_busy)
-                                            .on_click(move |_, window, cx| {
-                                                let _ = quote_app.update(cx, |this, cx| {
-                                                    if self::chat(&this.view).is_some_and(|chat| {
-                                                        chat.channel_id == quote_channel
-                                                            && chat.can_send()
-                                                            && chat.outgoing.is_none()
-                                                    }) {
-                                                        this.chat_input.update(cx, |input, cx| {
-                                                            let end = input.value().len();
-                                                            input.set_selected_range(end..end, cx);
-                                                            input.insert(
-                                                                format!("\n\n{quoted}\n\n"),
-                                                                window,
-                                                                cx,
-                                                            );
-                                                            input.focus(window, cx);
-                                                        });
-                                                        this.update_chat_draft(cx);
-                                                    }
-                                                });
-                                            }),
-                                    );
-                                let menu = message_actions.menu(menu).separator().item(
-                                    PopupMenuItem::new("Mark as unread").on_click(
-                                        move |_, _, cx| {
-                                            let _ = mark_app.update(cx, |this, cx| {
-                                                this.send(
-                                                    Command::MarkChatUnread {
-                                                        channel_id: mark_channel.clone(),
-                                                        message_id: mark_message.clone(),
-                                                    },
-                                                    None,
-                                                    cx,
-                                                );
-                                            });
-                                        },
+                    .when_some(
+                        time.filter(|_| !starts_group).zip(exact_time.clone()),
+                        |lane, (time, exact)| {
+                            lane.child(
+                                div()
+                                    .id("sent-at")
+                                    .opacity(if row_focused { 1. } else { 0. })
+                                    .group_hover("message-row", |clock| clock.opacity(1.))
+                                    .tooltip(move |window, cx| {
+                                        Tooltip::new(exact.clone()).build(window, cx)
+                                    })
+                                    .child(
+                                        Label::new(time.format("%H:%M").to_string())
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground),
                                     ),
-                                );
-                                let copy_text = share_text.clone();
-                                let copy_markdown = body.clone();
-                                let menu = menu
-                                    .separator()
-                                    .item(PopupMenuItem::new("Copy text").on_click(
-                                        move |_, _, cx| {
-                                            cx.write_to_clipboard(ClipboardItem::new_string(
-                                                plain_text(&copy_text),
-                                            ));
-                                        },
-                                    ))
-                                    .item(PopupMenuItem::new("Copy Markdown").on_click(
-                                        move |_, _, cx| {
-                                            cx.write_to_clipboard(ClipboardItem::new_string(
-                                                copy_markdown.clone(),
-                                            ));
-                                        },
-                                    ))
-                                    .when_some(target.clone(), |menu, target| {
-                                        menu.item(PopupMenuItem::new("Copy link").on_click(
-                                            move |_, _, cx| {
-                                                search::copy_message_link(&target, cx);
-                                            },
-                                        ))
-                                    });
-                                if hidden.is_empty() {
-                                    menu
-                                } else {
-                                    let app = app.clone();
-                                    let key = spoiler_key.clone();
-                                    let offsets = hidden.clone();
-                                    menu.item(PopupMenuItem::new("Reveal spoilers").on_click(
-                                        move |_, _, cx| {
-                                            let _ = app.update(cx, |this, cx| {
-                                                this.chat_spoilers
-                                                    .entry(key.clone())
-                                                    .or_default()
-                                                    .extend(&offsets);
-                                                cx.notify();
-                                            });
-                                        },
-                                    ))
-                                }
-                            }),
+                            )
+                        },
                     ),
             )
-            .when(!message.body.is_empty(), |row| row.child(text))
-            .child(images)
-            .when(!message.attachments.is_empty(), |row| {
-                row.child(self.attachment_cards(message, cx))
-            })
-            .children(self.message_action_form(chat, message, cx))
-            .when(!message.previews.is_empty(), |row| {
-                row.child(self.link_previews(sidebar, chat, message, cx))
-            })
-            .when(!message.reactions.is_empty(), |row| {
-                row.child(self.reactions(sidebar, chat, message, cx))
-            })
+            .child(content)
+            .child(toolbar)
+            .context_menu(move |menu, window, cx| message_actions.menu(menu, window, cx))
     }
 
     fn reply_to_message(
@@ -1288,47 +1515,237 @@ impl Spk {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChatJump, ChatMessage, chat_jump_index};
-
+    #[cfg(target_os = "linux")]
     #[test]
-    fn resolves_the_jump_when_an_alert_first_opens_a_chat() {
-        let messages: Vec<ChatMessage> = serde_json::from_value(serde_json::json!([
-            {"id":"before","channelId":"general","userId":"bob","body":"Before","createdAt":1},
-            {"id":"target","channelId":"general","userId":"bob","body":"Target","createdAt":2},
-            {"id":"after","channelId":"general","userId":"bob","body":"After","createdAt":3}
-        ]))
-        .unwrap();
-        let jump = ChatJump {
-            message_id: "target".into(),
-            generation: 0,
-        };
-        assert_eq!(chat_jump_index(Some(&jump), &messages), Some(1));
+    #[ignore = "requires a graphical session or Xvfb"]
+    fn delayed_history_opens_at_the_latest_message_and_shares_scrollbar_position() {
+        use std::{cell::Cell, rc::Rc, time::Duration};
+
+        use gpui_kit::{prelude::FluentBuilder, *};
+
+        use super::{HistoryPosition, chat_history_viewport};
+
+        struct ChatLayout {
+            rows: usize,
+            height: Pixels,
+            scroll: ScrollHandle,
+            position: Rc<Cell<Option<HistoryPosition>>>,
+            latest_visible_on_first_paint: Rc<Cell<Option<bool>>>,
+        }
+
+        impl Render for ChatLayout {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .h(self.height)
+                    .flex()
+                    .flex_col()
+                    .child(chat_history_viewport(
+                        (0..self.rows).map(|index| {
+                            div().h(px(24.)).flex_shrink_0().when(
+                                self.rows > 1 && index + 1 == self.rows,
+                                |row| {
+                                    let visible = self.latest_visible_on_first_paint.clone();
+                                    row.child(
+                                        canvas(
+                                            |_, _, _| (),
+                                            move |bounds, (), window, _| {
+                                                if visible.get().is_none() {
+                                                    let viewport = window.content_mask().bounds;
+                                                    visible.set(Some(
+                                                        bounds.top() >= viewport.top()
+                                                            && bounds.bottom() <= viewport.bottom(),
+                                                    ));
+                                                }
+                                            },
+                                        )
+                                        .size_full(),
+                                    )
+                                },
+                            )
+                        }),
+                        &self.scroll,
+                        &self.position,
+                        self.rows > 1,
+                    ))
+            }
+        }
+
+        let outcome = Rc::new(Cell::new(None));
+        let result = outcome.clone();
+        application().run(move |cx| {
+            gpui_kit::init(cx);
+            let scroll = ScrollHandle::new();
+            let latest_visible_on_first_paint = Rc::new(Cell::new(None));
+            let handle = cx
+                .open_window(WindowOptions::default(), |_, cx| {
+                    cx.new(|_| ChatLayout {
+                        rows: 1,
+                        height: px(120.),
+                        scroll: scroll.clone(),
+                        position: Rc::new(Cell::new(Some(HistoryPosition::Opening))),
+                        latest_visible_on_first_paint: latest_visible_on_first_paint.clone(),
+                    })
+                })
+                .unwrap();
+            cx.spawn(async move |cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(250))
+                    .await;
+                handle
+                    .update(cx, |view, _, cx| {
+                        view.rows = 20;
+                        cx.notify();
+                    })
+                    .unwrap();
+                cx.background_executor()
+                    .timer(Duration::from_millis(250))
+                    .await;
+                let aligned = handle
+                    .update(cx, |_, window, cx| {
+                        let aligned = (
+                            scroll.bottom_item(),
+                            scroll.logical_scroll_bottom().1,
+                            latest_visible_on_first_paint.get(),
+                        );
+                        window.dispatch_event(
+                            ScrollEvent {
+                                position: scroll.bounds().center(),
+                                delta: ScrollDelta::Pixels(point(px(0.), px(20.))),
+                                ..Default::default()
+                            }
+                            .to_platform_input(),
+                            cx,
+                        );
+                        aligned
+                    })
+                    .unwrap();
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+                let after_wheel = scroll.offset().y;
+                handle
+                    .update(cx, |view, _, cx| {
+                        view.rows = 21;
+                        cx.notify();
+                    })
+                    .unwrap();
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+                let after_append = handle
+                    .update(cx, |_, window, cx| {
+                        let offset = scroll.offset().y;
+                        let bounds = scroll.bounds();
+                        let thumb = point(bounds.right() - px(8.), bounds.bottom() - px(25.));
+                        let top = point(thumb.x, bounds.top());
+                        for event in [
+                            MouseDownEvent {
+                                position: thumb,
+                                button: MouseButton::Left,
+                                click_count: 1,
+                                ..Default::default()
+                            }
+                            .to_platform_input(),
+                            MouseMoveEvent {
+                                position: top,
+                                pressed_button: Some(MouseButton::Left),
+                                ..Default::default()
+                            }
+                            .to_platform_input(),
+                            MouseUpEvent {
+                                position: top,
+                                button: MouseButton::Left,
+                                click_count: 1,
+                                ..Default::default()
+                            }
+                            .to_platform_input(),
+                        ] {
+                            window.dispatch_event(event, cx);
+                        }
+                        offset
+                    })
+                    .unwrap();
+                let after_drag = scroll.offset().y;
+                handle
+                    .update(cx, |view, _, cx| {
+                        view.height = px(530.);
+                        cx.notify();
+                    })
+                    .unwrap();
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+                handle
+                    .update(cx, |_, _, cx| {
+                        result.set(Some((
+                            aligned,
+                            after_wheel,
+                            after_append,
+                            after_drag,
+                            scroll.max_offset().y,
+                        )));
+                        cx.quit();
+                    })
+                    .unwrap();
+            })
+            .detach();
+        });
+        let (aligned, after_wheel, after_append, after_drag, max_after_resize) =
+            outcome.take().expect("history must finish layout");
+        assert_eq!(aligned, (19, px(0.), Some(true)));
+        assert_eq!(after_wheel, px(-340.));
+        assert_eq!(after_append, after_wheel);
+        assert_eq!(after_drag, px(0.));
+        assert_eq!(max_after_resize, px(0.));
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     #[ignore = "requires a graphical session or Xvfb"]
-    fn first_chat_jump_aligns_the_row_below_the_header() {
+    fn chat_jumps_align_grouped_messages_and_messages_after_both_dividers() {
         use std::{cell::Cell, rc::Rc, time::Duration};
 
+        use chrono::{FixedOffset, TimeZone};
         use gpui_kit::*;
+
+        use super::{
+            ChatMessage, HistoryPosition, HistoryRow, chat_history_viewport,
+            history::message_row_index, history_rows,
+        };
 
         struct ChatLayout {
             scroll: ScrollHandle,
-            jump_row: Rc<Cell<Option<usize>>>,
+            position: Rc<Cell<Option<HistoryPosition>>>,
+            messages: Vec<ChatMessage>,
+            timezone: FixedOffset,
         }
 
         impl Render for ChatLayout {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                let history =
-                    super::scroll_to_chat_jump(div(), self.jump_row.clone(), self.scroll.clone())
-                        .id("chat-history")
-                        .flex()
-                        .flex_col()
-                        .h(px(120.))
-                        .overflow_y_scroll()
-                        .track_scroll(&self.scroll)
-                        .children((0..20).map(|_| div().h(px(24.)).flex_shrink_0()));
+                let rows = history_rows(&self.messages, Some("5"), &self.timezone).map(|row| {
+                    let height = match row {
+                        HistoryRow::Date(_) => 16.,
+                        HistoryRow::Unread => 20.,
+                        HistoryRow::Message { starts_group, .. } => {
+                            if starts_group {
+                                32.
+                            } else {
+                                24.
+                            }
+                        }
+                    };
+                    div().h(px(height)).flex_shrink_0()
+                });
+                let history = div()
+                    .h(px(120.))
+                    .flex()
+                    .flex_col()
+                    .child(chat_history_viewport(
+                        rows,
+                        &self.scroll,
+                        &self.position,
+                        true,
+                    ));
                 div()
                     .flex()
                     .flex_col()
@@ -1337,36 +1754,74 @@ mod tests {
             }
         }
 
+        let timezone = FixedOffset::east_opt(7200).unwrap();
+        let midnight = timezone
+            .with_ymd_and_hms(2026, 11, 22, 0, 0, 0)
+            .unwrap()
+            .timestamp_millis();
+        let messages: Vec<ChatMessage> = (0..20)
+            .map(|index| {
+                serde_json::from_value(serde_json::json!({
+                    "id": index.to_string(),
+                    "channelId": "general",
+                    "userId": "bob",
+                    "body": "Message",
+                    "createdAt": midnight + (index - 5) * 60_000
+                }))
+                .unwrap()
+            })
+            .collect();
+        let rows = || history_rows(&messages, Some("5"), &timezone);
+        let after_dividers = message_row_index(rows(), "5").unwrap();
+        let grouped = message_row_index(rows(), "6").unwrap();
+        assert_eq!((after_dividers, grouped), (8, 9));
+
         let outcome = Rc::new(Cell::new(None));
         let result = outcome.clone();
         application().run(move |cx| {
+            gpui_kit::init(cx);
             let scroll = ScrollHandle::new();
             let handle = cx
                 .open_window(WindowOptions::default(), |_, cx| {
                     cx.new(|_| ChatLayout {
                         scroll: scroll.clone(),
-                        jump_row: Rc::new(Cell::new(Some(8))),
+                        position: Rc::new(Cell::new(Some(HistoryPosition::Jump(after_dividers)))),
+                        messages,
+                        timezone,
                     })
                 })
                 .unwrap();
             cx.spawn(async move |cx| {
-                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let timer = cx.background_executor().clone();
+                timer.timer(Duration::from_millis(250)).await;
+                let viewport_top = scroll.bounds().top();
+                let after_dividers_top =
+                    scroll.bounds_for_item(after_dividers).unwrap().top() + scroll.offset().y;
+                handle
+                    .update(cx, |view, _, cx| {
+                        view.position.set(Some(HistoryPosition::Jump(grouped)));
+                        cx.notify();
+                    })
+                    .unwrap();
+                timer.timer(Duration::from_millis(250)).await;
                 handle
                     .update(cx, |_, _, cx| {
-                        let viewport_top = scroll.bounds().top();
-                        let row_top = scroll.bounds_for_item(8).unwrap().top() + scroll.offset().y;
-                        result.set(Some((viewport_top, row_top)));
+                        let grouped_top =
+                            scroll.bounds_for_item(grouped).unwrap().top() + scroll.offset().y;
+                        result.set(Some((viewport_top, after_dividers_top, grouped_top)));
                         cx.quit();
                     })
                     .unwrap();
             })
             .detach();
         });
-        let (viewport_top, row_top) = outcome.take().expect("the chat must finish layout");
+        let (viewport_top, after_dividers_top, grouped_top) =
+            outcome.take().expect("the chat must finish layout");
         assert!(
             viewport_top > px(0.),
             "fixture needs a header above the chat"
         );
-        assert_eq!(row_top, viewport_top);
+        assert_eq!(after_dividers_top, viewport_top);
+        assert_eq!(grouped_top, viewport_top);
     }
 }
