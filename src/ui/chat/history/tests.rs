@@ -1,6 +1,7 @@
 use chrono::{FixedOffset, TimeZone};
+use gpui_kit::{component::Theme, rgb};
 
-use super::{HistoryRow, date_label, history_rows, message_row_index};
+use super::{HistoryRow, date_label, history_rows, message_row_background, message_row_index};
 use crate::api::ChatMessage;
 
 #[test]
@@ -92,4 +93,44 @@ fn relative_time_uses_the_web_rounding_and_units() {
     assert_eq!(relative_time(now - 90_000, now), "2 min ago");
     assert_eq!(relative_time(now - 9_000_000, now), "3 h ago");
     assert_eq!(relative_time(now - 86_400_000, now), "1 d ago");
+}
+
+#[test]
+fn history_distinguishes_pings_and_the_active_jump() {
+    let mut theme = Theme::default();
+    theme.colors.primary = rgb(0xf59e0b).into();
+    theme.colors.foreground = rgb(0xe4e4e7).into();
+    let messages: Vec<ChatMessage> = serde_json::from_value(serde_json::json!([
+        {"id":"mention","channelId":"general","userId":"bob","body":"Hi <@alice>","createdAt":1},
+        {
+            "id":"reply","channelId":"general","userId":"bob","body":"Thanks!","createdAt":2,
+            "replyTo":{"id":"original","userId":"alice","preview":"Hi","deleted":false}
+        },
+        {"id":"self","channelId":"general","userId":"alice","body":"Hi <@alice>","createdAt":3},
+        {"id":"inline-code","channelId":"general","userId":"bob","body":"`<@alice>`","createdAt":4},
+        {"id":"fenced-code","channelId":"general","userId":"bob","body":"```\n<@alice>\n```","createdAt":5}
+    ]))
+    .unwrap();
+    let timezone = FixedOffset::east_opt(0).unwrap();
+    let backgrounds = |direct_message, target: Option<&str>| {
+        history_rows(&messages, None, &timezone)
+            .filter_map(|row| row.message())
+            .map(|message| {
+                message_row_background(message, direct_message, Some("alice"), target, &theme)
+            })
+            .collect::<Vec<_>>()
+    };
+    let ping = Some(theme.primary.opacity(0.1));
+    let jump = Some(theme.foreground.opacity(0.1));
+    assert_ne!(ping, jump);
+    assert_eq!(backgrounds(false, None), [ping, ping, None, None, None]);
+    assert_eq!(
+        backgrounds(false, Some("reply")),
+        [ping, jump, None, None, None]
+    );
+    assert_eq!(backgrounds(true, None), [None, None, None, None, None]);
+    assert_eq!(
+        backgrounds(true, Some("mention")),
+        [jump, None, None, None, None]
+    );
 }

@@ -1,4 +1,5 @@
 use chrono::{DateTime, Datelike, Local, NaiveDate, TimeZone};
+use gpui_kit::{Hsla, component::Theme};
 
 use crate::{api::ChatMessage, session::ChatView};
 
@@ -77,6 +78,22 @@ pub(super) fn history_message_at(
         .enumerate()
         .skip(row_index)
         .find_map(|(index, row)| Some((index, row.message()?)))
+}
+
+pub(super) fn message_row_background(
+    message: &ChatMessage,
+    direct_message: bool,
+    viewer_id: Option<&str>,
+    jump_target: Option<&str>,
+    theme: &Theme,
+) -> Option<Hsla> {
+    if jump_target == Some(message.id.as_str()) {
+        Some(theme.foreground.opacity(0.1))
+    } else if !direct_message && viewer_id.is_some_and(|id| message.pings(id)) {
+        Some(theme.primary.opacity(0.1))
+    } else {
+        None
+    }
 }
 
 pub(super) fn date_label(date: NaiveDate, today: NaiveDate) -> String {

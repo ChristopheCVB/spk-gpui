@@ -23,7 +23,8 @@ use gpui_kit::component::{
 };
 
 use history::{
-    HistoryRow, date_label, history_message_at, history_message_index, history_rows, relative_time,
+    HistoryRow, date_label, history_message_at, history_message_index, history_rows,
+    message_row_background, relative_time,
 };
 
 use super::*;
@@ -1031,12 +1032,6 @@ impl Spk {
             pin_to: chat.can_pin(sidebar.is_admin()).then_some(!message.pinned),
             disabled: chat.action_pending || !chat.can_send(),
         };
-        let pinged = chat.direct_message_peer.is_none()
-            && sidebar
-                .profile
-                .id
-                .as_deref()
-                .is_some_and(|id| message.pings(id));
         let reply_channel = channel.clone();
         let reply_id = message_id.clone();
         let row_focus = self
@@ -1186,9 +1181,6 @@ impl Spk {
                             )
                         },
                     )
-                    .when(pinged, |header| {
-                        header.child(Label::new("Ping").text_xs().text_color(theme.primary))
-                    })
                     .when(message.pinned, |row| {
                         row.child(
                             Label::new("Pinned")
@@ -1285,13 +1277,15 @@ impl Spk {
             .items_start()
             .gap_2()
             .flex_shrink_0()
-            .when(
-                pinged
-                    || chat
-                        .jump
-                        .as_ref()
-                        .is_some_and(|jump| jump.message_id == message.id),
-                |row| row.bg(theme.primary.opacity(0.1)),
+            .when_some(
+                message_row_background(
+                    message,
+                    chat.direct_message_peer.is_some(),
+                    sidebar.profile.id.as_deref(),
+                    chat.jump.as_ref().map(|jump| jump.message_id.as_str()),
+                    theme,
+                ),
+                |row, background| row.bg(background),
             )
             .when_some(
                 exact_time.clone().filter(|_| keyboard_focused),
