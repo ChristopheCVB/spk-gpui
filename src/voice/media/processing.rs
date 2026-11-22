@@ -446,8 +446,11 @@ where
                 }
             }
         },
-        move |_| {
-            if let Some(fail) = fail.take() {
+        move |error| {
+            // WASAPI can report a discontinuity while capture continues.
+            if error.kind() != cpal::ErrorKind::Xrun
+                && let Some(fail) = fail.take()
+            {
                 let _ = fail.send(());
             }
         },
