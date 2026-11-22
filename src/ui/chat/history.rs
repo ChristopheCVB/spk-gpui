@@ -62,17 +62,21 @@ pub(super) fn history_message_index(chat: &ChatView, id: &str) -> Option<usize> 
     )
 }
 
-fn message_row_index<'a>(
+pub(super) fn message_row_index<'a>(
     mut rows: impl Iterator<Item = HistoryRow<'a>>,
     id: &str,
 ) -> Option<usize> {
     rows.position(|row| row.message().is_some_and(|message| message.id == id))
 }
 
-pub(super) fn history_message_at(chat: &ChatView, row_index: usize) -> Option<&ChatMessage> {
+pub(super) fn history_message_at(
+    chat: &ChatView,
+    row_index: usize,
+) -> Option<(usize, &ChatMessage)> {
     history_rows(&chat.messages, chat.first_unread_id.as_deref(), &Local)
+        .enumerate()
         .skip(row_index)
-        .find_map(|row| row.message())
+        .find_map(|(index, row)| Some((index, row.message()?)))
 }
 
 pub(super) fn date_label(date: NaiveDate, today: NaiveDate) -> String {
