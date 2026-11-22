@@ -109,7 +109,7 @@ jobs:
         run: ditto -c -k --sequesterRsrc --keepParent target/debug/SPK.app "target/debug/${{ matrix.artifact }}"
       - name: Package Linux executable
         if: env.UPLOAD_BINARIES == 'true' && runner.os == 'Linux'
-        run: tar -czf "target/debug/${{ matrix.artifact }}" -C target/debug spk-gpui
+        run: tar -czf "target/debug/${{ matrix.artifact }}" -C target/debug spk-gpui -C ../../build zvidlib-license.txt
       - name: Upload build
         if: env.UPLOAD_BINARIES == 'true'
         uses: actions/upload-artifact@v7
