@@ -8,6 +8,10 @@ on:
         description: Tag for the release being built
         type: string
         required: true
+    outputs:
+      asset-count:
+        description: Number of packages produced by the build matrix
+        value: ${{ jobs.build.outputs.asset-count }}
   push:
     branches: [main]
 
@@ -27,6 +31,8 @@ jobs:
           - os: ubuntu-24.04
             artifact: spk-gpui-linux-x64.tar.gz
     runs-on: ${{ matrix.os }}
+    outputs:
+      asset-count: ${{ strategy.job-total }}
     env:
       SPK_URL: ${{ github.event_name == 'push' && vars.LIVEKIT_URL != '' && vars.SPK_URL || 'https://spk.example' }}
       LIVEKIT_URL: ${{ github.event_name == 'push' && vars.SPK_URL != '' && vars.LIVEKIT_URL || 'wss://voice.example' }}

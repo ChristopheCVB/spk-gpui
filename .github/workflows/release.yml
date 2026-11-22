@@ -4,14 +4,15 @@ on:
   push:
     branches: [main]
 
+concurrency:
+  group: release
+
 permissions:
   contents: read
 
 jobs:
   release-please:
     runs-on: ubuntu-24.04
-    concurrency:
-      group: release-please
     permissions:
       contents: write
       issues: write
@@ -30,25 +31,17 @@ jobs:
           RELEASE_OUTCOME: ${{ steps.release.outcome }}
         shell: bash
         run: |
-          if [[ -z "$RELEASE_TAG" && ( "$RELEASE_OUTCOME" == failure || "$GITHUB_RUN_ATTEMPT" -gt 1 ) ]]; then
-            # A draft can exist even if release-please fails before returning its tag.
-            RELEASE_TAG=$(gh api graphql --paginate \
-              -f owner="${GITHUB_REPOSITORY%/*}" -f repo="${GITHUB_REPOSITORY#*/}" \
-              -f query='query($owner: String!, $repo: String!, $endCursor: String) {
-                repository(owner: $owner, name: $repo) {
-                  releases(first: 100, after: $endCursor) {
-                    nodes { isDraft tagName tagCommit { oid } }
-                    pageInfo { hasNextPage endCursor }
-                  }
-                }
-              }' | jq -r --arg sha "$GITHUB_SHA" '
-                .data.repository.releases.nodes[]
-                | select(.isDraft and .tagCommit.oid == $sha)
-                | .tagName
+          if [[ -z "$RELEASE_TAG" ]]; then
+            # Release Please can tag a merge handled by a different push.
+            RELEASE_TAG=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" |
+              jq -rs '
+                add // [] | map(select(.draft and .author.login == "github-actions[bot]"
+                  and (.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))))
+                | min_by(.id).tag_name // empty
               ')
           fi
           if [[ -z "$RELEASE_TAG" && "$RELEASE_OUTCOME" != success ]]; then
-            echo "::error::release-please failed and no draft was found for this commit."
+            echo "::error::Release Please failed and no automated draft was found."
             exit 1
           fi
           if [[ -n "$RELEASE_TAG" ]]; then
@@ -71,20 +64,25 @@ jobs:
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: spk-gpui*
           path: dist
           merge-multiple: true
           skip-decompress: true
-      - name: Publish the draft with all three assets
+      - name: Publish the draft with all platform assets
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.release-please.outputs.tag }}
+          ASSET_COUNT: ${{ needs.build.outputs.asset-count }}
         shell: bash
         run: |
-          assets=(dist/spk-gpui-macos-arm64.zip dist/spk-gpui.exe dist/spk-gpui-linux-x64.tar.gz)
+          shopt -s nullglob
+          assets=(dist/*)
+          if [[ "$ASSET_COUNT" -le 0 || "${#assets[@]}" -ne "$ASSET_COUNT" ]]; then
+            echo "::error::Expected $ASSET_COUNT release packages, found ${#assets[@]}."
+            exit 1
+          fi
           for asset in "${assets[@]}"; do
-            test -s "$asset"
+            test -f "$asset" && test -s "$asset" || exit 1
           done
           draft_id=$(gh release view "$TAG" --json databaseId,isDraft --jq 'select(.isDraft) | .databaseId')
           if [[ -n "$draft_id" ]]; then
