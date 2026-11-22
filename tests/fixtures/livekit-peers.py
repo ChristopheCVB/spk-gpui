@@ -88,7 +88,42 @@ def token(key, secret, room, identity):
     return (unsigned + b"." + encode(hmac.digest(secret.encode(), unsigned, "sha256"))).decode()
 
 
-def main(command):
+def run_peers(command, signaling, key, secret, room):
+    environment = {
+        **os.environ,
+        "SPK_TEST_LIVEKIT": f"ws://127.0.0.1:{signaling}",
+        "SPK_TEST_PUBLISHER": token(key, secret, room, "alice"),
+        "SPK_TEST_RECEIVER": token(key, secret, room, "bob"),
+    }
+    subprocess.run(command, env=environment, check=True, timeout=300)
+
+
+def compose_server(command):
+    docker = shutil.which("docker")
+    if not docker:
+        raise RuntimeError("Install Docker Compose before running the Compose peer fixture")
+    key, secret, room = (secrets.token_hex(16) for _ in range(3))
+    compose = [
+        docker, "compose", "-f", Path(__file__).with_name("livekit-compose.yaml").resolve(),
+        "--project-name", f"spk-livekit-{room}",
+    ]
+    environment = {**os.environ, "SPK_TEST_LIVEKIT_KEYS": f"{key}: '{secret}'"}
+    try:
+        subprocess.run(
+            [*compose, "up", "--wait", "--wait-timeout", "30"],
+            env=environment, check=True, timeout=180,
+        )
+        run_peers(command, 17880, key, secret, room)
+    except subprocess.SubprocessError:
+        subprocess.run([*compose, "logs", "--no-color"], env=environment, timeout=15)
+        raise
+    finally:
+        subprocess.run(
+            [*compose, "down", "--timeout", "3"], env=environment, check=True, timeout=30,
+        )
+
+
+def native_server(command):
     with tempfile.TemporaryDirectory(prefix="spk-livekit-") as tmp:
         workspace = Path(tmp)
         executable = server_binary(workspace)
@@ -114,13 +149,7 @@ def main(command):
                         time.sleep(0.1)
                 else:
                     raise RuntimeError("LiveKit fixture did not start")
-                environment = {
-                    **os.environ,
-                    "SPK_TEST_LIVEKIT": f"ws://127.0.0.1:{signaling}",
-                    "SPK_TEST_PUBLISHER": token(key, secret, room, "alice"),
-                    "SPK_TEST_RECEIVER": token(key, secret, room, "bob"),
-                }
-                subprocess.run(command, env=environment, check=True, timeout=300)
+                run_peers(command, signaling, key, secret, room)
             except (RuntimeError, subprocess.SubprocessError):
                 if log.exists():
                     print(log.read_text(errors="replace"), file=sys.stderr)
@@ -132,6 +161,13 @@ def main(command):
                 except subprocess.TimeoutExpired:
                     server.kill()
                     server.wait()
+
+
+def main(command):
+    if os.environ.get("SPK_TEST_LIVEKIT_COMPOSE") == "1":
+        compose_server(command)
+    else:
+        native_server(command)
 
 
 if __name__ == "__main__":

@@ -83,3 +83,22 @@ On Windows, **System default** uses the default communications device for input 
 `SPK_URL` is the SPK HTTPS origin, optionally with a port. The build derives the SPK WebSocket URL from that origin at `/_ws`. `LIVEKIT_URL` is the LiveKit WSS endpoint returned by SPK's voice token API. Debug builds also accept `http://` and `ws://` for `localhost` or a loopback IP. Release builds require HTTPS and WSS. Changing an endpoint requires rebuilding. Keep credentials out of both URLs.
 
 Run `mise exec -- cargo fmt --all --check` and `mise exec -- cargo test --locked` with the endpoints configured. The tests use a local SPK protocol fixture and run without test accounts or a desktop credential store.
+
+### Run the LiveKit media tests locally
+
+The regular Cargo suite runs without a LiveKit server. A separate suite exercises audio, camera, and screen-share media between two peers connected to a real LiveKit server. With Docker running, set `SPK_TEST_LIVEKIT_COMPOSE=1` to start a disposable server. The fixture needs loopback ports 17880 and 17881 (TCP) and 17882 (UDP), generates temporary room tokens, and removes the container and network when the tests finish. Keep the build endpoints configured as above.
+
+```sh
+SPK_TEST_LIVEKIT_COMPOSE=1 python3 tests/fixtures/livekit-peers.py \
+  mise exec -- cargo test --locked --bin spk-gpui livekit_ -- --ignored --test-threads=1
+```
+
+In Windows PowerShell with Docker Desktop running Linux containers:
+
+```powershell
+$env:SPK_TEST_LIVEKIT_COMPOSE = '1'
+python tests/fixtures/livekit-peers.py mise exec -- cargo test --locked --bin spk-gpui livekit_ -- --ignored --test-threads=1
+Remove-Item Env:SPK_TEST_LIVEKIT_COMPOSE
+```
+
+Compose avoids launching `livekit-server.exe`. Run the shell command in WSL if you also want to avoid launching the Windows test executable. Use a native Windows session for Windows screen-capture checks. CI runs the controlled-peer suite using its native LiveKit launchers.
