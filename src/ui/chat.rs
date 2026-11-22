@@ -2,9 +2,11 @@ mod actions;
 mod attachments;
 mod gifs;
 mod history;
+mod reaction_picker;
 
 pub(super) use actions::{MessageActionForm, PinPanel};
 pub(super) use attachments::AttachmentUi;
+pub(super) use reaction_picker::ReactionPicker;
 
 use std::{
     cell::RefCell,
@@ -104,35 +106,34 @@ fn chat_history_viewport(
     position: &Rc<Cell<Option<HistoryPosition>>>,
     latest_ready: bool,
 ) -> Div {
+    if latest_ready && position.get() == Some(HistoryPosition::Opening) {
+        // Apply the new bottom before GPUI positions the message rows.
+        position.set(None);
+        scroll.scroll_to_bottom();
+    }
     let history = div().when(
-        position
-            .get()
-            .is_some_and(|position| position != HistoryPosition::Opening || latest_ready),
+        matches!(
+            position.get(),
+            Some(HistoryPosition::Jump(_) | HistoryPosition::Anchor(_, _))
+        ),
         |history| {
             let position = position.clone();
             let scroll = scroll.clone();
             // The viewport and the target row have their current bounds after layout.
             history.on_children_prepainted(move |_, window, _| {
-                let Some(position) = position.take() else {
+                let (index, offset) = match position.take() {
+                    Some(HistoryPosition::Jump(index)) => (index, px(0.)),
+                    Some(HistoryPosition::Anchor(index, offset)) => (index, offset),
+                    _ => return,
+                };
+                let Some(row) = scroll.bounds_for_item(index) else {
                     return;
                 };
-                let bottom = -scroll.max_offset().y;
-                let row = match position {
-                    HistoryPosition::Opening => None,
-                    HistoryPosition::Jump(index) => Some((index, px(0.))),
-                    HistoryPosition::Anchor(index, offset) => Some((index, offset)),
-                };
-                let offset = if let Some((index, offset)) = row {
-                    let Some(row) = scroll.bounds_for_item(index) else {
-                        return;
-                    };
-                    (scroll.bounds().top() - row.top() + offset).clamp(bottom, px(0.))
-                } else {
-                    bottom
-                };
+                let offset = (scroll.bounds().top() - row.top() + offset)
+                    .clamp(-scroll.max_offset().y, px(0.));
                 if scroll.offset().y != offset {
                     scroll.set_offset(point(scroll.offset().x, offset));
-                    window.request_animation_frame();
+                    window.on_next_frame(|window, _| window.refresh());
                 }
             })
         },
@@ -272,6 +273,9 @@ impl Spk {
         {
             return false;
         }
+        if self.close_reaction_picker(window, cx) {
+            return true;
+        }
         if self.chat_pins_focus.contains_focused(window, cx) && self.close_pins(window, cx) {
             return true;
         }
@@ -406,6 +410,18 @@ impl Spk {
         }
         self.update_gif_input(previous, next, window, cx);
         Self::update_message_actions(&mut self.message_action_form, previous, next);
+        if self.reaction_picker.as_ref().is_some_and(|picker| {
+            !next.is_some_and(|chat| {
+                chat.channel_id == picker.channel_id
+                    && chat.can_send()
+                    && chat
+                        .messages
+                        .iter()
+                        .any(|message| message.id == picker.message_id)
+            })
+        }) {
+            self.reaction_picker = None;
+        }
         if let Some(next) = next.filter(|chat| chat.latest_ready())
             && previous.is_none_or(|previous| {
                 previous.channel_id != next.channel_id
@@ -1048,11 +1064,18 @@ impl Spk {
                     search::activate_chat_link(&link_app, url, cx);
                 }
             });
+        let row_focus = self
+            .chat_row_focus
+            .borrow_mut()
+            .entry(message.id.clone())
+            .or_insert_with(|| cx.focus_handle().tab_stop(true))
+            .clone();
         let composer_busy = chat.outgoing.is_some() || !chat.can_send();
         let message_actions = Rc::new(actions::MessageActions {
             app: app.clone(),
             channel: channel.clone(),
             message: message_id.clone(),
+            row_focus: row_focus.clone(),
             can_edit: sidebar.profile.id.as_deref() == Some(&message.user_id),
             can_delete: sidebar.can_remove_message_content(message),
             pin_to: chat.can_pin(sidebar.is_admin()).then_some(!message.pinned),
@@ -1066,12 +1089,6 @@ impl Spk {
         });
         let reply_channel = channel.clone();
         let reply_id = message_id.clone();
-        let row_focus = self
-            .chat_row_focus
-            .borrow_mut()
-            .entry(message.id.clone())
-            .or_insert_with(|| cx.focus_handle().tab_stop(true))
-            .clone();
         let keyboard_focused = row_focus.is_focused(window) && window.last_input_was_keyboard();
         let row_focused = row_focus.contains_focused(window, cx);
         let author = sidebar.message_author(&message.user_id);
@@ -1084,8 +1101,14 @@ impl Spk {
             .is_some_and(|(channel, id, focus)| {
                 channel == &chat.channel_id && id == &message.id && focus.is_focused(window)
             });
-        let toolbar =
-            message_actions.toolbar(sidebar, chat, message, row_focused || menu_focused, cx);
+        let toolbar = message_actions.toolbar(
+            self,
+            sidebar,
+            chat,
+            message,
+            row_focused || menu_focused,
+            cx,
+        );
         let content = div()
             .flex_1()
             .min_w_0()
@@ -1447,7 +1470,7 @@ mod tests {
     fn delayed_history_opens_at_the_latest_message_and_shares_scrollbar_position() {
         use std::{cell::Cell, rc::Rc, time::Duration};
 
-        use gpui_kit::*;
+        use gpui_kit::{prelude::FluentBuilder, *};
 
         use super::{HistoryPosition, chat_history_viewport};
 
@@ -1456,6 +1479,7 @@ mod tests {
             height: Pixels,
             scroll: ScrollHandle,
             position: Rc<Cell<Option<HistoryPosition>>>,
+            latest_visible_on_first_paint: Rc<Cell<Option<bool>>>,
         }
 
         impl Render for ChatLayout {
@@ -1465,7 +1489,29 @@ mod tests {
                     .flex()
                     .flex_col()
                     .child(chat_history_viewport(
-                        (0..self.rows).map(|_| div().h(px(24.)).flex_shrink_0()),
+                        (0..self.rows).map(|index| {
+                            div().h(px(24.)).flex_shrink_0().when(
+                                self.rows > 1 && index + 1 == self.rows,
+                                |row| {
+                                    let visible = self.latest_visible_on_first_paint.clone();
+                                    row.child(
+                                        canvas(
+                                            |_, _, _| (),
+                                            move |bounds, (), window, _| {
+                                                if visible.get().is_none() {
+                                                    let viewport = window.content_mask().bounds;
+                                                    visible.set(Some(
+                                                        bounds.top() >= viewport.top()
+                                                            && bounds.bottom() <= viewport.bottom(),
+                                                    ));
+                                                }
+                                            },
+                                        )
+                                        .size_full(),
+                                    )
+                                },
+                            )
+                        }),
                         &self.scroll,
                         &self.position,
                         self.rows > 1,
@@ -1478,6 +1524,7 @@ mod tests {
         application().run(move |cx| {
             gpui_kit::init(cx);
             let scroll = ScrollHandle::new();
+            let latest_visible_on_first_paint = Rc::new(Cell::new(None));
             let handle = cx
                 .open_window(WindowOptions::default(), |_, cx| {
                     cx.new(|_| ChatLayout {
@@ -1485,6 +1532,7 @@ mod tests {
                         height: px(120.),
                         scroll: scroll.clone(),
                         position: Rc::new(Cell::new(Some(HistoryPosition::Opening))),
+                        latest_visible_on_first_paint: latest_visible_on_first_paint.clone(),
                     })
                 })
                 .unwrap();
@@ -1503,7 +1551,11 @@ mod tests {
                     .await;
                 let aligned = handle
                     .update(cx, |_, window, cx| {
-                        let aligned = (scroll.bottom_item(), scroll.logical_scroll_bottom().1);
+                        let aligned = (
+                            scroll.bottom_item(),
+                            scroll.logical_scroll_bottom().1,
+                            latest_visible_on_first_paint.get(),
+                        );
                         window.dispatch_event(
                             ScrollEvent {
                                 position: scroll.bounds().center(),
@@ -1589,7 +1641,7 @@ mod tests {
         });
         let (aligned, after_wheel, after_append, after_drag, max_after_resize) =
             outcome.take().expect("history must finish layout");
-        assert_eq!(aligned, (19, px(0.)));
+        assert_eq!(aligned, (19, px(0.), Some(true)));
         assert_eq!(after_wheel, px(-340.));
         assert_eq!(after_append, after_wheel);
         assert_eq!(after_drag, px(0.));

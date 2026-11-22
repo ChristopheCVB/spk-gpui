@@ -23,7 +23,6 @@ pub(in crate::ui) enum PinPanel {
 pub(super) enum ActionForm {
     Edit,
     Delete,
-    React,
 }
 
 pub(in crate::ui) struct MessageActionForm {
@@ -117,20 +116,6 @@ impl Spk {
         let action = match form.kind {
             ActionForm::Edit => MessageAction::Edit(text.to_string()),
             ActionForm::Delete => MessageAction::Delete,
-            ActionForm::React => {
-                let emoji = text.trim();
-                let Some(message) = view
-                    .messages
-                    .iter()
-                    .find(|message| message.id == form.message_id)
-                else {
-                    return;
-                };
-                if emoji.is_empty() {
-                    return;
-                }
-                reaction_action(message, emoji, sidebar.profile.id.as_deref())
-            }
         };
         form.submitted = true;
         let command = Command::MutateChatMessage {
@@ -154,7 +139,6 @@ impl Spk {
         let (title, action) = match form.kind {
             ActionForm::Edit => ("Edit message", "Save"),
             ActionForm::Delete => ("Delete this message?", "Delete"),
-            ActionForm::React => ("Enter an emoji", "Toggle reaction"),
         };
         let button = Button::new("submit-message-action")
             .small()
@@ -638,6 +622,7 @@ pub(super) struct MessageActions {
     pub app: WeakEntity<Spk>,
     pub channel: String,
     pub message: String,
+    pub row_focus: FocusHandle,
     pub can_edit: bool,
     pub can_delete: bool,
     pub pin_to: Option<bool>,
@@ -653,6 +638,7 @@ pub(super) struct MessageActions {
 impl MessageActions {
     pub fn toolbar(
         self: &Rc<Self>,
+        app: &Spk,
         sidebar: &Sidebar,
         chat: &ChatView,
         message: &ChatMessage,
@@ -661,6 +647,10 @@ impl MessageActions {
     ) -> impl IntoElement {
         let theme = cx.theme();
         let menu = self.clone();
+        let picker_open = app
+            .reaction_picker
+            .as_ref()
+            .is_some_and(|picker| picker.belongs_to(&self.channel, &self.message));
         div()
             .id("message-toolbar")
             .role(Role::Toolbar)
@@ -677,7 +667,7 @@ impl MessageActions {
             .border_color(theme.border)
             .rounded_md()
             .shadow_sm()
-            .when(!visible, |toolbar| {
+            .when(!visible && !picker_open, |toolbar| {
                 toolbar
                     .invisible()
                     .group_hover("message-row", |style| style.visible())
@@ -695,14 +685,22 @@ impl MessageActions {
                     .tooltip(label)
             }))
             .child(
-                tool_button(
-                    "add-reaction",
-                    IconName::FaceSlightlySmiling,
-                    "Add reaction",
-                )
-                .size(px(24.))
-                .disabled(self.disabled)
-                .on_click(self.form_action(ActionForm::React)),
+                div()
+                    .relative()
+                    .child(
+                        tool_button(
+                            "add-reaction",
+                            IconName::FaceSlightlySmilingPlus,
+                            "Add reaction",
+                        )
+                        .size(px(24.))
+                        .open(picker_open)
+                        .disabled(self.disabled)
+                        .on_click(self.reaction_action()),
+                    )
+                    .when(picker_open, |anchor| {
+                        anchor.children(app.reaction_picker_anchor(cx))
+                    }),
             )
             .child(
                 tool_button("message-reply", IconName::Reply, "Reply")
@@ -859,8 +857,10 @@ impl MessageActions {
 
     fn mutation_items(&self, menu: PopupMenu, danger: Hsla) -> PopupMenu {
         let menu = menu.item(
-            self.form_item("Add reaction…", ActionForm::React)
-                .icon(IconName::FaceSlightlySmilingPlus),
+            PopupMenuItem::new("Add reaction…")
+                .icon(IconName::FaceSlightlySmilingPlus)
+                .disabled(self.disabled)
+                .on_click(self.reaction_action()),
         );
         let menu = if self.can_edit {
             menu.item(
@@ -908,6 +908,25 @@ impl MessageActions {
         PopupMenuItem::new(label)
             .disabled(self.disabled)
             .on_click(self.form_action(kind))
+    }
+
+    fn reaction_action(&self) -> impl Fn(&ClickEvent, &mut Window, &mut App) + use<> {
+        let (app, channel, message, focus) = (
+            self.app.clone(),
+            self.channel.clone(),
+            self.message.clone(),
+            self.row_focus.clone(),
+        );
+        move |_, window, cx| {
+            let (app, channel, message, focus) =
+                (app.clone(), channel.clone(), message.clone(), focus.clone());
+            // An invoking menu needs to release its focus before handing it to the picker.
+            window.defer(cx, move |window, cx| {
+                let _ = app.update(cx, |this, cx| {
+                    this.open_reaction_picker(&channel, &message, focus, window, cx);
+                });
+            });
+        }
     }
 
     fn form_action(&self, kind: ActionForm) -> impl Fn(&ClickEvent, &mut Window, &mut App) + use<> {
