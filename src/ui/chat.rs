@@ -22,7 +22,7 @@ use super::*;
 use crate::{
     api::{ChatMessage, MessageTarget, UnreadState},
     chat_markdown::{image_preview_links, message_markdown, plain_text, safe_link},
-    session::{ChatView, Delivery},
+    session::{ChatJump, ChatView, Delivery},
 };
 
 fn chat(view: &View) -> Option<&ChatView> {
@@ -30,6 +30,27 @@ fn chat(view: &View) -> Option<&ChatView> {
         View::SignedIn(sidebar) => sidebar.chat.as_ref(),
         _ => None,
     }
+}
+
+fn chat_jump_index(jump: Option<&ChatJump>, messages: &[ChatMessage]) -> Option<usize> {
+    let jump = jump?;
+    messages
+        .iter()
+        .position(|message| message.id == jump.message_id)
+}
+
+fn scroll_to_chat_jump(
+    history: Div,
+    jump_row: Rc<Cell<Option<usize>>>,
+    scroll: ScrollHandle,
+) -> Div {
+    // GPUI can align a row only after the history viewport has been measured.
+    history.on_children_prepainted(move |_, window, _| {
+        if let Some(index) = jump_row.take() {
+            scroll.scroll_to_top_of_item(index);
+            window.request_animation_frame();
+        }
+    })
 }
 
 fn chat_images(chat: &ChatView) -> impl Iterator<Item = &Arc<RenderImage>> {
@@ -228,9 +249,9 @@ impl Spk {
                 .commands
                 .try_send(Command::ReadVisibleChat(next.channel_id.clone()));
         }
-        if previous.map(|chat| (&chat.channel_id, chat.unavailable()))
-            != next.map(|chat| (&chat.channel_id, chat.unavailable()))
-        {
+        let reset = previous.map(|chat| (&chat.channel_id, chat.unavailable()))
+            != next.map(|chat| (&chat.channel_id, chat.unavailable()));
+        if reset {
             self.chat_input.update(cx, |input, cx| {
                 input.set_value(
                     next.map_or("", |chat| chat.draft.body.as_str()).to_owned(),
@@ -240,8 +261,8 @@ impl Spk {
             });
             self.chat_spoilers.clear();
             self.chat_scroll_anchor = None;
+            self.chat_jump_row.set(None);
             self.chat_scroll = ScrollHandle::new();
-            self.chat_scroll.scroll_to_bottom();
         } else if let (Some(previous), Some(next)) = (previous, next) {
             if previous.has_more_after
                 && next.direct_message_peer.is_some()
@@ -268,14 +289,22 @@ impl Spk {
                     input.set_value(next.draft.body.clone(), window, cx)
                 });
             }
-            if previous.jump != next.jump
-                && let Some((id, _)) = &next.jump
-                && let Some(index) = next.messages.iter().position(|message| message.id == *id)
-            {
+        }
+        let previous_jump = previous
+            .filter(|_| !reset)
+            .and_then(|chat| chat.jump.as_ref());
+        let next_jump = next.and_then(|chat| chat.jump.as_ref());
+        if previous_jump != next_jump || self.chat_jump_row.get().is_some() {
+            let row = next.and_then(|chat| chat_jump_index(next_jump, &chat.messages));
+            self.chat_jump_row.set(row);
+            if row.is_some() {
                 self.chat_scroll_anchor = None;
-                self.chat_scroll.scroll_to_top_of_item(index);
                 return;
             }
+        }
+        if reset {
+            self.chat_scroll.scroll_to_bottom();
+        } else if let (Some(previous), Some(next)) = (previous, next) {
             if next.history_ready()
                 && let Some(anchor) = self.chat_scroll_anchor.take()
                 && (next.has_more_after || next.paging_forward)
@@ -465,6 +494,13 @@ impl Spk {
             )
             .child(
                 div()
+                    .when(self.chat_jump_row.get().is_some(), |history| {
+                        scroll_to_chat_jump(
+                            history,
+                            self.chat_jump_row.clone(),
+                            self.chat_scroll.clone(),
+                        )
+                    })
                     .id("chat-history")
                     .flex()
                     .flex_col()
@@ -807,7 +843,11 @@ impl Spk {
             .py(if self.compact() { px(4.0) } else { px(8.0) })
             .flex_shrink_0()
             .when(
-                pinged || chat.jump.as_ref().is_some_and(|(id, _)| id == &message.id),
+                pinged
+                    || chat
+                        .jump
+                        .as_ref()
+                        .is_some_and(|jump| jump.message_id == message.id),
                 |row| row.bg(theme.primary.opacity(0.1)),
             )
             .when(chat.first_unread_id.as_ref() == Some(&message.id), |row| {
@@ -1158,5 +1198,90 @@ impl Spk {
             input.focus(window, cx);
         });
         self.update_chat_draft(cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ChatJump, ChatMessage, chat_jump_index};
+
+    #[test]
+    fn resolves_the_jump_when_an_alert_first_opens_a_chat() {
+        let messages: Vec<ChatMessage> = serde_json::from_value(serde_json::json!([
+            {"id":"before","channelId":"general","userId":"bob","body":"Before","createdAt":1},
+            {"id":"target","channelId":"general","userId":"bob","body":"Target","createdAt":2},
+            {"id":"after","channelId":"general","userId":"bob","body":"After","createdAt":3}
+        ]))
+        .unwrap();
+        let jump = ChatJump {
+            message_id: "target".into(),
+            generation: 0,
+        };
+        assert_eq!(chat_jump_index(Some(&jump), &messages), Some(1));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires a graphical session or Xvfb"]
+    fn first_chat_jump_aligns_the_row_below_the_header() {
+        use std::{cell::Cell, rc::Rc, time::Duration};
+
+        use gpui_kit::*;
+
+        struct ChatLayout {
+            scroll: ScrollHandle,
+            jump_row: Rc<Cell<Option<usize>>>,
+        }
+
+        impl Render for ChatLayout {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let history =
+                    super::scroll_to_chat_jump(div(), self.jump_row.clone(), self.scroll.clone())
+                        .id("chat-history")
+                        .flex()
+                        .flex_col()
+                        .h(px(120.))
+                        .overflow_y_scroll()
+                        .track_scroll(&self.scroll)
+                        .children((0..20).map(|_| div().h(px(24.)).flex_shrink_0()));
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(div().h(px(48.)))
+                    .child(history)
+            }
+        }
+
+        let outcome = Rc::new(Cell::new(None));
+        let result = outcome.clone();
+        application().run(move |cx| {
+            let scroll = ScrollHandle::new();
+            let handle = cx
+                .open_window(WindowOptions::default(), |_, cx| {
+                    cx.new(|_| ChatLayout {
+                        scroll: scroll.clone(),
+                        jump_row: Rc::new(Cell::new(Some(8))),
+                    })
+                })
+                .unwrap();
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                handle
+                    .update(cx, |_, _, cx| {
+                        let viewport_top = scroll.bounds().top();
+                        let row_top = scroll.bounds_for_item(8).unwrap().top() + scroll.offset().y;
+                        result.set(Some((viewport_top, row_top)));
+                        cx.quit();
+                    })
+                    .unwrap();
+            })
+            .detach();
+        });
+        let (viewport_top, row_top) = outcome.take().expect("the chat must finish layout");
+        assert!(
+            viewport_top > px(0.),
+            "fixture needs a header above the chat"
+        );
+        assert_eq!(row_top, viewport_top);
     }
 }

@@ -32,6 +32,12 @@ enum History {
     Unavailable,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub struct ChatJump {
+    pub message_id: String,
+    pub generation: u64,
+}
+
 #[derive(Clone)]
 pub struct ChatView {
     pub channel_id: String,
@@ -42,7 +48,7 @@ pub struct ChatView {
     pub has_more_after: bool,
     pub draft: Draft,
     pub typing: Vec<String>,
-    pub jump: Option<(String, u64)>,
+    pub jump: Option<ChatJump>,
     pub jump_failed: bool,
     hold_read: bool,
     pending_unread: Option<u64>,
@@ -83,12 +89,12 @@ impl ChatView {
             && (self.direct_message_peer.is_none() || self.history == History::Ready)
     }
 
-    fn mark_jump(&mut self, id: String) {
-        let generation = self
-            .jump
-            .as_ref()
-            .map_or(0, |(_, generation)| generation + 1);
-        self.jump = Some((id, generation));
+    fn mark_jump(&mut self, message_id: String) {
+        let generation = self.jump.as_ref().map_or(0, |jump| jump.generation + 1);
+        self.jump = Some(ChatJump {
+            message_id,
+            generation,
+        });
         self.jump_failed = false;
     }
 
@@ -208,10 +214,12 @@ impl ChatSession {
         Some(view)
     }
 
-    pub fn open(&mut self, client: &SpkClient, channel: &Channel) {
-        if self.select(channel) {
-            self.load(client, HistoryRequest::Refresh { load_newer: false });
+    pub fn open(&mut self, client: &SpkClient, channel: &Channel) -> bool {
+        if !self.select(channel) {
+            return false;
         }
+        self.load(client, HistoryRequest::Refresh { load_newer: false });
+        true
     }
 
     pub fn open_conversation_target(&mut self, client: &SpkClient, channel: &Channel) {

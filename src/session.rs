@@ -59,7 +59,10 @@ pub use {
     accounts::AccountLinkForm,
     avatars::AvatarPhoto,
     channel_admin::{ChannelAction, ChannelAdmin, ChannelKind},
-    chat::{AttachmentInput, ChatView, Delivery, GifPickerView, Pins, UploadStatus, image_preview},
+    chat::{
+        AttachmentInput, ChatJump, ChatView, Delivery, GifPickerView, Pins, UploadStatus,
+        image_preview,
+    },
     presence::Participant,
     profiles::ProfileEdit,
     radio::RadioPlayback,
@@ -555,6 +558,24 @@ enum ChatNavigation {
     OpeningAlert,
 }
 
+impl ChatNavigation {
+    fn is_opening_alert(navigation: &Option<Self>) -> bool {
+        matches!(navigation, Some(Self::OpeningAlert))
+    }
+
+    fn open_chat(
+        navigation: &mut Option<Self>,
+        chat: &mut ChatSession,
+        client: &SpkClient,
+        channel: &Channel,
+    ) {
+        // Reselecting the pending conversation keeps its access check in place.
+        if chat.open(client, channel) || !Self::is_opening_alert(navigation) {
+            *navigation = None;
+        }
+    }
+}
+
 async fn watch_session(
     client: &SpkClient,
     profile: Profile,
@@ -612,6 +633,15 @@ async fn watch_session(
         admin_soundboard.sync(&mut sidebar);
         voice.start_pending(&mut sidebar, client, &settings.start_call);
         let mut next = sidebar.clone();
+        if ChatNavigation::is_opening_alert(&chat_navigation) {
+            // A retained alert can point to a conversation the account can no longer access.
+            if next.chat.as_ref().is_some_and(ChatView::loading) {
+                next.chat = None;
+                next.chat_notice = Some("Opening message…");
+            } else {
+                chat_navigation = None;
+            }
+        }
         next.alerts = std::mem::take(&mut alerts.ready);
         if views.send(View::SignedIn(Box::new(next))).await.is_err() {
             break SessionEnd::Closed;
@@ -620,11 +650,6 @@ async fn watch_session(
         let chat_timeout = chat.next_timeout();
         let active = *settings.presence.activity.borrow_and_update();
         let alert_activation = &mut settings.alert_activation;
-        if matches!(chat_navigation, Some(ChatNavigation::OpeningAlert))
-            && !sidebar.chat.as_ref().is_some_and(ChatView::loading)
-        {
-            chat_navigation = None;
-        }
         let mut from_alert = false;
         tokio::select! {
             () = presence.report(sidebar.user_status, active) => {}
@@ -652,7 +677,16 @@ async fn watch_session(
                 if let Ok(page) = &result {
                     alerts.remember_history(&page.messages);
                 }
+                // SPK checks conversation access before reporting that the target message is missing.
+                let unverified_alert = ChatNavigation::is_opening_alert(&chat_navigation)
+                    && result.as_ref().is_err_and(|error| {
+                        !matches!(error, Failure::Http(reqwest::StatusCode::NOT_FOUND))
+                    });
                 chat.complete(client, sidebar.profile.id.as_deref(), result);
+                if unverified_alert {
+                    chat.close();
+                    sidebar.chat_notice = Some("Message unavailable.");
+                }
             }
             Some(result) = chat.action_tasks.join_next() => {
                 let result = result.unwrap_or(Err(Failure::Connection));
@@ -695,7 +729,7 @@ async fn watch_session(
                 match result.unwrap_or(Err(Failure::Connection)) {
                     Ok(channel) => {
                         sidebar.chat_notice = None;
-                        chat.open(client, &channel);
+                        ChatNavigation::open_chat(&mut chat_navigation, &mut chat, client, &channel);
                         let channels = sidebar.channels.get_or_insert_default();
                         if !channels.iter().any(|listed| listed.id == channel.id) {
                             channels.push(channel);
@@ -751,30 +785,30 @@ async fn watch_session(
                     }
                 }
                 Ok(Command::OpenTextChannel(id)) => {
-                    chat_navigation = None;
                     if let Some(channel) = sidebar.channels.iter().flatten().find(|channel| channel.id == id && channel.kind == "text") {
                         direct_message_opens = JoinSet::new();
                         sidebar.chat_notice = None;
-                        chat.open(client, channel);
+                        ChatNavigation::open_chat(&mut chat_navigation, &mut chat, client, channel);
                     }
                 }
                 Ok(Command::OpenDirectMessage(id)) => {
-                    chat_navigation = None;
                     direct_message_opens = JoinSet::new();
                     if let Some(channel) = sidebar.channels.iter().flatten().find(|channel| channel.id == id && channel.kind == "dm" && channel.is_conversation()) {
                         sidebar.chat_notice = None;
-                        chat.open(client, channel);
+                        ChatNavigation::open_chat(&mut chat_navigation, &mut chat, client, channel);
                     } else {
                         sidebar.chat_notice = Some("Direct message unavailable.");
                     }
                 }
                 Ok(Command::StartDirectMessage(user_id)) => {
-                    chat_navigation = None;
+                    if !ChatNavigation::is_opening_alert(&chat_navigation) {
+                        chat_navigation = None;
+                    }
                     direct_message_opens = JoinSet::new();
                     if user_id.is_empty() || sidebar.profile.id.as_deref() == Some(&user_id) {
                         sidebar.chat_notice = Some("Direct message unavailable.");
                     } else if let Some(channel) = sidebar.direct_message(&user_id) {
-                        chat.open(client, channel);
+                        ChatNavigation::open_chat(&mut chat_navigation, &mut chat, client, channel);
                         sidebar.chat_notice = None;
                     } else {
                         sidebar.chat_notice = Some("Opening direct message…");
@@ -808,6 +842,8 @@ async fn watch_session(
                         unread.mark(&mut sidebar, channel_id, Mark::Unread(message_id, request));
                     }
                 },
+                Ok(Command::JumpToChatMessage { .. } | Command::LoadLatestMessages)
+                    if ChatNavigation::is_opening_alert(&chat_navigation) => {}
                 Ok(Command::JumpToChatMessage { channel_id, message_id }) => {
                     chat_navigation = None;
                     sidebar.chat_notice = None;
@@ -851,6 +887,9 @@ async fn watch_session(
                         _ => unreachable!(),
                     };
                     direct_message_opens = JoinSet::new();
+                    if ChatNavigation::is_opening_alert(&chat_navigation) {
+                        chat.close();
+                    }
                     if search::open_chat_target(&mut sidebar, &mut chat, client, &channel, message.as_deref()) {
                         chat_navigation = from_alert.then_some(ChatNavigation::OpeningAlert);
                     } else {

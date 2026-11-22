@@ -13,6 +13,8 @@ mod workspace;
 mod workspace_keys;
 
 use std::{
+    cell::Cell,
+    rc::Rc,
     sync::{Arc, LazyLock},
     time::{Duration, Instant},
 };
@@ -55,6 +57,7 @@ pub(super) struct Spk {
     message_action_form: Option<chat::MessageActionForm>,
     chat_scroll: ScrollHandle,
     chat_scroll_anchor: Option<String>,
+    chat_jump_row: Rc<Cell<Option<usize>>>,
     chat_spoiler_link: String,
     chat_spoilers: std::collections::HashMap<(String, u64), std::collections::HashSet<usize>>,
     commands: async_channel::Sender<Command>,
@@ -332,6 +335,7 @@ impl Spk {
             message_action_form: None,
             chat_scroll: ScrollHandle::new(),
             chat_scroll_anchor: None,
+            chat_jump_row: Rc::default(),
             chat_spoiler_link: format!("spk-spoiler:{}:", uuid::Uuid::new_v4()),
             chat_spoilers: Default::default(),
             commands,

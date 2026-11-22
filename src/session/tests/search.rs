@@ -78,7 +78,7 @@ async fn searches_messages_and_opens_authenticated_exact_targets() {
             "hasMoreAfter": false
         }).to_string()).await;
         wait_for_sidebar(&rx, |view| {
-            view.chat.as_ref().is_some_and(|chat| chat.jump.as_ref().is_some_and(|(id, _)| id == "startup"))
+            view.chat.as_ref().is_some_and(|chat| chat.jump.as_ref().is_some_and(|jump| jump.message_id == "startup"))
         }).await;
         let cases = [
             (
@@ -143,7 +143,7 @@ async fn searches_messages_and_opens_authenticated_exact_targets() {
             "hasMoreAfter":true,
         }).to_string()).await;
         wait_for_sidebar(&rx, |view| {
-            view.chat.as_ref().is_some_and(|chat| chat.jump.as_ref().is_some_and(|(id, _)| id == "m2"))
+            view.chat.as_ref().is_some_and(|chat| chat.jump.as_ref().is_some_and(|jump| jump.message_id == "m2"))
         }).await;
 
         // An activated alert is checked again, even if the target exists in the current view.
@@ -155,35 +155,54 @@ async fn searches_messages_and_opens_authenticated_exact_targets() {
             view.chat.as_ref().is_some_and(|chat| chat.jump_failed && chat.messages.is_empty())
         }).await;
 
-        let private = MessageTarget::new("dm-1", "private").unwrap();
-        tx.send(Command::OpenMessageTarget(private.clone())).await.unwrap();
-        let (line, request) = search.recv().await.unwrap();
-        assert_eq!(line, "GET /api/channels/dm-1/messages?around=private HTTP/1.1");
-        request.respond(&[], &value!({
-            "messages":[
-                {"id":"neighbor","channelId":"dm-1","userId":"bob","body":"private context","createdAt":12},
-                {"id":"private","channelId":"dm-1","userId":"bob","body":"private text","createdAt":13}
-            ],
-            "hasMoreBefore":false,
-            "hasMoreAfter":false,
-        }).to_string()).await;
-        wait_for_sidebar(&rx, |view| {
-            view.chat.as_ref().is_some_and(|chat| chat.messages.len() == 2)
-        }).await;
+        for (channel, status, reselect) in [
+            ("general", "403 Forbidden", Command::OpenTextChannel("general".into())),
+            ("dm-1", "503 Service Unavailable", Command::OpenDirectMessage("dm-1".into())),
+        ] {
+            let target = MessageTarget::new(channel, "target").unwrap();
+            let around = format!("GET /api/channels/{channel}/messages?around=target HTTP/1.1");
+            tx.send(Command::OpenMessageTarget(target.clone())).await.unwrap();
+            let (line, request) = search.recv().await.unwrap();
+            assert_eq!(line, around);
+            request.respond(&[], &value!({
+                "messages":[
+                    {"id":"neighbor","channelId":channel,"userId":"bob","body":"Earlier message","createdAt":12},
+                    {"id":"target","channelId":channel,"userId":"bob","body":"Alert target","createdAt":13}
+                ],
+                "hasMoreBefore":false,
+                "hasMoreAfter":false,
+            }).to_string()).await;
+            wait_for_sidebar(&rx, |view| {
+                view.chat.as_ref().is_some_and(|chat| chat.messages.len() == 2)
+            }).await;
 
-        tx.send(Command::OpenMessageTarget(private)).await.unwrap();
-        let (line, request) = search.recv().await.unwrap();
-        assert_eq!(line, "GET /api/channels/dm-1/messages?around=private HTTP/1.1");
-        wait_for_sidebar(&rx, |view| {
-            view.chat.as_ref().is_some_and(|chat| chat.channel_id == "dm-1" && chat.loading() && chat.messages.is_empty())
-        }).await;
-        request.respond_raw("403 Forbidden", &[], b"").await;
-        wait_for_sidebar(&rx, |view| {
-            view.chat.as_ref().is_some_and(|chat| chat.jump_failed && chat.unavailable())
-        }).await;
+            activate.send_replace(Some(target));
+            let (line, request) = search.recv().await.unwrap();
+            assert_eq!(line, around);
+            let pending = wait_for_sidebar(&rx, |view| view.chat_notice == Some("Opening message…")).await;
+            assert!(pending.chat.is_none(), "authorization must finish before opening an alert's conversation");
+
+            tx.send(reselect).await.unwrap();
+            tx.send(Command::SearchMessages {
+                query: "reselected".into(),
+                scope: SearchScope::Everything,
+            }).await.unwrap();
+            let after_reselect = wait_for_sidebar(&rx, |view| view.chat.is_some() || view.search.loading).await;
+            assert!(after_reselect.chat.is_none(), "reselecting {channel} must not expose it before authorization");
+            let (line, search_request) = search.recv().await.unwrap();
+            assert_eq!(line, "GET /api/search?q=reselected&scope=everything HTTP/1.1");
+            search_request.respond(&[], &result("search-hit", None)).await;
+            wait_for_sidebar(&rx, |view| !view.search.loading).await;
+
+            request.respond_raw(status, &[], b"").await;
+            let finished = wait_for_sidebar(&rx, |view| view.chat_notice != Some("Opening message…")).await;
+            assert!(finished.chat.is_none(), "{status} must keep the alert's conversation closed");
+            assert_eq!(finished.chat_notice, Some("Message unavailable."));
+        }
 
         let unknown = MessageTarget::new("unknown", "private").unwrap();
         tx.send(Command::OpenMessageTarget(unknown)).await.unwrap();
+        wait_for_sidebar(&rx, |view| view.chat_notice == Some("Opening message…")).await;
         wait_for_sidebar(&rx, |view| view.chat_notice == Some("Message unavailable.")).await;
 
         tx.send(Command::OpenConversationTarget("dm-1".into())).await.unwrap();
