@@ -125,6 +125,30 @@ impl Settings {
             .gap_4()
             .child(header)
             .children(
+                view.users
+                    .as_ref()
+                    .filter(|_| page == AdminPage::Users)
+                    .map(|directory| {
+                        card(
+                            "Storage",
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(Label::new(format!(
+                                    "Attachments and Soundboard clips · {}",
+                                    size(directory.total_bytes)
+                                )))
+                                .child(
+                                    Label::new("Avatars and link thumbnails are excluded.")
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground),
+                                ),
+                            cx,
+                        )
+                    }),
+            )
+            .children(
                 view.error
                     .map(|text| Label::new(text).text_color(theme.danger)),
             )
@@ -263,51 +287,29 @@ impl Settings {
 
     fn admin_users(&self, sidebar: &Sidebar, cx: &Context<Self>) -> impl IntoElement {
         let view = &sidebar.admin_accounts;
-        let theme = cx.theme();
         let Some(directory) = &view.users else {
             return div();
         };
-        div()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .child(card(
-                "Storage",
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(Label::new(format!(
-                        "Attachments and Soundboard clips · {}",
-                        size(directory.total_bytes)
-                    )))
-                    .child(
-                        Label::new("Avatars and link thumbnails are excluded.")
-                            .text_xs()
-                            .text_color(theme.muted_foreground),
-                    ),
-                cx,
-            ))
-            .child(card(
-                "Accounts",
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .when(directory.users.is_empty(), |body| {
-                        body.child(Label::new("No users."))
-                    })
-                    .children(directory.users.iter().map(|row| {
-                        let confirm =
-                            !row.user.banned && self.ban_target.as_ref() == Some(&row.user.id);
-                        div()
-                            .child(self.admin_user_row(row, sidebar, cx))
-                            .when(confirm, |content| {
-                                content.child(self.confirm_ban(row, view.busy, cx))
-                            })
-                    })),
-                cx,
-            ))
+        div().child(card(
+            "Accounts",
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .when(directory.users.is_empty(), |body| {
+                    body.child(Label::new("No users."))
+                })
+                .children(directory.users.iter().map(|row| {
+                    let confirm =
+                        !row.user.banned && self.ban_target.as_ref() == Some(&row.user.id);
+                    div()
+                        .child(self.admin_user_row(row, sidebar, cx))
+                        .when(confirm, |content| {
+                            content.child(self.confirm_ban(row, view.busy, cx))
+                        })
+                })),
+            cx,
+        ))
     }
 
     fn admin_user_row(
@@ -324,6 +326,11 @@ impl Settings {
         let admin = user.role == "admin";
         let name = user.name().unwrap_or("No nickname yet");
         let account_name = user.name().unwrap_or(&row.email).to_owned();
+        let role_color = if admin {
+            theme.primary
+        } else {
+            theme.muted_foreground
+        };
         let settings = cx.weak_entity();
         div()
             .id(SharedString::from(format!("admin-user-{id}")))
@@ -354,22 +361,27 @@ impl Settings {
                             .truncate(),
                     ),
             )
-            .child(
-                Label::new(if admin { "Admin" } else { "User" }).text_color(if admin {
-                    theme.primary
-                } else {
-                    theme.muted_foreground
-                }),
-            )
             .when(banned, |row| {
                 row.child(Label::new("Banned").text_color(theme.danger))
             })
+            .child(
+                Label::new(if admin { "Admin" } else { "User" })
+                    .flex_shrink_0()
+                    .rounded_sm()
+                    .px_2()
+                    .py_0p5()
+                    .text_xs()
+                    .font_semibold()
+                    .bg(role_color.opacity(0.10))
+                    .text_color(role_color),
+            )
             .child(
                 tool_button(
                     "admin-user-actions",
                     IconName::Ellipsis,
                     format!("Actions for {account_name}"),
                 )
+                .flex_shrink_0()
                 .disabled(sidebar.admin_accounts.busy)
                 .dropdown_menu(move |menu, _, _| {
                     let profile = settings.clone();

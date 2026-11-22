@@ -542,9 +542,12 @@ impl Spk {
                             )),
                     )
                     .child(
-                        tool_button("settings", IconName::Settings, "Settings").on_click(
-                            cx.listener(|this, _, window, cx| this.open_settings(window, cx)),
-                        ),
+                        tool_button("settings", IconName::Settings, "Settings")
+                            .track_focus(&self.settings_button_focus)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.settings_button_focus.focus(window, cx);
+                                this.open_settings(window, cx);
+                            })),
                     )
                     .child(self.voice_controls(sidebar, VoiceControls::Profile, cx)),
             )
