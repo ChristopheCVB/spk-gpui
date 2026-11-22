@@ -164,14 +164,18 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
             .into_iter()
             .find(|choice| choice.id == "display" || choice.id.starts_with("display:"))
             .expect("fixture Linux display");
-        let selected = linux::select(
-            choice,
-            Some(Device {
-                id: output.clone(),
-                name: output,
-            }),
+        let selected = timeout(
+            Duration::from_secs(6),
+            linux::select(
+                choice,
+                Some(Device {
+                    id: output.clone(),
+                    name: output,
+                }),
+            ),
         )
         .await
+        .expect("selected display delivers video")
         .unwrap();
         assert_eq!(selected.audio, Some(AudioScope::PlaybackMix));
         (Some(selected.capture), AudioScope::PlaybackMix)
@@ -447,10 +451,8 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
     .await
     .unwrap();
 
-    #[cfg(target_os = "macos")]
-    let source_stop = std::env::var_os("SPK_TEST_MAC_SCREEN_STOP");
-    #[cfg(not(target_os = "macos"))]
-    let source_stop: Option<std::ffi::OsString> = None;
+    let source_stop = std::env::var_os("SPK_TEST_MAC_SCREEN_STOP")
+        .or_else(|| std::env::var_os("SPK_TEST_WAYLAND_SCREEN_STOP"));
     if let Some(path) = source_stop {
         std::fs::write(path, []).unwrap();
     } else {

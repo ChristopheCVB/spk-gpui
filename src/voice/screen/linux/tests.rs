@@ -152,27 +152,8 @@ fn fixture_window() -> (RustConnection, u32) {
 #[tokio::test]
 #[ignore = "requires isolated Xvfb, PulseAudio and LiveKit fixtures"]
 async fn x11_screen_share_publishes_video_only_and_preserves_voice() {
-    use futures::StreamExt as _;
-    use livekit::webrtc::video_stream::native::NativeVideoStream;
-
     assert!(!wayland().unwrap());
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    let endpoint = std::env::var("SPK_TEST_LIVEKIT").unwrap();
-    let (publisher, _) = Room::connect(
-        &endpoint,
-        &std::env::var("SPK_TEST_PUBLISHER").unwrap(),
-        RoomOptions::default(),
-    )
-    .await
-    .unwrap();
-    let (receiver, mut events) = Room::connect(
-        &endpoint,
-        &std::env::var("SPK_TEST_RECEIVER").unwrap(),
-        RoomOptions::default(),
-    )
-    .await
-    .unwrap();
-
+    let (publisher, receiver, mut events) = fixture_rooms().await;
     let (connection, window) = fixture_window();
     let choices = choices().await.unwrap();
     let display = choices
@@ -192,6 +173,7 @@ async fn x11_screen_share_publishes_video_only_and_preserves_voice() {
         name: available.clone(),
         id: available,
     };
+    let lose_window = || connection.destroy_window(window).unwrap().check().unwrap();
     for (choice, output, size, audio_scope, wants_audio) in [
         (display, missing, (640, 480), None, true),
         (
@@ -203,103 +185,14 @@ async fn x11_screen_share_publishes_video_only_and_preserves_voice() {
         ),
         (window_choice, available, (320, 240), None, true),
     ] {
-        let destroy_window = choice.id == window_choice.id;
-        let selected = select(choice.clone(), Some(output)).await.unwrap();
-        assert_eq!(selected.audio, audio_scope);
-        let quality = Quality {
-            height: 720,
-            fps: 5,
-        };
-        let (requests, mut requested) = watch::channel(Intent::default());
-        requests.send_modify(|intent| {
-            intent.screen.quality = quality;
-            intent.screen.open();
-        });
-        let attempt = requested.borrow().screen.attempt;
-        let mut cancellation = requested.clone();
-        let report = |state| {
-            if let State::Live {
-                width,
-                height,
-                fps,
-                audio,
-                ..
-            } = state
-            {
-                assert_eq!(((width, height), fps, audio), (size, 5, None));
-            }
-        };
-        let share = super::super::select_until_cancelled(
-            &mut cancellation,
-            attempt,
-            super::super::capture_and_publish(
-                &publisher,
-                quality,
-                &mut requested,
-                selected.audio.filter(|_| wants_audio),
-                selected.capture,
-                &report,
-            ),
-        );
-        let watcher = async {
-            let (video, mut frames) = loop {
-                if let RoomEvent::TrackSubscribed {
-                    track, publication, ..
-                } = events.recv().await.unwrap()
-                {
-                    assert_eq!(publication.source(), TrackSource::Screenshare);
-                    let RemoteTrack::Video(track) = track else {
-                        unreachable!()
-                    };
-                    break (publication, NativeVideoStream::new(track.rtc_track()));
-                }
-            };
-            for _ in 0..3 {
-                let frame = frames.next().await.unwrap();
-                assert_eq!((frame.buffer.width(), frame.buffer.height()), size);
-            }
-            assert_eq!(publisher.local_participant().track_publications().len(), 1);
-            if destroy_window {
-                connection.destroy_window(window).unwrap().check().unwrap();
-            } else {
-                requests.send_modify(|intent| {
-                    assert!(intent.screen.advance(attempt, Action::Stop));
-                });
-            }
-            loop {
-                match events.recv().await.unwrap() {
-                    RoomEvent::TrackPublished { publication, .. } => {
-                        assert_eq!(publication.sid(), video.sid(), "unexpected share track");
-                    }
-                    RoomEvent::TrackUnpublished { publication, .. }
-                        if publication.sid() == video.sid() =>
-                    {
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-        };
-        let (result, ()) = timeout(Duration::from_secs(15), async {
-            tokio::join!(share, watcher)
-        })
-        .await
-        .unwrap();
-        assert_eq!(
-            result,
-            Err(if destroy_window {
-                CaptureError::SourceLost
-            } else {
-                CaptureError::Cancelled
-            })
-        );
-        assert!(
-            publisher
-                .local_participant()
-                .track_publications()
-                .is_empty()
-        );
-        assert_eq!(publisher.connection_state(), ConnectionState::Connected);
+        let lose_source = (choice.id == window_choice.id).then_some(&lose_window as &dyn Fn());
+        check_video_only_share(
+            &publisher,
+            &mut events,
+            (choice.clone(), output, size, audio_scope, wants_audio),
+            lose_source,
+        )
+        .await;
     }
     assert!(matches!(
         select(window_choice.clone(), None).await,
@@ -307,6 +200,172 @@ async fn x11_screen_share_publishes_video_only_and_preserves_voice() {
     ));
     receiver.close().await.unwrap();
     publisher.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires the Wayland window portal, PulseAudio and LiveKit fixtures"]
+async fn wayland_window_publishes_video_only_and_preserves_voice() {
+    assert!(wayland().unwrap());
+    let (publisher, receiver, mut events) = fixture_rooms().await;
+    let available = choices().await.unwrap();
+    assert_eq!(available.len(), 1);
+    let choice = available.into_iter().next().unwrap();
+    assert_eq!(choice.id, "window");
+    let output = std::env::var("SPK_TEST_PULSE_OUTPUT").unwrap();
+    let output = Device {
+        name: output.clone(),
+        id: output,
+    };
+    let stop = std::env::var_os("SPK_TEST_WAYLAND_SCREEN_STOP").unwrap();
+    let lose_source = || std::fs::write(&stop, []).unwrap();
+    for end in [None, Some(&lose_source as &dyn Fn())] {
+        check_video_only_share(
+            &publisher,
+            &mut events,
+            (choice.clone(), output.clone(), (640, 480), None, true),
+            end,
+        )
+        .await;
+    }
+    receiver.close().await.unwrap();
+    publisher.close().await.unwrap();
+}
+
+async fn fixture_rooms() -> (Room, Room, tokio::sync::mpsc::UnboundedReceiver<RoomEvent>) {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let endpoint = std::env::var("SPK_TEST_LIVEKIT").unwrap();
+    let (publisher, _) = Room::connect(
+        &endpoint,
+        &std::env::var("SPK_TEST_PUBLISHER").unwrap(),
+        RoomOptions::default(),
+    )
+    .await
+    .unwrap();
+    let (receiver, events) = Room::connect(
+        &endpoint,
+        &std::env::var("SPK_TEST_RECEIVER").unwrap(),
+        RoomOptions::default(),
+    )
+    .await
+    .unwrap();
+
+    (publisher, receiver, events)
+}
+
+async fn check_video_only_share(
+    publisher: &Room,
+    events: &mut tokio::sync::mpsc::UnboundedReceiver<RoomEvent>,
+    (choice, output, size, audio_scope, wants_audio): (
+        Choice,
+        Device,
+        (u32, u32),
+        Option<AudioScope>,
+        bool,
+    ),
+    lose_source: Option<&dyn Fn()>,
+) {
+    use futures::StreamExt as _;
+    use livekit::webrtc::video_stream::native::NativeVideoStream;
+
+    let selected = timeout(Duration::from_secs(6), select(choice, Some(output)))
+        .await
+        .expect("selected source delivers video")
+        .unwrap();
+    assert_eq!(selected.audio, audio_scope);
+    let quality = Quality {
+        height: 720,
+        fps: 5,
+    };
+    let (requests, mut requested) = watch::channel(Intent::default());
+    requests.send_modify(|intent| {
+        intent.screen.quality = quality;
+        intent.screen.open();
+    });
+    let attempt = requested.borrow().screen.attempt;
+    let mut cancellation = requested.clone();
+    let report = |state| {
+        if let State::Live {
+            width,
+            height,
+            fps,
+            audio,
+            ..
+        } = state
+        {
+            assert_eq!(((width, height), fps, audio), (size, 5, None));
+        }
+    };
+    let share = super::super::select_until_cancelled(
+        &mut cancellation,
+        attempt,
+        super::super::capture_and_publish(
+            publisher,
+            quality,
+            &mut requested,
+            selected.audio.filter(|_| wants_audio),
+            selected.capture,
+            &report,
+        ),
+    );
+    let watcher = async {
+        let (video, mut frames) = loop {
+            if let RoomEvent::TrackSubscribed {
+                track, publication, ..
+            } = events.recv().await.unwrap()
+            {
+                assert_eq!(publication.source(), TrackSource::Screenshare);
+                let RemoteTrack::Video(track) = track else {
+                    unreachable!()
+                };
+                break (publication, NativeVideoStream::new(track.rtc_track()));
+            }
+        };
+        for _ in 0..3 {
+            let frame = frames.next().await.unwrap();
+            assert_eq!((frame.buffer.width(), frame.buffer.height()), size);
+        }
+        assert_eq!(publisher.local_participant().track_publications().len(), 1);
+        if let Some(lose_source) = lose_source {
+            lose_source();
+        } else {
+            requests.send_modify(|intent| {
+                assert!(intent.screen.advance(attempt, Action::Stop));
+            });
+        }
+        loop {
+            match events.recv().await.unwrap() {
+                RoomEvent::TrackPublished { publication, .. } => {
+                    assert_eq!(publication.sid(), video.sid(), "unexpected share track");
+                }
+                RoomEvent::TrackUnpublished { publication, .. }
+                    if publication.sid() == video.sid() =>
+                {
+                    break;
+                }
+                _ => {}
+            }
+        }
+    };
+    let (result, ()) = timeout(Duration::from_secs(15), async {
+        tokio::join!(share, watcher)
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        result,
+        Err(if lose_source.is_some() {
+            CaptureError::SourceLost
+        } else {
+            CaptureError::Cancelled
+        })
+    );
+    assert!(
+        publisher
+            .local_participant()
+            .track_publications()
+            .is_empty()
+    );
+    assert_eq!(publisher.connection_state(), ConnectionState::Connected);
 }
 
 #[tokio::test]
