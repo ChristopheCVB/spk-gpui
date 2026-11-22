@@ -308,6 +308,34 @@ async fn desktop_voice_routes_samples_and_synchronizes_presence() {
             assert_eq!(recovered.download_kbps, None);
             assert_eq!(recovered.loss_percent, None);
 
+            peer.reconnecting();
+            wait_for_route(
+                &views,
+                VoiceStatus::Reconnecting,
+                Some("preferred-mic"),
+                "preferred-speakers",
+            )
+            .await;
+            let resumptions = peer.microphone_resumptions();
+            let (scan_started, finish_scan) = peer.reconnect_with_paused_scan();
+            scan_started.await.unwrap();
+            commands.send(Command::ToggleMute).await.unwrap();
+            wait_for_sidebar(&views, |sidebar| {
+                sidebar.voice_intent.mute.effective_muted()
+            })
+            .await;
+            finish_scan.send(()).unwrap();
+            wait_for_route(&views, VoiceStatus::Connected, None, "preferred-speakers").await;
+            assert_eq!(peer.microphone_resumptions(), resumptions);
+            commands.send(Command::ToggleMute).await.unwrap();
+            wait_for_route(
+                &views,
+                VoiceStatus::Connected,
+                Some("preferred-mic"),
+                "preferred-speakers",
+            )
+            .await;
+
             peer.disconnect();
             let terminal = wait_for_sidebar(&views, |sidebar| {
                 sidebar.rejoin_channel().is_some() && sidebar.participants("first").is_empty()

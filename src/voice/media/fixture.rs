@@ -1,6 +1,9 @@
 use std::{collections::VecDeque, sync::Mutex};
 
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::{
+    mpsc::{self, UnboundedReceiver, UnboundedSender},
+    oneshot,
+};
 
 use super::*;
 use crate::{
@@ -22,7 +25,7 @@ pub(crate) fn start_call(
                     assert_eq!(token, "fixture-token");
                     let (room, peer) = TestRoom::new();
                     let room = media.fixture.insert(room);
-                    let devices = room.devices();
+                    let devices = room.devices().await?;
                     let speakers = route_speakers(
                         &devices.speakers,
                         worker.requested.borrow().preferred.speakers.as_ref(),
@@ -51,6 +54,8 @@ struct State {
     echo_reference_unavailable: bool,
     echo_cancellation: bool,
     stats: VecDeque<SessionStats>,
+    device_scan: Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>,
+    microphone_resumptions: usize,
 }
 
 impl State {
@@ -144,6 +149,20 @@ impl Peer {
         self.events.send(MediaEvent::Reconnected).ok().unwrap();
     }
 
+    pub(crate) fn reconnect_with_paused_scan(
+        &self,
+    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (started, wait_started) = oneshot::channel();
+        let (finish, wait_finish) = oneshot::channel();
+        self.state.lock().unwrap().device_scan = Some((started, wait_finish));
+        self.reconnected();
+        (wait_started, finish)
+    }
+
+    pub(crate) fn microphone_resumptions(&self) -> usize {
+        self.state.lock().unwrap().microphone_resumptions
+    }
+
     pub(crate) fn disconnect(&self) {
         self.events
             .send(MediaEvent::Disconnected(Issue::LiveKitDisconnected))
@@ -212,6 +231,8 @@ impl TestRoom {
             echo_reference_unavailable: false,
             echo_cancellation: false,
             stats: VecDeque::new(),
+            device_scan: None,
+            microphone_resumptions: 0,
         }));
         let playout_changed = Arc::new(tokio::sync::Notify::new());
         let peer = Peer {
@@ -262,8 +283,13 @@ impl RoomAudio for TestRoom {
         "alice".to_owned()
     }
 
-    fn devices(&self) -> Devices {
-        self.state.lock().unwrap().devices.clone()
+    async fn devices(&self) -> Result<Devices, Issue> {
+        let scan = self.state.lock().unwrap().device_scan.take();
+        if let Some((started, finish)) = scan {
+            let _ = started.send(());
+            let _ = finish.await;
+        }
+        Ok(self.state.lock().unwrap().devices.clone())
     }
 
     fn switch_speakers(&self, device: &Device) -> bool {
@@ -340,6 +366,7 @@ impl RoomAudio for TestRoom {
     fn resume_microphone(&self) {
         let mut state = self.state.lock().unwrap();
         state.muted = state.capture.is_none();
+        state.microphone_resumptions += usize::from(!state.muted);
     }
 
     async fn reconcile_microphone(&mut self) {}
