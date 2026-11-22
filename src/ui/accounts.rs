@@ -96,7 +96,12 @@ impl Spk {
                 1,
             ))
             .children(self.form_message(message, cx))
-            .child(self.submit_button("Sign in", 2, cx))
+            .child(self.submit_button("Sign in", 2, cx).icon(IconName::LogIn))
+            .child(
+                Label::new("No account? You need an invite link from an admin.")
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground),
+            )
             .when(retry_restore, |card| {
                 card.child(
                     Button::new("restore")
@@ -221,6 +226,7 @@ impl Spk {
         Button::new("submit-account-form")
             .primary()
             .label(label)
+            .w_full()
             .tab_index(tab_index)
             .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx)))
     }
@@ -241,7 +247,7 @@ impl Spk {
 fn account_card(title: &'static str, cx: &Context<Spk>) -> Div {
     div()
         .w_full()
-        .max_w(px(360.0))
+        .max_w(px(384.0))
         .mx_auto()
         .p_6()
         .rounded_lg()
@@ -250,14 +256,13 @@ fn account_card(title: &'static str, cx: &Context<Spk>) -> Div {
         .border_color(cx.theme().border)
         .flex()
         .flex_col()
-        .gap_4()
+        .gap_3()
         .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_3()
-                .child(logo(32.0))
-                .child(Label::new(title).text_xl().font_semibold()),
+            Label::new(title)
+                .mb_3()
+                .text_center()
+                .text_base()
+                .font_bold(),
         )
 }
 
@@ -271,7 +276,7 @@ fn field(
         .flex()
         .flex_col()
         .gap_1()
-        .child(Label::new(label))
+        .child(Label::new(label).id(label).font_medium())
         .child(
             Input::new(input)
                 .aria_label(label)
