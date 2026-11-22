@@ -91,8 +91,8 @@ impl Media {
             .audio
             .insert(PlatformAudio::new().map_err(|_| Issue::Playback)?);
         stop_recording(audio);
+        let devices = Devices::scan(audio).await?;
         let requested = worker.requested.borrow().clone();
-        let devices = Devices::read(audio);
         let speakers = route_speakers(
             &devices.speakers,
             requested.preferred.speakers.as_ref(),
@@ -132,8 +132,8 @@ impl Media {
         speakers: &Device,
     ) -> Result<(), Issue> {
         let mut requested = worker.requested.clone();
+        let mut devices = Arc::new(backend.devices().await?);
         let mut intent = requested.borrow_and_update().clone();
-        let mut devices = Arc::new(backend.devices());
         // LiveKit can initialize WebRTC with the default route while connecting.
         let mut output = route_speakers(
             &devices.speakers,
@@ -223,7 +223,10 @@ impl Media {
                     backend.start_microphone(device.clone(), processing, use_system_default);
                 }
                 backend.sync_microphone_processing(processing).await;
-                if resync && !intent.mute.effective_muted() {
+                if resync
+                    && !intent.mute.effective_muted()
+                    && !requested.borrow().mute.effective_muted()
+                {
                     backend.resume_microphone();
                 }
             }
@@ -271,7 +274,7 @@ impl Media {
                         || next.preferred.media_output != intent.preferred.media_output
                         || next.retry_mic != intent.retry_mic || next.retry_speakers != intent.retry_speakers
                     {
-                        devices = Arc::new(backend.devices());
+                        devices = Arc::new(backend.devices().await?);
                     }
                     intent = next;
                     check_routes = true;
@@ -298,9 +301,9 @@ impl Media {
                         reconnecting = false;
                         resync = true;
                         check_routes = true;
-                        intent = requested.borrow_and_update().clone();
-                        devices = Arc::new(backend.devices());
+                        devices = Arc::new(backend.devices().await?);
                         backend.reconcile_microphone().await;
+                        intent = requested.borrow_and_update().clone();
                     }
                     MediaEvent::Disconnected(issue) => return Err(issue),
                     MediaEvent::MicrophoneChanged | MediaEvent::RemoteAudioChanged => check_routes = true,
@@ -308,7 +311,7 @@ impl Media {
                     _ => {}
                 },
                 _ = scan.tick() => {
-                    devices = Arc::new(backend.devices());
+                    devices = Arc::new(backend.devices().await?);
                     check_routes = true;
                     if !reconnecting && stats_job.is_empty() {
                         backend.start_stats(&mut stats_job);
@@ -331,7 +334,7 @@ trait RoomAudio {
     type PlayoutFormat: PartialEq;
 
     fn identity(&self) -> String;
-    fn devices(&self) -> Devices;
+    async fn devices(&self) -> Result<Devices, Issue>;
     fn switch_speakers(&self, device: &Device) -> bool;
     fn set_playout(&self, enabled: bool);
     // Reports when the active voice output cannot provide an echo reference.

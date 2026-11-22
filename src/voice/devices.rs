@@ -7,6 +7,8 @@ use rodio::cpal::{
 };
 use serde::{Deserialize, Deserializer, Serialize};
 
+use super::Issue;
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum DeviceKind {
     Microphone,
@@ -218,7 +220,15 @@ impl Devices {
         )
     }
 
-    pub(super) fn read(audio: &PlatformAudio) -> Self {
+    pub(super) async fn scan(audio: &PlatformAudio) -> Result<Self, Issue> {
+        let audio = audio.clone();
+        // Device enumeration can block the shared runtime long enough to drop audio.
+        tokio::task::spawn_blocking(move || Self::read(&audio))
+            .await
+            .map_err(|_| Issue::Playback)
+    }
+
+    fn read(audio: &PlatformAudio) -> Self {
         Self {
             microphones: list(
                 DeviceKind::Microphone,

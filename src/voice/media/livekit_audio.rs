@@ -25,8 +25,8 @@ impl RoomAudio for LiveKitAudio<'_> {
         self.room.local_participant().identity().to_string()
     }
 
-    fn devices(&self) -> Devices {
-        Devices::read(self.audio)
+    async fn devices(&self) -> Result<Devices, Issue> {
+        Devices::scan(self.audio).await
     }
 
     fn switch_speakers(&self, device: &Device) -> bool {
