@@ -10,7 +10,7 @@ bytes = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 cookie_store = "0.22"
 dfn3_rs = "=0.1.2"
-dirs = "6"
+dirs = "7"
 futures = "0.3"
 global-hotkey = "=0.10.0"
 gpui-kit = "=0.10.0"
