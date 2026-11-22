@@ -16,6 +16,7 @@ mod soundboard_admin;
 
 use gpui_kit::component::{
     Theme, ThemeMode, ThemeRegistry, WindowExt,
+    menu::{DropdownMenu, PopupMenuItem},
     radio::RadioGroup,
     slider::{SliderEvent, SliderState, SliderValue},
 };
@@ -144,6 +145,8 @@ impl Spk {
     }
 }
 
+const SETTINGS_WIDE_WIDTH: Pixels = px(768.0);
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Tab {
     Profile,
@@ -159,6 +162,34 @@ enum Tab {
 }
 
 impl Tab {
+    const ALL: [Self; 10] = [
+        Self::Profile,
+        Self::Appearance,
+        Self::Voice,
+        Self::Notifications,
+        Self::Shortcuts,
+        Self::Soundboard,
+        Self::Invites,
+        Self::Users,
+        Self::Channels,
+        Self::Changelog,
+    ];
+
+    fn navigation(self) -> (&'static str, IconName) {
+        match self {
+            Self::Profile => ("Profile", IconName::User),
+            Self::Appearance => ("Appearance", IconName::Palette),
+            Self::Voice => ("Voice & Video", IconName::Mic),
+            Self::Notifications => ("Notifications", IconName::Bell),
+            Self::Shortcuts => ("Shortcuts", IconName::Settings2),
+            Self::Soundboard => ("Soundboard", IconName::Megaphone),
+            Self::Invites => ("Invites", IconName::Link),
+            Self::Users => ("Users", IconName::Users),
+            Self::Channels => ("Channels", IconName::Hash),
+            Self::Changelog => ("Changelog", IconName::FileText),
+        }
+    }
+
     fn requires_admin(self) -> bool {
         matches!(
             self,
@@ -323,10 +354,15 @@ impl Spk {
         })
         .detach();
         window.open_dialog(cx, move |dialog, window, _| {
+            let viewport = window.viewport_size();
             dialog
                 .centered()
                 .width(px(1152.0))
-                .h(window.viewport_size().height * 0.85)
+                .h(if viewport.width < SETTINGS_WIDE_WIDTH {
+                    viewport.height
+                } else {
+                    viewport.height * 0.85
+                })
                 .p_0()
                 .close_button(false)
                 .content({
@@ -376,6 +412,8 @@ impl Render for Settings {
             self.tab = Tab::Profile;
         }
         let compact = app.compact();
+        let wide = window.viewport_size().width >= SETTINGS_WIDE_WIDTH;
+        let navigation = self.navigation(sidebar.is_admin(), wide, compact, cx);
         let body = match self.tab {
             Tab::Profile => self.profile(sidebar, cx).into_any_element(),
             Tab::Appearance => self.appearance(app, cx).into_any_element(),
@@ -436,147 +474,184 @@ impl Render for Settings {
             .child(
                 div()
                     .flex()
+                    .when(!wide, |layout| layout.flex_col())
                     .flex_1()
                     .min_h_0()
+                    .child(navigation)
                     .child(
                         div()
-                            .flex()
-                            .flex_col()
-                            .w(px(208.0))
-                            .max_w(relative(0.36))
-                            .flex_shrink_0()
-                            .bg(theme.sidebar)
-                            .p(if compact { px(8.0) } else { px(12.0) })
-                            .border_r_1()
-                            .border_color(theme.border)
-                            .children(
-                                [
-                                    (Tab::Profile, "Profile", IconName::User),
-                                    (Tab::Appearance, "Appearance", IconName::Palette),
-                                    (Tab::Voice, "Voice & Video", IconName::Mic),
-                                    (Tab::Notifications, "Notifications", IconName::Bell),
-                                    (Tab::Shortcuts, "Shortcuts", IconName::Settings2),
-                                    (Tab::Changelog, "Changelog", IconName::FileText),
-                                    (Tab::Invites, "Invites", IconName::Link),
-                                    (Tab::Users, "Users", IconName::Users),
-                                    (Tab::Channels, "Channels", IconName::Hash),
-                                    (Tab::Soundboard, "Soundboard", IconName::Megaphone),
-                                ]
-                                .into_iter()
-                                .filter(|(tab, _, _)| !tab.requires_admin() || sidebar.is_admin())
-                                .map(|(tab, label, icon)| {
-                                    let active = self.tab == tab;
-                                    let color = if active {
-                                        theme.primary
-                                    } else {
-                                        theme.muted_foreground
-                                    };
-                                    Button::new(label)
-                                        .ghost()
-                                        .small()
-                                        .tab_stop(true)
-                                        .selected(active)
-                                        .accessibility_label(label)
-                                        .h_8()
-                                        .when(active, |button| {
-                                            button.bg(theme.primary.opacity(0.10))
-                                        })
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .w_full()
-                                                .gap_2()
-                                                .child(themed_icon(icon, color, 16.0))
-                                                .child(
-                                                    Label::new(label).text_color(color).truncate(),
-                                                ),
-                                        )
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            if this.tab == Tab::Shortcuts && tab != Tab::Shortcuts {
-                                                this.spk.update(cx, |app, cx| {
-                                                    app.cancel_shortcut_editor(cx)
-                                                });
-                                            }
-                                            let old_admin_page = this.tab.admin_page();
-                                            let admin_page = tab.admin_page();
-                                            if old_admin_page != admin_page {
-                                                this.ban_target = None;
-                                                this.account_action(
-                                                    AdminAccountAction::Show(admin_page),
-                                                    cx,
-                                                );
-                                            }
-                                            if this.tab != tab {
-                                                use crate::session::SoundboardAdminAction;
-                                                if this.tab == Tab::Soundboard {
-                                                    this.soundboard_action(
-                                                        SoundboardAdminAction::Close,
-                                                        cx,
-                                                    );
-                                                } else if tab == Tab::Soundboard {
-                                                    this.soundboard_action(
-                                                        SoundboardAdminAction::Show,
-                                                        cx,
-                                                    );
-                                                }
-                                            }
-                                            this.tab = tab;
-                                            if tab == Tab::Changelog && this.changelog.initial() {
-                                                this.load_changelog(cx);
-                                            }
-                                            this.sync_mic_test(cx);
-                                            this.sync_camera_preview(cx);
-                                            if tab == Tab::Voice {
-                                                this.refresh_cameras(cx);
-                                                this.spk.update(cx, |app, cx| {
-                                                    app.send(Command::RefreshDevices, None, cx)
-                                                });
-                                            }
-                                            cx.notify();
-                                        }))
-                                }),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
+                            .id(("settings-body", self.tab as usize))
                             .flex_1()
                             .min_w_0()
-                            .children(
-                                self.channel_form
-                                    .as_ref()
-                                    .filter(|_| self.tab == Tab::Channels)
-                                    .map(|form| {
-                                        div()
-                                            .px_6()
-                                            .pt_6()
-                                            .gap_2()
-                                            .flex()
-                                            .flex_col()
-                                            .children(self.channel_status(sidebar, cx))
-                                            .child(self.channel_editor(
-                                                form,
-                                                sidebar.channel_admin.pending,
-                                                cx,
-                                            ))
-                                    }),
-                            )
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .bg(theme.background)
+                            .p(if compact { px(16.0) } else { px(24.0) })
                             .child(
                                 div()
-                                    .id("settings-body")
                                     .flex()
                                     .flex_col()
-                                    .flex_1()
-                                    .min_h_0()
-                                    .overflow_y_scroll()
-                                    .bg(theme.background)
-                                    .p(if compact { px(16.0) } else { px(24.0) })
+                                    .gap_2()
+                                    .children(
+                                        self.channel_form
+                                            .as_ref()
+                                            .filter(|_| self.tab == Tab::Channels)
+                                            .map(|form| {
+                                                div()
+                                                    .gap_2()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .children(self.channel_status(sidebar, cx))
+                                                    .child(self.channel_editor(
+                                                        form,
+                                                        sidebar.channel_admin.pending,
+                                                        cx,
+                                                    ))
+                                            }),
+                                    )
                                     .child(body),
                             ),
                     ),
             )
+    }
+}
+
+impl Settings {
+    fn navigation(
+        &self,
+        admin: bool,
+        wide: bool,
+        compact: bool,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        let tabs = Tab::ALL
+            .into_iter()
+            .filter(move |tab| admin || !tab.requires_admin());
+        let navigation = div()
+            .id("settings-navigation")
+            .flex()
+            .flex_col()
+            .flex_shrink_0()
+            .bg(theme.sidebar)
+            .border_color(theme.border)
+            .p(if compact { px(8.0) } else { px(12.0) });
+        if wide {
+            navigation
+                .w(px(208.0))
+                .min_h_0()
+                .overflow_y_scroll()
+                .border_r_1()
+                .children(tabs.map(|tab| {
+                    let (label, icon) = tab.navigation();
+                    let active = self.tab == tab;
+                    let color = if active {
+                        theme.primary
+                    } else {
+                        theme.muted_foreground
+                    };
+                    Button::new(label)
+                        .ghost()
+                        .small()
+                        .tab_stop(true)
+                        .selected(active)
+                        .accessibility_label(label)
+                        .h_8()
+                        .flex_shrink_0()
+                        .when(active, |button| button.bg(theme.primary.opacity(0.10)))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .w_full()
+                                .gap_2()
+                                .child(themed_icon(icon, color, 16.0))
+                                .child(Label::new(label).text_color(color).truncate()),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| this.select_tab(tab, cx)))
+                }))
+        } else {
+            let active = self.tab;
+            let (label, icon) = active.navigation();
+            let settings = cx.weak_entity();
+            navigation.border_b_1().child(
+                Button::new("settings-sections")
+                    .small()
+                    .outline()
+                    .tab_stop(true)
+                    .accessibility_label(format!("Settings sections, {label}"))
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(themed_icon(icon, theme.foreground, 16.0))
+                            .child(Label::new(label).flex_1())
+                            .child(themed_icon(
+                                IconName::ChevronDown,
+                                theme.muted_foreground,
+                                16.0,
+                            )),
+                    )
+                    .dropdown_menu(move |mut menu, window, _| {
+                        menu = menu.max_h(window.viewport_size().height - px(136.0));
+                        for tab in tabs.clone() {
+                            let (label, icon) = tab.navigation();
+                            let settings = settings.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(label)
+                                    .icon(icon)
+                                    .checked(active == tab)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = settings.update(cx, |settings, cx| {
+                                            settings.select_tab(tab, cx);
+                                        });
+                                    }),
+                            );
+                        }
+                        menu
+                    }),
+            )
+        }
+    }
+
+    fn select_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
+        if tab.requires_admin()
+            && !matches!(&self.spk.read(cx).view, View::SignedIn(sidebar) if sidebar.is_admin())
+        {
+            return;
+        }
+        if self.tab == Tab::Shortcuts && tab != Tab::Shortcuts {
+            self.spk
+                .update(cx, |app, cx| app.cancel_shortcut_editor(cx));
+        }
+        let old_admin_page = self.tab.admin_page();
+        let admin_page = tab.admin_page();
+        if old_admin_page != admin_page {
+            self.ban_target = None;
+            self.account_action(AdminAccountAction::Show(admin_page), cx);
+        }
+        if self.tab != tab {
+            use crate::session::SoundboardAdminAction;
+            if self.tab == Tab::Soundboard {
+                self.soundboard_action(SoundboardAdminAction::Close, cx);
+            } else if tab == Tab::Soundboard {
+                self.soundboard_action(SoundboardAdminAction::Show, cx);
+            }
+        }
+        self.tab = tab;
+        if tab == Tab::Changelog && self.changelog.initial() {
+            self.load_changelog(cx);
+        }
+        self.sync_mic_test(cx);
+        self.sync_camera_preview(cx);
+        if tab == Tab::Voice {
+            self.refresh_cameras(cx);
+            self.spk
+                .update(cx, |app, cx| app.send(Command::RefreshDevices, None, cx));
+        }
+        cx.notify();
     }
 }
 
