@@ -649,6 +649,9 @@ async fn watch_session(
                 if result.as_ref().is_err_and(Failure::unauthorized) {
                     break SessionEnd::Invalidated(SESSION_EXPIRED);
                 }
+                if let Ok(page) = &result {
+                    alerts.remember_history(&page.messages);
+                }
                 chat.complete(client, sidebar.profile.id.as_deref(), result);
             }
             Some(result) = chat.action_tasks.join_next() => {

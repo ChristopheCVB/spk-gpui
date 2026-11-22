@@ -160,6 +160,11 @@ pub struct LiveAlerts {
 }
 
 impl LiveAlerts {
+    pub fn remember_history(&mut self, messages: &[ChatMessage]) {
+        self.seen
+            .extend(messages.iter().map(|message| message.id.clone()));
+    }
+
     pub fn receive(&mut self, sidebar: &Sidebar, message: &ChatMessage) {
         if sidebar
             .profile
@@ -168,13 +173,6 @@ impl LiveAlerts {
             .is_none_or(|me| me == message.user_id)
             || !self.seen.insert(message.id.clone())
         {
-            return;
-        }
-        // Remember replays of loaded messages after their conversation is closed.
-        if sidebar.chat.as_ref().is_some_and(|chat| {
-            chat.channel_id == message.channel_id
-                && chat.messages.iter().any(|loaded| loaded.id == message.id)
-        }) {
             return;
         }
         if let Some(channel) = sidebar
