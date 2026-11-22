@@ -58,6 +58,14 @@ A private conversation with a shared message history between two SPK users.
 
 An individual post in a text channel or DM conversation.
 
+**Message History**
+
+The chronological record of posted messages in a text channel or DM conversation.
+
+**Message Group**
+
+Consecutive messages from the same author that share one author header in Message History. Each message can still be acted on individually.
+
 **Draft**
 
 An unsent message being composed for a specific text channel or DM conversation.
