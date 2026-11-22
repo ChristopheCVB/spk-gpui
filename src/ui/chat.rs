@@ -765,7 +765,7 @@ impl Spk {
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
-        let surface = theme.secondary;
+        let surface = theme.popover;
         let disabled = chat.outgoing.is_some() || !chat.can_send();
         let can_send = !disabled && chat.draft.can_send(&self.chat_input.read(cx).value());
         let app = cx.weak_entity();
@@ -907,7 +907,9 @@ impl Spk {
             .id(SharedString::from(format!("message-{}", message.id)))
             .focusable()
             .tab_index(0)
-            .focus_visible(|row| row.bg(theme.secondary))
+            .border_l_2()
+            .border_color(theme.transparent)
+            .focus_visible(|row| row.border_color(theme.ring))
             .on_key_down(cx.listener(move |app, event: &KeyDownEvent, window, cx| {
                 if !event.is_held
                     && !event.keystroke.modifiers.modified()

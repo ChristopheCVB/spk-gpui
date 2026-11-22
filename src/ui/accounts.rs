@@ -229,7 +229,11 @@ impl Spk {
         self.form_error.or(message).map(|message| {
             Label::new(message)
                 .text_sm()
-                .text_color(cx.theme().foreground)
+                .text_color(if self.form_error.is_some() {
+                    cx.theme().danger
+                } else {
+                    cx.theme().foreground
+                })
         })
     }
 }
@@ -241,6 +245,7 @@ fn account_card(title: &'static str, cx: &Context<Spk>) -> Div {
         .mx_auto()
         .p_6()
         .rounded_lg()
+        .bg(cx.theme().popover)
         .border_1()
         .border_color(cx.theme().border)
         .flex()
