@@ -170,6 +170,13 @@ impl LiveAlerts {
         {
             return;
         }
+        // Remember replays of loaded messages after their conversation is closed.
+        if sidebar.chat.as_ref().is_some_and(|chat| {
+            chat.channel_id == message.channel_id
+                && chat.messages.iter().any(|loaded| loaded.id == message.id)
+        }) {
+            return;
+        }
         if let Some(channel) = sidebar
             .channels
             .iter()
