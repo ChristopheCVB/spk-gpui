@@ -7755,7 +7755,6 @@ dependencies = [
  "wayland-client",
  "wayland-protocols",
  "webrtc-sys",
- "windows 0.61.3",
  "windows 0.62.2",
  "windows-capture 2.0.1",
  "windows-core 0.62.2",

@@ -8,25 +8,7 @@ use std::{
     time::Instant,
 };
 
-use ::windows::Win32::{
-    Foundation::{HANDLE, HWND, WAIT_TIMEOUT},
-    System::{
-        Com::{CO_MTA_USAGE_COOKIE, CoDecrementMTAUsage, CoIncrementMTAUsage},
-        Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject},
-    },
-    UI::WindowsAndMessaging::GetClassNameW,
-};
-use livekit::webrtc::{native::yuv_helper::argb_to_i420, video_frame::VideoRotation};
-use wasapi::{
-    AudioCaptureClient, AudioClient, DeviceEnumerator, Direction, Role, SampleType, StreamMode,
-    WasapiError, WaveFormat,
-};
-use windows_capture::{
-    monitor::Monitor,
-    settings::{CaptureItemTypes, TryIntoCaptureItemWithType},
-    window::Window,
-};
-use windows_wgc::{
+use ::windows::{
     Foundation::TypedEventHandler,
     Graphics::{
         Capture::{
@@ -39,7 +21,7 @@ use windows_wgc::{
     Win32::{
         Foundation::{
             E_ABORT, E_ACCESSDENIED, E_POINTER, ERROR_ACCESS_DISABLED_BY_POLICY, ERROR_CANCELLED,
-            HMODULE, HWND as PickerHwnd,
+            HANDLE, HMODULE, HWND, WAIT_TIMEOUT,
         },
         Graphics::{
             Direct3D::D3D_DRIVER_TYPE_HARDWARE,
@@ -51,13 +33,23 @@ use windows_wgc::{
             },
             Dxgi::IDXGIDevice,
         },
-        System::WinRT::Direct3D11::{
-            CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
+        System::{
+            Com::{CO_MTA_USAGE_COOKIE, CoDecrementMTAUsage, CoIncrementMTAUsage},
+            Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject},
+            WinRT::Direct3D11::{
+                CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
+            },
         },
-        UI::Shell::IInitializeWithWindow,
+        UI::{Shell::IInitializeWithWindow, WindowsAndMessaging::GetClassNameW},
     },
     core::Interface,
 };
+use livekit::webrtc::{native::yuv_helper::argb_to_i420, video_frame::VideoRotation};
+use wasapi::{
+    AudioCaptureClient, AudioClient, DeviceEnumerator, Direction, Role, SampleType, StreamMode,
+    WasapiError, WaveFormat,
+};
+use windows_capture::{monitor::Monitor, settings::GraphicsCaptureItemType, window::Window};
 
 use super::*;
 
@@ -69,7 +61,7 @@ pub(crate) async fn pick_system_source(hwnd: isize) -> Result<GraphicsCaptureIte
         .cast::<IInitializeWithWindow>()
         .map_err(graphics_error)?;
     // GPUI supplies the live owner HWND and runs this operation on its OLE-initialized UI thread.
-    unsafe { owner.Initialize(PickerHwnd(hwnd as *mut _)) }.map_err(graphics_error)?;
+    unsafe { owner.Initialize(HWND(hwnd as *mut _)) }.map_err(graphics_error)?;
     picker
         .PickSingleItemAsync()
         .map_err(graphics_error)?
@@ -130,28 +122,27 @@ pub(super) async fn select(
             .find(|(available, _)| available.id == choice.id)
             .ok_or(CaptureError::SourceLost)?;
         let fps = match &target {
-            CaptureItemTypes::Monitor(monitor) => monitor.refresh_rate().ok(),
-            CaptureItemTypes::Window(window) => {
-                window.monitor().and_then(|m| m.refresh_rate().ok())
-            }
+            Source::Monitor(monitor) => monitor.refresh_rate().ok(),
+            Source::Window(window) => window.monitor().and_then(|m| m.refresh_rate().ok()),
         };
         let audio = AudioTarget::for_item(&target, playback);
-        let (item, kind) = match target {
-            CaptureItemTypes::Monitor(monitor) => monitor.try_into_capture_item(),
-            CaptureItemTypes::Window(window) => window.try_into_capture_item(),
+        let item = match target {
+            Source::Monitor(monitor) => monitor.try_into(),
+            Source::Window(window) => window.try_into(),
         }
         .map_err(graphics_error)?;
-        let window = match kind {
-            CaptureItemTypes::Monitor(_) => None,
-            CaptureItemTypes::Window(window) => {
+        let (item, window) = match item {
+            GraphicsCaptureItemType::Monitor((item, _)) => (item, None),
+            GraphicsCaptureItemType::Window((item, window)) => {
                 if window_id(&window).as_ref() != Some(&choice.id)
                     || matches!(&audio, Some(AudioTarget::Application(process)) if !process.alive())
                 {
                     return Err(CaptureError::SourceLost);
                 }
                 let pid = window.process_id().map_err(|_| CaptureError::SourceLost)?;
-                Some((window, pid))
+                (item, Some((window, pid)))
             }
+            GraphicsCaptureItemType::Unknown(_) => return Err(CaptureError::Unavailable),
         };
         Ok::<_, CaptureError>((
             available.label,
@@ -180,7 +171,12 @@ pub(super) async fn select(
     })
 }
 
-fn sources() -> Vec<(Choice, CaptureItemTypes)> {
+enum Source {
+    Monitor(Monitor),
+    Window(Window),
+}
+
+fn sources() -> Vec<(Choice, Source)> {
     let displays = Monitor::enumerate()
         .unwrap_or_default()
         .into_iter()
@@ -195,7 +191,7 @@ fn sources() -> Vec<(Choice, CaptureItemTypes)> {
                 id: format!("display:{:p}:{name}", monitor.as_raw_hmonitor()),
                 label,
             };
-            (choice, CaptureItemTypes::Monitor(monitor))
+            (choice, Source::Monitor(monitor))
         });
     let windows = Window::enumerate()
         .unwrap_or_default()
@@ -209,13 +205,16 @@ fn sources() -> Vec<(Choice, CaptureItemTypes)> {
                 id: window_id(&window)?,
                 label: format!("Window · {title}"),
             };
-            Some((choice, CaptureItemTypes::Window(window)))
+            Some((choice, Source::Window(window)))
         });
     displays.chain(windows).collect()
 }
 
 fn window_id(window: &Window) -> Option<String> {
-    let pid = window.process_id().ok()?;
+    let pid = window
+        .process_id()
+        .ok()
+        .filter(|pid| *pid != std::process::id())?;
     Some(format!("window:{:p}:{pid}", window.as_raw_hwnd()))
 }
 
@@ -453,7 +452,7 @@ impl Selected {
     }
 }
 
-fn graphics_error(error: windows_wgc::core::Error) -> CaptureError {
+fn graphics_error(error: ::windows::core::Error) -> CaptureError {
     if error.code() == E_ACCESSDENIED
         || error.code() == ERROR_ACCESS_DISABLED_BY_POLICY.to_hresult()
     {
@@ -463,7 +462,7 @@ fn graphics_error(error: windows_wgc::core::Error) -> CaptureError {
     }
 }
 
-fn picker_error(error: windows_wgc::core::Error) -> CaptureError {
+fn picker_error(error: ::windows::core::Error) -> CaptureError {
     let code = error.code();
     if code.is_ok() || matches!(code, E_POINTER | E_ABORT) || code == ERROR_CANCELLED.to_hresult() {
         CaptureError::Cancelled
@@ -498,7 +497,7 @@ struct Frames {
 
 fn render_frame(
     frames: &mut Frames,
-    frame: &windows_wgc::Graphics::Capture::Direct3D11CaptureFrame,
+    frame: &::windows::Graphics::Capture::Direct3D11CaptureFrame,
     size: SizeInt32,
     quality: Quality,
 ) -> Result<VideoFrame<I420Buffer>, CaptureError> {
@@ -655,10 +654,10 @@ struct AudioStart {
 }
 
 impl AudioTarget {
-    fn for_item(item: &CaptureItemTypes, playback: Option<Device>) -> Option<Self> {
+    fn for_item(item: &Source, playback: Option<Device>) -> Option<Self> {
         match item {
-            CaptureItemTypes::Monitor(_) => Some(Self::Endpoint(playback.map(|device| device.id))),
-            CaptureItemTypes::Window(window) => Process::for_window(window).map(Self::Application),
+            Source::Monitor(_) => Some(Self::Endpoint(playback.map(|device| device.id))),
+            Source::Window(window) => Process::for_window(window).map(Self::Application),
         }
     }
 

@@ -32,7 +32,7 @@ pub(in super::super) async fn fixture_selection(
         let choice = sources()
             .into_iter()
             .find(|(_, target)| {
-                matches!(target, CaptureItemTypes::Monitor(candidate)
+                matches!(target, Source::Monitor(candidate)
                     if candidate.as_raw_hmonitor() == monitor.as_raw_hmonitor())
             })
             .expect("fixture display in source list")
@@ -63,7 +63,7 @@ pub(in super::super) async fn fixture_selection(
 
 #[test]
 fn windows_capture_distinguishes_denied_permission_from_picker_cancellation() {
-    use windows_wgc::{Win32::Foundation::E_FAIL, core::Error};
+    use ::windows::{Win32::Foundation::E_FAIL, core::Error};
 
     for code in [E_ACCESSDENIED, ERROR_ACCESS_DISABLED_BY_POLICY.to_hresult()] {
         let denied = Error::from_hresult(code);
@@ -88,9 +88,9 @@ fn selected_window_audio_never_becomes_an_endpoint_mix() {
         id: "endpoint".into(),
         name: "Speakers".into(),
     };
-    let window = CaptureItemTypes::Window(Window::from_raw_hwnd(std::ptr::null_mut()));
+    let window = Source::Window(Window::from_raw_hwnd(std::ptr::null_mut()));
     assert!(AudioTarget::for_item(&window, Some(endpoint.clone())).is_none());
-    let display = CaptureItemTypes::Monitor(Monitor::from_raw_hmonitor(std::ptr::null_mut()));
+    let display = Source::Monitor(Monitor::from_raw_hmonitor(std::ptr::null_mut()));
     assert!(matches!(
         AudioTarget::for_item(&display, Some(endpoint)),
         Some(AudioTarget::Endpoint(Some(id))) if id == "endpoint"
