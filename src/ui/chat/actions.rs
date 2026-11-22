@@ -412,6 +412,7 @@ impl Spk {
                             .small()
                             .ghost()
                             .selected(latest_open)
+                            .toggled(latest_open)
                             .track_focus(&self.latest_pin_focus)
                             .tab_stop(true)
                             .flex_1()
@@ -435,7 +436,8 @@ impl Spk {
                                     )
                                     .child(Label::new(format!("{author} · {snippet}")).truncate()),
                             )
-                            .on_click(cx.listener(move |this, _, _, cx| {
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.latest_pin_focus.focus(window, cx);
                                 this.chat_pins = (!latest_open).then_some(PinPanel::Latest);
                                 cx.notify();
                             })),
@@ -446,6 +448,8 @@ impl Spk {
                                 .small()
                                 .ghost()
                                 .selected(all_open)
+                                .toggled(all_open)
+                                .track_focus(&self.all_pins_focus)
                                 .tab_stop(true)
                                 .flex_shrink_0()
                                 .label(format!("+{}", pins.len() - 1))
@@ -454,7 +458,8 @@ impl Spk {
                                 } else {
                                     format!("Show all {} pinned messages", pins.len())
                                 })
-                                .on_click(cx.listener(move |this, _, _, cx| {
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.all_pins_focus.focus(window, cx);
                                     this.chat_pins = (!all_open).then_some(PinPanel::All);
                                     cx.notify();
                                 })),
@@ -478,9 +483,12 @@ impl Spk {
                             let message_id = message.id.clone();
                             let unpin_channel = channel_id.clone();
                             let unpin_id = message_id.clone();
-                            let author = sidebar.message_author(&message.user_id);
                             let preview = if all_open {
-                                pin_snippet(message, sidebar)
+                                let author = sidebar.message_author(&message.user_id);
+                                let snippet = pin_snippet(message, sidebar);
+                                Label::new(format!("{author} · {snippet}"))
+                                    .truncate()
+                                    .into_any_element()
                             } else {
                                 let body = plain_text(&message_markdown(
                                     &message.body,
@@ -488,11 +496,17 @@ impl Spk {
                                     |_| false,
                                     None,
                                 ));
-                                if body.trim().is_empty() {
+                                let body = if body.trim().is_empty() {
                                     pin_snippet(message, sidebar)
                                 } else {
                                     body
-                                }
+                                };
+                                div()
+                                    .id("preview")
+                                    .max_h(px(72.))
+                                    .overflow_y_scroll()
+                                    .child(Label::new(body))
+                                    .into_any_element()
                             };
                             div()
                                 .id(SharedString::from(message.id.clone()))
@@ -500,16 +514,7 @@ impl Spk {
                                 .py_2()
                                 .border_t_1()
                                 .border_color(theme.border)
-                                .when(all_open, |row| {
-                                    row.child(Label::new(author.to_owned()).font_semibold())
-                                })
-                                .child(
-                                    div()
-                                        .id("preview")
-                                        .max_h(px(72.))
-                                        .overflow_y_scroll()
-                                        .child(Label::new(preview)),
-                                )
+                                .child(preview)
                                 .child(
                                     div()
                                         .flex()

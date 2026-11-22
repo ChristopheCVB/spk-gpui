@@ -184,9 +184,14 @@ impl Spk {
         let Some(chat) = chat(&self.view) else {
             return false;
         };
-        if self.chat_pins.is_some() && self.chat_pins_focus.contains_focused(window, cx) {
-            self.chat_pins = None;
-            self.latest_pin_focus.focus(window, cx);
+        if self.chat_pins_focus.contains_focused(window, cx)
+            && let Some(panel) = self.chat_pins.take()
+        {
+            let opener = match panel {
+                PinPanel::Latest => &self.latest_pin_focus,
+                PinPanel::All => &self.all_pins_focus,
+            };
+            opener.focus(window, cx);
             cx.notify();
         } else if chat.gifs.is_some() {
             self.gif_button_focus.focus(window, cx);
