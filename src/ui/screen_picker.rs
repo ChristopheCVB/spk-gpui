@@ -65,7 +65,12 @@ impl Spk {
                 let Some(app) = app.upgrade() else {
                     return dialog;
                 };
-                let Some(report) = app.read(cx).screen_picker_report().cloned() else {
+                let app_state = app.read(cx);
+                let Some(report) = app_state
+                    .screen_picker_report()
+                    .filter(|_| app_state.screen_picker_open)
+                    .cloned()
+                else {
                     return dialog;
                 };
                 let focus_state = (report.attempt, std::mem::discriminant(&report.state));

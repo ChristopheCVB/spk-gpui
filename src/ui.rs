@@ -90,6 +90,8 @@ pub(super) struct Spk {
     quick_switcher: Option<WeakEntity<gpui_kit::component::command::CommandState>>,
     video_stage: video::VideoStage,
     screen_picker_open: bool,
+    screen_sidebar_focus: FocusHandle,
+    screen_channel_focus: FocusHandle,
     #[cfg(windows)]
     windows_screen_picker: Option<u64>,
     #[cfg(windows)]
@@ -414,6 +416,8 @@ impl Spk {
             quick_switcher: None,
             video_stage: video::VideoStage::default(),
             screen_picker_open: false,
+            screen_sidebar_focus: cx.focus_handle(),
+            screen_channel_focus: cx.focus_handle(),
             #[cfg(windows)]
             windows_screen_picker: None,
             #[cfg(windows)]

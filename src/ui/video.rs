@@ -317,12 +317,18 @@ impl Spk {
         let (label, command) = screen_share_action(call);
         let active = !matches!(command, Command::OpenScreenShare);
         let app = cx.weak_entity();
+        let focus = if location == VoiceControls::Session {
+            self.screen_sidebar_focus.clone()
+        } else {
+            self.screen_channel_focus.clone()
+        };
         VoiceButtonGroup::new(
             "screen-controls",
             voice_shortcut_tooltip(
                 voice_button("screen-share", IconName::Monitor, label, location)
                     .selected(active)
-                    .on_click(cx.listener(move |app, _, _, cx| {
+                    .track_focus(&focus)
+                    .on_click(cx.listener(move |app, _, window, cx| {
                         let View::SignedIn(sidebar) = &app.view else {
                             return;
                         };
@@ -331,6 +337,7 @@ impl Spk {
                             .as_ref()
                             .filter(|call| call.is_participating())
                         {
+                            focus.focus(window, cx);
                             app.send(screen_share_action(call).1, None, cx);
                         }
                     })),
