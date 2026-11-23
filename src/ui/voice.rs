@@ -15,8 +15,39 @@ use gpui_kit::component::{
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum VoiceControls {
     Profile,
+    Session,
     Channel,
     BottomBar,
+}
+
+impl VoiceControls {
+    pub(super) fn compact(self) -> bool {
+        self != Self::Channel
+    }
+}
+
+pub(super) fn voice_action_button(
+    id: &'static str,
+    icon: impl Into<Icon>,
+    label: impl Into<SharedString>,
+    location: VoiceControls,
+) -> Button {
+    let label = label.into();
+    tool_button(id, icon, label.clone()).when(!location.compact(), |button| button.label(label))
+}
+
+pub(super) fn voice_options_button(label: impl Into<SharedString>, open: bool) -> Button {
+    tool_button(
+        "options",
+        if open {
+            IconName::ChevronDown
+        } else {
+            IconName::ChevronUp
+        },
+        label,
+    )
+    .w(px(18.0))
+    .px_0()
 }
 
 fn device_label(kind: DeviceKind) -> &'static str {
@@ -66,19 +97,21 @@ impl Spk {
         } else {
             "Mute"
         };
-        let compact = location != VoiceControls::Channel;
         let theme = cx.theme();
 
         div()
             .id(match location {
                 VoiceControls::Profile => "profile-voice-controls",
+                VoiceControls::Session => "session-voice-controls",
                 VoiceControls::Channel => "room-voice-controls",
                 VoiceControls::BottomBar => "bottom-bar-voice-controls",
             })
             .flex()
             .items_center()
             .gap_1()
-            .when(compact, |controls| controls.flex_wrap().max_w_full())
+            .when(location == VoiceControls::BottomBar, |controls| {
+                controls.flex_wrap().max_w_full()
+            })
             .children(
                 [
                     (
@@ -114,7 +147,7 @@ impl Spk {
                         .flex()
                         .items_center()
                         .child(
-                            tool_button(
+                            voice_action_button(
                                 "toggle",
                                 themed_icon(
                                     icon,
@@ -122,20 +155,10 @@ impl Spk {
                                     16.0,
                                 ),
                                 label,
+                                location,
                             )
-                            .when(!compact, |button| button.label(label))
                             .when_some(binding, |button, binding| {
-                                button.tooltip(format!("{label} ({})", binding.chord)).when(
-                                    location == VoiceControls::Profile,
-                                    |button| {
-                                        button.child(
-                                            gpui_kit::component::kbd::Kbd::new(
-                                                binding.chord.keystroke(),
-                                            )
-                                            .outline(),
-                                        )
-                                    },
-                                )
+                                button.tooltip(format!("{label} ({})", binding.chord))
                             })
                             .on_click(
                                 cx.listener(move |this, _, _, cx| this.voice_action(action, cx)),
@@ -148,19 +171,7 @@ impl Spk {
                                 .anchor(Anchor::BottomRight)
                                 .w(px(300.0))
                                 .open(open)
-                                .trigger(
-                                    tool_button(
-                                        "devices",
-                                        if open {
-                                            IconName::ChevronDown
-                                        } else {
-                                            IconName::ChevronUp
-                                        },
-                                        picker_label,
-                                    )
-                                    .w(px(18.0))
-                                    .px_0(),
-                                )
+                                .trigger(voice_options_button(picker_label, open))
                                 .on_open_change(move |open, _, cx| {
                                     let _ = app.update(cx, |app, cx| {
                                         if *open {
@@ -221,13 +232,17 @@ impl Spk {
             )
     }
 
-    pub(super) fn voice_media_buttons(&self, labeled: bool, cx: &Context<Self>) -> [Button; 2] {
+    pub(super) fn voice_media_buttons(
+        &self,
+        location: VoiceControls,
+        cx: &Context<Self>,
+    ) -> [Button; 2] {
         [
-            tool_button("radio", IconName::Radio, "Channel Radio")
-                .when(labeled, |button| button.label("Radio"))
+            voice_action_button("radio", IconName::Radio, "Radio", location)
+                .accessibility_label("Channel Radio")
+                .tooltip("Channel Radio")
                 .on_click(cx.listener(|this, _, window, cx| this.open_radio(window, cx))),
-            tool_button("soundboard", IconName::Megaphone, "Soundboard")
-                .when(labeled, |button| button.label("Soundboard"))
+            voice_action_button("soundboard", IconName::Megaphone, "Soundboard", location)
                 .on_click(cx.listener(|this, _, window, cx| this.open_soundboard(window, cx))),
         ]
     }
@@ -616,15 +631,40 @@ fn device_status(active: Option<&Device>, preferred: Option<&Device>, list: &Dev
 }
 
 pub(super) fn connection_diagnostics(cx: &Context<Spk>) -> Popover {
+    connection_diagnostics_popover(
+        tool_button(
+            "voice-connection-diagnostics",
+            IconName::Activity,
+            "Voice connection diagnostics",
+        ),
+        cx,
+    )
+}
+
+pub(super) fn connection_diagnostics_with_status(
+    status: &'static str,
+    cx: &Context<Spk>,
+) -> Popover {
+    connection_diagnostics_popover(
+        tool_button(
+            "voice-connection-status",
+            IconName::Activity,
+            format!("{status} Voice connection diagnostics"),
+        )
+        .label(status)
+        .xsmall()
+        .px_0()
+        .text_color(cx.theme().muted_foreground),
+        cx,
+    )
+}
+
+fn connection_diagnostics_popover(trigger: Button, cx: &Context<Spk>) -> Popover {
     let app = cx.weak_entity();
     Popover::new("voice-connection")
         .anchor(Anchor::BottomRight)
         .w(px(300.0))
-        .trigger(tool_button(
-            "voice-connection-diagnostics",
-            IconName::Activity,
-            "Voice connection diagnostics",
-        ))
+        .trigger(trigger)
         .content(move |_, _, cx| {
             let Some(app) = app.upgrade() else {
                 return div();

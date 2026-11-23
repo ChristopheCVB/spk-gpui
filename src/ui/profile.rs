@@ -17,33 +17,89 @@ pub(super) fn user_status_picker(
     selected: UserStatus,
     app: WeakEntity<Spk>,
 ) -> impl IntoElement {
-    Button::new(id)
-        .small()
-        .tab_stop(true)
-        .ghost()
-        .label(selected.label())
-        .icon(IconName::ChevronDown)
-        .accessibility_label(format!("Status, {}", selected.label()))
-        .dropdown_menu(move |mut menu, _, _| {
-            for status in [
-                UserStatus::Online,
-                UserStatus::Away,
-                UserStatus::Busy,
-                UserStatus::Invisible,
-            ] {
-                let app = app.clone();
-                menu = menu.item(
-                    PopupMenuItem::new(status.label())
-                        .checked(status == selected)
-                        .on_click(move |_, _, cx| {
-                            let _ = app.update(cx, |app, cx| {
-                                app.send(Command::SetUserStatus(status), None, cx);
-                            });
-                        }),
-                );
-            }
-            menu
-        })
+    user_status_menu(
+        Button::new(id)
+            .small()
+            .tab_stop(true)
+            .ghost()
+            .label(selected.label())
+            .icon(IconName::ChevronDown)
+            .accessibility_label(format!("Status, {}", selected.label())),
+        selected,
+        Anchor::TopLeft,
+        app,
+    )
+}
+
+pub(super) fn profile_status_avatar(sidebar: &Sidebar, cx: &Context<Spk>) -> impl IntoElement {
+    let name = sidebar.profile.name();
+    let color = match sidebar.user_status {
+        UserStatus::Online => cx.theme().success,
+        UserStatus::Away => cx.theme().warning,
+        UserStatus::Busy => cx.theme().danger,
+        UserStatus::Invisible => cx.theme().muted_foreground,
+    };
+    let avatar = div()
+        .relative()
+        .child(profile_avatar(
+            Avatar::new().name(name.to_owned()).small(),
+            sidebar.avatar(sidebar.profile.id.as_deref()),
+            28.0,
+            false,
+            cx,
+        ))
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .right_0()
+                .size(px(8.0))
+                .rounded_full()
+                .border_1()
+                .border_color(cx.theme().secondary)
+                .bg(color),
+        );
+    user_status_menu(
+        Button::new("sidebar-status")
+            .ghost()
+            .tab_stop(true)
+            .size(px(32.0))
+            .px_0()
+            .accessibility_label(format!("User Presence, {}", sidebar.user_status.label()))
+            .tooltip("Change User Presence")
+            .child(avatar),
+        sidebar.user_status,
+        Anchor::BottomLeft,
+        cx.weak_entity(),
+    )
+}
+
+fn user_status_menu(
+    trigger: Button,
+    selected: UserStatus,
+    anchor: Anchor,
+    app: WeakEntity<Spk>,
+) -> impl IntoElement {
+    trigger.dropdown_menu_with_anchor(anchor, move |mut menu, _, _| {
+        for status in [
+            UserStatus::Online,
+            UserStatus::Away,
+            UserStatus::Busy,
+            UserStatus::Invisible,
+        ] {
+            let app = app.clone();
+            menu = menu.item(
+                PopupMenuItem::new(status.label())
+                    .checked(status == selected)
+                    .on_click(move |_, _, cx| {
+                        let _ = app.update(cx, |app, cx| {
+                            app.send(Command::SetUserStatus(status), None, cx);
+                        });
+                    }),
+            );
+        }
+        menu
+    })
 }
 
 fn user_presence_label(status: UserPresence, cx: &App) -> Label {

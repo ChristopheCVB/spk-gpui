@@ -18,6 +18,7 @@ use crate::{
 };
 
 pub(super) const SIDEBAR_WIDTH: Pixels = px(288.0);
+const WIDE_VOICE_SESSION_WIDTH: Pixels = px(320.0);
 
 pub(super) fn wide_workspace(window: &Window) -> bool {
     let padding = window_paddings(window);
@@ -89,7 +90,8 @@ impl Spk {
                     Some((
                         this.navigation(sidebar, this.selected_voice_destination(sidebar), cx)
                             .into_any_element(),
-                        this.navigation_footer(sidebar, cx).into_any_element(),
+                        this.navigation_footer(sidebar, SIDEBAR_WIDTH, cx)
+                            .into_any_element(),
                     ))
                 });
                 let app = app.clone();
@@ -215,12 +217,11 @@ impl Spk {
                         .bg(theme.sidebar)
                         .text_color(theme.sidebar_foreground)
                         .child(self.navigation(sidebar, selected_channel, cx))
-                        .child(
-                            div()
-                                .px_2()
-                                .pb_2()
-                                .child(self.navigation_footer(sidebar, cx)),
-                        )
+                        .child(div().px_2().pb_2().child(self.navigation_footer(
+                            sidebar,
+                            self.sidebar_width,
+                            cx,
+                        )))
                         .child(
                             resize_handle("sidebar-edge", Axis::Horizontal)
                                 .inside(HandleEdge::Trailing)
@@ -356,11 +357,14 @@ impl Spk {
                             && !self.sidebar_drawer_open
                             && !self.video_stage.fullscreen,
                         |area| {
-                            area.children(
-                                sidebar.voice.as_ref().map(|call| {
-                                    self.persistent_voice_session(sidebar, call, true, cx)
-                                }),
-                            )
+                            area.children(sidebar.voice.as_ref().and_then(|call| {
+                                let stage_has_controls = chat.is_none()
+                                    && call.is_participating()
+                                    && selected_channel
+                                        .is_some_and(|channel| channel.id == call.channel_id);
+                                (!stage_has_controls)
+                                    .then(|| self.persistent_voice_session(sidebar, call, None, cx))
+                            }))
                         },
                     ),
             )
@@ -531,7 +535,12 @@ impl Spk {
             })
     }
 
-    fn navigation_footer(&self, sidebar: &Sidebar, cx: &Context<Self>) -> impl IntoElement {
+    fn navigation_footer(
+        &self,
+        sidebar: &Sidebar,
+        width: Pixels,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
         let theme = cx.theme();
         let name = sidebar.profile.name();
         div()
@@ -544,40 +553,39 @@ impl Spk {
                 sidebar
                     .voice
                     .as_ref()
-                    .map(|call| self.persistent_voice_session(sidebar, call, false, cx)),
+                    .map(|call| self.persistent_voice_session(sidebar, call, Some(width), cx)),
             )
             .child(
                 div()
+                    .id("profile-card")
                     .flex()
-                    .flex_wrap()
                     .items_center()
                     .gap_1()
                     .px_2()
                     .py_2()
                     .rounded_lg()
                     .bg(theme.secondary)
-                    .child(profile_avatar(
-                        Avatar::new().name(name.to_owned()).small(),
-                        sidebar.avatar(sidebar.profile.id.as_deref()),
-                        28.0,
-                        false,
-                        cx,
-                    ))
+                    .child(profile::profile_status_avatar(sidebar, cx))
                     .child(
                         div()
                             .flex()
                             .flex_col()
                             .items_start()
                             .flex_1()
-                            .min_w(px(48.0))
-                            .ml_1()
-                            .child(Label::new(name.to_owned()).font_semibold().truncate())
-                            .child(profile::user_status_picker(
-                                "sidebar-status",
-                                sidebar.user_status,
-                                cx.weak_entity(),
-                            )),
+                            .min_w_0()
+                            .child(
+                                Label::new(name.to_owned())
+                                    .w_full()
+                                    .font_semibold()
+                                    .truncate(),
+                            )
+                            .child(
+                                Label::new(sidebar.user_status.label())
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground),
+                            ),
                     )
+                    .child(self.voice_controls(sidebar, VoiceControls::Profile, cx))
                     .child(
                         tool_button("settings", IconName::Settings, "Settings")
                             .track_focus(&self.settings_button_focus)
@@ -585,8 +593,7 @@ impl Spk {
                                 this.settings_button_focus.focus(window, cx);
                                 this.open_settings(window, cx);
                             })),
-                    )
-                    .child(self.voice_controls(sidebar, VoiceControls::Profile, cx)),
+                    ),
             )
     }
 
@@ -594,66 +601,106 @@ impl Spk {
         &self,
         sidebar: &Sidebar,
         call: &VoiceView,
-        bottom_bar: bool,
+        sidebar_width: Option<Pixels>,
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
+        let location = if sidebar_width.is_some() {
+            VoiceControls::Session
+        } else {
+            VoiceControls::BottomBar
+        };
+        let bottom_bar = location == VoiceControls::BottomBar;
+        let stacked = sidebar_width.is_some_and(|width| width < WIDE_VOICE_SESSION_WIDTH);
         let switching = sidebar.switching_to().is_some();
+        let status = call_status(call, switching);
         let id = sidebar
             .switching_to()
             .unwrap_or(&call.channel_id)
             .to_owned();
         let voice_channel_name = voice_channels(sidebar)
             .find(|channel| channel.id == id)
-            .map_or("Voice", channel_name);
+            .map_or("Voice", channel_name)
+            .to_owned();
+        let channel_color = if matches!(call.status, Status::Connected | Status::ListenOnly) {
+            theme.success
+        } else {
+            theme.muted_foreground
+        };
         div()
             .id("voice-session")
             .flex()
             .flex_shrink_0()
             .items_center()
-            .gap_2()
+            .gap_1()
             .p_2()
             .bg(theme.secondary)
             .when(bottom_bar, |bar| {
                 bar.border_t_1().border_color(theme.border)
             })
             .when(!bottom_bar, |card| card.rounded_lg())
-            .child(
-                tool_button(
-                    "current-call",
-                    IconName::Volume2,
-                    "Show current voice channel",
-                )
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.close_sidebar_drawer(window, cx);
-                    this.select_voice_channel(&id, cx);
-                })),
-            )
+            .when(stacked, |card| card.flex_col())
             .child(
                 div()
                     .flex()
-                    .flex_col()
-                    .flex_1()
                     .min_w_0()
+                    .when(stacked, |details| {
+                        details.w_full().items_center().justify_between()
+                    })
+                    .when(!stacked, |details| {
+                        details.flex_1().flex_col().items_start()
+                    })
                     .child(
-                        Label::new(voice_channel_name.to_owned())
-                            .font_semibold()
-                            .truncate(),
+                        Button::new("current-call")
+                            .ghost()
+                            .small()
+                            .tab_stop(true)
+                            .accessibility_label(format!("Show {voice_channel_name} voice channel"))
+                            .min_w_0()
+                            .max_w_full()
+                            .flex_shrink_1()
+                            .justify_start()
+                            .px_0()
+                            .icon(themed_icon(IconName::Volume2, channel_color, 16.0))
+                            .child(
+                                Label::new(voice_channel_name)
+                                    .min_w_0()
+                                    .font_semibold()
+                                    .truncate(),
+                            )
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.close_sidebar_drawer(window, cx);
+                                this.select_voice_channel(&id, cx);
+                            })),
                     )
-                    .child(
-                        Label::new(call_status(call, switching))
-                            .text_xs()
-                            .truncate()
-                            .text_color(theme.muted_foreground),
-                    ),
+                    .child(super::voice::connection_diagnostics_with_status(status, cx)),
             )
-            .when(call.is_participating(), |card| {
-                card.children(self.voice_media_buttons(false, cx))
-            })
-            .when(bottom_bar && call.is_participating(), |bar| {
-                bar.child(self.voice_controls(sidebar, VoiceControls::BottomBar, cx))
-            })
-            .children(self.leave_voice("persistent-voice-leave", call, switching, bottom_bar, cx))
+            .when(
+                call.is_participating() || call.status == Status::Joining || switching,
+                |card| {
+                    card.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .gap_1()
+                            .when(call.is_participating(), |actions| {
+                                actions
+                                    .when(bottom_bar, |bar| {
+                                        bar.child(self.voice_controls(sidebar, location, cx))
+                                    })
+                                    .children(self.voice_media_buttons(location, cx))
+                            })
+                            .children(self.leave_voice(
+                                "persistent-voice-leave",
+                                call,
+                                switching,
+                                bottom_bar,
+                                cx,
+                            )),
+                    )
+                },
+            )
     }
 
     fn channel_row(
@@ -989,7 +1036,12 @@ impl Spk {
                                             ))
                                             .child(self.camera_controls(sidebar, cx))
                                             .child(self.screen_button(call, cx))
-                                            .children(self.voice_media_buttons(true, cx))
+                                            .children(
+                                                self.voice_media_buttons(
+                                                    VoiceControls::Channel,
+                                                    cx,
+                                                ),
+                                            )
                                             .child(super::voice::connection_diagnostics(cx))
                                     })
                                     .children(departing.and_then(|call| {
