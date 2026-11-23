@@ -150,19 +150,22 @@ fn capture_preview(
             match pool.TryGetNextFrame() {
                 Ok(frame) => {
                     let content = frame.ContentSize().ok()?;
-                    let snapshot = (content.Width >= 2 && content.Height >= 2).then(|| {
-                        render_frame(
-                            frames,
-                            &frame,
-                            content,
-                            Quality {
-                                height: 144,
-                                fps: 5,
-                            },
-                        )
-                    });
+                    // The staging texture must match the frame pool texture, even after a resize.
+                    if content != size {
+                        let _ = frame.Close();
+                        continue;
+                    }
+                    let snapshot = render_frame(
+                        frames,
+                        &frame,
+                        content,
+                        Quality {
+                            height: 144,
+                            fps: 5,
+                        },
+                    );
                     let _ = frame.Close();
-                    let snapshot = snapshot?.ok()?;
+                    let snapshot = snapshot.ok()?;
                     let image = VideoFrameSlot::default();
                     image.update(&snapshot, false);
                     return image.latest();
@@ -179,18 +182,31 @@ fn capture_preview(
     result
 }
 
-pub(crate) async fn pick_system_source(hwnd: isize) -> Result<GraphicsCaptureItem, CaptureError> {
+pub(crate) async fn pick_system_source(
+    hwnd: isize,
+    cancelled: &mut tokio::sync::oneshot::Receiver<()>,
+) -> Result<GraphicsCaptureItem, CaptureError> {
+    if !matches!(
+        cancelled.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ) {
+        return Err(CaptureError::Cancelled);
+    }
     let picker = GraphicsCapturePicker::new().map_err(graphics_error)?;
     let owner = picker
         .cast::<IInitializeWithWindow>()
         .map_err(graphics_error)?;
     // GPUI supplies the live owner HWND and runs this operation on its OLE-initialized UI thread.
     unsafe { owner.Initialize(HWND(hwnd as *mut _)) }.map_err(graphics_error)?;
-    picker
-        .PickSingleItemAsync()
-        .map_err(graphics_error)?
-        .await
-        .map_err(picker_error)
+    let operation = picker.PickSingleItemAsync().map_err(graphics_error)?;
+    tokio::select! {
+        biased;
+        _ = cancelled => {
+            let _ = operation.Cancel();
+            Err(CaptureError::Cancelled)
+        }
+        result = operation.clone() => result.map_err(picker_error),
+    }
 }
 
 pub(super) async fn select_system(item: GraphicsCaptureItem) -> Result<Selection, CaptureError> {

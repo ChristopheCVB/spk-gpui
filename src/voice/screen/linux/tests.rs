@@ -206,10 +206,15 @@ async fn wayland_window_publishes_video_only_and_preserves_voice() {
     let stop = std::env::var_os("SPK_TEST_WAYLAND_SCREEN_STOP").unwrap();
     let lose_source = || std::fs::write(&stop, []).unwrap();
     for end in [None, Some(&lose_source as &dyn Fn())] {
+        let selection = async {
+            let selection = pick(Some(output.clone())).await?;
+            assert_eq!(selection.label, "Screen Share · 640 × 480");
+            Ok(selection)
+        };
         check_video_only_share(
             &publisher,
             &mut events,
-            (pick(Some(output.clone())), (640, 480), None, true),
+            (selection, (640, 480), None, true),
             end,
         )
         .await;

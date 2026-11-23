@@ -41,14 +41,13 @@ pending = {}
 closed_source = False
 source_selections = 0
 source = os.environ.get("SPK_TEST_WAYLAND_SOURCE")
-source_type = 1 if source == "display" else 2
 node = int(os.environ["SPK_TEST_PIPEWIRE_NODE"]) if source else None
 rejections = iter([1, 2, "denied", None])
 available_types = 3 if source else 2
 
 
 def property_value(_connection, _sender, _path, _interface, name):
-    return GLib.Variant("u", {"version": 4, "AvailableSourceTypes": available_types, "AvailableCursorModes": 3}[name])
+    return GLib.Variant("u", {"version": 2 if source else 4, "AvailableSourceTypes": available_types, "AvailableCursorModes": 3}[name])
 
 
 def link_source():
@@ -124,9 +123,11 @@ def method_call(_connection, sender, path, _interface, method, parameters, invoc
             invocation.return_dbus_error("org.freedesktop.portal.Error.NotAllowed", "Permission denied")
             return
         if status == 0:
+            properties = {"size": GLib.Variant("(ii)", (640, 480))}
+            if source == "display":
+                properties["position"] = GLib.Variant("(ii)", (0, 0))
             response["streams"] = GLib.Variant(
-                "a(ua{sv})", [(node, {"size": GLib.Variant("(ii)", (640, 480)),
-                                     "source_type": GLib.Variant("u", source_type)})]
+                "a(ua{sv})", [(node, properties)]
             )
 
     registration = bus.register_object(handle, request, None, None, None)

@@ -147,8 +147,18 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
         let title = std::env::var("SPK_TEST_SCREEN_WINDOW").unwrap();
         let (selection, size) = macos::fixture_selection(&mode, &title);
         let scope = match mode.as_str() {
-            "display" => AudioScope::PlaybackMix,
-            "window" => AudioScope::Application,
+            "display" => {
+                assert!(
+                    selection
+                        .label
+                        .starts_with(&format!("Display · {} × {} at (", size.0, size.1))
+                );
+                AudioScope::PlaybackMix
+            }
+            "window" => {
+                assert_eq!(selection.label, title);
+                AudioScope::Application
+            }
             _ => panic!("invalid macOS Screen Share fixture mode"),
         };
         assert_eq!(selection.audio, Some(scope));
@@ -179,6 +189,9 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
         .expect("selected display delivers video")
         .unwrap();
         assert_eq!(selected.audio, Some(AudioScope::PlaybackMix));
+        if std::env::var("SPK_TEST_WAYLAND_SOURCE").as_deref() == Ok("display") {
+            assert_eq!(selected.label, "Display · 640 × 480 at (0, 0)");
+        }
         (Some(selected.capture), AudioScope::PlaybackMix)
     } else {
         (native, scope)

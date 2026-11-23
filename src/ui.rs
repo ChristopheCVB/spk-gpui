@@ -90,10 +90,11 @@ pub(super) struct Spk {
     quick_switcher: Option<WeakEntity<gpui_kit::component::command::CommandState>>,
     video_stage: video::VideoStage,
     screen_picker_open: bool,
+    dismissed_screen_picker: Option<u64>,
     screen_sidebar_focus: FocusHandle,
     screen_channel_focus: FocusHandle,
     #[cfg(windows)]
-    windows_screen_picker: Option<u64>,
+    windows_screen_picker: Option<(u64, tokio::sync::oneshot::Sender<()>)>,
     #[cfg(windows)]
     screen_previews: Option<screen_picker::ScreenPreviews>,
     workspace_focus: FocusHandle,
@@ -345,7 +346,7 @@ impl Spk {
                             this.device_picker = None;
                             this.close_sidebar_drawer(window, cx);
                             this.search_panel = None;
-                            window.close_all_dialogs(cx);
+                            this.dismiss_workspace_dialogs(window, cx);
                         }
                         this.focus_account_input(&view, window, cx);
                         this.set_session_view(view, window, cx);
@@ -360,7 +361,7 @@ impl Spk {
                 this.shortcuts.signed_in(false);
                 this.close_sidebar_drawer(window, cx);
                 this.search_panel = None;
-                window.close_all_dialogs(cx);
+                this.dismiss_workspace_dialogs(window, cx);
                 this.set_session_view(
                     View::SignIn {
                         message: Some("The SPK connection stopped. Close and reopen the app."),
@@ -416,6 +417,7 @@ impl Spk {
             quick_switcher: None,
             video_stage: video::VideoStage::default(),
             screen_picker_open: false,
+            dismissed_screen_picker: None,
             screen_sidebar_focus: cx.focus_handle(),
             screen_channel_focus: cx.focus_handle(),
             #[cfg(windows)]

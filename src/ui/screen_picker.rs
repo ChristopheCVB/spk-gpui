@@ -16,7 +16,7 @@ pub(super) struct ScreenPreviews {
 }
 
 impl Spk {
-    fn screen_picker_report(&self) -> Option<&Report> {
+    fn reported_screen_picker(&self) -> Option<&Report> {
         let View::SignedIn(sidebar) = &self.view else {
             return None;
         };
@@ -28,9 +28,63 @@ impl Spk {
             .as_ref()
     }
 
-    pub(super) fn update_screen_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn screen_picker_report(&self) -> Option<&Report> {
+        self.reported_screen_picker()
+            .filter(|report| self.dismissed_screen_picker != Some(report.attempt))
+    }
+
+    pub(super) fn screen_picker_pending(&self) -> bool {
+        self.screen_picker_report().is_some_and(|report| {
+            matches!(
+                report.state,
+                State::LoadingSources | State::Picking | State::Choices(_) | State::Confirm { .. }
+            )
+        })
+    }
+
+    pub(super) fn dismiss_workspace_dialogs(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(report) = self.screen_picker_report()
+            && (self.screen_picker_pending()
+                || self.screen_picker_open && matches!(report.state, State::Ended(_)))
+        {
+            let attempt = report.attempt;
+            self.dismissed_screen_picker = Some(attempt);
+            self.send(Command::StopScreenShare(attempt), None, cx);
+        }
+        self.screen_picker_open = false;
+        self.quick_switcher = None;
         #[cfg(windows)]
-        self.update_screen_previews(window, cx);
+        {
+            self.windows_screen_picker = None;
+            self.update_screen_previews(window, cx);
+        }
+        window.close_all_dialogs(cx);
+    }
+
+    pub(super) fn update_screen_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let reported = self.reported_screen_picker().map(|report| report.attempt);
+        if self.dismissed_screen_picker != reported {
+            self.dismissed_screen_picker = None;
+        }
+        #[cfg(windows)]
+        {
+            if self
+                .windows_screen_picker
+                .as_ref()
+                .is_some_and(|(attempt, _)| {
+                    self.screen_picker_report().is_none_or(|report| {
+                        report.attempt != *attempt || !matches!(report.state, State::Choices(_))
+                    })
+                })
+            {
+                self.windows_screen_picker = None;
+            }
+            self.update_screen_previews(window, cx);
+        }
         let state = self.screen_picker_report().map(|report| &report.state);
         if self.screen_picker_open {
             if !matches!(
@@ -44,10 +98,6 @@ impl Spk {
                 )
             ) {
                 self.screen_picker_open = false;
-                #[cfg(windows)]
-                {
-                    self.windows_screen_picker = None;
-                }
                 if window.has_active_dialog(cx) {
                     window.close_dialog(cx);
                 }
@@ -99,7 +149,7 @@ impl Spk {
             .screen_picker_report()
             .and_then(|report| match &report.state {
                 State::Choices(choices)
-                    if self.windows_screen_picker != Some(report.attempt)
+                    if !self.windows_screen_picker_pending(report.attempt)
                         && !choices.is_empty() =>
                 {
                     Some((report.attempt, choices))
@@ -186,7 +236,7 @@ impl Spk {
             .gap_2()
             .justify_end();
         #[cfg(windows)]
-        let native_pending = app.read(cx).windows_screen_picker == Some(attempt);
+        let native_pending = app.read(cx).windows_screen_picker_pending(attempt);
         #[cfg(windows)]
         let actions = if matches!(report.state, State::Choices(_)) {
             let app = app.downgrade();
@@ -266,14 +316,22 @@ impl Spk {
     }
 
     #[cfg(windows)]
+    fn windows_screen_picker_pending(&self, attempt: u64) -> bool {
+        self.windows_screen_picker
+            .as_ref()
+            .is_some_and(|(active, _)| *active == attempt)
+    }
+
+    #[cfg(windows)]
     fn pick_windows_screen(&mut self, attempt: u64, window: &mut Window, cx: &mut Context<Self>) {
         use crate::voice::screen::{CaptureError, pick_system_source};
         use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-        if self.windows_screen_picker == Some(attempt) {
+        if self.windows_screen_picker_pending(attempt) {
             return;
         }
-        self.windows_screen_picker = Some(attempt);
+        let (cancel, mut cancelled) = tokio::sync::oneshot::channel();
+        self.windows_screen_picker = Some((attempt, cancel));
         self.update_screen_previews(window, cx);
         cx.notify();
         let hwnd = HasWindowHandle::window_handle(window)
@@ -284,11 +342,17 @@ impl Spk {
             });
         cx.spawn(async move |app, cx| {
             let result = match hwnd {
-                Some(hwnd) => pick_system_source(hwnd).await,
+                Some(hwnd) => pick_system_source(hwnd, &mut cancelled).await,
                 None => Err(CaptureError::Unavailable),
             };
+            if !matches!(
+                cancelled.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ) {
+                return;
+            }
             let _ = app.update(cx, |app, cx| {
-                if app.windows_screen_picker == Some(attempt) {
+                if app.windows_screen_picker_pending(attempt) {
                     app.windows_screen_picker = None;
                     app.send(
                         Command::ChooseWindowsScreenSource(attempt, result),

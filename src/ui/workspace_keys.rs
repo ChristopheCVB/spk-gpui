@@ -36,6 +36,9 @@ impl Spk {
             return false;
         }
         if primary && count == 1 && key_name == "k" {
+            if self.screen_picker_open || self.screen_picker_pending() {
+                return false;
+            }
             if window.has_active_dialog(cx) {
                 if self
                     .quick_switcher
@@ -55,7 +58,9 @@ impl Spk {
         }
         let media_shortcut = primary && modifiers.alt && modifiers.shift && count == 3;
         if window.has_active_dialog(cx)
-            && !(self.screen_picker_open && media_shortcut && key_name == "s")
+            && !(media_shortcut
+                && key_name == "s"
+                && (self.screen_picker_open || self.screen_picker_pending()))
         {
             return false;
         }

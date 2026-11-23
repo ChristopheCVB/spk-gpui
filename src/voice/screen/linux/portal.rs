@@ -80,7 +80,12 @@ pub(super) async fn pick(playback: Option<Device>) -> Result<Selection, CaptureE
     };
     let source = stream
         .source_type()
-        .or_else(|| (sources.bits().count_ones() == 1).then_some(sources));
+        .or_else(|| (sources.bits().count_ones() == 1).then_some(sources))
+        .or_else(|| {
+            // Older portals omit source_type but report position only for monitors.
+            (sources.contains(SourceType::MONITOR) && stream.position().is_some())
+                .then_some(SourceType::MONITOR)
+        });
     let label = match source {
         Some(SourceType::MONITOR) => "Display",
         Some(SourceType::WINDOW) => "Window",
@@ -88,6 +93,13 @@ pub(super) async fn pick(playback: Option<Device>) -> Result<Selection, CaptureE
         _ => "Screen Share",
     };
     let display = source == Some(SourceType::MONITOR) && sources.contains(SourceType::MONITOR);
+    let mut label = label.to_owned();
+    if let Some((width, height)) = stream.size() {
+        label.push_str(&format!(" · {width} × {height}"));
+    }
+    if display && let Some((x, y)) = stream.position() {
+        label.push_str(&format!(" at ({x}, {y})"));
+    }
     let remote = timeout(
         PORTAL_TIMEOUT,
         portal.open_pipe_wire_remote(&session.handle, Default::default()),
@@ -110,7 +122,7 @@ pub(super) async fn pick(playback: Option<Device>) -> Result<Selection, CaptureE
         frames: Arc::default(),
         backend: VideoBackend::Wayland(PortalVideo { pipewire, session }),
     };
-    ready_selection(video, label.into(), display, playback).await
+    ready_selection(video, label, display, playback).await
 }
 
 fn portal_error(error: Error) -> CaptureError {

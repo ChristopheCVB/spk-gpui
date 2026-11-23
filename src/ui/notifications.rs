@@ -145,7 +145,7 @@ impl Spk {
         cx: &mut Context<Self>,
     ) {
         if !self.signing_out && matches!(self.view, View::SignedIn(_)) {
-            window.close_all_dialogs(cx);
+            self.dismiss_workspace_dialogs(window, cx);
             self.exit_video_fullscreen(window);
             self.device_picker = None;
             cx.notify();
