@@ -1,4 +1,10 @@
-use super::{voice::device_picker, *};
+use super::{
+    voice::{
+        device_picker,
+        media::{MediaResult, media_results},
+    },
+    *,
+};
 use crate::api::{Connection, SoundboardClip};
 use gpui_kit::component::{
     Disableable,
@@ -10,39 +16,40 @@ struct SoundboardPanel {
     app: Entity<Spk>,
     query: Entity<InputState>,
     volume: Entity<SliderState>,
+    clip_scroll: ScrollHandle,
 }
 
-impl Spk {
-    pub(super) fn open_soundboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let View::SignedIn(sidebar) = &self.view else {
-            return;
-        };
-        let initial = f32::from(sidebar.voice_intent.preferred.soundboard_volume.min(100));
-        self.device_picker = None;
-        let app = cx.entity();
-        let panel = cx.new(|cx: &mut Context<SoundboardPanel>| {
-            cx.observe(&app, |_, _, cx| cx.notify()).detach();
-            let query = cx.new(|cx| InputState::new(window, cx).placeholder("Search sounds"));
-            cx.observe(&query, |_, _, cx| cx.notify()).detach();
-            let volume = cx.new(|_| SliderState::new().max(100.0).default_value(initial));
-            cx.subscribe(&volume, |panel, _, event, cx| {
-                if let SliderEvent::Release(SliderValue::Single(value)) = event {
-                    panel.send(Command::SetSoundboardVolume(*value as u8), cx);
-                }
-                cx.notify();
-            })
-            .detach();
-            SoundboardPanel { app, query, volume }
+pub(super) fn soundboard_panel(
+    app: Entity<Spk>,
+    initial: u8,
+    window: &mut Window,
+    cx: &mut App,
+) -> (AnyView, FocusHandle) {
+    let panel = cx.new(|cx: &mut Context<SoundboardPanel>| {
+        cx.observe(&app, |_, _, cx| cx.notify()).detach();
+        let query = cx.new(|cx| InputState::new(window, cx).placeholder("Search sounds"));
+        cx.observe(&query, |_, _, cx| cx.notify()).detach();
+        let volume = cx.new(|_| {
+            SliderState::new()
+                .max(100.0)
+                .default_value(f32::from(initial))
         });
-        self.send(Command::LoadSoundboard, None, cx);
-        window.open_dialog(cx, move |dialog, _, _| {
-            dialog
-                .centered()
-                .width(px(420.0))
-                .title("Soundboard")
-                .child(panel.clone())
-        });
-    }
+        cx.subscribe(&volume, |panel, _, event, cx| {
+            if let SliderEvent::Release(SliderValue::Single(value)) = event {
+                panel.send(Command::SetSoundboardVolume(*value as u8), cx);
+            }
+            cx.notify();
+        })
+        .detach();
+        SoundboardPanel {
+            app,
+            query,
+            volume,
+            clip_scroll: ScrollHandle::new(),
+        }
+    });
+    let focus = panel.read(cx).query.focus_handle(cx);
+    (panel.into(), focus)
 }
 
 impl SoundboardPanel {
@@ -50,42 +57,38 @@ impl SoundboardPanel {
         self.app.update(cx, |app, cx| app.send(command, None, cx));
     }
 
-    fn clip_row(clip: &SoundboardClip, can_play: bool, cx: &Context<Self>) -> impl IntoElement {
+    fn clip_tile(clip: &SoundboardClip, can_play: bool, cx: &Context<Self>) -> impl IntoElement {
         let play_id = clip.id.clone();
         let preview_id = clip.id.clone();
-        let theme = cx.theme();
-        let icon = clip_icon(&clip.icon);
         div()
-            .id(SharedString::from(clip.id.clone()))
-            .flex()
-            .items_center()
-            .gap_2()
+            .relative()
+            .min_w_0()
             .child(
                 Button::new("play")
-                    .ghost()
-                    .flex_1()
-                    .min_w_0()
+                    .w_full()
+                    .h(px(64.0))
+                    .px_1()
                     .tab_stop(true)
                     .disabled(!can_play)
                     .accessibility_label(format!("Play {} for everyone", clip.name))
+                    .tooltip(clip.name.clone())
                     .on_click(cx.listener(move |panel, _, _, cx| {
                         panel.send(Command::PlaySound(play_id.clone()), cx);
                     }))
                     .child(
                         div()
                             .w_full()
+                            .min_w_0()
                             .flex()
+                            .flex_col()
                             .items_center()
-                            .gap_2()
-                            .child(icon)
-                            .child(Label::new(clip.name.clone()).truncate().flex_1())
+                            .gap_1()
+                            .child(clip_icon(&clip.icon))
                             .child(
-                                Label::new(format!(
-                                    "{:.1} s",
-                                    f64::from(clip.duration_ms) / 1000.0
-                                ))
-                                .text_xs()
-                                .text_color(theme.muted_foreground),
+                                Label::new(clip.name.clone())
+                                    .text_xs()
+                                    .truncate()
+                                    .max_w_full(),
                             ),
                     ),
             )
@@ -95,6 +98,11 @@ impl SoundboardPanel {
                     IconName::Headphones,
                     format!("Preview {} (only you)", clip.name),
                 )
+                .absolute()
+                .top_0()
+                .right_0()
+                .size(px(22.0))
+                .p_0()
                 .on_click(cx.listener(move |panel, _, _, cx| {
                     panel.send(Command::PreviewSound(preview_id.clone()), cx);
                 })),
@@ -103,7 +111,7 @@ impl SoundboardPanel {
 }
 
 impl Render for SoundboardPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let View::SignedIn(sidebar) = &self.app.read(cx).view else {
             return div();
         };
@@ -141,7 +149,11 @@ impl Render for SoundboardPanel {
             .flex()
             .flex_col()
             .gap_3()
-            .child(Input::new(&self.query).aria_label("Search sounds"))
+            .child(
+                Input::new(&self.query)
+                    .prefix(themed_icon(IconName::Search, theme.muted_foreground, 16.0))
+                    .aria_label("Search sounds"),
+            )
             .children(status.map(|message| Label::new(message).text_color(theme.muted_foreground)))
             .children(board.directory_error.map(|error| {
                 div()
@@ -171,19 +183,26 @@ impl Render for SoundboardPanel {
                     .playback_error
                     .map(|error| Label::new(error).text_color(theme.danger)),
             )
-            .child(
+            .child(media_results(
+                &self.clip_scroll,
                 div()
                     .id("clips")
-                    .flex()
-                    .flex_col()
-                    .max_h(px(180.0))
-                    .overflow_y_scroll()
+                    .grid()
+                    .grid_cols(3)
+                    .gap_2()
+                    .max_h((window.viewport_size().height - px(295.0)).min(px(240.0)))
                     .children(
                         shown
                             .into_iter()
-                            .map(|clip| Self::clip_row(clip, can_play, cx)),
+                            .enumerate()
+                            .map(|(index, clip)| MediaResult {
+                                id: clip.id.clone().into(),
+                                index,
+                                scroll: self.clip_scroll.clone(),
+                                content: Self::clip_tile(clip, can_play, cx).into_any_element(),
+                            }),
                     ),
-            )
+            ))
             .child(
                 Switch::new("soundboard-enabled")
                     .label("Hear soundboard sounds")

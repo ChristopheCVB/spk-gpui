@@ -1,3 +1,5 @@
+pub(super) mod media;
+
 use super::*;
 use crate::{
     session::{View, VoiceProcessingSetting},
@@ -230,21 +232,6 @@ impl Spk {
                         })
                 }),
             )
-    }
-
-    pub(super) fn voice_media_buttons(
-        &self,
-        location: VoiceControls,
-        cx: &Context<Self>,
-    ) -> [Button; 2] {
-        [
-            voice_action_button("radio", IconName::Radio, "Radio", location)
-                .accessibility_label("Channel Radio")
-                .tooltip("Channel Radio")
-                .on_click(cx.listener(|this, _, window, cx| this.open_radio(window, cx))),
-            voice_action_button("soundboard", IconName::Megaphone, "Soundboard", location)
-                .on_click(cx.listener(|this, _, window, cx| this.open_soundboard(window, cx))),
-        ]
     }
 }
 
