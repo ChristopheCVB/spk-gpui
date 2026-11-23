@@ -36,7 +36,7 @@ impl Spk {
             return false;
         }
         if primary && count == 1 && key_name == "k" {
-            if self.screen_picker_open || self.screen_picker_pending() {
+            if self.screen_picker_focus.is_some() || self.screen_picker_pending() {
                 return false;
             }
             if window.has_active_dialog(cx) {
@@ -60,7 +60,7 @@ impl Spk {
         if window.has_active_dialog(cx)
             && !(media_shortcut
                 && key_name == "s"
-                && (self.screen_picker_open || self.screen_picker_pending()))
+                && (self.screen_picker_focus.is_some() || self.screen_picker_pending()))
         {
             return false;
         }

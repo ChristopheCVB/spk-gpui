@@ -378,7 +378,7 @@ impl Spk {
             .px_2()
             .pb_2();
         Some(match &report.state {
-            ScreenState::Picking if !self.screen_picker_open => {
+            ScreenState::Picking if self.screen_picker_focus.is_none() => {
                 panel.child(Label::new("Choose a display or window…"))
             }
             ScreenState::Starting => panel.child(Label::new("Starting Screen Share…")),
@@ -410,7 +410,7 @@ impl Spk {
                     })
                     .text_xs(),
                 ),
-            ScreenState::Ended(message) if !self.screen_picker_open => {
+            ScreenState::Ended(message) if self.screen_picker_focus.is_none() => {
                 panel.child(Label::new(*message))
             }
             _ => return None,

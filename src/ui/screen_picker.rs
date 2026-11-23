@@ -49,13 +49,13 @@ impl Spk {
     ) {
         if let Some(report) = self.screen_picker_report()
             && (self.screen_picker_pending()
-                || self.screen_picker_open && matches!(report.state, State::Ended(_)))
+                || self.screen_picker_focus.is_some() && matches!(report.state, State::Ended(_)))
         {
             let attempt = report.attempt;
             self.dismissed_screen_picker = Some(attempt);
             self.send(Command::StopScreenShare(attempt), None, cx);
         }
-        self.screen_picker_open = false;
+        self.screen_picker_focus = None;
         self.quick_switcher = None;
         #[cfg(windows)]
         {
@@ -86,7 +86,7 @@ impl Spk {
             self.update_screen_previews(window, cx);
         }
         let state = self.screen_picker_report().map(|report| &report.state);
-        if self.screen_picker_open {
+        if self.screen_picker_focus.is_some() {
             if !matches!(
                 state,
                 Some(
@@ -97,7 +97,7 @@ impl Spk {
                         | State::Ended(_)
                 )
             ) {
-                self.screen_picker_open = false;
+                self.screen_picker_focus = None;
                 if window.has_active_dialog(cx) {
                     window.close_dialog(cx);
                 }
@@ -106,9 +106,9 @@ impl Spk {
             state,
             Some(State::LoadingSources | State::Choices(_) | State::Confirm { .. })
         ) {
-            self.screen_picker_open = true;
             let app = cx.weak_entity();
             let cancel_focus = cx.focus_handle();
+            self.screen_picker_focus = Some(cancel_focus.clone());
             let primary_focus = cx.focus_handle();
             let focused_state = Cell::new(None);
             window.open_dialog(cx, move |dialog, window, cx| {
@@ -118,7 +118,7 @@ impl Spk {
                 let app_state = app.read(cx);
                 let Some(report) = app_state
                     .screen_picker_report()
-                    .filter(|_| app_state.screen_picker_open)
+                    .filter(|_| app_state.screen_picker_focus.as_ref() == Some(&cancel_focus))
                     .cloned()
                 else {
                     return dialog;
