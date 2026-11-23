@@ -97,6 +97,11 @@ impl Spk {
             .title("Share Screen")
             .width(px(520.).min(window.viewport_size().width - px(32.)))
             .overlay_closable(false)
+            .on_ok(|_, _, cx| {
+                // Let the focused tab or button handle Enter.
+                cx.propagate();
+                false
+            })
             .on_cancel(move |_, _, cx| {
                 let _ = cancel.update(cx, |app, cx| {
                     app.send(Command::StopScreenShare(attempt), None, cx);
