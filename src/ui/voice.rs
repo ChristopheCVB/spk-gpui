@@ -663,7 +663,7 @@ fn connection_diagnostics_popover(trigger: Button, cx: &Context<Spk>) -> Popover
     let app = cx.weak_entity();
     Popover::new("voice-connection")
         .anchor(Anchor::BottomRight)
-        .w(px(300.0))
+        .w(px(320.0))
         .trigger(trigger)
         .content(move |_, _, cx| {
             let Some(app) = app.upgrade() else {

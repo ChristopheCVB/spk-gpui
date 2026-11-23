@@ -651,7 +651,7 @@ impl Spk {
                     .flex()
                     .min_w_0()
                     .when(stacked, |details| {
-                        details.w_full().items_center().justify_between()
+                        details.w_full().items_center().justify_between().gap_1()
                     })
                     .when(!stacked, |details| {
                         details.flex_1().flex_col().items_start()
