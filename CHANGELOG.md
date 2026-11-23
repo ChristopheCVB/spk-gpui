@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.5.0](https://github.com/ChristopheCVB/spk-gpui/compare/v0.4.0...v0.5.0) (2026-11-23)
+
+
+### Features
+
+* **voice:** rework watched screen share tiles ([#143](https://github.com/ChristopheCVB/spk-gpui/issues/143)) ([29abc3e](https://github.com/ChristopheCVB/spk-gpui/commit/29abc3ec8a8b255b6b66511dd1c26b5a64630e90))
+
+
+### Bug Fixes
+
+* **soundboard:** play WAV clips with metadata ([f89d433](https://github.com/ChristopheCVB/spk-gpui/commit/f89d433bab08aaad5cc3f33aff11a25e84a320a4))
+
 ## [0.4.0](https://github.com/ChristopheCVB/spk-gpui/compare/v0.3.0...v0.4.0) (2026-11-23)
 
 
