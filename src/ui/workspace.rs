@@ -76,32 +76,39 @@ fn navigation_target(
     let focused = focus.contains_focused(window, cx);
     let target = div().id(id).track_focus(&focus).when_some(
         scroll_on_focus.cloned().filter(|_| focused),
-        |row, scroll| {
-            row.relative().child(
-                canvas(
-                    move |bounds, window, _| {
-                        let viewport = scroll.bounds();
-                        let delta = if bounds.top() < viewport.top() {
-                            viewport.top() - bounds.top()
-                        } else {
-                            (viewport.bottom() - bounds.bottom()).min(px(0.))
-                        };
-                        if delta != px(0.) {
-                            let offset = scroll.offset() + point(px(0.), delta);
-                            window.on_next_frame(move |window, _| {
-                                scroll.set_offset(offset);
-                                window.refresh();
-                            });
-                        }
-                    },
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .inset_0(),
-            )
-        },
+        |row, scroll| row.relative().child(reveal_in_vertical_scroll(scroll)),
     );
     (target, focused)
+}
+
+fn reveal_in_vertical_scroll(scroll: ScrollHandle) -> impl IntoElement {
+    canvas(
+        move |bounds, window, _| {
+            let viewport = scroll.bounds();
+            let delta =
+                if bounds.top() < viewport.top() || bounds.size.height > viewport.size.height {
+                    viewport.top() - bounds.top()
+                } else {
+                    (viewport.bottom() - bounds.bottom()).min(px(0.))
+                };
+            if delta != px(0.) {
+                let offset = scroll.offset() + point(px(0.), delta);
+                window.on_next_frame(move |window, _| {
+                    scroll.set_offset(offset);
+                    window.refresh();
+                });
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .inset_0()
+}
+
+enum TileLayout<'a> {
+    Theater,
+    Strip(Pixels),
+    Grid(Pixels, Option<&'a ScrollHandle>),
 }
 
 fn call_status(call: &VoiceView, switching: bool) -> &'static str {
@@ -733,11 +740,12 @@ impl Spk {
             .find(|channel| channel.id == id)
             .map_or("Voice", channel_name)
             .to_owned();
-        let show_capture = self.sidebar_drawer_open
-            || sidebar.chat.is_some()
-            || self
-                .selected_voice_destination(sidebar)
-                .is_none_or(|channel| channel.id != call.channel_id);
+        let show_capture = !bottom_bar
+            && (self.sidebar_drawer_open
+                || sidebar.chat.is_some()
+                || self
+                    .selected_voice_destination(sidebar)
+                    .is_none_or(|channel| channel.id != call.channel_id));
         let capture_status = show_capture
             .then(|| self.screen_capture_status(call, sidebar, cx))
             .flatten();
@@ -809,8 +817,10 @@ impl Spk {
                                     .when(bottom_bar, |bar| {
                                         bar.child(self.voice_controls(sidebar, location, cx))
                                     })
-                                    .child(self.camera_controls(sidebar, location, cx))
-                                    .child(self.screen_controls(call, location, cx))
+                                    .when(!bottom_bar, |card| {
+                                        card.child(self.camera_controls(sidebar, location, cx))
+                                            .child(self.screen_controls(call, location, cx))
+                                    })
                                     .children(self.voice_media_buttons(location, cx))
                             })
                             .children(self.leave_voice(
@@ -1049,6 +1059,11 @@ impl Spk {
             (Some(_), _) if participants.is_empty() => Some("Nobody is here yet."),
             _ => None,
         };
+        let stage = &self.video_stage;
+        let focused = window.focused(cx);
+        let focus_changed = stage.grid_focus.replace(focused.clone()) != focused;
+        let scroll_on_focus =
+            (focus_changed && window.last_input_was_keyboard()).then_some(&stage.grid_scroll);
         let camera_status = joined.and_then(|_| match sidebar.camera_status() {
             CameraStatus::Starting => Some("Starting Camera…"),
             CameraStatus::Failed(message) => Some(message),
@@ -1105,12 +1120,14 @@ impl Spk {
                     .flex_1()
                     .min_h_0()
                     .when(!fullscreen, |tiles| tiles.p_2().gap(gap))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_h_0()
-                            .child(self.voice_tile(focused, call, sidebar, None, window, cx)),
-                    )
+                    .child(div().flex_1().min_h_0().child(self.voice_tile(
+                        focused,
+                        call,
+                        sidebar,
+                        TileLayout::Theater,
+                        window,
+                        cx,
+                    )))
                     .when(!fullscreen && participants.len() > 1, |stage| {
                         let label = if show_strip {
                             "Hide participants"
@@ -1163,7 +1180,7 @@ impl Spk {
                                         person,
                                         call,
                                         sidebar,
-                                        Some(strip_width),
+                                        TileLayout::Strip(strip_width),
                                         window,
                                         cx,
                                     )
@@ -1179,6 +1196,7 @@ impl Spk {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
+                    .track_scroll(&stage.grid_scroll)
                     .child(
                         div()
                             .flex()
@@ -1197,7 +1215,7 @@ impl Spk {
                                         person,
                                         call,
                                         sidebar,
-                                        Some(tile_width),
+                                        TileLayout::Grid(tile_width, scroll_on_focus),
                                         window,
                                         cx,
                                     )
@@ -1467,10 +1485,15 @@ impl Spk {
         participant: &Participant<'_>,
         call: &VoiceView,
         sidebar: &Sidebar,
-        tile_width: Option<Pixels>,
+        layout: TileLayout<'_>,
         window: &Window,
         cx: &Context<Self>,
     ) -> impl IntoElement {
+        let (tile_width, scroll_on_focus) = match layout {
+            TileLayout::Theater => (None, None),
+            TileLayout::Strip(width) => (Some(width), None),
+            TileLayout::Grid(width, scroll) => (Some(width), scroll),
+        };
         let theme = cx.theme();
         let is_me = sidebar.profile.id.as_deref() == Some(participant.id);
         let media = call.media.as_ref();
@@ -1496,8 +1519,17 @@ impl Spk {
         let key_id = hover_id.clone();
         let tile_focus = &self.video_stage.tile_focus[participant.id];
         let menu = self.voice_tile_menu(participant, sidebar, cx);
-        let reveal_actions = tile_focus.contains_focused(window, cx)
-            || self.video_stage.menu_for.as_deref() == Some(participant.id);
+        let tile_focused = tile_focus.contains_focused(window, cx);
+        let reveal_actions =
+            tile_focused || self.video_stage.menu_for.as_deref() == Some(participant.id);
+        let scroll_on_focus = scroll_on_focus.filter(|_| tile_focused).cloned();
+        let focus_on_tile = tile_focus.is_focused(window);
+        let controls = self
+            .video_tile_controls(participant, call, sidebar, reveal_actions, menu, cx)
+            .when_some(
+                scroll_on_focus.clone().filter(|_| !focus_on_tile),
+                |controls, scroll| controls.child(reveal_in_vertical_scroll(scroll)),
+            );
         let name = if is_me { "You" } else { participant.name };
         div()
             .id(SharedString::from(participant.id.to_owned()))
@@ -1589,7 +1621,10 @@ impl Spk {
                         row.child(radio_badge(cx))
                     }),
             )
-            .child(self.video_tile_controls(participant, call, sidebar, reveal_actions, menu, cx))
+            .child(controls)
+            .when_some(scroll_on_focus.filter(|_| focus_on_tile), |tile, scroll| {
+                tile.child(reveal_in_vertical_scroll(scroll))
+            })
     }
 }
 

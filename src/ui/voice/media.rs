@@ -1,13 +1,14 @@
-use super::{VoiceControls, voice_action_button, voice_options_button};
-use crate::ui::{radio::radio_panel, soundboard::soundboard_panel, *};
-use gpui_kit::component::{
-    popover::Popover,
-    scroll::{Scrollbar, ScrollbarMode},
+use super::{VoiceControls, voice_action_button, voice_options_button, voice_popover};
+use crate::ui::{
+    radio::{RadioAction, radio_panel},
+    soundboard::soundboard_panel,
+    *,
 };
+use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 
 #[derive(Clone, Copy)]
 enum MediaControl {
-    Radio(Option<bool>),
+    Radio(Option<RadioAction>),
     Soundboard,
 }
 
@@ -67,7 +68,6 @@ impl MediaControl {
 
 struct MediaPopover {
     panel: Option<(AnyView, FocusHandle)>,
-    trigger: FocusHandle,
     radio_primary: FocusHandle,
 }
 
@@ -84,14 +84,11 @@ impl Spk {
         location: VoiceControls,
         cx: &Context<Self>,
     ) -> [impl IntoElement + use<>; 2] {
-        use crate::session::RadioPlayback;
-        let running = match &self.view {
-            View::SignedIn(sidebar) if sidebar.radio.station.is_some() => {
-                Some(sidebar.radio.enabled && sidebar.radio.playback != RadioPlayback::Unavailable)
-            }
+        let action = match &self.view {
+            View::SignedIn(sidebar) => RadioAction::for_sidebar(sidebar),
             _ => None,
         };
-        [MediaControl::Radio(running), MediaControl::Soundboard].map(|control| MediaButton {
+        [MediaControl::Radio(action), MediaControl::Soundboard].map(|control| MediaButton {
             control,
             location,
             app: cx.weak_entity(),
@@ -106,44 +103,35 @@ impl RenderOnce for MediaButton {
         let state =
             window.use_keyed_state((id, self.location as usize), cx, |_, cx| MediaPopover {
                 panel: None,
-                trigger: cx.focus_handle(),
                 radio_primary: cx.focus_handle(),
             });
         let current = state.read(cx);
         let open = current.panel.is_some();
-        let anchor_focus = current.trigger.clone();
         let panel = current.panel.clone();
         let primary_focus = current.radio_primary.clone();
-        let (trigger, primary) = match control {
-            MediaControl::Radio(running) => {
-                let label = match running {
-                    Some(true) => "Pause Radio",
-                    Some(false) => "Resume Radio",
-                    None => "Channel Radio",
-                };
+        let location = self.location;
+        let playing = matches!(control, MediaControl::Radio(Some(RadioAction::Pause)));
+        let primary = match control {
+            MediaControl::Radio(action) => {
+                let label = action.map_or_else(
+                    || "Channel Radio".to_owned(),
+                    |action| format!("{} Radio", action.label()),
+                );
                 let primary =
-                    voice_action_button("radio-primary", IconName::Radio, "Radio", self.location)
-                        .accessibility_label(label)
+                    voice_action_button("radio-primary", IconName::Radio, "Radio", location)
+                        .accessibility_label(label.clone())
                         .tooltip(label)
                         .track_focus(&primary_focus)
-                        .when_some(running, |button, playing| {
+                        .when_some(action, |button, _| {
                             button.toggled(playing).selected(playing)
                         })
                         .on_click({
                             let app = self.app.clone();
                             let state = state.clone();
                             move |_, window, cx| {
-                                if let Some(playing) = running {
+                                if let Some(action) = action {
                                     let _ = app.update(cx, |app, cx| {
-                                        app.send(
-                                            if playing {
-                                                Command::PauseRadio
-                                            } else {
-                                                Command::ListenToRadio
-                                            },
-                                            None,
-                                            cx,
-                                        );
+                                        app.send(action.command(), None, cx);
                                     });
                                 } else if state.read(cx).panel.is_none() {
                                     primary_focus.focus(window, cx);
@@ -151,50 +139,40 @@ impl RenderOnce for MediaButton {
                                 }
                             }
                         });
-                (
-                    voice_options_button("Radio options", open).selected(running == Some(true)),
-                    Some(primary),
-                )
+                Some(primary)
             }
-            MediaControl::Soundboard => (
-                voice_action_button(
+            MediaControl::Soundboard => None,
+        };
+        let popover = voice_popover(
+            id,
+            px(330.0).min(window.viewport_size().width - px(16.0)),
+            move |open| match control {
+                MediaControl::Radio(_) => {
+                    voice_options_button("Radio options", open).selected(playing)
+                }
+                MediaControl::Soundboard => voice_action_button(
                     "soundboard-trigger",
                     IconName::Megaphone,
                     "Soundboard",
-                    self.location,
+                    location,
                 ),
-                None,
-            ),
-        };
-        let popover = Popover::new(id)
-            .anchor(Anchor::BottomRight)
-            .w(px(330.0).min(window.viewport_size().width - px(16.0)))
-            .open(open)
-            .trigger(trigger.track_focus(&anchor_focus))
-            .on_open_change(move |open, window, cx| {
-                if let Some(search) = control.set_open(&state, &self.app, *open, window, cx) {
-                    search.focus(window, cx);
-                }
-            })
-            .when_some(panel, |popover, (panel, search)| {
-                popover.track_focus(&search).child(panel)
-            });
+            },
+        )
+        .open(open)
+        .on_open_change(move |open, window, cx| {
+            if let Some(search) = control.set_open(&state, &self.app, *open, window, cx) {
+                search.focus(window, cx);
+            }
+        })
+        .when_some(panel, |popover, (panel, search)| {
+            popover.track_focus(&search).child(panel)
+        });
         div()
             .id((id, self.location as usize))
             .flex()
             .items_center()
             .children(primary)
-            .child(
-                div()
-                    .id("trigger")
-                    .capture_any_mouse_down(move |event, window, cx| {
-                        // The popover saves the current focus before opening on mouse-down.
-                        if event.button == MouseButton::Left && !open {
-                            anchor_focus.focus(window, cx);
-                        }
-                    })
-                    .child(popover),
-            )
+            .child(popover)
     }
 }
 

@@ -2,13 +2,12 @@ use std::{cell::RefCell, collections::HashMap};
 
 use gpui_kit::component::{
     IndexPath,
-    popover::Popover,
     select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState},
     switch::Switch,
 };
 
 use super::{
-    voice::{voice_action_button, voice_options_button},
+    voice::{voice_action_button, voice_options_button, voice_popover},
     *,
 };
 use crate::{
@@ -25,14 +24,14 @@ pub(super) struct VideoStage {
     pub fullscreen: bool,
     pub participants_hidden: bool,
     pub participant_scroll: ScrollHandle,
+    pub grid_scroll: ScrollHandle,
+    pub grid_focus: RefCell<Option<FocusHandle>>,
     pub tile_focus: HashMap<String, FocusHandle>,
     strip_focus: RefCell<Option<FocusHandle>>,
-    camera_options_focus: RefCell<[Option<FocusHandle>; 2]>,
     pub hide_preview: bool,
     pub hovered: Option<String>,
     pub menu_for: Option<String>,
     pub frames: HashMap<(String, VideoSource), Arc<RenderImage>>,
-    screen_options_focus: RefCell<[Option<FocusHandle>; 2]>,
 }
 
 #[derive(Clone, Copy)]
@@ -259,10 +258,6 @@ impl Spk {
             "Turn camera on"
         };
         let app = cx.weak_entity();
-        let trigger_focus = self.video_stage.camera_options_focus.borrow_mut()
-            [usize::from(location.compact())]
-        .get_or_insert_with(|| cx.focus_handle())
-        .clone();
         div()
             .id("camera-controls")
             .flex()
@@ -291,32 +286,23 @@ impl Spk {
                 })),
             )
             .child(
-                Popover::new("camera-options")
-                    .anchor(Anchor::BottomRight)
-                    .w(px(280.0))
-                    .trigger(
-                        voice_options_button("Camera options", false).track_focus(&trigger_focus),
-                    )
-                    .on_open_change(move |open, window, cx| {
-                        if !open {
-                            trigger_focus.focus(window, cx);
-                            window.refresh();
-                        }
-                    })
-                    .content(move |_, _, cx| {
-                        let Some(app) = app.upgrade() else {
-                            return div();
-                        };
-                        let View::SignedIn(sidebar) = &app.read(cx).view else {
-                            return div();
-                        };
-                        let devices = sidebar
-                            .voice
-                            .as_ref()
-                            .and_then(|call| call.video.as_ref())
-                            .map_or(&[][..], |report| report.devices.as_slice());
-                        camera_options(sidebar, &app, devices)
-                    }),
+                voice_popover("camera-options", px(280.0), |open| {
+                    voice_options_button("Camera options", open)
+                })
+                .content(move |_, _, cx| {
+                    let Some(app) = app.upgrade() else {
+                        return div();
+                    };
+                    let View::SignedIn(sidebar) = &app.read(cx).view else {
+                        return div();
+                    };
+                    let devices = sidebar
+                        .voice
+                        .as_ref()
+                        .and_then(|call| call.video.as_ref())
+                        .map_or(&[][..], |report| report.devices.as_slice());
+                    camera_options(sidebar, &app, devices)
+                }),
             )
     }
 
@@ -326,10 +312,6 @@ impl Spk {
         location: VoiceControls,
         cx: &Context<Self>,
     ) -> impl IntoElement {
-        let trigger_focus = self.video_stage.screen_options_focus.borrow_mut()
-            [usize::from(location.compact())]
-        .get_or_insert_with(|| cx.focus_handle().tab_stop(true))
-        .clone();
         let (label, command) = screen_share_action(call);
         let active = !matches!(command, Command::OpenScreenShare);
         let app = cx.weak_entity();
@@ -354,33 +336,19 @@ impl Spk {
                     })),
             )
             .child(
-                Popover::new("screen-options")
-                    .anchor(Anchor::BottomRight)
-                    .w(px(280.0))
-                    .trigger(
-                        voice_options_button("Screen Share options", false)
-                            .track_focus(&trigger_focus),
-                    )
-                    .on_open_change(move |open, window, cx| {
-                        if !open {
-                            trigger_focus.focus(window, cx);
-                            window.refresh();
-                        }
-                    })
-                    .content(move |_, _, cx| {
-                        let Some(app) = app.upgrade() else {
-                            return div();
-                        };
-                        let View::SignedIn(sidebar) = &app.read(cx).view else {
-                            return div();
-                        };
-                        let intent = &sidebar.voice_intent;
-                        screen_preferences(
-                            intent.screen.quality,
-                            intent.preferred.screen_audio,
-                            &app,
-                        )
-                    }),
+                voice_popover("screen-options", px(280.0), |open| {
+                    voice_options_button("Screen Share options", open)
+                })
+                .content(move |_, _, cx| {
+                    let Some(app) = app.upgrade() else {
+                        return div();
+                    };
+                    let View::SignedIn(sidebar) = &app.read(cx).view else {
+                        return div();
+                    };
+                    let intent = &sidebar.voice_intent;
+                    screen_preferences(intent.screen.quality, intent.preferred.screen_audio, &app)
+                }),
             )
     }
 
@@ -663,7 +631,7 @@ impl Spk {
         reveal_actions: bool,
         menu: Option<impl IntoElement>,
         cx: &Context<Self>,
-    ) -> impl IntoElement {
+    ) -> Div {
         let available = TileActions::for_participant(self, participant, call, sidebar);
         let id = participant.id.to_owned();
         let watch_id = id.clone();

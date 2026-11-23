@@ -9,6 +9,42 @@ use crate::{api::RadioStation, session::RadioPlayback};
 use gpui_kit::component::Disableable;
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState, SliderValue};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum RadioAction {
+    Pause,
+    Resume,
+    Retry,
+}
+
+impl RadioAction {
+    pub(super) fn for_sidebar(sidebar: &Sidebar) -> Option<Self> {
+        let radio = &sidebar.radio;
+        radio.station.as_ref()?;
+        Some(if !radio.enabled {
+            Self::Resume
+        } else if radio.playback == RadioPlayback::Unavailable {
+            Self::Retry
+        } else {
+            Self::Pause
+        })
+    }
+
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Pause => "Pause",
+            Self::Resume => "Resume",
+            Self::Retry => "Retry",
+        }
+    }
+
+    pub(super) fn command(self) -> Command {
+        match self {
+            Self::Pause => Command::PauseRadio,
+            Self::Resume | Self::Retry => Command::ListenToRadio,
+        }
+    }
+}
+
 struct RadioPanel {
     spk: Entity<Spk>,
     query: Entity<InputState>,
@@ -170,11 +206,10 @@ impl Render for RadioPanel {
         }
         let theme = cx.theme();
         let radio = &sidebar.radio;
-        let retry = radio.playback == RadioPlayback::Unavailable;
-        let running = radio.enabled && !retry;
-        let status = if !radio.enabled {
+        let playback_action = RadioAction::for_sidebar(sidebar);
+        let status = if playback_action == Some(RadioAction::Resume) {
             "Paused for you"
-        } else if retry {
+        } else if playback_action == Some(RadioAction::Retry) {
             "Stream unavailable. Retry or choose another."
         } else if sidebar.voice_intent.mute.deafened {
             "Deafened"
@@ -217,17 +252,15 @@ impl Render for RadioPanel {
             .when(radio.station.is_none(), |body| {
                 body.child(Label::new("Find a station to play in this channel.").text_color(theme.muted_foreground))
             })
-            .children(radio.station.as_ref().map(|station| {
+            .children(radio.station.as_ref().zip(playback_action).map(|(station, action)| {
                 div().flex().flex_col().gap_2()
                     .child(Label::new(station.name.clone()).font_semibold().truncate())
                     .child(Label::new(status).text_xs().text_color(theme.muted_foreground))
                     .child(div().flex().gap_2()
                         .child(
-                            Button::new("playback").small().label(if retry { "Retry" } else if running { "Pause" } else { "Resume" })
+                            Button::new("playback").small().label(action.label())
                                 .tab_stop(true)
-                                .on_click(cx.listener(move |panel, _, _, cx| panel.send(
-                                    if running { Command::PauseRadio } else { Command::ListenToRadio }, cx
-                                ))),
+                                .on_click(cx.listener(move |panel, _, _, cx| panel.send(action.command(), cx))),
                         )
                         .child(
                             Button::new("stop").ghost().small().label("Stop for everyone").tab_stop(true)
