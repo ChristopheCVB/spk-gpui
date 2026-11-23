@@ -21,6 +21,7 @@ pub(super) struct VideoStage {
     strip_focus: RefCell<Option<FocusHandle>>,
     pub hide_preview: bool,
     pub hovered: Option<String>,
+    pub menu_for: Option<String>,
     pub frames: HashMap<(String, VideoSource), Arc<RenderImage>>,
 }
 
@@ -153,6 +154,14 @@ impl Spk {
                     .tile_focus
                     .insert(person.id.to_owned(), cx.focus_handle().tab_stop(true));
             }
+        }
+        if self
+            .video_stage
+            .menu_for
+            .as_ref()
+            .is_some_and(|id| !self.video_stage.tile_focus.contains_key(id))
+        {
+            self.video_stage.menu_for = None;
         }
         if self
             .video_stage
@@ -616,6 +625,8 @@ impl Spk {
         participant: &Participant<'_>,
         call: &VoiceView,
         sidebar: &Sidebar,
+        reveal_actions: bool,
+        menu: Option<impl IntoElement>,
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let available = TileActions::for_participant(self, participant, call, sidebar);
@@ -637,6 +648,7 @@ impl Spk {
                 row.child(
                     Label::new(format!("Watching: {}", viewers.join(", ")))
                         .flex_1()
+                        .min_w_0()
                         .px_2()
                         .rounded_md()
                         .bg(cx.theme().background)
@@ -661,71 +673,94 @@ impl Spk {
                         label,
                     )
                     .secondary()
-                    .label(label)
+                    .flex_shrink_0()
+                    .when(!available.watching, |button| button.label(label))
                     .on_click(cx.listener(move |app, _, window, cx| {
                         app.apply_tile_action(&watch_id, TileAction::Watch, &available, window, cx);
                     })),
                 )
             })
-            .when(available.is_me && available.live, |row| {
-                let label = if self.video_stage.hide_preview {
-                    "Show preview"
-                } else {
-                    "Hide preview"
-                };
-                row.child(
-                    tool_button("camera-preview", IconName::Eye, label)
-                        .secondary()
-                        .on_click(cx.listener(|app, _, _, cx| {
-                            app.video_stage.hide_preview = !app.video_stage.hide_preview;
-                            cx.notify();
-                        })),
-                )
-            })
-            .when(available.permits(TileAction::Theater), |row| {
-                row.child(
-                    tool_button(
-                        "theater",
-                        IconName::Monitor,
-                        if available.theater {
-                            "Exit theater mode"
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .when(!reveal_actions, |actions| {
+                        actions
+                            .invisible()
+                            .group_hover("voice-tile", |style| style.visible())
+                    })
+                    .when(available.is_me && available.live, |row| {
+                        let label = if self.video_stage.hide_preview {
+                            "Show preview"
                         } else {
-                            "Theater mode"
-                        },
-                    )
-                    .secondary()
-                    .on_click(cx.listener(move |app, _, window, cx| {
-                        app.apply_tile_action(
-                            &theater_id,
-                            TileAction::Theater,
-                            &available,
-                            window,
-                            cx,
-                        );
-                    })),
-                )
-            })
-            .when(available.permits(TileAction::Fullscreen), |row| {
-                row.child(
-                    tool_button(
-                        "fullscreen",
-                        if available.fullscreen {
-                            IconName::Minimize
-                        } else {
-                            IconName::Maximize
-                        },
-                        if available.fullscreen {
-                            "Exit fullscreen"
-                        } else {
-                            "Fullscreen"
-                        },
-                    )
-                    .secondary()
-                    .on_click(cx.listener(move |app, _, window, cx| {
-                        app.apply_tile_action(&id, TileAction::Fullscreen, &available, window, cx);
-                    })),
-                )
-            })
+                            "Hide preview"
+                        };
+                        row.child(
+                            tool_button("camera-preview", IconName::Eye, label)
+                                .secondary()
+                                .on_click(cx.listener(|app, _, _, cx| {
+                                    app.video_stage.hide_preview = !app.video_stage.hide_preview;
+                                    cx.notify();
+                                })),
+                        )
+                    })
+                    .when(available.permits(TileAction::Theater), |row| {
+                        row.child(
+                            tool_button(
+                                "theater",
+                                IconName::Monitor,
+                                if available.theater {
+                                    "Exit theater mode"
+                                } else {
+                                    "Theater mode"
+                                },
+                            )
+                            .secondary()
+                            .on_click(cx.listener(
+                                move |app, _, window, cx| {
+                                    app.apply_tile_action(
+                                        &theater_id,
+                                        TileAction::Theater,
+                                        &available,
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            )),
+                        )
+                    })
+                    .when(available.permits(TileAction::Fullscreen), |row| {
+                        row.child(
+                            tool_button(
+                                "fullscreen",
+                                if available.fullscreen {
+                                    IconName::Minimize
+                                } else {
+                                    IconName::Maximize
+                                },
+                                if available.fullscreen {
+                                    "Exit fullscreen"
+                                } else {
+                                    "Fullscreen"
+                                },
+                            )
+                            .secondary()
+                            .on_click(cx.listener(
+                                move |app, _, window, cx| {
+                                    app.apply_tile_action(
+                                        &id,
+                                        TileAction::Fullscreen,
+                                        &available,
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            )),
+                        )
+                    })
+                    .children(menu),
+            )
     }
 }
 
