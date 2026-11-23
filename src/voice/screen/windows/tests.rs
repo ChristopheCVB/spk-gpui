@@ -19,11 +19,10 @@ fn screen_sources_remain_available_after_device_discovery() {
             .await
             .unwrap();
             let choices = choices().await.expect("Screen Share source picker opens");
-            assert!(choices.iter().any(|choice| choice.id == SYSTEM_PICKER));
             assert!(
                 choices
                     .iter()
-                    .any(|choice| choice.id.starts_with("display:"))
+                    .any(|choice| choice.kind == SourceKind::Display)
             );
         });
 }
@@ -143,7 +142,7 @@ async fn check_controlled_window_capture() {
     let choices = choices().await.unwrap();
     let display = choices
         .iter()
-        .find(|choice| choice.id.starts_with("display:"))
+        .find(|choice| choice.kind == SourceKind::Display)
         .expect("display in source list");
     let playback_mix = select(display.clone(), None).await.unwrap();
     assert_eq!(playback_mix.audio, Some(AudioScope::PlaybackMix));

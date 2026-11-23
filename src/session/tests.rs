@@ -1875,6 +1875,71 @@ async fn livekit_recovery_and_rejoin_use_the_signed_in_voice_flow() {
 }
 
 #[tokio::test]
+async fn native_screen_selection_waits_for_confirmation_in_the_current_attempt() {
+    let mut sidebar = Sidebar::new(
+        serde_json::from_str(r#"{"id":"alice","email":"alice@example.test"}"#).unwrap(),
+        None,
+    );
+    let mut voice = VoiceView::joining("first".into());
+    voice.status = VoiceStatus::Connected;
+    sidebar.voice = Some(voice);
+    let session = VoiceSession::default();
+    let mut settings = fixture_settings(String::new(), Call::start_for_test);
+    session
+        .apply_controls(&mut sidebar, &mut settings, Command::OpenScreenShare)
+        .await;
+    let first = sidebar.voice_intent.screen.attempt;
+    session
+        .apply_controls(&mut sidebar, &mut settings, Command::StopScreenShare(first))
+        .await;
+    session
+        .apply_controls(&mut sidebar, &mut settings, Command::OpenScreenShare)
+        .await;
+    let attempt = sidebar.voice_intent.screen.attempt;
+
+    let confirmation = |attempt| screen::Report {
+        attempt,
+        state: screen::State::Confirm {
+            label: "Window".into(),
+            audio: None,
+        },
+    };
+    session.screen_report(&mut sidebar, &settings, confirmation(first));
+    session
+        .apply_controls(
+            &mut sidebar,
+            &mut settings,
+            Command::StartScreenShare(attempt, true),
+        )
+        .await;
+    assert_eq!(
+        sidebar.voice_intent.screen.action,
+        screen::Action::Open(None)
+    );
+
+    session.screen_report(&mut sidebar, &settings, confirmation(attempt));
+    assert_eq!(
+        sidebar.voice_intent.screen.action,
+        screen::Action::Open(None)
+    );
+    session
+        .apply_controls(
+            &mut sidebar,
+            &mut settings,
+            Command::StartScreenShare(attempt, true),
+        )
+        .await;
+    assert_eq!(
+        sidebar.voice_intent.screen.action,
+        screen::Action::Start(false)
+    );
+    assert_eq!(
+        sidebar.voice.as_ref().unwrap().status,
+        VoiceStatus::Connected
+    );
+}
+
+#[tokio::test]
 async fn queued_screen_start_respects_the_latest_audio_preference() {
     let mut sidebar = Sidebar::new(
         serde_json::from_str(r#"{"id":"alice","email":"alice@example.test"}"#).unwrap(),
@@ -1883,7 +1948,7 @@ async fn queued_screen_start_respects_the_latest_audio_preference() {
     let mut view = VoiceView::joining("first".into());
     view.status = VoiceStatus::Connected;
     let request = &mut sidebar.voice_intent.screen;
-    request.open();
+    request.open(None);
     let attempt = request.attempt;
     assert!(request.advance(attempt, screen::Action::Choose("display".into(), None)));
     view.screen = Some(screen::Report {
@@ -1923,7 +1988,7 @@ fn failed_screen_quality_restores_the_previous_preset_for_the_current_share() {
     voice.status = VoiceStatus::Connected;
     sidebar.voice = Some(voice);
     let request = &mut sidebar.voice_intent.screen;
-    request.open();
+    request.open(None);
     let attempt = request.attempt;
     assert!(request.advance(attempt, screen::Action::Choose("display".into(), None)));
     assert!(request.advance(attempt, screen::Action::Start(false)));
@@ -1981,14 +2046,13 @@ async fn windows_picker_failures_allow_retry_in_the_same_voice_session() {
         .apply_controls(&mut sidebar, &mut settings, Command::OpenScreenShare)
         .await;
 
-    for (error, notice) in [
-        (
-            screen::CaptureError::Cancelled,
-            "Screen Share selection cancelled.",
-        ),
+    for (error, state) in [
+        (screen::CaptureError::Cancelled, screen::State::Cancelled),
         (
             screen::CaptureError::Permission,
-            "Allow screen capture in system settings, then select a source again.",
+            screen::State::Ended(
+                "Allow screen capture in system settings, then select a source again.",
+            ),
         ),
     ] {
         let attempt = sidebar.voice_intent.screen.attempt;
@@ -1997,10 +2061,7 @@ async fn windows_picker_failures_allow_retry_in_the_same_voice_session() {
             &settings,
             screen::Report {
                 attempt,
-                state: screen::State::Choices(vec![screen::Choice {
-                    id: screen::SYSTEM_PICKER.into(),
-                    label: "Windows picker (video only)".into(),
-                }]),
+                state: screen::State::Choices(vec![]),
             },
         );
         session
@@ -2019,15 +2080,20 @@ async fn windows_picker_failures_allow_retry_in_the_same_voice_session() {
             &settings,
             screen::Report {
                 attempt,
-                state: screen::State::Ended(notice),
+                state: state.clone(),
             },
         );
         let voice = sidebar.voice.as_ref().unwrap();
         assert_eq!(voice.channel_id, "first");
         assert_eq!(voice.status, VoiceStatus::Connected);
-        assert!(
-            matches!(voice.screen.as_ref().unwrap().state, screen::State::Ended(message) if message == notice)
-        );
+        match state {
+            screen::State::Cancelled => assert!(voice.screen.is_none()),
+            screen::State::Ended(notice) => assert!(matches!(
+                voice.screen.as_ref().unwrap().state,
+                screen::State::Ended(message) if message == notice
+            )),
+            _ => unreachable!(),
+        }
         session
             .apply_controls(&mut sidebar, &mut settings, Command::OpenScreenShare)
             .await;

@@ -53,8 +53,6 @@ use windows_capture::{monitor::Monitor, settings::GraphicsCaptureItemType, windo
 
 use super::*;
 
-pub(crate) const SYSTEM_PICKER: &str = "windows-picker";
-
 pub(crate) async fn pick_system_source(hwnd: isize) -> Result<GraphicsCaptureItem, CaptureError> {
     let picker = GraphicsCapturePicker::new().map_err(graphics_error)?;
     let owner = picker
@@ -99,12 +97,7 @@ pub(super) async fn choices() -> Result<Vec<Choice>, CaptureError> {
         if !GraphicsCaptureSession::IsSupported().map_err(graphics_error)? {
             return Err(CaptureError::Unavailable);
         }
-        Ok(std::iter::once(Choice {
-            id: SYSTEM_PICKER.into(),
-            label: "Windows picker (video only)".into(),
-        })
-        .chain(sources().into_iter().map(|(choice, _)| choice))
-        .collect())
+        Ok(sources().into_iter().map(|(choice, _)| choice).collect())
     })
     .await
     .map_err(|_| CaptureError::Unavailable)?
@@ -190,6 +183,7 @@ fn sources() -> Vec<(Choice, Source)> {
             let choice = Choice {
                 id: format!("display:{:p}:{name}", monitor.as_raw_hmonitor()),
                 label,
+                kind: SourceKind::Display,
             };
             (choice, Source::Monitor(monitor))
         });
@@ -203,7 +197,8 @@ fn sources() -> Vec<(Choice, Source)> {
                 .filter(|title| !title.trim().is_empty())?;
             let choice = Choice {
                 id: window_id(&window)?,
-                label: format!("Window · {title}"),
+                label: title,
+                kind: SourceKind::Window,
             };
             Some((choice, Source::Window(window)))
         });

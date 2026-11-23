@@ -33,13 +33,13 @@ fn screen_audio_preferences_survive_reload_and_default_to_web_behavior() {
 #[tokio::test]
 async fn cancellation_ignores_late_or_unconfirmed_capture() {
     let (sender, mut requests) = watch::channel(Intent::default());
-    sender.send_modify(|intent| intent.screen.open());
+    sender.send_modify(|intent| intent.screen.open(None));
     let attempt = requests.borrow().screen.attempt;
     assert!(
         !sender.send_if_modified(|intent| intent.screen.advance(attempt - 1, Action::Start(true)))
     );
     let result = select_until_cancelled(&mut requests, attempt, async {
-        sender.send_modify(|intent| intent.screen.open());
+        sender.send_modify(|intent| intent.screen.open(None));
         Ok(())
     })
     .await;
@@ -158,22 +158,23 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
     };
     #[cfg(target_os = "linux")]
     let (native, scope) = if let Ok(output) = std::env::var("SPK_TEST_PULSE_OUTPUT") {
-        let choice = linux::choices()
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|choice| choice.id == "display" || choice.id.starts_with("display:"))
-            .expect("fixture Linux display");
-        let selected = timeout(
-            Duration::from_secs(6),
-            linux::select(
-                choice,
-                Some(Device {
-                    id: output.clone(),
-                    name: output,
-                }),
-            ),
-        )
+        let playback = Some(Device {
+            id: output.clone(),
+            name: output,
+        });
+        let selected = timeout(Duration::from_secs(6), async {
+            if linux::use_system_picker().await.unwrap() {
+                linux::pick(playback).await
+            } else {
+                let choice = linux::choices()
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .find(|choice| choice.kind == SourceKind::Display)
+                    .expect("fixture Linux display");
+                linux::select(choice, playback).await
+            }
+        })
         .await
         .expect("selected display delivers video")
         .unwrap();

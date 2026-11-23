@@ -279,7 +279,7 @@ async fn check_video_only_share(
     let (requests, mut requested) = watch::channel(Intent::default());
     requests.send_modify(|intent| {
         intent.screen.quality = quality;
-        intent.screen.open();
+        intent.screen.open(None);
     });
     let attempt = requested.borrow().screen.attempt;
     let mut cancellation = requested.clone();

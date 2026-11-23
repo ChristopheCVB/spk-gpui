@@ -549,6 +549,11 @@ impl VoiceSession {
         if report.attempt != request.attempt || request.action == Action::Stop {
             return;
         }
+        if matches!(report.state, State::Cancelled) {
+            request.advance(report.attempt, Action::Stop);
+            voice.screen = None;
+            return;
+        }
         let was_live = voice
             .screen
             .as_ref()
@@ -725,7 +730,11 @@ impl VoiceSession {
                 {
                     return;
                 }
-                sidebar.voice_intent.screen.open();
+                let playback = voice
+                    .media
+                    .as_ref()
+                    .and_then(|media| media.speakers.clone());
+                sidebar.voice_intent.screen.open(playback);
                 voice.screen = Some(screen::Report {
                     attempt: sidebar.voice_intent.screen.attempt,
                     state: State::Picking,
@@ -756,9 +765,11 @@ impl VoiceSession {
             #[cfg(windows)]
             Command::ChooseWindowsScreenSource(attempt, item) => {
                 if !sidebar.voice.as_ref().is_some_and(|voice| {
-                    voice.is_participating() && voice.screen.as_ref().is_some_and(|report| {
-                        matches!(&report.state, State::Choices(choices) if choices.iter().any(|choice| choice.id == screen::SYSTEM_PICKER))
-                    })
+                    voice.is_participating()
+                        && voice
+                            .screen
+                            .as_ref()
+                            .is_some_and(|report| matches!(&report.state, State::Choices(_)))
                 }) {
                     return;
                 }
@@ -768,16 +779,19 @@ impl VoiceSession {
                     .advance(attempt, Action::ChooseSystem(item));
             }
             Command::StartScreenShare(attempt, confirmed_audio) => {
-                if !sidebar.voice.as_ref().is_some_and(|voice| {
-                    voice.is_participating()
-                        && voice
-                            .screen
-                            .as_ref()
-                            .is_some_and(|report| matches!(report.state, State::Confirm { .. }))
-                }) {
+                let Some(State::Confirm { audio, .. }) = sidebar
+                    .voice
+                    .as_ref()
+                    .filter(|voice| voice.is_participating())
+                    .and_then(|voice| voice.screen.as_ref())
+                    .filter(|report| report.attempt == attempt)
+                    .map(|report| &report.state)
+                else {
                     return;
-                }
-                let audio = confirmed_audio && sidebar.voice_intent.preferred.screen_audio;
+                };
+                let audio = confirmed_audio
+                    && audio.is_some()
+                    && sidebar.voice_intent.preferred.screen_audio;
                 sidebar
                     .voice_intent
                     .screen
