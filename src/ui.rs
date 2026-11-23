@@ -92,6 +92,8 @@ pub(super) struct Spk {
     screen_picker_open: bool,
     #[cfg(windows)]
     windows_screen_picker: Option<u64>,
+    #[cfg(windows)]
+    screen_previews: Option<screen_picker::ScreenPreviews>,
     workspace_focus: FocusHandle,
     settings_button_focus: FocusHandle,
     appearance: Appearance,
@@ -414,6 +416,8 @@ impl Spk {
             screen_picker_open: false,
             #[cfg(windows)]
             windows_screen_picker: None,
+            #[cfg(windows)]
+            screen_previews: None,
             workspace_focus,
             settings_button_focus: cx.focus_handle(),
             appearance,
