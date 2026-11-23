@@ -746,53 +746,67 @@ impl Spk {
             },
             format!("Volume for {name}"),
         )
-        .on_click(cx.listener(move |_, _, window, cx| {
-            let app = cx.entity();
-            let content = cx.new(|cx: &mut Context<ParticipantVolumeDialog>| {
-                use crate::voice::ParticipantVolumeChange;
-                use gpui_kit::component::slider::{SliderEvent, SliderValue};
-
-                cx.observe(&app, |_, _, cx| cx.notify()).detach();
-                let sliders = [
-                    (
-                        volume.mic,
-                        ParticipantVolumeChange::Microphone as fn(u8) -> _,
-                    ),
-                    (
-                        volume.screen,
-                        ParticipantVolumeChange::Screen as fn(u8) -> _,
-                    ),
-                ]
-                .map(|(initial, change)| {
-                    let slider = cx.new(|_| {
-                        gpui_kit::component::slider::SliderState::new()
-                            .max(200.0)
-                            .default_value(f32::from(initial))
-                    });
-                    cx.subscribe(&slider, move |dialog, _, event, cx| {
-                        if let SliderEvent::Release(SliderValue::Single(value)) = event {
-                            dialog.change(change(*value as u8), cx);
-                        }
-                        cx.notify();
-                    })
-                    .detach();
-                    slider
-                });
-                ParticipantVolumeDialog {
-                    app,
-                    id: id.clone(),
-                    sliders,
-                }
-            });
-            let title = format!("Volume for {name}");
-            window.open_dialog(cx, move |dialog, _, _| {
-                dialog
-                    .centered()
-                    .width(px(380.0))
-                    .title(title.clone())
-                    .child(content.clone())
-            });
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.open_participant_volume(&id, &name, window, cx);
         }))
+    }
+
+    pub(super) fn open_participant_volume(
+        &self,
+        id: &str,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let View::SignedIn(sidebar) = &self.view else {
+            return;
+        };
+        let volume = sidebar.voice_intent.preferred.participant_volume(id);
+        let app = cx.entity();
+        let content = cx.new(|cx: &mut Context<ParticipantVolumeDialog>| {
+            use crate::voice::ParticipantVolumeChange;
+            use gpui_kit::component::slider::{SliderEvent, SliderValue};
+
+            cx.observe(&app, |_, _, cx| cx.notify()).detach();
+            let sliders = [
+                (
+                    volume.mic,
+                    ParticipantVolumeChange::Microphone as fn(u8) -> _,
+                ),
+                (
+                    volume.screen,
+                    ParticipantVolumeChange::Screen as fn(u8) -> _,
+                ),
+            ]
+            .map(|(initial, change)| {
+                let slider = cx.new(|_| {
+                    gpui_kit::component::slider::SliderState::new()
+                        .max(200.0)
+                        .default_value(f32::from(initial))
+                });
+                cx.subscribe(&slider, move |dialog, _, event, cx| {
+                    if let SliderEvent::Release(SliderValue::Single(value)) = event {
+                        dialog.change(change(*value as u8), cx);
+                    }
+                    cx.notify();
+                })
+                .detach();
+                slider
+            });
+            ParticipantVolumeDialog {
+                app,
+                id: id.to_owned(),
+                sliders,
+            }
+        });
+        let title = format!("Volume for {name}");
+        window.open_dialog(cx, move |dialog, _, _| {
+            dialog
+                .centered()
+                .width(px(380.0))
+                .title(title.clone())
+                .child(content.clone())
+        });
     }
 }
 
