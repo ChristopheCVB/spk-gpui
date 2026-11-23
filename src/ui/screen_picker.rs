@@ -49,7 +49,9 @@ impl Spk {
         ) {
             self.screen_picker_open = true;
             let app = cx.weak_entity();
+            let cancel_focus = cx.focus_handle();
             let start_focus = cx.focus_handle();
+            let initial_focus = Cell::new(true);
             let focused_confirmation = Cell::new(None);
             window.open_dialog(cx, move |dialog, window, cx| {
                 let Some(app) = app.upgrade() else {
@@ -58,12 +60,23 @@ impl Spk {
                 let Some(report) = app.read(cx).screen_picker_report().cloned() else {
                     return dialog;
                 };
+                let initial_focus = initial_focus.replace(false);
                 if matches!(&report.state, State::Confirm { .. })
                     && focused_confirmation.replace(Some(report.attempt)) != Some(report.attempt)
                 {
                     start_focus.focus(window, cx);
+                } else if initial_focus {
+                    cancel_focus.focus(window, cx);
                 }
-                Self::screen_picker_dialog(dialog, &report, &app, &start_focus, window, cx)
+                Self::screen_picker_dialog(
+                    dialog,
+                    &report,
+                    &app,
+                    &cancel_focus,
+                    &start_focus,
+                    window,
+                    cx,
+                )
             });
         }
     }
@@ -72,6 +85,7 @@ impl Spk {
         dialog: Dialog,
         report: &Report,
         app: &Entity<Spk>,
+        cancel_focus: &FocusHandle,
         start_focus: &FocusHandle,
         window: &mut Window,
         cx: &mut App,
@@ -116,12 +130,12 @@ impl Spk {
         } else {
             actions
         };
-        let mut actions = actions.child(picker_button(
-            "cancel-screen-picker",
-            "Cancel",
-            app,
-            move || Command::StopScreenShare(attempt),
-        ));
+        let mut actions = actions.child(
+            picker_button("cancel-screen-picker", "Cancel", app, move || {
+                Command::StopScreenShare(attempt)
+            })
+            .track_focus(cancel_focus),
+        );
         let content = match &report.state {
             State::LoadingSources => Label::new("Loading Screen Share sources…").into_any_element(),
             State::Picking => Label::new("Choosing a Screen Share source…").into_any_element(),
