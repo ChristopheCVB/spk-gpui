@@ -733,12 +733,20 @@ impl Spk {
             .find(|channel| channel.id == id)
             .map_or("Voice", channel_name)
             .to_owned();
+        let show_capture = self.sidebar_drawer_open
+            || sidebar.chat.is_some()
+            || self
+                .selected_voice_destination(sidebar)
+                .is_none_or(|channel| channel.id != call.channel_id);
+        let capture_status = show_capture
+            .then(|| self.screen_capture_status(call, sidebar, cx))
+            .flatten();
         let channel_color = if matches!(call.status, Status::Connected | Status::ListenOnly) {
             theme.success
         } else {
             theme.muted_foreground
         };
-        div()
+        let row = div()
             .id("voice-session")
             .flex()
             .flex_shrink_0()
@@ -795,11 +803,13 @@ impl Spk {
                             .items_center()
                             .justify_center()
                             .gap_1()
+                            .flex_wrap()
                             .when(call.is_participating(), |actions| {
                                 actions
                                     .when(bottom_bar, |bar| {
                                         bar.child(self.voice_controls(sidebar, location, cx))
                                     })
+                                    .child(self.screen_controls(call, location, cx))
                                     .children(self.voice_media_buttons(location, cx))
                             })
                             .children(self.leave_voice(
@@ -811,7 +821,8 @@ impl Spk {
                             )),
                     )
                 },
-            )
+            );
+        div().flex().flex_col().children(capture_status).child(row)
     }
 
     fn channel_row(
@@ -1208,8 +1219,8 @@ impl Spk {
             })
             .children(
                 joined
-                    .filter(|_| !fullscreen)
-                    .and_then(|call| self.screen_options(call, sidebar, cx)),
+                    .filter(|_| !fullscreen && !self.sidebar_drawer_open)
+                    .and_then(|call| self.screen_capture_status(call, sidebar, cx)),
             )
             .when(!fullscreen, |stage| {
                 let footer = if let Some(call) = joined {
@@ -1228,7 +1239,7 @@ impl Spk {
                             .p_2()
                             .child(self.voice_controls(sidebar, VoiceControls::Channel, cx))
                             .child(self.camera_controls(sidebar, cx))
-                            .child(self.screen_button(Some(call), cx))
+                            .child(self.screen_controls(call, VoiceControls::Channel, cx))
                             .children(self.voice_media_buttons(VoiceControls::Channel, cx))
                             .children(self.leave_voice(
                                 "voice-channel-leave",

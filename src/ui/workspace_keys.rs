@@ -1,10 +1,6 @@
 use super::chat::{BOLD, CODE_BLOCK, INLINE_CODE, ITALIC, QUOTE, STRIKETHROUGH};
 use super::*;
-use crate::{
-    session::VoiceProcessingSetting,
-    shortcuts::Action,
-    voice::{NoiseSuppression, screen::State as ScreenState},
-};
+use crate::{session::VoiceProcessingSetting, shortcuts::Action, voice::NoiseSuppression};
 
 impl Spk {
     pub(super) fn workspace_key(
@@ -71,19 +67,15 @@ impl Spk {
                 {
                     Command::SetCameraEnabled(!sidebar.camera_publishing())
                 }
-                "s" if sidebar
-                    .voice
-                    .as_ref()
-                    .is_some_and(session::VoiceView::is_participating) =>
-                {
-                    sidebar
+                "s" => {
+                    let Some(call) = sidebar
                         .voice
                         .as_ref()
-                        .and_then(|call| call.screen.as_ref())
-                        .filter(|report| !matches!(report.state, ScreenState::Ended(_)))
-                        .map_or(Command::OpenScreenShare, |report| {
-                            Command::StopScreenShare(report.attempt)
-                        })
+                        .filter(|call| call.is_participating())
+                    else {
+                        return false;
+                    };
+                    super::video::screen_share_action(call).1
                 }
                 "n" => Command::SetVoiceProcessing(VoiceProcessingSetting::NoiseSuppression(
                     match processing.noise_suppression {

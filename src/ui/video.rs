@@ -1,8 +1,16 @@
 use std::{cell::RefCell, collections::HashMap};
 
-use gpui_kit::component::popover::Popover;
+use gpui_kit::component::{
+    IndexPath,
+    popover::Popover,
+    select::{SearchableVec, Select, SelectEvent, SelectState},
+    switch::Switch,
+};
 
-use super::*;
+use super::{
+    voice::{voice_action_button, voice_options_button},
+    *,
+};
 use crate::{
     session::{Participant, VoiceView},
     voice::{
@@ -23,6 +31,7 @@ pub(super) struct VideoStage {
     pub hovered: Option<String>,
     pub menu_for: Option<String>,
     pub frames: HashMap<(String, VideoSource), Arc<RenderImage>>,
+    screen_options_focus: RefCell<[Option<FocusHandle>; 2]>,
 }
 
 #[derive(Clone, Copy)]
@@ -289,34 +298,89 @@ impl Spk {
             )
     }
 
-    pub(super) fn screen_button(&self, call: Option<&VoiceView>, cx: &Context<Self>) -> Button {
-        let report = call.and_then(|call| call.screen.as_ref());
-        let active = report.filter(|report| !matches!(report.state, ScreenState::Ended(_)));
-        let attempt = active.map(|report| report.attempt);
-        let label = match active.map(|report| &report.state) {
-            Some(ScreenState::Live { .. }) => "Stop Screen Share",
-            Some(_) => "Cancel Screen Share",
-            None => "Share Screen",
-        };
-        tool_button("screen-share", IconName::Monitor, label)
-            .selected(active.is_some())
-            .label(label)
-            .on_click(cx.listener(move |app, _, _, cx| {
-                let command = attempt.map_or(Command::OpenScreenShare, Command::StopScreenShare);
-                app.send(command, None, cx);
-            }))
+    pub(super) fn screen_controls(
+        &self,
+        call: &VoiceView,
+        location: VoiceControls,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let trigger_focus = self.video_stage.screen_options_focus.borrow_mut()
+            [usize::from(location.compact())]
+        .get_or_insert_with(|| cx.focus_handle().tab_stop(true))
+        .clone();
+        let (label, command) = screen_share_action(call);
+        let active = !matches!(command, Command::OpenScreenShare);
+        let app = cx.weak_entity();
+        div()
+            .id("screen-controls")
+            .flex()
+            .items_center()
+            .child(
+                voice_action_button("screen-share", IconName::Monitor, label, location)
+                    .selected(active)
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        let View::SignedIn(sidebar) = &app.view else {
+                            return;
+                        };
+                        if let Some(call) = sidebar
+                            .voice
+                            .as_ref()
+                            .filter(|call| call.is_participating())
+                        {
+                            app.send(screen_share_action(call).1, None, cx);
+                        }
+                    })),
+            )
+            .child(
+                Popover::new("screen-options")
+                    .anchor(Anchor::BottomRight)
+                    .w(px(280.0))
+                    .trigger(
+                        voice_options_button("Screen Share options", false)
+                            .track_focus(&trigger_focus),
+                    )
+                    .on_open_change(move |open, window, cx| {
+                        if !open {
+                            trigger_focus.focus(window, cx);
+                            window.refresh();
+                        }
+                    })
+                    .content(move |_, window, cx| {
+                        let Some(app) = app.upgrade() else {
+                            return div();
+                        };
+                        let View::SignedIn(sidebar) = &app.read(cx).view else {
+                            return div();
+                        };
+                        let intent = &sidebar.voice_intent;
+                        screen_preferences(
+                            intent.screen.quality,
+                            intent.preferred.screen_audio,
+                            &app,
+                            window,
+                            cx,
+                        )
+                    }),
+            )
     }
 
-    pub(super) fn screen_options(
+    pub(super) fn screen_capture_status(
         &self,
         call: &VoiceView,
         sidebar: &Sidebar,
         cx: &Context<Self>,
-    ) -> Option<Div> {
+    ) -> Option<Stateful<Div>> {
         let report = call.screen.as_ref()?;
         let attempt = report.attempt;
         let selected = sidebar.voice_intent.screen.quality;
-        let panel = div().flex().flex_col().items_center().gap_2().px_4().pb_2();
+        let panel = div()
+            .id("screen-capture")
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .pb_2();
         Some(match &report.state {
             ScreenState::Picking => panel.child(Label::new("Choose a display or window…")),
             ScreenState::Choices(choices) => panel.child(
@@ -361,22 +425,6 @@ impl Spk {
                     .child(Label::new(label.clone()).font_semibold())
                     .child(Label::new(audio_label).text_xs())
                     .child(
-                        Button::new("include-screen-audio")
-                            .small()
-                            .secondary()
-                            .tab_stop(true)
-                            .label(if enabled {
-                                "Share audio on"
-                            } else {
-                                "Share audio off"
-                            })
-                            .selected(enabled)
-                            .on_click(cx.listener(move |app, _, _, cx| {
-                                app.send(Command::SetScreenAudio(!enabled), None, cx);
-                            })),
-                    )
-                    .child(Self::screen_quality_options(selected, cx))
-                    .child(
                         Button::new("start-screen-share")
                             .small()
                             .primary()
@@ -402,7 +450,6 @@ impl Spk {
                 quality_failed,
                 ..
             } => panel
-                .child(Self::screen_quality_options(selected, cx))
                 .child(
                     Label::new(format!("Sharing at {width} × {height} · up to {fps} fps"))
                         .text_xs(),
@@ -423,38 +470,6 @@ impl Spk {
                 ),
             ScreenState::Ended(message) => panel.child(Label::new(*message)),
         })
-    }
-
-    fn screen_quality_options(selected: Quality, cx: &Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_wrap()
-            .justify_center()
-            .gap_1()
-            .children(Quality::HEIGHTS.into_iter().map(|height| {
-                let label = SharedString::from(format!("{height}p"));
-                Button::new(label.clone())
-                    .small()
-                    .ghost()
-                    .tab_stop(true)
-                    .label(label)
-                    .selected(selected.height == height)
-                    .on_click(cx.listener(move |app, _, _, cx| {
-                        app.send(Command::SetScreenHeight(height), None, cx);
-                    }))
-            }))
-            .children(Quality::FPS.into_iter().map(|fps| {
-                let label = SharedString::from(format!("{fps} fps"));
-                Button::new(label.clone())
-                    .small()
-                    .ghost()
-                    .tab_stop(true)
-                    .label(label)
-                    .selected(selected.fps == fps)
-                    .on_click(cx.listener(move |app, _, _, cx| {
-                        app.send(Command::SetScreenFps(fps), None, cx);
-                    }))
-            }))
     }
 
     #[cfg(windows)]
@@ -762,6 +777,101 @@ impl Spk {
                     .children(menu),
             )
     }
+}
+
+pub(super) fn screen_share_action(call: &VoiceView) -> (&'static str, Command) {
+    match &call.screen {
+        Some(report) if report.state.active() => (
+            "Stop Screen Share",
+            Command::StopScreenShare(report.attempt),
+        ),
+        Some(report) if !matches!(report.state, ScreenState::Ended(_)) => (
+            "Cancel Screen Share",
+            Command::StopScreenShare(report.attempt),
+        ),
+        _ => ("Share Screen", Command::OpenScreenShare),
+    }
+}
+
+fn screen_preferences(
+    selected: Quality,
+    share_audio: bool,
+    app: &Entity<Spk>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Div {
+    let audio = app.downgrade();
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(
+            Switch::new("screen-share-audio")
+                .label("Share audio")
+                .accessibility_label("Share audio")
+                .tab_stop(true)
+                .checked(share_audio)
+                .on_change(move |enabled, _, cx| {
+                    let _ = audio.update(cx, |app, cx| {
+                        app.send(Command::SetScreenAudio(*enabled), None, cx)
+                    });
+                }),
+        )
+        .children(
+            [
+                (
+                    "Max resolution",
+                    Quality::HEIGHTS,
+                    selected.height,
+                    "p",
+                    Command::SetScreenHeight as fn(u32) -> Command,
+                ),
+                (
+                    "Frame rate",
+                    Quality::FPS,
+                    selected.fps,
+                    " fps",
+                    Command::SetScreenFps,
+                ),
+            ]
+            .into_iter()
+            .map(|(label, choices, selected, unit, command)| {
+                let labels = choices.map(|choice| format!("{choice}{unit}"));
+                let index = choices
+                    .iter()
+                    .position(|choice| *choice == selected)
+                    .map(IndexPath::new);
+                let select = window.use_keyed_state(label, cx, |window, cx| {
+                    let app = app.downgrade();
+                    cx.subscribe(&cx.entity(), {
+                        let labels = labels.clone();
+                        move |_, _, event, cx| {
+                            if let SelectEvent::Confirm(Some(choice)) = event
+                                && let Some(index) = labels.iter().position(|label| label == choice)
+                            {
+                                let _ = app.update(cx, |app, cx| {
+                                    app.send(command(choices[index]), None, cx)
+                                });
+                            }
+                        }
+                    })
+                    .detach();
+                    SelectState::new(SearchableVec::new(labels), index, window, cx)
+                });
+                div()
+                    .id(label)
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(Label::new(label).font_semibold())
+                    .child(
+                        Select::new(&select)
+                            .small()
+                            .w_full()
+                            .accessibility_label(label),
+                    )
+            }),
+        )
 }
 
 pub(super) fn joined_participants<'a>(
