@@ -46,18 +46,6 @@ pub(super) async fn pick(playback: Option<Device>) -> Result<Selection, CaptureE
             .await
             .map_err(portal_error)?;
         let session = PortalSession::new(session).await?;
-        portal
-            .select_sources(
-                &session.handle,
-                SelectSourcesOptions::default()
-                    .set_sources(sources)
-                    .set_multiple(false)
-                    .set_cursor_mode(cursor),
-            )
-            .await
-            .map_err(portal_error)?
-            .response()
-            .map_err(portal_error)?;
         Ok((portal, session, sources, cursor))
     })
     .await
@@ -65,9 +53,26 @@ pub(super) async fn pick(playback: Option<Device>) -> Result<Selection, CaptureE
 
     let response = tokio::select! {
         biased;
-        response = portal.start(&session.handle, None, Default::default()) => {
-            response.map_err(portal_error)?.response().map_err(portal_error)?
-        }
+        response = async {
+            // Some backends display their chooser while selecting sources.
+            portal
+                .select_sources(
+                    &session.handle,
+                    SelectSourcesOptions::default()
+                        .set_sources(sources)
+                        .set_multiple(false)
+                        .set_cursor_mode(cursor),
+                )
+                .await
+                .map_err(portal_error)?
+                .response()
+                .map_err(portal_error)?;
+            portal.start(&session.handle, None, Default::default())
+                .await
+                .map_err(portal_error)?
+                .response()
+                .map_err(portal_error)
+        } => response?,
         _ = &mut session.closed => return Err(CaptureError::PortalSelection),
     };
     let [stream] = response.streams() else {
