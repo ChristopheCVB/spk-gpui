@@ -39,6 +39,7 @@ calls = []
 active = {}
 pending = {}
 closed_source = False
+source_selections = 0
 source = os.environ.get("SPK_TEST_WAYLAND_SOURCE")
 source_type = 1 if source == "display" else 2
 node = int(os.environ["SPK_TEST_PIPEWIRE_NODE"]) if source else None
@@ -70,14 +71,22 @@ def link_source():
     return False
 
 
+def close_session(path, source_lost=False):
+    sender, registration = active.pop(path)
+    if source_lost:
+        bus.emit_signal(sender, path, "org.freedesktop.portal.Session", "Closed", GLib.Variant("(a{sv})", ({},)))
+    bus.unregister_object(registration)
+    if path in pending:
+        bus.unregister_object(pending.pop(path))
+    return False
+
+
 def method_call(_connection, sender, path, _interface, method, parameters, invocation):
+    global source_selections
     calls.append(method)
     if method == "Close":
-        _, registration = active.pop(path)
         invocation.return_value(GLib.Variant("()", ()))
-        bus.unregister_object(registration)
-        if path in pending:
-            bus.unregister_object(pending.pop(path))
+        close_session(path)
         return
     if method == "OpenPipeWireRemote":
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as remote:
@@ -93,14 +102,22 @@ def method_call(_connection, sender, path, _interface, method, parameters, invoc
     handle = f"{ROOT}/request/{client}/{options['handle_token']}"
     response = {}
     status = 0
+    delay = 25
     if method == "CreateSession":
         session_handle = f"{ROOT}/session/{client}/{options['session_handle_token']}"
         registration = bus.register_object(session_handle, session, method_call, None, None)
         active[session_handle] = (sender, registration)
         response["session_handle"] = GLib.Variant("s", session_handle)
-    elif method == "SelectSources" and (options["types"] != available_types or options["multiple"]):
-        status = 2
-        calls.append("unexpected selection")
+    elif method == "SelectSources":
+        source_selections += 1
+        if options["types"] != available_types or options["multiple"]:
+            status = 2
+            calls.append("unexpected selection")
+        elif source == "window" and source_selections == 1:
+            # Some backends show the chooser here and the user can take longer than portal setup.
+            delay = 3500
+        elif not source and source_selections in (5, 6):
+            status = None
     elif method == "Start":
         status = 0 if source else next(rejections)
         if status == "denied":
@@ -122,9 +139,12 @@ def method_call(_connection, sender, path, _interface, method, parameters, invoc
         return False
 
     if status is None:
-        pending[parameters.unpack()[0]] = registration
+        session_path = parameters.unpack()[0]
+        pending[session_path] = registration
+        if method == "SelectSources" and source_selections == 6:
+            GLib.timeout_add(delay, close_session, session_path, True)
     else:
-        GLib.timeout_add(25, emit_response)
+        GLib.timeout_add(delay, emit_response)
 
 
 bus.register_object(ROOT, screen_cast, method_call, property_value, None)
@@ -144,10 +164,8 @@ def check_done():
     global closed_source
     if source and not closed_source and Path(os.environ["SPK_TEST_WAYLAND_SCREEN_STOP"]).exists():
         assert len(active) == 1
-        handle, (sender, registration) = active.popitem()
         os.kill(int(os.environ["SPK_TEST_PIPEWIRE_SOURCE_PID"]), signal.SIGTERM)
-        bus.emit_signal(sender, handle, "org.freedesktop.portal.Session", "Closed", GLib.Variant("(a{sv})", ({},)))
-        bus.unregister_object(registration)
+        close_session(next(iter(active)), source_lost=True)
         closed_source = True
     if test.poll() is None:
         return True
@@ -165,6 +183,8 @@ if source:
     if not closed_source:
         sys.exit("The ScreenCast source was not closed by the fixture")
 else:
-    expected = ["CreateSession", "SelectSources", "Start", "Close"] * 4
+    expected = ["CreateSession", "SelectSources", "Start", "Close"] * 4 + [
+        "CreateSession", "SelectSources", "Close", "CreateSession", "SelectSources"
+    ]
 if calls != expected or active or pending:
     sys.exit(f"Unexpected ScreenCast calls or active sessions: {calls}, {list(active)}")
