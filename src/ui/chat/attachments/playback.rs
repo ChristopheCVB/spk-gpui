@@ -82,6 +82,7 @@ impl Spk {
             .as_mut()
             .filter(|playback| playback.id == id)
         {
+            self.chat_attachments.media_start = None;
             playback.toggle();
             cx.notify();
             return;

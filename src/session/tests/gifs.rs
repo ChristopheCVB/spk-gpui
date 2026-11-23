@@ -167,22 +167,32 @@ async fn gif_picker_searches_saves_and_shares_across_conversations() {
         }
 
         for (path, preview_bytes) in [("/from-web.gif", PREVIEW_GIF), ("/from-web.png", PREVIEW_PNG)] {
-            let incoming_url = base.join(path).unwrap().to_string();
+            let incoming_url = base.join(path).unwrap();
+            let message_id = path.trim_start_matches('/').replace('.', "-");
+            let body = format!("Shared {incoming_url} inline");
             peer.send(Message::text(value!({"type":"message:new","message":{
-                "id":path,"channelId":"general","userId":"bob","body":format!("Shared {incoming_url} inline"),"createdAt":2
+                "id":message_id,"channelId":"general","userId":"bob","body":body,"createdAt":2
             }}).to_string())).await.unwrap();
-            wait_for_sidebar(&rx, |s| s.chat.as_ref().is_some_and(|chat| chat.messages.iter().any(|message| message.id == path))).await;
-            assert!(requests.is_empty(), "incoming image links must wait for a click");
-            let preview = || Command::PreviewMessageImage { message_id: path.into(), url: incoming_url.clone() };
+            wait_for_sidebar(&rx, |s| s.chat.as_ref().is_some_and(|chat| chat.messages.iter().any(|message| message.id == message_id))).await;
+            let target = crate::api::MessageTarget::new("general", &message_id).unwrap();
+            let (reply, rejected) = oneshot::channel();
+            send(Command::ReadMessageImage {
+                target: target.clone(), url: incoming_url.clone(), body: "Stale body".into(), reply,
+            }).await;
+            assert!(rejected.await.is_err());
+            assert!(requests.is_empty());
             for (status, bytes) in [("404 Not Found", &b""[..]), ("200 OK", preview_bytes)] {
-                send(preview()).await;
-                let (line, request) = timeout(Duration::from_secs(2), requests.recv()).await.expect("clicked image must fetch").unwrap();
+                let (reply, image) = oneshot::channel();
+                send(Command::ReadMessageImage {
+                    target: target.clone(), url: incoming_url.clone(), body: body.clone(), reply,
+                }).await;
+                let (line, request) = timeout(Duration::from_secs(2), requests.recv()).await.expect("visible image must fetch").unwrap();
                 assert_eq!(line, format!("GET {path} HTTP/1.1"));
                 assert_eq!(request.header("cookie"), None);
                 assert_eq!(request.header("origin"), None);
+                assert_eq!(request.header("referer"), None);
                 request.respond_raw(status, &[], bytes).await;
-                let view = wait_for_sidebar(&rx, |s| s.chat.as_ref().and_then(|chat| chat.message_image.as_ref()).is_some_and(|gif| !gif.loading && gif.message_id == path)).await;
-                assert_eq!(view.chat.unwrap().message_image.unwrap().image.is_some(), status == "200 OK");
+                assert_eq!(image.await.unwrap().is_some(), status == "200 OK");
             }
         }
     }).await.expect("GIF picker workflow timed out");

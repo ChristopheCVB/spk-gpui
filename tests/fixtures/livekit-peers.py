@@ -127,40 +127,49 @@ def native_server(command):
     with tempfile.TemporaryDirectory(prefix="spk-livekit-") as tmp:
         workspace = Path(tmp)
         executable = server_binary(workspace)
-        signaling, tcp, udp = ports()
         key, secret, room = (secrets.token_hex(16) for _ in range(3))
         log = workspace / "livekit.log"
-        with log.open("wb") as output:
-            server = subprocess.Popen(
-                [executable, "--bind", "127.0.0.1", "--node-ip", "127.0.0.1",
-                 "--udp-port", str(udp), "--keys", f"{key}: {secret}",
-                 "--config-body", f"port: {signaling}\nrtc:\n  tcp_port: {tcp}"],
-                stdout=output,
-                stderr=subprocess.STDOUT,
-            )
-            try:
-                for _ in range(100):
-                    if server.poll() is not None:
-                        raise RuntimeError("LiveKit fixture exited before accepting connections")
-                    try:
-                        with socket.create_connection(("127.0.0.1", signaling), timeout=0.1):
-                            break
-                    except OSError:
-                        time.sleep(0.1)
-                else:
-                    raise RuntimeError("LiveKit fixture did not start")
-                run_peers(command, signaling, key, secret, room)
-            except (RuntimeError, subprocess.SubprocessError):
-                if log.exists():
-                    print(log.read_text(errors="replace"), file=sys.stderr)
-                raise
-            finally:
-                server.terminate()
+        attempts = 3
+        for attempt in range(attempts):
+            signaling, tcp, udp = ports()
+            with log.open("wb") as output:
+                server = subprocess.Popen(
+                    [executable, "--bind", "127.0.0.1", "--node-ip", "127.0.0.1",
+                     "--udp-port", str(udp), "--keys", f"{key}: {secret}",
+                     "--config-body", f"port: {signaling}\nrtc:\n  tcp_port: {tcp}"],
+                    stdout=output,
+                    stderr=subprocess.STDOUT,
+                )
                 try:
-                    server.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    server.kill()
-                    server.wait()
+                    for _ in range(100):
+                        if server.poll() is not None:
+                            break
+                        try:
+                            with socket.create_connection(("127.0.0.1", signaling), timeout=0.1):
+                                pass
+                        except OSError:
+                            time.sleep(0.1)
+                            continue
+                        run_peers(command, signaling, key, secret, room)
+                        return
+                    else:
+                        raise RuntimeError("LiveKit fixture did not start")
+
+                    # A port can be claimed between probing it and starting LiveKit.
+                    if attempt + 1 < attempts and b"address already in use" in log.read_bytes():
+                        print("LiveKit fixture port was taken, retrying with new ports", file=sys.stderr)
+                        continue
+                    raise RuntimeError("LiveKit fixture exited before accepting connections")
+                except (RuntimeError, subprocess.SubprocessError):
+                    print(log.read_text(errors="replace"), file=sys.stderr)
+                    raise
+                finally:
+                    server.terminate()
+                    try:
+                        server.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        server.kill()
+                        server.wait()
 
 
 def main(command):

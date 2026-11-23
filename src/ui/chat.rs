@@ -33,7 +33,7 @@ use super::*;
 
 use crate::{
     api::{ChatMessage, MessageTarget, UnreadState},
-    chat_markdown::{image_preview_links, message_markdown, safe_link},
+    chat_markdown::{message_markdown, safe_link},
     reaction_artwork::reaction_artwork_path,
     session::{ChatView, Delivery, Pins},
 };
@@ -187,16 +187,69 @@ fn chat_images(chat: &ChatView) -> impl Iterator<Item = &Arc<RenderImage>> {
         .chain(chat.gifs.iter().flat_map(|picker| picker.images()))
         .chain(chat.draft.gif.iter().filter_map(|gif| gif.image.as_ref()))
         .chain(
-            chat.message_image
-                .iter()
-                .filter_map(|preview| preview.image.as_ref()),
-        )
-        .chain(
             chat.draft
                 .uploads
                 .iter()
                 .filter_map(|upload| upload.preview.as_ref()),
         )
+}
+
+fn when_visible(row: Div, load: impl Fn(&mut Window, &mut App) + 'static) -> Div {
+    let load = Rc::new(load);
+    row.on_children_prepainted(move |children, window, cx| {
+        let viewport = window.content_mask().bounds;
+        if children.iter().any(|child| child.intersects(&viewport)) {
+            let load = load.clone();
+            window.defer(cx, move |window, cx| load(window, cx));
+        }
+    })
+}
+
+impl Spk {
+    fn preserve_chat_position(&self) {
+        if self.chat_history_position.get().is_some() {
+            return;
+        }
+        if self.chat_scroll.offset().y == -self.chat_scroll.max_offset().y {
+            self.chat_scroll.scroll_to_bottom();
+        } else if let Some(chat) = chat(&self.view)
+            && let Some((id, offset)) = history_anchor(chat, &self.chat_scroll)
+            && let Some(index) = history_message_index(chat, id)
+        {
+            self.chat_history_position
+                .set(Some(HistoryPosition::Anchor(index, offset)));
+        }
+    }
+}
+
+fn open_chat_image(
+    title: String,
+    image: Arc<RenderImage>,
+    original: impl Fn(&mut Window, &mut App) + 'static,
+    window: &mut Window,
+    cx: &mut Context<Spk>,
+) {
+    let original = Rc::new(original);
+    window.open_dialog(cx, move |dialog, window, _| {
+        let original = original.clone();
+        let viewport = window.viewport_size();
+        dialog
+            .centered()
+            .title(title.clone())
+            .width((viewport.width * 0.9).min(px(960.)))
+            .child(
+                img(image.clone())
+                    .w_full()
+                    .h(viewport.height * 0.65)
+                    .object_fit(ObjectFit::Contain),
+            )
+            .footer(
+                Button::new("open-image-original")
+                    .label("Open original")
+                    .tab_stop(true)
+                    .on_click(move |_, window, cx| original(window, cx)),
+            )
+    });
 }
 
 pub(super) fn unread_badges(counts: UnreadState, cx: &App) -> impl IntoElement {
@@ -1070,9 +1123,9 @@ impl Spk {
         let link_app = app.clone();
         let link_filter = self.chat_spoiler_link.clone();
         let link_prefix = self.chat_spoiler_link.clone();
-        let images = self.message_images(chat, &message_id, &rendered, cx);
-        let share_text = SharedString::from(rendered);
         let target = MessageTarget::new(&message.channel_id, &message.id);
+        let images = self.message_images(chat, target.clone(), &body, &rendered, cx);
+        let share_text = SharedString::from(rendered);
         let text = TextView::markdown("message-body", share_text.clone())
             .markdown_extensions(
                 MarkdownExtensions::default()
@@ -1087,6 +1140,7 @@ impl Spk {
                 if let Some(offset) = href.strip_prefix(&link_prefix) {
                     if let Ok(offset) = offset.parse::<usize>() {
                         let _ = link_app.update(cx, |this, cx| {
+                            this.preserve_chat_position();
                             this.chat_spoilers
                                 .entry(link_key.clone())
                                 .or_default()
@@ -1521,9 +1575,9 @@ mod tests {
     fn delayed_history_opens_at_the_latest_message_and_shares_scrollbar_position() {
         use std::{cell::Cell, rc::Rc, time::Duration};
 
-        use gpui_kit::{prelude::FluentBuilder, *};
+        use gpui_kit::*;
 
-        use super::{HistoryPosition, chat_history_viewport};
+        use super::{HistoryPosition, chat_history_viewport, when_visible};
 
         struct ChatLayout {
             rows: usize,
@@ -1531,6 +1585,7 @@ mod tests {
             scroll: ScrollHandle,
             position: Rc<Cell<Option<HistoryPosition>>>,
             latest_visible_on_first_paint: Rc<Cell<Option<bool>>>,
+            preview_requests: Rc<Cell<(bool, bool)>>,
         }
 
         impl Render for ChatLayout {
@@ -1541,27 +1596,34 @@ mod tests {
                     .flex_col()
                     .child(chat_history_viewport(
                         (0..self.rows).map(|index| {
-                            div().h(px(24.)).flex_shrink_0().when(
-                                self.rows > 1 && index + 1 == self.rows,
-                                |row| {
+                            let first = index == 0;
+                            let last = index + 1 == self.rows;
+                            let row = div().h(px(24.)).flex_shrink_0().child(
+                                canvas(|_, _, _| (), {
                                     let visible = self.latest_visible_on_first_paint.clone();
-                                    row.child(
-                                        canvas(
-                                            |_, _, _| (),
-                                            move |bounds, (), window, _| {
-                                                if visible.get().is_none() {
-                                                    let viewport = window.content_mask().bounds;
-                                                    visible.set(Some(
-                                                        bounds.top() >= viewport.top()
-                                                            && bounds.bottom() <= viewport.bottom(),
-                                                    ));
-                                                }
-                                            },
-                                        )
-                                        .size_full(),
-                                    )
-                                },
-                            )
+                                    let check = self.rows > 1 && last;
+                                    move |bounds, (), window, _| {
+                                        if check && visible.get().is_none() {
+                                            let viewport = window.content_mask().bounds;
+                                            visible.set(Some(
+                                                bounds.top() >= viewport.top()
+                                                    && bounds.bottom() <= viewport.bottom(),
+                                            ));
+                                        }
+                                    }
+                                })
+                                .size_full(),
+                            );
+                            if self.rows > 1 && (first || last) {
+                                let requests = self.preview_requests.clone();
+                                when_visible(row, move |_, _| {
+                                    let (requested_first, requested_last) = requests.get();
+                                    requests
+                                        .set((requested_first || first, requested_last || last));
+                                })
+                            } else {
+                                row
+                            }
                         }),
                         &self.scroll,
                         &self.position,
@@ -1576,6 +1638,7 @@ mod tests {
             gpui_kit::init(cx);
             let scroll = ScrollHandle::new();
             let latest_visible_on_first_paint = Rc::new(Cell::new(None));
+            let preview_requests = Rc::new(Cell::new((false, false)));
             let handle = cx
                 .open_window(WindowOptions::default(), |_, cx| {
                     cx.new(|_| ChatLayout {
@@ -1584,6 +1647,7 @@ mod tests {
                         scroll: scroll.clone(),
                         position: Rc::new(Cell::new(Some(HistoryPosition::Opening))),
                         latest_visible_on_first_paint: latest_visible_on_first_paint.clone(),
+                        preview_requests: preview_requests.clone(),
                     })
                 })
                 .unwrap();
@@ -1606,6 +1670,7 @@ mod tests {
                             scroll.bottom_item(),
                             scroll.logical_scroll_bottom().1,
                             latest_visible_on_first_paint.get(),
+                            preview_requests.get(),
                         );
                         window.dispatch_event(
                             ScrollEvent {
@@ -1683,6 +1748,7 @@ mod tests {
                             after_append,
                             after_drag,
                             scroll.max_offset().y,
+                            preview_requests.get(),
                         )));
                         cx.quit();
                     })
@@ -1690,9 +1756,10 @@ mod tests {
             })
             .detach();
         });
-        let (aligned, after_wheel, after_append, after_drag, max_after_resize) =
+        let (aligned, after_wheel, after_append, after_drag, max_after_resize, preview_requests) =
             outcome.take().expect("history must finish layout");
-        assert_eq!(aligned, (19, px(0.), Some(true)));
+        assert_eq!(aligned, (19, px(0.), Some(true), (false, true)));
+        assert_eq!(preview_requests, (true, true));
         assert_eq!(after_wheel, px(-340.));
         assert_eq!(after_append, after_wheel);
         assert_eq!(after_drag, px(0.));
