@@ -17,6 +17,7 @@ Implement every feature available in the SPK web app. Use the upstream web clien
 ## Pull requests
 
 For user-facing visual changes, capture the affected UI in Dark mode and embed the screenshots directly in the pull request body.
+Attach screenshots directly to the PR with `gh pr create --attach` or `gh pr edit --attach`.
 
 ## Server integration
 
