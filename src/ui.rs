@@ -3,6 +3,7 @@ mod chat;
 mod notifications;
 mod profile;
 mod radio;
+mod screen_picker;
 mod search;
 mod settings;
 mod soundboard;
@@ -88,6 +89,9 @@ pub(super) struct Spk {
     voice_strip_toggle_focus: FocusHandle,
     quick_switcher: Option<WeakEntity<gpui_kit::component::command::CommandState>>,
     video_stage: video::VideoStage,
+    screen_picker_open: bool,
+    #[cfg(windows)]
+    windows_screen_picker: Option<u64>,
     workspace_focus: FocusHandle,
     settings_button_focus: FocusHandle,
     appearance: Appearance,
@@ -407,6 +411,9 @@ impl Spk {
             voice_strip_toggle_focus: cx.focus_handle(),
             quick_switcher: None,
             video_stage: video::VideoStage::default(),
+            screen_picker_open: false,
+            #[cfg(windows)]
+            windows_screen_picker: None,
             workspace_focus,
             settings_button_focus: cx.focus_handle(),
             appearance,
@@ -489,6 +496,7 @@ impl Spk {
             window.clear_notifications(cx);
         }
         self.view = view;
+        self.update_screen_picker(window, cx);
     }
 
     fn send(&mut self, command: Command, busy: Option<&'static str>, cx: &mut Context<Self>) {
