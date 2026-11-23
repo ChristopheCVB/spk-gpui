@@ -30,7 +30,7 @@ use screencapturekit::{
 
 use super::*;
 
-pub(super) async fn choices() -> Result<Vec<Choice>, CaptureError> {
+pub(super) async fn pick(_: Option<Device>) -> Result<Selection, CaptureError> {
     if !cfg!(target_arch = "aarch64")
         || !NSProcessInfo::processInfo().isOperatingSystemAtLeastVersion(NSOperatingSystemVersion {
             majorVersion: 15,
@@ -38,15 +38,8 @@ pub(super) async fn choices() -> Result<Vec<Choice>, CaptureError> {
             patchVersion: 0,
         })
     {
-        return Ok(Vec::new());
+        return Err(CaptureError::Unavailable);
     }
-    Ok(vec![Choice {
-        id: "system-picker".into(),
-        label: "Choose a display or window".into(),
-    }])
-}
-
-pub(super) async fn select(_: Choice, _: Option<Device>) -> Result<Selection, CaptureError> {
     let mut config =
         SCContentSharingPickerConfiguration::new().map_err(|_| CaptureError::Unavailable)?;
     config.set_allowed_picker_modes(&[
