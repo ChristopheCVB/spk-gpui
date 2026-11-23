@@ -109,7 +109,8 @@ def method_call(_connection, sender, path, _interface, method, parameters, invoc
         response["session_handle"] = GLib.Variant("s", session_handle)
     elif method == "SelectSources":
         source_selections += 1
-        if options["types"] != available_types or options["multiple"]:
+        expected_types = 1 if source == "display" and source_selections == 2 else available_types
+        if options["types"] != expected_types or options["multiple"]:
             status = 2
             calls.append("unexpected selection")
         elif source == "window" and source_selections == 1:
@@ -124,7 +125,7 @@ def method_call(_connection, sender, path, _interface, method, parameters, invoc
             return
         if status == 0:
             properties = {"size": GLib.Variant("(ii)", (640, 480))}
-            if source == "display":
+            if source == "display" and source_selections == 1:
                 properties["position"] = GLib.Variant("(ii)", (0, 0))
             response["streams"] = GLib.Variant(
                 "a(ua{sv})", [(node, properties)]
@@ -180,7 +181,7 @@ if test.returncode:
     sys.exit(test.returncode)
 if source:
     selected = ["CreateSession", "SelectSources", "Start", "OpenPipeWireRemote"]
-    expected = selected + ["Close"] + selected if source == "window" else selected
+    expected = selected + ["Close"] + selected
     if not closed_source:
         sys.exit("The ScreenCast source was not closed by the fixture")
 else:

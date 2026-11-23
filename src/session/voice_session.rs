@@ -715,7 +715,7 @@ impl VoiceSession {
                 }
                 sidebar.voice_intent.camera.resolution = resolution;
             }
-            Command::OpenScreenShare => {
+            Command::OpenScreenShare | Command::ChooseScreenShareDisplay(_) => {
                 let Some(voice) = sidebar
                     .voice
                     .as_mut()
@@ -723,11 +723,27 @@ impl VoiceSession {
                 else {
                     return;
                 };
-                if voice
-                    .screen
-                    .as_ref()
-                    .is_some_and(|report| !matches!(report.state, State::Ended(_)))
-                {
+                let display_only = matches!(command, Command::ChooseScreenShareDisplay(_));
+                let allowed = match command {
+                    Command::ChooseScreenShareDisplay(attempt) => {
+                        sidebar.voice_intent.preferred.screen_audio
+                            && voice.screen.as_ref().is_some_and(|report| {
+                                report.attempt == attempt
+                                    && matches!(
+                                        report.state,
+                                        State::Confirm {
+                                            can_choose_display: true,
+                                            ..
+                                        }
+                                    )
+                            })
+                    }
+                    _ => voice
+                        .screen
+                        .as_ref()
+                        .is_none_or(|report| matches!(report.state, State::Ended(_))),
+                };
+                if !allowed {
                     return;
                 }
                 let playback = voice
@@ -735,6 +751,7 @@ impl VoiceSession {
                     .as_ref()
                     .and_then(|media| media.speakers.clone());
                 sidebar.voice_intent.screen.open(playback);
+                sidebar.voice_intent.screen.display_only = display_only;
                 voice.screen = Some(screen::Report {
                     attempt: sidebar.voice_intent.screen.attempt,
                     state: State::Picking,

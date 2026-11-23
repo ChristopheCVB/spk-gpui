@@ -51,9 +51,7 @@ impl Spk {
             && (self.screen_picker_pending()
                 || self.screen_picker_focus.is_some() && matches!(report.state, State::Ended(_)))
         {
-            let attempt = report.attempt;
-            self.dismissed_screen_picker = Some(attempt);
-            self.send(Command::StopScreenShare(attempt), None, cx);
+            self.dismiss_screen_attempt(report.attempt, cx);
         }
         self.screen_picker_focus = None;
         self.quick_switcher = None;
@@ -63,6 +61,19 @@ impl Spk {
             self.update_screen_previews(window, cx);
         }
         window.close_all_dialogs(cx);
+    }
+
+    fn dismiss_screen_attempt(&mut self, attempt: u64, cx: &mut Context<Self>) {
+        self.dismissed_screen_picker = Some(attempt);
+        if let Err(async_channel::TrySendError::Full(command)) =
+            self.commands.try_send(Command::StopScreenShare(attempt))
+        {
+            let commands = self.commands.clone();
+            cx.background_spawn(async move {
+                let _ = commands.send(command).await;
+            })
+            .detach();
+        }
     }
 
     pub(super) fn update_screen_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -106,6 +117,13 @@ impl Spk {
             state,
             Some(State::LoadingSources | State::Choices(_) | State::Confirm { .. })
         ) {
+            // A dialog already waiting for a server response may close the topmost dialog.
+            if window.has_active_dialog(cx) {
+                if let Some(attempt) = reported {
+                    self.dismiss_screen_attempt(attempt, cx);
+                }
+                return;
+            }
             let app = cx.weak_entity();
             let cancel_focus = cx.focus_handle();
             self.screen_picker_focus = Some(cancel_focus.clone());
@@ -274,17 +292,32 @@ impl Spk {
                 }
                 screen_sources(choices, attempt, app, window, cx).into_any_element()
             }
-            State::Confirm { label, audio } => {
+            State::Confirm {
+                label,
+                audio,
+                can_choose_display,
+            } => {
                 let View::SignedIn(sidebar) = &app.read(cx).view else {
                     return dialog;
                 };
                 let audio_enabled = sidebar.voice_intent.preferred.screen_audio;
                 let audio_label = match (audio, audio_enabled) {
                     (Some(scope), true) => scope.label(),
+                    (None, true) if *can_choose_display => {
+                        "Video only. Choose a display to include playback audio."
+                    }
                     (None, true) => "Video only. Audio is unavailable for this source.",
                     _ => "Video only",
                 };
                 let audio = audio_enabled && audio.is_some();
+                if audio_enabled && *can_choose_display {
+                    actions = actions.child(picker_button(
+                        "choose-screen-share-display",
+                        "Choose a display",
+                        app,
+                        move || Command::ChooseScreenShareDisplay(attempt),
+                    ));
+                }
                 actions = actions.child(
                     picker_button("start-screen-share", "Start Screen Share", app, move || {
                         Command::StartScreenShare(attempt, audio)
@@ -390,6 +423,14 @@ fn screen_sources(
 ) -> Div {
     let tab = window.use_keyed_state(("screen-source-tab", attempt as usize), cx, |_, _| 0);
     let selected = *tab.read(cx);
+    let scroll = window
+        .use_keyed_state(
+            format!("screen-source-scroll-{attempt}-{selected}"),
+            cx,
+            |_, _| ScrollHandle::new(),
+        )
+        .read(cx)
+        .clone();
     let (kind, icon, empty) = if selected == 0 {
         (
             SourceKind::Display,
@@ -432,12 +473,19 @@ fn screen_sources(
                 .id(("screen-sources", selected))
                 .max_h(window.viewport_size().height * 0.5)
                 .overflow_y_scroll()
+                .track_scroll(&scroll)
                 .flex()
                 .flex_col()
                 .gap_1()
                 .children(sources.into_iter().map(|choice| {
                     let weak_app = app.downgrade();
                     let id = choice.id.clone();
+                    let (row, _) = super::workspace::navigation_target(
+                        format!("screen-source-row-{id}").into(),
+                        Some(&scroll),
+                        window,
+                        cx,
+                    );
                     let button = Button::new(SharedString::from(format!("screen-source-{id}")))
                         .secondary()
                         .w_full()
@@ -454,7 +502,7 @@ fn screen_sources(
                             });
                         });
                     #[cfg(windows)]
-                    {
+                    let button = {
                         let image = app
                             .read(cx)
                             .screen_previews
@@ -498,9 +546,10 @@ fn screen_sources(
                                             .child(choice.label.clone()),
                                     ),
                             )
-                    }
+                    };
                     #[cfg(not(windows))]
-                    button.icon(icon).label(choice.label.clone())
+                    let button = button.icon(icon).label(choice.label.clone());
+                    row.flex_shrink_0().child(button)
                 })),
         )
 }

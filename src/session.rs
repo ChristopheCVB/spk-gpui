@@ -210,6 +210,7 @@ pub enum Command {
     ChooseCameraResolution(CameraResolution),
     SetWatching(String, bool),
     OpenScreenShare,
+    ChooseScreenShareDisplay(u64),
     ChooseScreenSource(u64, String),
     #[cfg(windows)]
     ChooseWindowsScreenSource(

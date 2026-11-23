@@ -14,7 +14,10 @@ use super::*;
 
 const PORTAL_TIMEOUT: Duration = Duration::from_secs(3);
 
-pub(super) async fn pick(playback: Option<Device>) -> Result<Selection, CaptureError> {
+pub(super) async fn pick(
+    playback: Option<Device>,
+    display_only: bool,
+) -> Result<Selection, CaptureError> {
     let (portal, mut session, sources, cursor) = timeout(PORTAL_TIMEOUT, async {
         // A dedicated connection also cleans up the portal if creation is cancelled.
         let connection = zbus::Connection::session()
@@ -23,11 +26,14 @@ pub(super) async fn pick(playback: Option<Device>) -> Result<Selection, CaptureE
         let portal = Screencast::with_connection(connection)
             .await
             .map_err(portal_error)?;
-        let sources = portal
+        let mut sources = portal
             .available_source_types()
             .await
             .map_err(portal_error)?
             & SourceType::all();
+        if display_only {
+            sources &= SourceType::MONITOR;
+        }
         if sources.is_empty() {
             return Err(CaptureError::Unavailable);
         }
@@ -122,7 +128,9 @@ pub(super) async fn pick(playback: Option<Device>) -> Result<Selection, CaptureE
         frames: Arc::default(),
         backend: VideoBackend::Wayland(PortalVideo { pipewire, session }),
     };
-    ready_selection(video, label, display, playback).await
+    let mut selection = ready_selection(video, label, display, playback).await?;
+    selection.can_choose_display = source.is_none() && sources.contains(SourceType::MONITOR);
+    Ok(selection)
 }
 
 fn portal_error(error: Error) -> CaptureError {

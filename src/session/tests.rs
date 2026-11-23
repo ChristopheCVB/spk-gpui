@@ -1897,14 +1897,15 @@ async fn native_screen_selection_waits_for_confirmation_in_the_current_attempt()
         .await;
     let attempt = sidebar.voice_intent.screen.attempt;
 
-    let confirmation = |attempt| screen::Report {
+    let confirmation = |attempt, can_choose_display| screen::Report {
         attempt,
         state: screen::State::Confirm {
             label: "Window".into(),
             audio: None,
+            can_choose_display,
         },
     };
-    session.screen_report(&mut sidebar, &settings, confirmation(first));
+    session.screen_report(&mut sidebar, &settings, confirmation(first, false));
     session
         .apply_controls(
             &mut sidebar,
@@ -1917,16 +1918,35 @@ async fn native_screen_selection_waits_for_confirmation_in_the_current_attempt()
         screen::Action::Open(None)
     );
 
-    session.screen_report(&mut sidebar, &settings, confirmation(attempt));
-    assert_eq!(
-        sidebar.voice_intent.screen.action,
-        screen::Action::Open(None)
-    );
+    session.screen_report(&mut sidebar, &settings, confirmation(attempt, true));
     session
         .apply_controls(
             &mut sidebar,
             &mut settings,
-            Command::StartScreenShare(attempt, true),
+            Command::ChooseScreenShareDisplay(first),
+        )
+        .await;
+    assert_eq!(sidebar.voice_intent.screen.attempt, attempt);
+    session
+        .apply_controls(
+            &mut sidebar,
+            &mut settings,
+            Command::ChooseScreenShareDisplay(attempt),
+        )
+        .await;
+    let retry = sidebar.voice_intent.screen.attempt;
+    assert_eq!(retry, attempt + 1);
+    assert!(sidebar.voice_intent.screen.display_only);
+    assert_eq!(
+        sidebar.voice_intent.screen.action,
+        screen::Action::Open(None)
+    );
+    session.screen_report(&mut sidebar, &settings, confirmation(retry, false));
+    session
+        .apply_controls(
+            &mut sidebar,
+            &mut settings,
+            Command::StartScreenShare(retry, true),
         )
         .await;
     assert_eq!(
@@ -1956,6 +1976,7 @@ async fn queued_screen_start_respects_the_latest_audio_preference() {
         state: screen::State::Confirm {
             label: "Display".into(),
             audio: Some(screen::AudioScope::PlaybackMix),
+            can_choose_display: false,
         },
     });
     sidebar.voice = Some(view);

@@ -156,6 +156,7 @@ impl CaptureError {
 pub struct Selection {
     pub label: String,
     pub audio: Option<AudioScope>,
+    pub can_choose_display: bool,
     pub capture: Box<dyn Capture>,
 }
 
@@ -228,12 +229,14 @@ pub struct Request {
     pub attempt: u64,
     pub action: Action,
     pub quality: Quality,
+    pub display_only: bool,
 }
 
 impl Request {
     pub fn open(&mut self, playback: Option<Device>) {
         self.attempt += 1;
         self.action = Action::Open(playback);
+        self.display_only = false;
     }
 
     pub fn advance(&mut self, attempt: u64, action: Action) -> bool {
@@ -269,6 +272,7 @@ pub enum State {
     Confirm {
         label: String,
         audio: Option<AudioScope>,
+        can_choose_display: bool,
     },
     Starting,
     Live {
@@ -313,10 +317,18 @@ pub(super) async fn run(worker: &Worker, room: &Room) {
             let Action::Open(playback) = next.action else {
                 unreachable!();
             };
-            let selection = pick_source(&mut requested, next.attempt, playback, &report).await?;
+            let selection = pick_source(
+                &mut requested,
+                next.attempt,
+                playback,
+                next.display_only,
+                &report,
+            )
+            .await?;
             report(State::Confirm {
                 label: selection.label,
                 audio: selection.audio,
+                can_choose_display: selection.can_choose_display,
             });
             let request = wait_for_action(&mut requested, next.attempt, |action| {
                 matches!(action, Action::Start(_))
@@ -354,6 +366,7 @@ async fn pick_source(
     _requested: &mut watch::Receiver<Intent>,
     _attempt: u64,
     _playback: Option<Device>,
+    _display_only: bool,
     report: &impl Fn(State),
 ) -> Result<Selection, CaptureError> {
     #[cfg(target_os = "macos")]
@@ -366,7 +379,7 @@ async fn pick_source(
         #[cfg(target_os = "linux")]
         if platform::use_system_picker().await? {
             report(State::Picking);
-            return platform::pick(_playback).await;
+            return platform::pick(_playback, _display_only).await;
         }
 
         report(State::LoadingSources);

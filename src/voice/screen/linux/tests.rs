@@ -207,8 +207,9 @@ async fn wayland_window_publishes_video_only_and_preserves_voice() {
     let lose_source = || std::fs::write(&stop, []).unwrap();
     for end in [None, Some(&lose_source as &dyn Fn())] {
         let selection = async {
-            let selection = pick(Some(output.clone())).await?;
+            let selection = pick(Some(output.clone()), false).await?;
             assert_eq!(selection.label, "Screen Share · 640 × 480");
+            assert!(selection.can_choose_display);
             Ok(selection)
         };
         check_video_only_share(
@@ -378,17 +379,23 @@ async fn wayland_portal_rejection_ends_source_selection() {
         CaptureError::Permission,
     ] {
         assert!(matches!(
-            timeout(Duration::from_secs(3), pick(None)).await.unwrap(),
+            timeout(Duration::from_secs(3), pick(None, false)).await.unwrap(),
             Err(actual) if actual == error
         ));
     }
 
     // Cancel while either portal method is still waiting for the user.
     for _ in 0..2 {
-        assert!(timeout(Duration::from_secs(1), pick(None)).await.is_err());
+        assert!(
+            timeout(Duration::from_secs(1), pick(None, false))
+                .await
+                .is_err()
+        );
     }
     assert!(matches!(
-        timeout(Duration::from_secs(3), pick(None)).await.unwrap(),
+        timeout(Duration::from_secs(3), pick(None, false))
+            .await
+            .unwrap(),
         Err(CaptureError::PortalSelection)
     ));
     tokio::time::sleep(Duration::from_millis(150)).await;

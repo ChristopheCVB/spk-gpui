@@ -172,9 +172,18 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
             id: output.clone(),
             name: output,
         });
+        let wayland_fixture = std::env::var("SPK_TEST_WAYLAND_SOURCE").as_deref() == Ok("display");
         let selected = timeout(Duration::from_secs(6), async {
             if linux::use_system_picker().await.unwrap() {
-                linux::pick(playback).await
+                let selected = linux::pick(playback.clone(), false).await?;
+                if wayland_fixture {
+                    assert_eq!(selected.audio, Some(AudioScope::PlaybackMix));
+                    assert_eq!(selected.label, "Display · 640 × 480 at (0, 0)");
+                    drop(selected);
+                    linux::pick(playback, true).await
+                } else {
+                    Ok(selected)
+                }
             } else {
                 let choice = linux::choices()
                     .await
@@ -189,8 +198,9 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
         .expect("selected display delivers video")
         .unwrap();
         assert_eq!(selected.audio, Some(AudioScope::PlaybackMix));
-        if std::env::var("SPK_TEST_WAYLAND_SOURCE").as_deref() == Ok("display") {
-            assert_eq!(selected.label, "Display · 640 × 480 at (0, 0)");
+        if wayland_fixture {
+            assert_eq!(selected.label, "Display · 640 × 480");
+            assert!(!selected.can_choose_display);
         }
         (Some(selected.capture), AudioScope::PlaybackMix)
     } else {

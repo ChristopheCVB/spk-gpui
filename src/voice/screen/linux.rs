@@ -33,11 +33,14 @@ pub(super) async fn use_system_picker() -> Result<bool, CaptureError> {
     wayland()
 }
 
-pub(super) async fn pick(playback: Option<Device>) -> Result<Selection, CaptureError> {
+pub(super) async fn pick(
+    playback: Option<Device>,
+    display_only: bool,
+) -> Result<Selection, CaptureError> {
     if !wayland()? {
         return Err(CaptureError::Unavailable);
     }
-    portal::pick(playback).await
+    portal::pick(playback, display_only).await
 }
 
 pub async fn choices() -> Result<Vec<Choice>, CaptureError> {
@@ -125,6 +128,7 @@ async fn ready_selection(
     Ok(Selection {
         label,
         audio: monitor.as_ref().map(|_| AudioScope::PlaybackMix),
+        can_choose_display: false,
         capture: Box::new(Selected { video, monitor }),
     })
 }

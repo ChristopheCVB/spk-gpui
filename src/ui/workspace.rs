@@ -59,7 +59,7 @@ fn navigation_card(title: &'static str, cx: &App) -> Stateful<Div> {
         .bg(cx.theme().background)
 }
 
-fn navigation_target(
+pub(super) fn navigation_target(
     id: SharedString,
     scroll_on_focus: Option<&ScrollHandle>,
     window: &mut Window,

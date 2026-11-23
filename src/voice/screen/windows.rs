@@ -221,6 +221,7 @@ pub(super) async fn select_system(item: GraphicsCaptureItem) -> Result<Selection
         Ok(Selection {
             label,
             audio: None,
+            can_choose_display: false,
             capture: Box::new(Selected {
                 item: SelectedItem(item, apartment),
                 window: None,
@@ -297,6 +298,7 @@ pub(super) async fn select(
     Ok(Selection {
         label,
         audio: scope,
+        can_choose_display: false,
         capture: Box::new(Selected {
             item,
             window,

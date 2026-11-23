@@ -131,6 +131,7 @@ fn selection(filter: SCContentFilter, label: Option<String>) -> Result<Selection
     Ok(Selection {
         label,
         audio: Some(scope),
+        can_choose_display: false,
         capture: Box::new(Selected {
             filter,
             width,
