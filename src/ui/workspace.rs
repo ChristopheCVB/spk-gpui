@@ -4,7 +4,6 @@ use gpui_kit::component::{
     Disableable, Placement,
     menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem},
     resizable::{HandleEdge, resize_handle},
-    scroll::ScrollableElement,
     window_paddings,
 };
 
@@ -58,6 +57,7 @@ fn navigation_card(title: &'static str, cx: &App) -> Stateful<Div> {
         .flex_shrink_0()
         .rounded_lg()
         .p_1()
+        .pr(OVERLAY_SCROLLBAR_WIDTH)
         .bg(cx.theme().background)
 }
 
@@ -575,7 +575,6 @@ impl Spk {
             .min_h_0()
             .overflow_y_scroll()
             .track_scroll(&scroll)
-            .px_2()
             .pb_2()
             .gap(if self.compact() { px(4.0) } else { px(8.0) })
             .when(!self.sidebar_drawer_open, |nav| {
@@ -700,8 +699,9 @@ impl Spk {
             .flex_col()
             .flex_1()
             .min_h_0()
+            .px_2()
             .child(destinations)
-            .vertical_scrollbar(&scroll)
+            .child(overlay_scrollbar(&scroll))
     }
 
     fn navigation_footer(

@@ -22,7 +22,7 @@ use std::{
 
 use gpui_kit::{
     assets::IconName,
-    base::StyledExt,
+    base::{Scrollbar, ScrollbarHandle, ScrollbarMode, StyledExt},
     component::{
         ActiveTheme, Icon, Selectable, Sizable, WindowExt,
         avatar::Avatar,
@@ -736,6 +736,18 @@ fn profile_avatar(
 const ACTION_ICON_SIZE: Pixels = px(20.0);
 const CONTROL_PADDING: Pixels = px(6.0);
 const CONTROL_HEIGHT: Pixels = px(32.0);
+const OVERLAY_SCROLLBAR_WIDTH: Pixels = px(8.0);
+
+#[track_caller]
+fn overlay_scrollbar(scroll: &(impl ScrollbarHandle + Clone)) -> Scrollbar {
+    Scrollbar::vertical(scroll)
+        .mode(ScrollbarMode::Scrolling)
+        .styles(|styles| {
+            styles
+                .track(|track| track.width(OVERLAY_SCROLLBAR_WIDTH))
+                .thumb(|thumb| thumb.width(px(4.)).inset(px(2.)).radius(px(2.)))
+        })
+}
 
 fn control_button(id: impl Into<ElementId>) -> Button {
     Button::new(id).h(CONTROL_HEIGHT).p(CONTROL_PADDING)

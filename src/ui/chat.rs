@@ -15,7 +15,6 @@ use std::{
 };
 
 use chrono::{DateTime, Local};
-use gpui_kit::base::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::{
     Disableable,
     menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
@@ -169,7 +168,7 @@ fn chat_history_viewport(
                 .track_scroll(scroll)
                 .children(rows),
         )
-        .child(Scrollbar::vertical(scroll).mode(ScrollbarMode::Always))
+        .child(overlay_scrollbar(scroll))
 }
 
 fn history_anchor<'a>(chat: &'a ChatView, scroll: &ScrollHandle) -> Option<(&'a str, Pixels)> {

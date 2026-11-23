@@ -221,7 +221,7 @@ impl Spk {
                             list(scroll.clone(), move |index, _, _| {
                                 let emoji = results[index];
                                 let app = app.clone();
-                                control_button(index)
+                                let item = control_button(index)
                                     .ghost()
                                     .w_full()
                                     .h(ROW_HEIGHT)
@@ -247,13 +247,16 @@ impl Spk {
                                         let _ = app.update(cx, |this, cx| {
                                             this.pick_reaction(&emoji.emoji, window, cx);
                                         });
-                                    })
+                                    });
+                                div()
+                                    .pr(OVERLAY_SCROLLBAR_WIDTH)
+                                    .child(item)
                                     .into_any_element()
                             })
                             .w_full()
                             .h_full(),
                         )
-                        .child(Scrollbar::vertical(&scroll).mode(ScrollbarMode::Always)),
+                        .child(overlay_scrollbar(&scroll)),
                 )
             });
         Some(

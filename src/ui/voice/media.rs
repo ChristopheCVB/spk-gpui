@@ -4,10 +4,7 @@ use crate::ui::{
     soundboard::soundboard_panel,
     *,
 };
-use gpui_kit::component::{
-    popover::Popover,
-    scroll::{Scrollbar, ScrollbarMode},
-};
+use gpui_kit::component::popover::Popover;
 
 type MediaPanel = fn(Entity<Spk>, u8, &mut Window, &mut App) -> (AnyView, FocusHandle);
 
@@ -189,7 +186,7 @@ pub(in crate::ui) fn media_results(
                 .track_scroll(scroll)
                 .pr_3(),
         )
-        .child(Scrollbar::vertical(scroll).mode(ScrollbarMode::Always))
+        .child(overlay_scrollbar(scroll))
 }
 
 #[derive(IntoElement)]
