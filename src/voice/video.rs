@@ -141,7 +141,7 @@ pub(crate) async fn preview_camera(
 pub struct ParticipantVideo {
     pub live: HashSet<VideoSource>,
     pub screen_quality: Option<Quality>,
-    pub screen_audio: bool,
+    pub has_unmuted_screen_audio: bool,
     pub frames: HashMap<VideoSource, VideoFrameSlot>,
 }
 
@@ -415,7 +415,7 @@ impl Video {
             for publication in participant.track_publications().values() {
                 let track_source = publication.source();
                 if track_source == TrackSource::ScreenshareAudio {
-                    video.screen_audio |= !publication.is_muted();
+                    video.has_unmuted_screen_audio |= !publication.is_muted();
                     continue;
                 }
                 let Some(source) = VideoSource::from_track(track_source) else {

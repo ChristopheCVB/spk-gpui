@@ -34,9 +34,19 @@ pub(super) struct VideoStage {
     strip_focus: RefCell<Option<FocusHandle>>,
     pub hide_preview: bool,
     pub hovered: Option<String>,
+    pub pointer_in_window: bool,
+    focused: Option<FocusHandle>,
+    pub keyboard_focus: bool,
     pub menu_for: Option<String>,
     pub screen_volume_for: Option<String>,
     pub frames: HashMap<(String, VideoSource), Arc<RenderImage>>,
+}
+
+impl VideoStage {
+    pub(super) fn pointer_over_window(&self, window: &Window) -> bool {
+        // Windows signals window hover changes without dispatching MouseExitEvent.
+        self.pointer_in_window && (!cfg!(windows) || window.is_window_hovered())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -47,7 +57,7 @@ enum TileAction {
 }
 
 #[derive(Clone, Copy)]
-struct TileActions {
+pub(super) struct TileActions {
     live: bool,
     can_watch: bool,
     watching: bool,
@@ -55,10 +65,19 @@ struct TileActions {
     theater: bool,
     fullscreen: bool,
     is_me: bool,
+    pub watched_screen: bool,
+    pub screen_quality: Option<Quality>,
+    screen_volume: bool,
+}
+
+pub(super) struct TileControls {
+    pub actions: TileActions,
+    pub revealed: bool,
+    pub compact: bool,
 }
 
 impl TileActions {
-    fn for_participant(
+    pub(super) fn for_participant(
         app: &Spk,
         participant: &Participant<'_>,
         call: &VoiceView,
@@ -66,29 +85,37 @@ impl TileActions {
     ) -> Self {
         let is_me = sidebar.profile.id.as_deref() == Some(participant.id);
         let report = call.video.as_ref();
+        let video = report.and_then(|report| report.participants.get(participant.id));
         let live = (is_me
             && call
                 .screen
                 .as_ref()
                 .is_some_and(|screen| screen.state.active()))
-            || participant_video(report.and_then(|report| report.participants.get(participant.id)))
+            || participant_video(video)
             || participant
                 .video
                 .is_some_and(|media| !is_me && (media.cam || media.screen));
         let watching = sidebar.voice_intent.watching.contains(participant.id);
+        let watched_screen = watching
+            && (participant.video.is_some_and(|video| video.screen)
+                || video.is_some_and(|video| video.live.contains(&VideoSource::Screen)));
         Self {
             live,
             can_watch: !is_me
                 && (watching
                     || (live
-                        && report.is_none_or(|report| {
-                            !report.reconnecting && report.participants.contains_key(participant.id)
-                        }))),
+                        && report.is_none_or(|report| !report.reconnecting && video.is_some()))),
             watching,
             show: live && (is_me || watching),
             theater: app.video_stage.theater.as_deref() == Some(participant.id),
             fullscreen: app.video_stage.fullscreen,
             is_me,
+            watched_screen,
+            screen_quality: video
+                .filter(|_| watched_screen)
+                .and_then(|video| video.screen_quality),
+            screen_volume: watched_screen
+                && video.is_some_and(|video| video.has_unmuted_screen_audio),
         }
     }
 
@@ -103,6 +130,11 @@ impl TileActions {
 
 impl Spk {
     pub(super) fn prepare_video_stage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let focused = window.focused(cx);
+        if self.video_stage.focused != focused {
+            self.video_stage.keyboard_focus = window.last_input_was_keyboard();
+            self.video_stage.focused = focused;
+        }
         let call = match &self.view {
             View::SignedIn(sidebar) => sidebar.voice.as_ref().filter(|call| {
                 call.is_participating()
@@ -162,6 +194,20 @@ impl Spk {
         self.video_stage
             .tile_focus
             .retain(|id, _| participants.iter().any(|person| person.id == id));
+        if let Some(id) = &self.video_stage.screen_volume_for {
+            let can_adjust = match (&self.view, call) {
+                (View::SignedIn(sidebar), Some(call)) => participants
+                    .iter()
+                    .find(|person| person.id == id)
+                    .is_some_and(|person| {
+                        TileActions::for_participant(self, person, call, sidebar).screen_volume
+                    }),
+                _ => false,
+            };
+            if !can_adjust {
+                self.video_stage.screen_volume_for = None;
+            }
+        }
         for person in participants {
             if !self.video_stage.tile_focus.contains_key(person.id) {
                 self.video_stage
@@ -176,22 +222,6 @@ impl Spk {
             .is_some_and(|id| !self.video_stage.tile_focus.contains_key(id))
         {
             self.video_stage.menu_for = None;
-        }
-        if self
-            .video_stage
-            .screen_volume_for
-            .as_ref()
-            .is_some_and(|id| {
-                !self.video_stage.tile_focus.contains_key(id)
-                    || !watching.is_some_and(|ids| ids.contains(id))
-                    || !report
-                        .and_then(|report| report.participants.get(id))
-                        .is_some_and(|video| {
-                            video.screen_audio && video.live.contains(&VideoSource::Screen)
-                        })
-            })
-        {
-            self.video_stage.screen_volume_for = None;
         }
         if self
             .video_stage
@@ -470,7 +500,9 @@ impl Spk {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(id) = self.video_stage.hovered.clone() {
+        if self.video_stage.pointer_over_window(window)
+            && let Some(id) = self.video_stage.hovered.clone()
+        {
             self.video_tile_key(&id, event, window, cx);
         }
     }
@@ -578,15 +610,19 @@ impl Spk {
         participant: &Participant<'_>,
         call: &VoiceView,
         sidebar: &Sidebar,
-        reveal_actions: bool,
+        controls: TileControls,
         menu: Option<impl IntoElement>,
         cx: &Context<Self>,
     ) -> Div {
-        let available = TileActions::for_participant(self, participant, call, sidebar);
+        let TileControls {
+            actions: available,
+            revealed: reveal_actions,
+            compact,
+        } = controls;
         let id = participant.id.to_owned();
         let watch_id = id.clone();
         let theater_id = id.clone();
-        let watched_screen = watching_screen(participant, call, sidebar);
+        let watched_screen = available.watched_screen;
         let viewers = sidebar.viewers(&call.channel_id, participant.id);
         let row = div()
             .absolute()
@@ -594,14 +630,14 @@ impl Spk {
             .left_2()
             .right_2()
             .flex()
-            .flex_wrap()
+            .when(!watched_screen, |row| row.flex_wrap())
+            .when(watched_screen, |row| row.min_h(CONTROL_HEIGHT))
             .items_center()
             .justify_end()
             .gap_1()
-            .when(watched_screen, |row| row.left_1().right_1())
             .when(available.live && !viewers.is_empty(), |row| {
                 if watched_screen {
-                    row.child(screen_viewers(&viewers, sidebar, cx))
+                    row.child(screen_viewers(&viewers, compact, sidebar, cx))
                 } else {
                     let names = viewers.iter().map(|viewer| viewer.name).collect::<Vec<_>>();
                     row.child(
@@ -637,7 +673,6 @@ impl Spk {
             )
             .secondary()
             .flex_shrink_0()
-            .when(watched_screen, screen_tile_button)
             .on_click(cx.listener(move |app, _, window, cx| {
                 app.apply_tile_action(&watch_id, TileAction::Watch, &available, window, cx);
             }))
@@ -686,7 +721,6 @@ impl Spk {
                             },
                         )
                         .secondary()
-                        .when(watched_screen, screen_tile_button)
                         .on_click(cx.listener(
                             move |app, _, window, cx| {
                                 app.apply_tile_action(
@@ -716,7 +750,6 @@ impl Spk {
                             },
                         )
                         .secondary()
-                        .when(watched_screen, screen_tile_button)
                         .on_click(cx.listener(
                             move |app, _, window, cx| {
                                 app.apply_tile_action(
@@ -730,40 +763,23 @@ impl Spk {
                         )),
                     )
                 })
-                .when(
-                    watched_screen
-                        && call
-                            .video
-                            .as_ref()
-                            .and_then(|report| report.participants.get(participant.id))
-                            .is_some_and(|video| video.screen_audio),
-                    |row| row.child(screen_volume(participant.id, cx)),
-                )
+                .when(available.screen_volume, |row| {
+                    row.child(screen_volume(participant.id, cx))
+                })
                 .children(menu),
         )
     }
 }
 
-pub(super) fn watching_screen(
-    participant: &Participant<'_>,
-    call: &VoiceView,
-    sidebar: &Sidebar,
-) -> bool {
-    sidebar.voice_intent.watching.contains(participant.id)
-        && (participant.video.is_some_and(|video| video.screen)
-            || call
-                .video
-                .as_ref()
-                .and_then(|report| report.participants.get(participant.id))
-                .is_some_and(|video| video.live.contains(&VideoSource::Screen)))
-}
-
-pub(super) fn screen_tile_button(button: Button) -> Button {
-    button.size(px(24.0)).p_0()
-}
-
-fn screen_viewers(viewers: &[Participant<'_>], sidebar: &Sidebar, cx: &App) -> Div {
-    const LIMIT: usize = 5;
+fn screen_viewers(viewers: &[Participant<'_>], compact: bool, sidebar: &Sidebar, cx: &App) -> Div {
+    // The compact row has room for two circles beside five standard action buttons.
+    let limit = if compact && viewers.len() > 2 {
+        1
+    } else if compact {
+        2
+    } else {
+        5
+    };
     div()
         .flex()
         .mr_auto()
@@ -771,7 +787,7 @@ fn screen_viewers(viewers: &[Participant<'_>], sidebar: &Sidebar, cx: &App) -> D
         .children(
             viewers
                 .iter()
-                .take(LIMIT)
+                .take(limit)
                 .enumerate()
                 .map(|(index, viewer)| {
                     let name = viewer.name.to_owned();
@@ -790,8 +806,8 @@ fn screen_viewers(viewers: &[Participant<'_>], sidebar: &Sidebar, cx: &App) -> D
                         ))
                 }),
         )
-        .when(viewers.len() > LIMIT, |row| {
-            let hidden = &viewers[LIMIT..];
+        .when(viewers.len() > limit, |row| {
+            let hidden = &viewers[limit..];
             let names = hidden
                 .iter()
                 .map(|viewer| viewer.name)
@@ -824,14 +840,14 @@ fn screen_volume(id: &str, cx: &Context<Spk>) -> Popover {
     Popover::new("screen-volume")
         .anchor(Anchor::BottomRight)
         .w(px(192.0))
-        .trigger(screen_tile_button(
+        .trigger(
             tool_button(
                 "screen-volume-trigger",
                 IconName::Volume2,
                 "Screen Share volume",
             )
             .secondary(),
-        ))
+        )
         .on_open_change({
             let app = app.clone();
             move |open, _, cx| {
