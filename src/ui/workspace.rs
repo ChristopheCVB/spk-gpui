@@ -1569,7 +1569,9 @@ impl Spk {
         let reveal_actions = tile_focused
             || self.video_stage.menu_for.as_deref() == Some(participant.id)
             || self.video_stage.screen_volume_for.as_deref() == Some(participant.id)
-            || (watched_screen && self.video_stage.hovered.as_deref() == Some(participant.id));
+            || (watched_screen
+                && window.is_window_hovered()
+                && self.video_stage.hovered.as_deref() == Some(participant.id));
         let scroll_on_focus = scroll_on_focus.filter(|_| tile_focused).cloned();
         let focus_on_tile = tile_focus.is_focused(window);
         let controls = self
