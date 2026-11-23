@@ -176,6 +176,10 @@ A voice participant’s live view of a selected screen, window, or tab, optional
 
 A viewer’s choice to receive the camera video, screen share, and screen audio a participant is sharing.
 
+**Theater Mode**
+
+A Voice Channel view that enlarges one participant’s tile and places the other participants in a hideable strip.
+
 **Channel Radio**
 
 A radio station selected for a voice channel. The station is shared, and each listener controls their own playback.
