@@ -182,6 +182,10 @@ try {
     Write-Host 'Soundboard upload accessibility passed.'
 
     Invoke-Button 'Close settings'
+    $null = Wait-For 'Settings to close' {
+        -not (Get-Nodes $windowHandle | Where-Object { $_.Current.Name -eq 'Close settings' } |
+            Select-Object -First 1)
+    }
     if ([SpkAccessibilityFixture]::waveOutGetNumDevs() -gt 0) {
         Invoke-Button 'Join voice'
         Invoke-Button 'Voice connection diagnostics'

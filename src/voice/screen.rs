@@ -32,7 +32,7 @@ mod windows;
 #[cfg(windows)]
 use self::windows as platform;
 #[cfg(windows)]
-pub(crate) use self::windows::{SYSTEM_PICKER, pick_system_source};
+pub(crate) use self::windows::{pick_system_source, preview_sources};
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 mod platform {
@@ -92,10 +92,17 @@ impl Quality {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SourceKind {
+    Display,
+    Window,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Choice {
     pub id: String,
     pub label: String,
+    pub kind: SourceKind,
 }
 
 #[allow(dead_code)] // Constructed by native capture adapters.
@@ -149,6 +156,7 @@ impl CaptureError {
 pub struct Selection {
     pub label: String,
     pub audio: Option<AudioScope>,
+    pub can_choose_display: bool,
     pub capture: Box<dyn Capture>,
 }
 
@@ -209,7 +217,7 @@ impl CaptureSink {
 pub enum Action {
     #[default]
     Stop,
-    Open,
+    Open(Option<Device>),
     Choose(String, Option<Device>),
     #[cfg(windows)]
     ChooseSystem(Result<::windows::Graphics::Capture::GraphicsCaptureItem, CaptureError>),
@@ -221,21 +229,24 @@ pub struct Request {
     pub attempt: u64,
     pub action: Action,
     pub quality: Quality,
+    pub display_only: bool,
 }
 
 impl Request {
-    pub fn open(&mut self) {
+    pub fn open(&mut self, playback: Option<Device>) {
         self.attempt += 1;
-        self.action = Action::Open;
+        self.action = Action::Open(playback);
+        self.display_only = false;
     }
 
     pub fn advance(&mut self, attempt: u64, action: Action) -> bool {
         let valid = match (&self.action, &action) {
             (_, Action::Stop)
-            | (Action::Open, Action::Choose(..))
+            | (Action::Open(_), Action::Choose(..))
+            | (Action::Open(_), Action::Start(_))
             | (Action::Choose(..), Action::Start(_)) => true,
             #[cfg(windows)]
-            (Action::Open, Action::ChooseSystem(..))
+            (Action::Open(_), Action::ChooseSystem(..))
             | (Action::ChooseSystem(..), Action::Start(_)) => true,
             _ => false,
         };
@@ -256,10 +267,12 @@ pub struct Report {
 #[derive(Clone)]
 pub enum State {
     Picking,
+    LoadingSources,
     Choices(Vec<Choice>),
     Confirm {
         label: String,
         audio: Option<AudioScope>,
+        can_choose_display: bool,
     },
     Starting,
     Live {
@@ -273,6 +286,7 @@ pub enum State {
         frames: VideoFrameSlot,
     },
     Ended(&'static str),
+    Cancelled,
 }
 
 impl State {
@@ -286,7 +300,7 @@ pub(super) async fn run(worker: &Worker, room: &Room) {
     let mut previous = 0;
     while let Ok(next) = requested
         .wait_for(|intent| {
-            intent.screen.attempt != previous && intent.screen.action == Action::Open
+            intent.screen.attempt != previous && matches!(intent.screen.action, Action::Open(_))
         })
         .await
         .map(|intent| intent.screen.clone())
@@ -299,36 +313,22 @@ pub(super) async fn run(worker: &Worker, room: &Room) {
                 state,
             }));
         };
-        report(State::Picking);
         let result = select_until_cancelled(&mut requested.clone(), next.attempt, async {
-            let choices = platform::choices().await?;
-            if choices.is_empty() {
-                return Err(CaptureError::Unavailable);
-            }
-            report(State::Choices(choices.clone()));
-            let action = wait_for_action(&mut requested, next.attempt, |action| match action {
-                Action::Choose(..) => true,
-                #[cfg(windows)]
-                Action::ChooseSystem(..) => true,
-                _ => false,
-            })
-            .await?;
-            report(State::Picking);
-            let selection = match action.action {
-                Action::Choose(id, playback) => {
-                    let choice = choices
-                        .into_iter()
-                        .find(|choice| choice.id == id)
-                        .ok_or(CaptureError::Unavailable)?;
-                    platform::select(choice, playback).await?
-                }
-                #[cfg(windows)]
-                Action::ChooseSystem(item) => platform::select_system(item?).await?,
-                _ => unreachable!(),
+            let Action::Open(playback) = next.action else {
+                unreachable!();
             };
+            let selection = pick_source(
+                &mut requested,
+                next.attempt,
+                playback,
+                next.display_only,
+                &report,
+            )
+            .await?;
             report(State::Confirm {
                 label: selection.label,
                 audio: selection.audio,
+                can_choose_display: selection.can_choose_display,
             });
             let request = wait_for_action(&mut requested, next.attempt, |action| {
                 matches!(action, Action::Start(_))
@@ -354,7 +354,56 @@ pub(super) async fn run(worker: &Worker, room: &Room) {
         let active = requested.borrow().screen.clone();
         worker.publish_screen_presence(false);
         if active.attempt == next.attempt && active.action != Action::Stop {
-            report(State::Ended(error.message()));
+            report(match error {
+                CaptureError::Cancelled => State::Cancelled,
+                error => State::Ended(error.message()),
+            });
+        }
+    }
+}
+
+async fn pick_source(
+    _requested: &mut watch::Receiver<Intent>,
+    _attempt: u64,
+    _playback: Option<Device>,
+    _display_only: bool,
+    report: &impl Fn(State),
+) -> Result<Selection, CaptureError> {
+    #[cfg(target_os = "macos")]
+    {
+        report(State::Picking);
+        platform::pick(_playback).await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        #[cfg(target_os = "linux")]
+        if platform::use_system_picker().await? {
+            report(State::Picking);
+            return platform::pick(_playback, _display_only).await;
+        }
+
+        report(State::LoadingSources);
+        let choices = platform::choices().await?;
+        report(State::Choices(choices.clone()));
+        let action = wait_for_action(_requested, _attempt, |action| match action {
+            Action::Choose(..) => true,
+            #[cfg(windows)]
+            Action::ChooseSystem(..) => true,
+            _ => false,
+        })
+        .await?;
+        report(State::Picking);
+        match action.action {
+            Action::Choose(id, playback) => {
+                let choice = choices
+                    .into_iter()
+                    .find(|choice| choice.id == id)
+                    .ok_or(CaptureError::Unavailable)?;
+                platform::select(choice, playback).await
+            }
+            #[cfg(windows)]
+            Action::ChooseSystem(item) => platform::select_system(item?).await,
+            _ => unreachable!(),
         }
     }
 }

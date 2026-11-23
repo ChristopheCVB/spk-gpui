@@ -40,10 +40,14 @@ use ::windows::{
                 CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
             },
         },
-        UI::{Shell::IInitializeWithWindow, WindowsAndMessaging::GetClassNameW},
+        UI::{
+            Shell::IInitializeWithWindow,
+            WindowsAndMessaging::{GetClassNameW, GetWindowDisplayAffinity, IsIconic, WDA_NONE},
+        },
     },
     core::Interface,
 };
+use gpui_kit::RenderImage;
 use livekit::webrtc::{native::yuv_helper::argb_to_i420, video_frame::VideoRotation};
 use wasapi::{
     AudioCaptureClient, AudioClient, DeviceEnumerator, Direction, Role, SampleType, StreamMode,
@@ -53,20 +57,156 @@ use windows_capture::{monitor::Monitor, settings::GraphicsCaptureItemType, windo
 
 use super::*;
 
-pub(crate) const SYSTEM_PICKER: &str = "windows-picker";
+const CAPTURE_PIXEL: DirectXPixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormalized;
 
-pub(crate) async fn pick_system_source(hwnd: isize) -> Result<GraphicsCaptureItem, CaptureError> {
+pub(crate) async fn preview_sources(
+    choices: Vec<Choice>,
+    images: async_channel::Sender<(String, Arc<RenderImage>)>,
+) {
+    // Serialize native snapshots across picker attempts while allowing queued work to cancel.
+    static WORKER: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+    let _permit = tokio::select! {
+        permit = WORKER.acquire() => permit,
+        () = images.closed() => return,
+    };
+    let (Ok(_apartment), Ok(_graphics)) = (Apartment::new(), GraphicsApartment::new()) else {
+        return;
+    };
+    let Ok((mut frames, device)) = Frames::new() else {
+        return;
+    };
+    let mut targets: std::collections::HashMap<_, _> = sources()
+        .into_iter()
+        .map(|(choice, source)| (choice.id, source))
+        .collect();
+    for choice in choices {
+        if images.is_closed() {
+            break;
+        }
+        let Some(target) = targets.remove(&choice.id) else {
+            continue;
+        };
+        if let Some(image) = capture_preview(target, &mut frames, &device, || images.is_closed())
+            && images.send_blocking((choice.id, image)).is_err()
+        {
+            break;
+        }
+    }
+}
+
+fn capture_preview(
+    target: Source,
+    frames: &mut Frames,
+    device: &IDirect3DDevice,
+    cancelled: impl Fn() -> bool,
+) -> Option<Arc<RenderImage>> {
+    let item = match target {
+        Source::Monitor(monitor) => monitor.try_into().ok()?,
+        Source::Window(window) => {
+            let hwnd = HWND(window.as_raw_hwnd());
+            let mut affinity = WDA_NONE.0;
+            if unsafe { IsIconic(hwnd).as_bool() }
+                || (unsafe { GetWindowDisplayAffinity(hwnd, &mut affinity) }.is_ok()
+                    && affinity != WDA_NONE.0)
+            {
+                return None;
+            }
+            window.try_into().ok()?
+        }
+    };
+    let item = match item {
+        GraphicsCaptureItemType::Monitor((item, _))
+        | GraphicsCaptureItemType::Window((item, _)) => item,
+        GraphicsCaptureItemType::Unknown(_) => return None,
+    };
+    let size = item.Size().ok()?;
+    if size.Width < 2 || size.Height < 2 {
+        return None;
+    }
+    let pool =
+        Direct3D11CaptureFramePool::CreateFreeThreaded(device, CAPTURE_PIXEL, 1, size).ok()?;
+    let session = pool.CreateCaptureSession(&item).ok()?;
+    let capture_thread = thread::current();
+    let frame_ready = Arc::new(AtomicBool::new(false));
+    let event = pool
+        .FrameArrived(&TypedEventHandler::new({
+            let frame_ready = frame_ready.clone();
+            move |_, _| {
+                frame_ready.store(true, Ordering::Release);
+                capture_thread.unpark();
+                Ok(())
+            }
+        }))
+        .ok()?;
+    let result = (|| {
+        let _ = session.SetIsCursorCaptureEnabled(false);
+        session.StartCapture().ok()?;
+        let deadline = Instant::now() + Duration::from_millis(350);
+        while !cancelled() && Instant::now() < deadline {
+            if !frame_ready.swap(false, Ordering::AcqRel) {
+                thread::park_timeout(Duration::from_millis(10));
+                continue;
+            }
+            match pool.TryGetNextFrame() {
+                Ok(frame) => {
+                    let content = frame.ContentSize().ok()?;
+                    // The staging texture must match the frame pool texture, even after a resize.
+                    if content != size {
+                        let _ = frame.Close();
+                        continue;
+                    }
+                    let snapshot = render_frame(
+                        frames,
+                        &frame,
+                        content,
+                        Quality {
+                            height: 144,
+                            fps: 5,
+                        },
+                    );
+                    let _ = frame.Close();
+                    let snapshot = snapshot.ok()?;
+                    let image = VideoFrameSlot::default();
+                    image.update(&snapshot, false);
+                    return image.latest();
+                }
+                Err(error) if error.code() == E_POINTER => continue,
+                Err(_) => return None,
+            }
+        }
+        None
+    })();
+    let _ = pool.RemoveFrameArrived(event);
+    let _ = session.Close();
+    let _ = pool.Close();
+    result
+}
+
+pub(crate) async fn pick_system_source(
+    hwnd: isize,
+    cancelled: &mut tokio::sync::oneshot::Receiver<()>,
+) -> Result<GraphicsCaptureItem, CaptureError> {
+    if !matches!(
+        cancelled.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ) {
+        return Err(CaptureError::Cancelled);
+    }
     let picker = GraphicsCapturePicker::new().map_err(graphics_error)?;
     let owner = picker
         .cast::<IInitializeWithWindow>()
         .map_err(graphics_error)?;
     // GPUI supplies the live owner HWND and runs this operation on its OLE-initialized UI thread.
     unsafe { owner.Initialize(HWND(hwnd as *mut _)) }.map_err(graphics_error)?;
-    picker
-        .PickSingleItemAsync()
-        .map_err(graphics_error)?
-        .await
-        .map_err(picker_error)
+    let operation = picker.PickSingleItemAsync().map_err(graphics_error)?;
+    tokio::select! {
+        biased;
+        _ = cancelled => {
+            let _ = operation.Cancel();
+            Err(CaptureError::Cancelled)
+        }
+        result = operation.clone() => result.map_err(picker_error),
+    }
 }
 
 pub(super) async fn select_system(item: GraphicsCaptureItem) -> Result<Selection, CaptureError> {
@@ -81,6 +221,7 @@ pub(super) async fn select_system(item: GraphicsCaptureItem) -> Result<Selection
         Ok(Selection {
             label,
             audio: None,
+            can_choose_display: false,
             capture: Box::new(Selected {
                 item: SelectedItem(item, apartment),
                 window: None,
@@ -99,12 +240,7 @@ pub(super) async fn choices() -> Result<Vec<Choice>, CaptureError> {
         if !GraphicsCaptureSession::IsSupported().map_err(graphics_error)? {
             return Err(CaptureError::Unavailable);
         }
-        Ok(std::iter::once(Choice {
-            id: SYSTEM_PICKER.into(),
-            label: "Windows picker (video only)".into(),
-        })
-        .chain(sources().into_iter().map(|(choice, _)| choice))
-        .collect())
+        Ok(sources().into_iter().map(|(choice, _)| choice).collect())
     })
     .await
     .map_err(|_| CaptureError::Unavailable)?
@@ -162,6 +298,7 @@ pub(super) async fn select(
     Ok(Selection {
         label,
         audio: scope,
+        can_choose_display: false,
         capture: Box::new(Selected {
             item,
             window,
@@ -190,6 +327,7 @@ fn sources() -> Vec<(Choice, Source)> {
             let choice = Choice {
                 id: format!("display:{:p}:{name}", monitor.as_raw_hmonitor()),
                 label,
+                kind: SourceKind::Display,
             };
             (choice, Source::Monitor(monitor))
         });
@@ -203,7 +341,8 @@ fn sources() -> Vec<(Choice, Source)> {
                 .filter(|title| !title.trim().is_empty())?;
             let choice = Choice {
                 id: window_id(&window)?,
-                label: format!("Window · {title}"),
+                label: title,
+                kind: SourceKind::Window,
             };
             Some((choice, Source::Window(window)))
         });
@@ -318,38 +457,9 @@ impl Selected {
         // The capture worker may be STA, so keep the selection MTA alive through capture.
         let SelectedItem(item, _graphics_apartment) = self.item;
 
-        let mut device = None;
-        let mut context = None;
-        unsafe {
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut context),
-            )
-        }
-        .map_err(graphics_error)?;
-        let mut frames = Frames {
-            device: device.ok_or(CaptureError::Unavailable)?,
-            context: context.ok_or(CaptureError::Unavailable)?,
-            staging: None,
-            packed: Vec::new(),
-        };
-        let dxgi_device = frames
-            .device
-            .cast::<IDXGIDevice>()
-            .map_err(graphics_error)?;
-        let device = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi_device) }
-            .and_then(|device| device.cast::<IDirect3DDevice>())
-            .map_err(graphics_error)?;
-        let pixel = DirectXPixelFormat::B8G8R8A8UIntNormalized;
+        let (mut frames, device) = Frames::new()?;
         let mut size = item.Size().map_err(graphics_error)?;
-        let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&device, pixel, 1, size)
+        let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&device, CAPTURE_PIXEL, 1, size)
             .map_err(graphics_error)?;
         let session = pool.CreateCaptureSession(&item).map_err(graphics_error)?;
         let capture_thread = thread::current();
@@ -440,7 +550,7 @@ impl Selected {
                     size = content;
                     capture
                         .pool
-                        .Recreate(&device, pixel, 1, size)
+                        .Recreate(&device, CAPTURE_PIXEL, 1, size)
                         .map_err(|_| CaptureError::SourceLost)?;
                 }
                 continue;
@@ -527,6 +637,39 @@ fn render_frame(
 }
 
 impl Frames {
+    fn new() -> Result<(Self, IDirect3DDevice), CaptureError> {
+        let mut device = None;
+        let mut context = None;
+        unsafe {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_HARDWARE,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                Some(&mut context),
+            )
+        }
+        .map_err(graphics_error)?;
+        let frames = Self {
+            device: device.ok_or(CaptureError::Unavailable)?,
+            context: context.ok_or(CaptureError::Unavailable)?,
+            staging: None,
+            packed: Vec::new(),
+        };
+        let dxgi_device = frames
+            .device
+            .cast::<IDXGIDevice>()
+            .map_err(graphics_error)?;
+        let device = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi_device) }
+            .and_then(|device| device.cast::<IDirect3DDevice>())
+            .map_err(graphics_error)?;
+        Ok((frames, device))
+    }
+
     fn read_frame(
         &mut self,
         source: &ID3D11Texture2D,

@@ -317,12 +317,18 @@ impl Spk {
         let (label, command) = screen_share_action(call);
         let active = !matches!(command, Command::OpenScreenShare);
         let app = cx.weak_entity();
+        let focus = if location == VoiceControls::Session {
+            self.screen_sidebar_focus.clone()
+        } else {
+            self.screen_channel_focus.clone()
+        };
         VoiceButtonGroup::new(
             "screen-controls",
             voice_shortcut_tooltip(
                 voice_button("screen-share", IconName::Monitor, label, location)
                     .selected(active)
-                    .on_click(cx.listener(move |app, _, _, cx| {
+                    .track_focus(&focus)
+                    .on_click(cx.listener(move |app, _, window, cx| {
                         let View::SignedIn(sidebar) = &app.view else {
                             return;
                         };
@@ -331,6 +337,7 @@ impl Spk {
                             .as_ref()
                             .filter(|call| call.is_participating())
                         {
+                            focus.focus(window, cx);
                             app.send(screen_share_action(call).1, None, cx);
                         }
                     })),
@@ -359,10 +366,8 @@ impl Spk {
         &self,
         call: &VoiceView,
         sidebar: &Sidebar,
-        cx: &Context<Self>,
     ) -> Option<Stateful<Div>> {
         let report = call.screen.as_ref()?;
-        let attempt = report.attempt;
         let selected = sidebar.voice_intent.screen.quality;
         let panel = div()
             .id("screen-capture")
@@ -373,62 +378,8 @@ impl Spk {
             .px_2()
             .pb_2();
         Some(match &report.state {
-            ScreenState::Picking => panel.child(Label::new("Choose a display or window…")),
-            ScreenState::Choices(choices) => panel.child(
-                div()
-                    .id("screen-sources")
-                    .max_h(px(140.))
-                    .overflow_y_scroll()
-                    .flex()
-                    .flex_wrap()
-                    .justify_center()
-                    .gap_1()
-                    .children(choices.iter().map(|choice| {
-                        let id = choice.id.clone();
-                        Button::new(SharedString::from(format!("screen-source-{id}")))
-                            .small()
-                            .secondary()
-                            .tab_stop(true)
-                            .label(choice.label.clone())
-                            .on_click(cx.listener(move |app, _, _window, cx| {
-                                #[cfg(windows)]
-                                if id == crate::voice::screen::SYSTEM_PICKER {
-                                    app.pick_windows_screen(attempt, _window, cx);
-                                    return;
-                                }
-                                app.send(
-                                    Command::ChooseScreenSource(attempt, id.clone()),
-                                    None,
-                                    cx,
-                                );
-                            }))
-                    })),
-            ),
-            ScreenState::Confirm { label, audio } => {
-                let enabled = sidebar.voice_intent.preferred.screen_audio;
-                let audio_label = match (audio, enabled) {
-                    (Some(scope), true) => scope.label(),
-                    (None, true) => "Video only. Audio is unavailable for this source.",
-                    _ => "Video only",
-                };
-                let confirmed_audio = enabled && audio.is_some();
-                panel
-                    .child(Label::new(label.clone()).font_semibold())
-                    .child(Label::new(audio_label).text_xs())
-                    .child(
-                        control_button("start-screen-share")
-                            .small()
-                            .primary()
-                            .tab_stop(true)
-                            .label("Start Screen Share")
-                            .on_click(cx.listener(move |app, _, _, cx| {
-                                app.send(
-                                    Command::StartScreenShare(attempt, confirmed_audio),
-                                    None,
-                                    cx,
-                                );
-                            })),
-                    )
+            ScreenState::Picking if self.screen_picker_focus.is_none() => {
+                panel.child(Label::new("Choose a display or window…"))
             }
             ScreenState::Starting => panel.child(Label::new("Starting Screen Share…")),
             ScreenState::Live {
@@ -459,35 +410,11 @@ impl Spk {
                     })
                     .text_xs(),
                 ),
-            ScreenState::Ended(message) => panel.child(Label::new(*message)),
+            ScreenState::Ended(message) if self.screen_picker_focus.is_none() => {
+                panel.child(Label::new(*message))
+            }
+            _ => return None,
         })
-    }
-
-    #[cfg(windows)]
-    fn pick_windows_screen(&mut self, attempt: u64, window: &Window, cx: &mut Context<Self>) {
-        use crate::voice::screen::{CaptureError, pick_system_source};
-        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-
-        let hwnd = HasWindowHandle::window_handle(window)
-            .ok()
-            .and_then(|window| match window.as_raw() {
-                RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
-                _ => None,
-            });
-        cx.spawn(async move |app, cx| {
-            let result = match hwnd {
-                Some(hwnd) => pick_system_source(hwnd).await,
-                None => Err(CaptureError::Unavailable),
-            };
-            let _ = app.update(cx, |app, cx| {
-                app.send(
-                    Command::ChooseWindowsScreenSource(attempt, result),
-                    None,
-                    cx,
-                );
-            });
-        })
-        .detach();
     }
 
     pub(super) fn video_images(

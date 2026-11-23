@@ -33,13 +33,13 @@ fn screen_audio_preferences_survive_reload_and_default_to_web_behavior() {
 #[tokio::test]
 async fn cancellation_ignores_late_or_unconfirmed_capture() {
     let (sender, mut requests) = watch::channel(Intent::default());
-    sender.send_modify(|intent| intent.screen.open());
+    sender.send_modify(|intent| intent.screen.open(None));
     let attempt = requests.borrow().screen.attempt;
     assert!(
         !sender.send_if_modified(|intent| intent.screen.advance(attempt - 1, Action::Start(true)))
     );
     let result = select_until_cancelled(&mut requests, attempt, async {
-        sender.send_modify(|intent| intent.screen.open());
+        sender.send_modify(|intent| intent.screen.open(None));
         Ok(())
     })
     .await;
@@ -147,8 +147,18 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
         let title = std::env::var("SPK_TEST_SCREEN_WINDOW").unwrap();
         let (selection, size) = macos::fixture_selection(&mode, &title);
         let scope = match mode.as_str() {
-            "display" => AudioScope::PlaybackMix,
-            "window" => AudioScope::Application,
+            "display" => {
+                assert!(
+                    selection
+                        .label
+                        .starts_with(&format!("Display · {} × {} at (", size.0, size.1))
+                );
+                AudioScope::PlaybackMix
+            }
+            "window" => {
+                assert_eq!(selection.label, title);
+                AudioScope::Application
+            }
             _ => panic!("invalid macOS Screen Share fixture mode"),
         };
         assert_eq!(selection.audio, Some(scope));
@@ -158,26 +168,40 @@ async fn livekit_screen_share_publishes_video_and_separate_audio() {
     };
     #[cfg(target_os = "linux")]
     let (native, scope) = if let Ok(output) = std::env::var("SPK_TEST_PULSE_OUTPUT") {
-        let choice = linux::choices()
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|choice| choice.id == "display" || choice.id.starts_with("display:"))
-            .expect("fixture Linux display");
-        let selected = timeout(
-            Duration::from_secs(6),
-            linux::select(
-                choice,
-                Some(Device {
-                    id: output.clone(),
-                    name: output,
-                }),
-            ),
-        )
+        let playback = Some(Device {
+            id: output.clone(),
+            name: output,
+        });
+        let wayland_fixture = std::env::var("SPK_TEST_WAYLAND_SOURCE").as_deref() == Ok("display");
+        let selected = timeout(Duration::from_secs(6), async {
+            if linux::use_system_picker().await.unwrap() {
+                let selected = linux::pick(playback.clone(), false).await?;
+                if wayland_fixture {
+                    assert_eq!(selected.audio, Some(AudioScope::PlaybackMix));
+                    assert_eq!(selected.label, "Display · 640 × 480 at (0, 0)");
+                    drop(selected);
+                    linux::pick(playback, true).await
+                } else {
+                    Ok(selected)
+                }
+            } else {
+                let choice = linux::choices()
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .find(|choice| choice.kind == SourceKind::Display)
+                    .expect("fixture Linux display");
+                linux::select(choice, playback).await
+            }
+        })
         .await
         .expect("selected display delivers video")
         .unwrap();
         assert_eq!(selected.audio, Some(AudioScope::PlaybackMix));
+        if wayland_fixture {
+            assert_eq!(selected.label, "Display · 640 × 480");
+            assert!(!selected.can_choose_display);
+        }
         (Some(selected.capture), AudioScope::PlaybackMix)
     } else {
         (native, scope)

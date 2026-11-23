@@ -96,8 +96,11 @@ windows-registry = "0.100"
 windows-capture = "=2.0.1"
 
 [build-dependencies]
+cc = "1.0"
 embed-resource = "3.0"
+pkg-config = "0.3"
 url = "2.5"
+webrtc-sys-build = "=0.3.21"
 
 [profile.dev.package.gpui-pre-windows]
 # Embed DirectX shaders so distributed builds can run without the Cargo source cache.

@@ -36,6 +36,9 @@ impl Spk {
             return false;
         }
         if primary && count == 1 && key_name == "k" {
+            if self.screen_picker_focus.is_some() || self.screen_picker_pending() {
+                return false;
+            }
             if window.has_active_dialog(cx) {
                 if self
                     .quick_switcher
@@ -53,11 +56,16 @@ impl Spk {
             }
             return true;
         }
-        if window.has_active_dialog(cx) {
+        let media_shortcut = primary && modifiers.alt && modifiers.shift && count == 3;
+        if window.has_active_dialog(cx)
+            && !(media_shortcut
+                && key_name == "s"
+                && (self.screen_picker_focus.is_some() || self.screen_picker_pending()))
+        {
             return false;
         }
         let typing = window.has_focused_input(cx);
-        if primary && modifiers.alt && modifiers.shift && count == 3 {
+        if media_shortcut {
             let processing = sidebar.voice_intent.preferred.processing;
             let command = match key_name {
                 "e" if sidebar

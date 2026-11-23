@@ -20,7 +20,7 @@ use screencapturekit::{
     cm::SCFrameStatus,
     content_sharing_picker::{
         SCContentSharingPicker, SCContentSharingPickerConfiguration, SCContentSharingPickerMode,
-        SCPickerFilterOutcome,
+        SCPickerFilterOutcome, SCPickerOutcome,
     },
     cv::CVPixelBufferLockFlags,
     error::SCStreamErrorCode,
@@ -30,7 +30,7 @@ use screencapturekit::{
 
 use super::*;
 
-pub(super) async fn choices() -> Result<Vec<Choice>, CaptureError> {
+pub(super) async fn pick(_: Option<Device>) -> Result<Selection, CaptureError> {
     if !cfg!(target_arch = "aarch64")
         || !NSProcessInfo::processInfo().isOperatingSystemAtLeastVersion(NSOperatingSystemVersion {
             majorVersion: 15,
@@ -38,15 +38,8 @@ pub(super) async fn choices() -> Result<Vec<Choice>, CaptureError> {
             patchVersion: 0,
         })
     {
-        return Ok(Vec::new());
+        return Err(CaptureError::Unavailable);
     }
-    Ok(vec![Choice {
-        id: "system-picker".into(),
-        label: "Choose a display or window".into(),
-    }])
-}
-
-pub(super) async fn select(_: Choice, _: Option<Device>) -> Result<Selection, CaptureError> {
     let mut config =
         SCContentSharingPickerConfiguration::new().map_err(|_| CaptureError::Unavailable)?;
     config.set_allowed_picker_modes(&[
@@ -57,29 +50,88 @@ pub(super) async fn select(_: Choice, _: Option<Device>) -> Result<Selection, Ca
     let (send, selected) = oneshot::channel();
     // The app owns at most one picker. Deactivation is dispatched before any replacement picker.
     let mut picker = Picker(true);
-    SCContentSharingPicker::show_filter(&config, move |outcome| {
-        let _ = send.send(outcome);
-    });
+    if NSProcessInfo::processInfo().isOperatingSystemAtLeastVersion(NSOperatingSystemVersion {
+        majorVersion: 15,
+        minorVersion: 2,
+        patchVersion: 0,
+    }) {
+        SCContentSharingPicker::show(&config, move |outcome| {
+            let selected = match outcome {
+                SCPickerOutcome::Picked(result) => {
+                    let filter = result.filter();
+                    let label = match filter.style() {
+                        Ok(SCShareableContentStyle::Display) => result
+                            .displays()
+                            .first()
+                            .map(|display| format!("Display {}", display.display_id())),
+                        Ok(SCShareableContentStyle::Window) => {
+                            result.windows().first().and_then(window_label).or_else(|| {
+                                result
+                                    .applications()
+                                    .first()
+                                    .map(|app| app.application_name())
+                            })
+                        }
+                        _ => None,
+                    };
+                    Ok((filter, label))
+                }
+                SCPickerOutcome::Cancelled => Err(CaptureError::Cancelled),
+                SCPickerOutcome::Error(_) => Err(CaptureError::Unavailable),
+            };
+            let _ = send.send(selected);
+        });
+    } else {
+        // The bridge's metadata path uses private KVC keys before macOS 15.2.
+        SCContentSharingPicker::show_filter(&config, move |outcome| {
+            let selected = match outcome {
+                SCPickerFilterOutcome::Filter(filter) => Ok((filter, None)),
+                SCPickerFilterOutcome::Cancelled => Err(CaptureError::Cancelled),
+                _ => Err(CaptureError::Unavailable),
+            };
+            let _ = send.send(selected);
+        });
+    }
     let outcome = selected.await;
     picker.0 = false;
-    let filter = match outcome {
-        Ok(SCPickerFilterOutcome::Filter(filter)) => filter,
-        Ok(SCPickerFilterOutcome::Cancelled) => return Err(CaptureError::Cancelled),
-        _ => return Err(CaptureError::Unavailable),
-    };
-    selection(filter)
+    let (filter, label) = outcome.map_err(|_| CaptureError::Unavailable)??;
+    selection(filter, label)
 }
 
-fn selection(filter: SCContentFilter) -> Result<Selection, CaptureError> {
-    let (label, scope) = match filter.style() {
-        Ok(SCShareableContentStyle::Display) => ("Display", AudioScope::PlaybackMix),
-        Ok(SCShareableContentStyle::Window) => ("Window", AudioScope::Application),
+fn window_label(window: &SCWindow) -> Option<String> {
+    window
+        .title()
+        .filter(|title| !title.trim().is_empty())
+        .or_else(|| {
+            window
+                .owning_application()
+                .map(|app| app.application_name())
+        })
+}
+
+fn selection(filter: SCContentFilter, label: Option<String>) -> Result<Selection, CaptureError> {
+    let scope = match filter.style() {
+        Ok(SCShareableContentStyle::Display) => AudioScope::PlaybackMix,
+        Ok(SCShareableContentStyle::Window) => AudioScope::Application,
         _ => return Err(CaptureError::Unavailable),
     };
     let (width, height) = source_size(&filter).ok_or(CaptureError::Unavailable)?;
+    let label = label
+        .filter(|label| !label.trim().is_empty())
+        .unwrap_or_else(|| match scope {
+            AudioScope::PlaybackMix => {
+                let origin = filter.content_rect().origin;
+                format!(
+                    "Display · {width} × {height} at ({:.0}, {:.0})",
+                    origin.x, origin.y
+                )
+            }
+            AudioScope::Application => format!("Window · {width} × {height}"),
+        });
     Ok(Selection {
-        label: label.into(),
+        label,
         audio: Some(scope),
+        can_choose_display: false,
         capture: Box::new(Selected {
             filter,
             width,
@@ -103,25 +155,28 @@ pub(super) fn fixture_selection(mode: &str, title: &str) -> (Selection, (u32, u3
     unsafe { screencapturekit::ffi::sc_initialize_core_graphics() };
     let content = SCShareableContent::get().expect("list capturable macOS displays and windows");
     let builder = SCContentFilter::create();
-    let filter = match mode {
-        "display" => builder
-            .with_display(content.displays().first().expect("fixture macOS display"))
-            .with_excluding_windows(&[])
-            .build(),
+    let (filter, label) = match mode {
+        "display" => (
+            builder
+                .with_display(content.displays().first().expect("fixture macOS display"))
+                .with_excluding_windows(&[])
+                .build(),
+            None,
+        ),
         "window" => {
             let window = content
                 .windows()
                 .into_iter()
                 .find(|window| window.title().as_deref() == Some(title))
                 .expect("fixture macOS window");
-            builder.with_window(&window).build()
+            (builder.with_window(&window).build(), window_label(&window))
         }
         _ => panic!("invalid macOS Screen Share fixture mode"),
-    }
-    .expect("create ScreenCaptureKit fixture filter");
+    };
+    let filter = filter.expect("create ScreenCaptureKit fixture filter");
     let size = source_size(&filter).expect("macOS fixture source has valid dimensions");
     (
-        selection(filter).expect("select macOS fixture source"),
+        selection(filter, label).expect("select macOS fixture source"),
         size,
     )
 }

@@ -2,14 +2,6 @@ use super::{pulse::matching_sink, *};
 use x11rb::rust_connection::RustConnection;
 
 #[test]
-fn portal_choices_only_list_the_advertised_source_types() {
-    assert!(portal_choices(false, false).is_empty());
-    assert_eq!(portal_choices(true, false)[0].id, "display");
-    assert_eq!(portal_choices(false, true)[0].id, "window");
-    assert_eq!(portal_choices(true, true).len(), 2);
-}
-
-#[test]
 fn padded_bgra_frames_convert_and_obey_the_preset_without_upscaling() {
     let width = 1920;
     let height = 1080;
@@ -84,12 +76,6 @@ fn pulse_monitor_only_matches_the_selected_sink() {
     );
 }
 
-#[test]
-fn preselection_error_distinguishes_x11_source_loss_from_portal_failure() {
-    assert_eq!(selection_error(false), CaptureError::SourceLost);
-    assert_eq!(selection_error(true), CaptureError::PortalSelection);
-}
-
 fn fixture_window() -> (RustConnection, u32) {
     use x11rb::{
         connection::Connection,
@@ -152,7 +138,7 @@ fn fixture_window() -> (RustConnection, u32) {
 #[tokio::test]
 #[ignore = "requires isolated Xvfb, PulseAudio and LiveKit fixtures"]
 async fn x11_screen_share_publishes_video_only_and_preserves_voice() {
-    assert!(!wayland().unwrap());
+    assert!(!use_system_picker().await.unwrap());
     let (publisher, receiver, mut events) = fixture_rooms().await;
     let (connection, window) = fixture_window();
     let choices = choices().await.unwrap();
@@ -189,7 +175,12 @@ async fn x11_screen_share_publishes_video_only_and_preserves_voice() {
         check_video_only_share(
             &publisher,
             &mut events,
-            (choice.clone(), output, size, audio_scope, wants_audio),
+            (
+                select(choice.clone(), Some(output)),
+                size,
+                audio_scope,
+                wants_audio,
+            ),
             lose_source,
         )
         .await;
@@ -205,12 +196,8 @@ async fn x11_screen_share_publishes_video_only_and_preserves_voice() {
 #[tokio::test]
 #[ignore = "requires the Wayland window portal, PulseAudio and LiveKit fixtures"]
 async fn wayland_window_publishes_video_only_and_preserves_voice() {
-    assert!(wayland().unwrap());
+    assert!(use_system_picker().await.unwrap());
     let (publisher, receiver, mut events) = fixture_rooms().await;
-    let available = choices().await.unwrap();
-    assert_eq!(available.len(), 1);
-    let choice = available.into_iter().next().unwrap();
-    assert_eq!(choice.id, "window");
     let output = std::env::var("SPK_TEST_PULSE_OUTPUT").unwrap();
     let output = Device {
         name: output.clone(),
@@ -219,10 +206,16 @@ async fn wayland_window_publishes_video_only_and_preserves_voice() {
     let stop = std::env::var_os("SPK_TEST_WAYLAND_SCREEN_STOP").unwrap();
     let lose_source = || std::fs::write(&stop, []).unwrap();
     for end in [None, Some(&lose_source as &dyn Fn())] {
+        let selection = async {
+            let selection = pick(Some(output.clone()), false).await?;
+            assert_eq!(selection.label, "Screen Share · 640 × 480");
+            assert!(selection.can_choose_display);
+            Ok(selection)
+        };
         check_video_only_share(
             &publisher,
             &mut events,
-            (choice.clone(), output.clone(), (640, 480), None, true),
+            (selection, (640, 480), None, true),
             end,
         )
         .await;
@@ -255,9 +248,8 @@ async fn fixture_rooms() -> (Room, Room, tokio::sync::mpsc::UnboundedReceiver<Ro
 async fn check_video_only_share(
     publisher: &Room,
     events: &mut tokio::sync::mpsc::UnboundedReceiver<RoomEvent>,
-    (choice, output, size, audio_scope, wants_audio): (
-        Choice,
-        Device,
+    (selection, size, audio_scope, wants_audio): (
+        impl Future<Output = Result<Selection, CaptureError>>,
         (u32, u32),
         Option<AudioScope>,
         bool,
@@ -267,7 +259,7 @@ async fn check_video_only_share(
     use futures::StreamExt as _;
     use livekit::webrtc::video_stream::native::NativeVideoStream;
 
-    let selected = timeout(Duration::from_secs(6), select(choice, Some(output)))
+    let selected = timeout(Duration::from_secs(6), selection)
         .await
         .expect("selected source delivers video")
         .unwrap();
@@ -279,7 +271,7 @@ async fn check_video_only_share(
     let (requests, mut requested) = watch::channel(Intent::default());
     requests.send_modify(|intent| {
         intent.screen.quality = quality;
-        intent.screen.open();
+        intent.screen.open(None);
     });
     let attempt = requested.borrow().screen.attempt;
     let mut cancellation = requested.clone();
@@ -371,23 +363,40 @@ async fn check_video_only_share(
 #[tokio::test]
 #[ignore = "requires Xvfb and a Wayland session without a compositor socket"]
 async fn wayland_without_socket_does_not_offer_x11_sources() {
-    assert!(matches!(choices().await, Err(CaptureError::Unavailable)));
+    assert!(matches!(
+        use_system_picker().await,
+        Err(CaptureError::Unavailable)
+    ));
 }
 
 #[tokio::test]
 #[ignore = "requires an isolated Wayland portal fixture advertising only window capture"]
 async fn wayland_portal_rejection_ends_source_selection() {
-    let mut available = choices().await.unwrap();
-    assert_eq!(available.len(), 1);
-    let choice = available.pop().unwrap();
-    assert_eq!(choice.id, "window");
-    for _ in 0..2 {
+    assert!(use_system_picker().await.unwrap());
+    for error in [
+        CaptureError::Cancelled,
+        CaptureError::PortalSelection,
+        CaptureError::Permission,
+    ] {
         assert!(matches!(
-            timeout(Duration::from_secs(3), select(choice.clone(), None))
-                .await
-                .unwrap(),
-            Err(CaptureError::PortalSelection)
+            timeout(Duration::from_secs(3), pick(None, false)).await.unwrap(),
+            Err(actual) if actual == error
         ));
     }
+
+    // Cancel while either portal method is still waiting for the user.
+    for _ in 0..2 {
+        assert!(
+            timeout(Duration::from_secs(1), pick(None, false))
+                .await
+                .is_err()
+        );
+    }
+    assert!(matches!(
+        timeout(Duration::from_secs(3), pick(None, false))
+            .await
+            .unwrap(),
+        Err(CaptureError::PortalSelection)
+    ));
     tokio::time::sleep(Duration::from_millis(150)).await;
 }

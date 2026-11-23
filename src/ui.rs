@@ -3,6 +3,7 @@ mod chat;
 mod notifications;
 mod profile;
 mod radio;
+mod screen_picker;
 mod search;
 mod settings;
 mod soundboard;
@@ -88,6 +89,14 @@ pub(super) struct Spk {
     voice_strip_toggle_focus: FocusHandle,
     quick_switcher: Option<WeakEntity<gpui_kit::component::command::CommandState>>,
     video_stage: video::VideoStage,
+    screen_picker_focus: Option<FocusHandle>,
+    dismissed_screen_picker: Option<u64>,
+    screen_sidebar_focus: FocusHandle,
+    screen_channel_focus: FocusHandle,
+    #[cfg(windows)]
+    windows_screen_picker: Option<(u64, tokio::sync::oneshot::Sender<()>)>,
+    #[cfg(windows)]
+    screen_previews: Option<screen_picker::ScreenPreviews>,
     workspace_focus: FocusHandle,
     settings_button_focus: FocusHandle,
     appearance: Appearance,
@@ -337,7 +346,7 @@ impl Spk {
                             this.device_picker = None;
                             this.close_sidebar_drawer(window, cx);
                             this.search_panel = None;
-                            window.close_all_dialogs(cx);
+                            this.dismiss_workspace_dialogs(window, cx);
                         }
                         this.focus_account_input(&view, window, cx);
                         this.set_session_view(view, window, cx);
@@ -352,7 +361,7 @@ impl Spk {
                 this.shortcuts.signed_in(false);
                 this.close_sidebar_drawer(window, cx);
                 this.search_panel = None;
-                window.close_all_dialogs(cx);
+                this.dismiss_workspace_dialogs(window, cx);
                 this.set_session_view(
                     View::SignIn {
                         message: Some("The SPK connection stopped. Close and reopen the app."),
@@ -407,6 +416,14 @@ impl Spk {
             voice_strip_toggle_focus: cx.focus_handle(),
             quick_switcher: None,
             video_stage: video::VideoStage::default(),
+            screen_picker_focus: None,
+            dismissed_screen_picker: None,
+            screen_sidebar_focus: cx.focus_handle(),
+            screen_channel_focus: cx.focus_handle(),
+            #[cfg(windows)]
+            windows_screen_picker: None,
+            #[cfg(windows)]
+            screen_previews: None,
             workspace_focus,
             settings_button_focus: cx.focus_handle(),
             appearance,
@@ -489,6 +506,7 @@ impl Spk {
             window.clear_notifications(cx);
         }
         self.view = view;
+        self.update_screen_picker(window, cx);
     }
 
     fn send(&mut self, command: Command, busy: Option<&'static str>, cx: &mut Context<Self>) {

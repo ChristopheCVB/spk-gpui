@@ -59,7 +59,7 @@ fn navigation_card(title: &'static str, cx: &App) -> Stateful<Div> {
         .bg(cx.theme().background)
 }
 
-fn navigation_target(
+pub(super) fn navigation_target(
     id: SharedString,
     scroll_on_focus: Option<&ScrollHandle>,
     window: &mut Window,
@@ -449,7 +449,7 @@ impl Spk {
                         |area| {
                             area.when_some(sidebar.voice.as_ref(), |area, call| {
                                 let (label, action) = super::video::screen_share_action(call);
-                                area.children(self.screen_capture_status(call, sidebar, cx).map(
+                                area.children(self.screen_capture_status(call, sidebar).map(
                                     |panel| {
                                         let attempt = match action {
                                             Command::StopScreenShare(attempt) => Some(attempt),
@@ -770,7 +770,7 @@ impl Spk {
                     .selected_voice_destination(sidebar)
                     .is_none_or(|channel| channel.id != call.channel_id));
         let capture_status = show_capture
-            .then(|| self.screen_capture_status(call, sidebar, cx))
+            .then(|| self.screen_capture_status(call, sidebar))
             .flatten();
         let channel_color = if matches!(call.status, Status::Connected | Status::ListenOnly) {
             theme.success
@@ -1279,7 +1279,7 @@ impl Spk {
             .children(
                 joined
                     .filter(|_| !fullscreen && !self.sidebar_drawer_open)
-                    .and_then(|call| self.screen_capture_status(call, sidebar, cx)),
+                    .and_then(|call| self.screen_capture_status(call, sidebar)),
             )
             .when(!fullscreen, |stage| {
                 let footer = if let Some(call) = joined {
