@@ -73,7 +73,7 @@ def ports():
         return tuple(s.getsockname()[1] for s in (signaling, tcp, udp))
 
 
-def token(key, secret, room, identity):
+def token(key, secret, room, identity, lifetime=600):
     def encode(data):
         return base64.urlsafe_b64encode(data).rstrip(b"=")
 
@@ -81,21 +81,22 @@ def token(key, secret, room, identity):
     payload = encode(json.dumps({
         "iss": key,
         "sub": identity,
-        "exp": int(time.time()) + 600,
+        "exp": int(time.time()) + lifetime,
         "video": {"roomJoin": True, "room": room},
     }).encode())
     unsigned = header + b"." + payload
     return (unsigned + b"." + encode(hmac.digest(secret.encode(), unsigned, "sha256"))).decode()
 
 
-def run_peers(command, signaling, key, secret, room):
+def run_peers(command, signaling, key, secret, room, timeout=300):
+    lifetime = max(600, timeout + 60)
     environment = {
         **os.environ,
         "SPK_TEST_LIVEKIT": f"ws://127.0.0.1:{signaling}",
-        "SPK_TEST_PUBLISHER": token(key, secret, room, "alice"),
-        "SPK_TEST_RECEIVER": token(key, secret, room, "bob"),
+        "SPK_TEST_PUBLISHER": token(key, secret, room, "alice", lifetime),
+        "SPK_TEST_RECEIVER": token(key, secret, room, "bob", lifetime),
     }
-    subprocess.run(command, env=environment, check=True, timeout=300)
+    subprocess.run(command, env=environment, check=True, timeout=timeout)
 
 
 def compose_server(command):
@@ -123,7 +124,7 @@ def compose_server(command):
         )
 
 
-def native_server(command):
+def native_server(command, timeout=300):
     with tempfile.TemporaryDirectory(prefix="spk-livekit-") as tmp:
         workspace = Path(tmp)
         executable = server_binary(workspace)
@@ -150,7 +151,7 @@ def native_server(command):
                         except OSError:
                             time.sleep(0.1)
                             continue
-                        run_peers(command, signaling, key, secret, room)
+                        run_peers(command, signaling, key, secret, room, timeout)
                         return
                     else:
                         raise RuntimeError("LiveKit fixture did not start")

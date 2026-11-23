@@ -416,6 +416,7 @@ impl Settings {
 
 fn field(label: &'static str, state: &Entity<InputState>, disabled: bool) -> impl IntoElement {
     div()
+        .id(label)
         .flex()
         .flex_col()
         .flex_1()
