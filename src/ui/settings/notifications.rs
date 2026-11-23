@@ -87,7 +87,7 @@ impl Settings {
                             .accessibility_label("Message sound volume"),
                     )
                     .child(
-                        Button::new("test-message-sound")
+                        control_button("test-message-sound")
                             .ghost()
                             .small()
                             .tab_stop(true)

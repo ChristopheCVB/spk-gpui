@@ -171,9 +171,14 @@ impl Spk {
             for (group, entries) in Group::ALL.into_iter().zip(entries.iter()) {
                 palette = palette.group(CommandGroup::new().label(group.label()).items(
                     entries.iter().map(|entry| {
+                        let label = entry.label.clone();
                         CommandItem::new()
-                            .label(entry.label.clone())
-                            .icon(group.icon())
+                            .label(label.clone())
+                            .child(move |_, _| {
+                                control_content()
+                                    .child(Icon::new(group.icon()).size(ACTION_ICON_SIZE))
+                                    .child(div().min_w_0().truncate().child(label.clone()))
+                            })
                             .keywords([group.label()])
                     }),
                 ));

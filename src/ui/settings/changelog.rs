@@ -100,7 +100,7 @@ impl Settings {
                             .items_center()
                             .gap_2()
                             .child(
-                                Button::new(SharedString::from(entry.sha.clone()))
+                                control_button(SharedString::from(entry.sha.clone()))
                                     .ghost()
                                     .small()
                                     .tab_stop(true)
@@ -119,7 +119,7 @@ impl Settings {
             })
             .when(history.page.is_some(), |list| {
                 list.child(
-                    Button::new("changelog-more")
+                    control_button("changelog-more")
                         .small()
                         .tab_stop(true)
                         .disabled(history.loading)

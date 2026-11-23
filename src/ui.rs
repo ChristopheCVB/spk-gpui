@@ -28,6 +28,7 @@ use gpui_kit::{
         button::{Button, ButtonVariants},
         input::{Input, InputContentType, InputEvent, InputState, Textarea, TextareaState},
         label::Label,
+        select::{Select, SelectDelegate, SelectItem, SelectState},
     },
     prelude::FluentBuilder,
     *,
@@ -594,7 +595,7 @@ impl Render for Spk {
                     "Could not sign out on SPK or clear the saved session.",
                 ))
                 .child(
-                    Button::new("retry-sign-out")
+                    control_button("retry-sign-out")
                         .label("Retry sign-out")
                         .on_click(
                             cx.listener(|this, _, _, cx| this.send(Command::SignOut, None, cx)),
@@ -687,6 +688,39 @@ fn profile_avatar(
         .into_any_element()
 }
 
+const ACTION_ICON_SIZE: Pixels = px(20.0);
+const CONTROL_PADDING: Pixels = px(6.0);
+const CONTROL_HEIGHT: Pixels = px(32.0);
+
+fn control_button(id: impl Into<ElementId>) -> Button {
+    Button::new(id).h(CONTROL_HEIGHT).p(CONTROL_PADDING)
+}
+
+fn control_select<D>(state: &Entity<SelectState<D>>) -> Select<D>
+where
+    D: SelectDelegate + 'static,
+    <D::Item as SelectItem>::Value: PartialEq + Clone,
+{
+    Select::new(state).h(CONTROL_HEIGHT).p(CONTROL_PADDING)
+}
+
+fn control_content() -> Div {
+    div().flex().items_center().min_w_0().gap(CONTROL_PADDING)
+}
+
+fn icon_label_button(
+    button: Button,
+    icon: impl Into<Icon>,
+    label: impl Into<SharedString>,
+) -> Button {
+    let label = label.into();
+    button.accessibility_label(label.clone()).child(
+        control_content()
+            .child(icon.into().size(ACTION_ICON_SIZE))
+            .child(div().min_w_0().truncate().child(label)),
+    )
+}
+
 fn tool_button(
     id: impl Into<ElementId>,
     icon: impl Into<Icon>,
@@ -702,26 +736,23 @@ fn tool_button_with_label(
     show_label: bool,
 ) -> Button {
     let label = label.into();
-    let button = Button::new(id)
+    let button = control_button(id)
         .ghost()
         .small()
         .accessibility_label(label.clone())
         .tooltip(label.clone())
         .tab_stop(true);
     if show_label {
-        button.icon(icon.into()).label(label)
+        icon_label_button(button, icon, label)
     } else {
         action_icon(button, icon)
     }
 }
 
-const ACTION_ICON_SIZE: Pixels = px(20.0);
-
 fn action_icon(button: Button, icon: impl Into<Icon>) -> Button {
     // The button's icon slot derives its size from the button size.
     button
-        .size_6()
-        .p_0()
+        .size(CONTROL_HEIGHT)
         .child(icon.into().size(ACTION_ICON_SIZE))
 }
 

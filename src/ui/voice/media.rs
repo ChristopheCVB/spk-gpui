@@ -1,10 +1,13 @@
-use super::{VoiceControls, voice_action_button, voice_options_button, voice_popover};
+use super::{VoiceButtonGroup, VoiceControls, voice_action_button, voice_popover};
 use crate::ui::{
     radio::{RadioAction, radio_panel},
     soundboard::soundboard_panel,
     *,
 };
-use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
+use gpui_kit::component::{
+    popover::Popover,
+    scroll::{Scrollbar, ScrollbarMode},
+};
 
 type MediaPanel = fn(Entity<Spk>, u8, &mut Window, &mut App) -> (AnyView, FocusHandle);
 
@@ -137,37 +140,39 @@ impl RenderOnce for MediaButton {
                     }
                 })
         });
-        let popover = voice_popover(
-            id,
-            px(330.0).min(window.viewport_size().width - px(16.0)),
-            move |open| {
-                if radio.is_some() {
-                    voice_options_button("Radio options", open).selected(playing)
-                } else {
-                    voice_action_button(
-                        "soundboard-trigger",
-                        IconName::Megaphone,
-                        "Soundboard",
-                        location,
-                    )
-                }
-            },
-        )
-        .open(open)
-        .on_open_change(move |open, window, cx| {
-            if let Some(search) = open_panel(*open, window, cx) {
-                search.focus(window, cx);
-            }
-        })
+        let width = px(330.0).min(window.viewport_size().width - px(16.0));
+        let popover = if primary.is_some() {
+            Popover::new(id).w(width)
+        } else {
+            voice_popover(id, width, move |_| {
+                voice_action_button(
+                    "soundboard-trigger",
+                    IconName::Megaphone,
+                    "Soundboard",
+                    location,
+                )
+            })
+        }
         .when_some(panel, |popover, (panel, search)| {
             popover.track_focus(&search).child(panel)
         });
-        div()
-            .id((id, self.location as usize))
-            .flex()
-            .items_center()
-            .children(primary)
-            .child(popover)
+        div().id((id, self.location as usize)).child(match primary {
+            Some(primary) => {
+                VoiceButtonGroup::new("radio-controls", primary, "Radio options", popover)
+                    .controlled(open, move |open, window, cx| {
+                        open_panel(open, window, cx);
+                    })
+                    .into_any_element()
+            }
+            None => popover
+                .open(open)
+                .on_open_change(move |open, window, cx| {
+                    if let Some(search) = open_panel(*open, window, cx) {
+                        search.focus(window, cx);
+                    }
+                })
+                .into_any_element(),
+        })
     }
 }
 

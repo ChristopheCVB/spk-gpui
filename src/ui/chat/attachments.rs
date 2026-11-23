@@ -438,7 +438,7 @@ impl Spk {
                             )),
                     )
                     .child(
-                        Button::new("spoiler")
+                        control_button("spoiler")
                             .ghost()
                             .small()
                             .tab_stop(true)
@@ -460,7 +460,7 @@ impl Spk {
                             })),
                     )
                     .child(
-                        Button::new("cancel")
+                        control_button("cancel")
                             .ghost()
                             .small()
                             .tab_stop(true)
@@ -506,7 +506,7 @@ impl Spk {
                 if file.spoiler && !card.is_some_and(|card| card.revealed) {
                     let id = file.id.clone();
                     return row.id(SharedString::from(file.id.clone())).child(
-                        Button::new("reveal")
+                        control_button("reveal")
                             .small()
                             .tab_stop(true)
                             .label("Reveal spoiler attachment")
@@ -700,7 +700,7 @@ impl Spk {
         let channel = message.channel_id.clone();
         let message_id = message.id.clone();
         let file = file.clone();
-        Button::new(id)
+        control_button(id)
             .ghost()
             .small()
             .tab_stop(true)
@@ -889,7 +889,7 @@ impl Spk {
         let file = file.clone();
         let channel = message.channel_id.clone();
         let message = message.id.clone();
-        Button::new("play-attachment")
+        control_button("play-attachment")
             .small()
             .tab_stop(true)
             .label(if playing {
@@ -922,7 +922,7 @@ impl Spk {
     fn attachment_text(&self, file: &Attachment, text: &TextPreview, cx: &Context<Self>) -> Div {
         let action = |id, label, update: fn(&mut TextPreview)| {
             let file = file.id.clone();
-            Button::new(id)
+            control_button(id)
                 .ghost()
                 .small()
                 .tab_stop(true)

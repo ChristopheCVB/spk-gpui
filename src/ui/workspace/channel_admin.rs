@@ -374,7 +374,7 @@ impl Render for ChannelEditor {
                     .justify_end()
                     .gap_2()
                     .child(
-                        Button::new("cancel-channel-edit")
+                        control_button("cancel-channel-edit")
                             .small()
                             .ghost()
                             .tab_stop(true)
@@ -386,7 +386,7 @@ impl Render for ChannelEditor {
                             })),
                     )
                     .child(
-                        Button::new("submit-channel-edit")
+                        control_button("submit-channel-edit")
                             .small()
                             .primary()
                             .tab_stop(true)

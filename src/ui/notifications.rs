@@ -93,7 +93,7 @@ impl Spk {
                         .action(move |_, _, cx| {
                             let app = app.clone();
                             let target = target.clone();
-                            Button::new("open-message-alert")
+                            control_button("open-message-alert")
                                 .label("Open")
                                 .small()
                                 .tab_stop(true)

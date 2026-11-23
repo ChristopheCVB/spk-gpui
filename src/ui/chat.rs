@@ -244,7 +244,7 @@ fn open_chat_image(
                     .object_fit(ObjectFit::Contain),
             )
             .footer(
-                Button::new("open-image-original")
+                control_button("open-image-original")
                     .label("Open original")
                     .tab_stop(true)
                     .on_click(move |_, window, cx| original(window, cx)),
@@ -770,7 +770,7 @@ impl Spk {
                         .child(Label::new(status).text_color(theme.muted_foreground))
                         .when(chat.history_failed(), |bar| {
                             bar.child(
-                                Button::new("retry-history")
+                                control_button("retry-history")
                                     .small()
                                     .tab_stop(true)
                                     .label("Retry")
@@ -786,7 +786,7 @@ impl Spk {
                 |area| {
                     area.child(
                         div().px_4().py_2().child(
-                            Button::new("older-messages")
+                            control_button("older-messages")
                                 .small()
                                 .tab_stop(true)
                                 .label("Load older messages")
@@ -809,7 +809,7 @@ impl Spk {
                     let message_id = message_id.clone();
                     area.child(
                         div().px_4().py_1().child(
-                            Button::new("jump-to-unread")
+                            control_button("jump-to-unread")
                                 .ghost()
                                 .small()
                                 .tab_stop(true)
@@ -837,7 +837,7 @@ impl Spk {
             .when(chat.has_more_after && !chat.loading(), |area| {
                 area.child(
                     div().px_4().py_2().flex().gap_2().child(
-                        Button::new("newer-messages")
+                        control_button("newer-messages")
                             .small()
                             .tab_stop(true)
                             .label("Load newer messages")
@@ -846,7 +846,7 @@ impl Spk {
                                 this.send(Command::LoadNewerMessages, None, cx)
                             })),
                     ).child(
-                        Button::new("latest-messages")
+                        control_button("latest-messages")
                             .small()
                             .tab_stop(true)
                             .label("Jump to latest messages")
@@ -917,7 +917,7 @@ impl Spk {
                                     .truncate(),
                                 )
                                 .child(
-                                    Button::new("cancel-reply")
+                                    control_button("cancel-reply")
                                         .small()
                                         .tab_stop(true)
                                         .label("Cancel reply")
@@ -975,7 +975,7 @@ impl Spk {
                                         )
                                         .when(retry, |bar| {
                                             bar.child(
-                                                Button::new("retry-send")
+                                                control_button("retry-send")
                                                     .small()
                                                     .tab_stop(true)
                                                     .label("Retry send")
@@ -986,7 +986,7 @@ impl Spk {
                                         })
                                         .when(dismiss, |bar| {
                                             bar.child(
-                                                Button::new("dismiss-send")
+                                                control_button("dismiss-send")
                                                     .small()
                                                     .tab_stop(true)
                                                     .label(if retry {
@@ -1005,7 +1005,7 @@ impl Spk {
                                         })
                                         .when(matches!(outgoing.status, Delivery::Unconfirmed), |bar| {
                                             bar.child(
-                                                Button::new("mark-send-delivered")
+                                                control_button("mark-send-delivered")
                                                     .small()
                                                     .tab_stop(true)
                                                     .label("Already sent")
@@ -1070,17 +1070,15 @@ impl Spk {
                     .gap_2()
                     .child(self.composer_tools(sidebar, chat, disabled, cx))
                     .child(
-                        Button::new("send-chat")
-                            .primary()
-                            .small()
-                            .icon(IconName::SendHorizontal)
-                            .label("Send")
-                            .tab_stop(true)
-                            .flex_shrink_0()
-                            .disabled(!can_send)
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.submit_chat(window, cx)),
-                            ),
+                        icon_label_button(
+                            control_button("send-chat").primary(),
+                            IconName::SendHorizontal,
+                            "Send",
+                        )
+                        .tab_stop(true)
+                        .flex_shrink_0()
+                        .disabled(!can_send)
+                        .on_click(cx.listener(|this, _, window, cx| this.submit_chat(window, cx))),
                     ),
             )
     }
@@ -1243,14 +1241,14 @@ impl Spk {
                     }),
             )
             .when_some(message.reply_to.as_ref(), |row, reply| {
-                let icon = themed_icon(IconName::CornerUpRight, theme.muted_foreground, 14.);
+                let icon = Icon::new(IconName::CornerUpRight).text_color(theme.muted_foreground);
                 row.child(if reply.deleted {
                     div()
                         .h(px(18.))
                         .flex()
                         .items_center()
                         .gap_1()
-                        .child(icon)
+                        .child(icon.size(px(14.0)))
                         .child(
                             Label::new("Original message deleted")
                                 .text_xs()
@@ -1269,34 +1267,32 @@ impl Spk {
                     );
                     let sender = sidebar.message_author(&reply.user_id);
                     let preview = preview.replace(['\r', '\n'], " ");
-                    Button::new("jump-reply")
+                    control_button("jump-reply")
                         .ghost()
                         .xsmall()
                         .self_start()
                         .max_w_full()
-                        .h(px(18.))
-                        .px_0()
                         .cursor_pointer()
                         .tab_stop(true)
                         .accessibility_label("Jump to the original message")
-                        .child(icon)
                         .child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(
-                                    StyledText::new(format!("{sender} {preview}")).with_highlights(
-                                        [(
-                                            0..sender.len(),
-                                            HighlightStyle {
-                                                font_weight: Some(FontWeight::SEMIBOLD),
-                                                ..Default::default()
-                                            },
-                                        )],
+                            control_content().child(icon.size(ACTION_ICON_SIZE)).child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(
+                                        StyledText::new(format!("{sender} {preview}"))
+                                            .with_highlights([(
+                                                0..sender.len(),
+                                                HighlightStyle {
+                                                    font_weight: Some(FontWeight::SEMIBOLD),
+                                                    ..Default::default()
+                                                },
+                                            )]),
                                     ),
-                                ),
+                            ),
                         )
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.send(

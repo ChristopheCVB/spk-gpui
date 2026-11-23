@@ -96,7 +96,7 @@ impl Spk {
                 1,
             ))
             .children(self.form_message(message, cx))
-            .child(self.submit_button("Sign in", 2, cx).icon(IconName::LogIn))
+            .child(self.submit_button("Sign in", Some(IconName::LogIn), 2, cx))
             .child(
                 Label::new("No account? You need an invite link from an admin.")
                     .text_xs()
@@ -104,7 +104,7 @@ impl Spk {
             )
             .when(retry_restore, |card| {
                 card.child(
-                    Button::new("restore")
+                    control_button("restore")
                         .label("Retry saved session")
                         .tab_index(3)
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -113,7 +113,7 @@ impl Spk {
                 )
             })
             .child(
-                Button::new("open-account-link")
+                control_button("open-account-link")
                     .ghost()
                     .label("Use an invite or reset link")
                     .tab_index(4)
@@ -164,10 +164,10 @@ impl Spk {
                 card.child(Label::new("At least 8 characters").text_sm())
             })
             .children(self.form_message(message, cx))
-            .child(self.submit_button(button, 2, cx))
+            .child(self.submit_button(button, None, 2, cx))
             .when(!matches!(form, AccountLinkForm::Link), |card| {
                 card.child(
-                    Button::new("change-account-link")
+                    control_button("change-account-link")
                         .ghost()
                         .label("Use a different link")
                         .tab_index(3)
@@ -178,7 +178,7 @@ impl Spk {
                 )
             })
             .child(
-                Button::new("back-to-sign-in")
+                control_button("back-to-sign-in")
                     .ghost()
                     .label("Back to sign in")
                     .tab_index(4)
@@ -205,9 +205,9 @@ impl Spk {
             .child(Label::new("2 to 32 characters").text_sm())
             .children(self.form_message(message, cx))
             .children(notice.map(|notice| Label::new(notice).text_sm()))
-            .child(self.submit_button("Continue", 1, cx))
+            .child(self.submit_button("Continue", None, 1, cx))
             .child(
-                Button::new("onboarding-sign-out")
+                control_button("onboarding-sign-out")
                     .ghost()
                     .label("Sign out")
                     .tab_index(2)
@@ -220,15 +220,18 @@ impl Spk {
     fn submit_button(
         &self,
         label: &'static str,
+        icon: Option<IconName>,
         tab_index: isize,
         cx: &mut Context<Self>,
     ) -> Button {
-        Button::new("submit-account-form")
-            .primary()
-            .label(label)
-            .w_full()
-            .tab_index(tab_index)
-            .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx)))
+        let button = control_button("submit-account-form").primary();
+        match icon {
+            Some(icon) => icon_label_button(button, icon, label),
+            None => button.label(label),
+        }
+        .w_full()
+        .tab_index(tab_index)
+        .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx)))
     }
 
     fn form_message(&self, message: Option<&'static str>, cx: &Context<Self>) -> Option<Label> {

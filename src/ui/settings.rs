@@ -506,7 +506,7 @@ impl Settings {
                     } else {
                         theme.muted_foreground
                     };
-                    Button::new(label)
+                    control_button(label)
                         .ghost()
                         .small()
                         .tab_stop(true)
@@ -520,8 +520,8 @@ impl Settings {
                                 .flex()
                                 .items_center()
                                 .w_full()
-                                .gap_2()
-                                .child(themed_icon(icon, color, 16.0))
+                                .gap(CONTROL_PADDING)
+                                .child(Icon::new(icon).size(ACTION_ICON_SIZE).text_color(color))
                                 .child(Label::new(label).text_color(color).truncate()),
                         )
                         .on_click(cx.listener(move |this, _, _, cx| this.select_tab(tab, cx)))
@@ -531,7 +531,7 @@ impl Settings {
             let (label, icon) = active.navigation();
             let settings = cx.weak_entity();
             navigation.border_b_1().child(
-                Button::new("settings-sections")
+                control_button("settings-sections")
                     .small()
                     .outline()
                     .tab_stop(true)
@@ -541,14 +541,18 @@ impl Settings {
                             .w_full()
                             .flex()
                             .items_center()
-                            .gap_2()
-                            .child(themed_icon(icon, theme.foreground, 16.0))
+                            .gap(CONTROL_PADDING)
+                            .child(
+                                Icon::new(icon)
+                                    .size(ACTION_ICON_SIZE)
+                                    .text_color(theme.foreground),
+                            )
                             .child(Label::new(label).flex_1())
-                            .child(themed_icon(
-                                IconName::ChevronDown,
-                                theme.muted_foreground,
-                                16.0,
-                            )),
+                            .child(
+                                Icon::new(IconName::ChevronDown)
+                                    .size(ACTION_ICON_SIZE)
+                                    .text_color(theme.muted_foreground),
+                            ),
                     )
                     .dropdown_menu(move |mut menu, window, _| {
                         menu = menu.max_h(window.viewport_size().height - px(136.0));

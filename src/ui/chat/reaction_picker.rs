@@ -6,7 +6,7 @@ use gpui_kit::{
 };
 use serde::Deserialize;
 
-const ROW_HEIGHT: Pixels = px(32.);
+const ROW_HEIGHT: Pixels = CONTROL_HEIGHT;
 const POPOVER_MARGIN: Pixels = px(8.);
 const POPOVER_GAP: Pixels = px(4.);
 
@@ -221,7 +221,7 @@ impl Spk {
                             list(scroll.clone(), move |index, _, _| {
                                 let emoji = results[index];
                                 let app = app.clone();
-                                Button::new(index)
+                                control_button(index)
                                     .ghost()
                                     .w_full()
                                     .h(ROW_HEIGHT)
@@ -233,9 +233,9 @@ impl Spk {
                                             .w_full()
                                             .flex()
                                             .items_center()
-                                            .gap_2()
+                                            .gap(CONTROL_PADDING)
                                             .min_w_0()
-                                            .child(reaction_glyph(&emoji.emoji, px(20.)))
+                                            .child(reaction_glyph(&emoji.emoji, ACTION_ICON_SIZE))
                                             .child(
                                                 div()
                                                     .text_sm()

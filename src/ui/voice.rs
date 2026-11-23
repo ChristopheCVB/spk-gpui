@@ -6,10 +6,11 @@ use crate::{
     shortcuts::Action,
     voice::{Device, DeviceKind, DeviceList, NoiseSuppression, VoiceProcessing},
 };
+use gpui_kit::base::{LayoutDirection, LogicalStyledExt};
 use gpui_kit::component::{
     IndexPath,
     popover::Popover,
-    select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState},
+    select::{SearchableVec, SelectEvent},
     slider::{Slider, SliderEvent, SliderState, SliderValue},
     switch::Switch,
     tooltip::Tooltip,
@@ -46,7 +47,7 @@ pub(super) fn voice_button(
     location: VoiceControls,
 ) -> Button {
     let label = label.into();
-    let button = Button::new(id)
+    let button = control_button(id)
         .ghost()
         .small()
         .accessibility_label(label.clone())
@@ -54,50 +55,48 @@ pub(super) fn voice_button(
     if location.compact() {
         action_icon(button, icon)
     } else {
-        button.icon(icon.into()).label(label)
+        icon_label_button(button, icon, label)
     }
 }
 
 pub(super) fn voice_shortcut_tooltip(
-    button: Button,
+    mut button: Button,
     label: &'static str,
     keys: Vec<String>,
-) -> impl IntoElement {
-    div()
-        .id("voice-shortcut")
-        .tooltip(move |window, cx| {
-            let keys = keys.clone();
-            Tooltip::element(move |_, cx| {
-                let theme = cx.theme();
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(label)
-                    .child("·")
-                    .children(keys.iter().map(|key| {
-                        let key = if key == "Shift" {
-                            "⇧".to_owned()
-                        } else {
-                            key.to_uppercase()
-                        };
-                        div()
-                            .px_1()
-                            .rounded_sm()
-                            .border_1()
-                            .border_color(theme.border)
-                            .bg(theme.muted)
-                            .text_color(theme.muted_foreground)
-                            .text_xs()
-                            .child(key)
-                    }))
-            })
-            .build(window, cx)
+) -> Button {
+    button.interactivity().tooltip(move |window, cx| {
+        let keys = keys.clone();
+        Tooltip::element(move |_, cx| {
+            let theme = cx.theme();
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(label)
+                .child("·")
+                .children(keys.iter().map(|key| {
+                    let key = if key == "Shift" {
+                        "⇧".to_owned()
+                    } else {
+                        key.to_uppercase()
+                    };
+                    div()
+                        .px_1()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.muted)
+                        .text_color(theme.muted_foreground)
+                        .text_xs()
+                        .child(key)
+                }))
         })
-        .child(button)
+        .build(window, cx)
+    });
+    button
 }
 
-pub(super) fn voice_options_button(label: impl Into<SharedString>, open: bool) -> Button {
+fn voice_options_button(label: impl Into<SharedString>, open: bool) -> Button {
     tool_button(
         "options",
         if open {
@@ -107,7 +106,156 @@ pub(super) fn voice_options_button(label: impl Into<SharedString>, open: bool) -
         },
         label,
     )
-    .w(px(22.0))
+    .w(ACTION_ICON_SIZE)
+    .px_0()
+}
+
+type OptionsChange = Rc<dyn Fn(bool, &mut Window, &mut App)>;
+
+#[derive(IntoElement)]
+pub(super) struct VoiceButtonGroup {
+    id: &'static str,
+    primary: Button,
+    label: SharedString,
+    popover: Popover,
+    controlled: Option<(bool, OptionsChange)>,
+}
+
+impl VoiceButtonGroup {
+    pub(super) fn new(
+        id: &'static str,
+        primary: Button,
+        label: impl Into<SharedString>,
+        popover: Popover,
+    ) -> Self {
+        Self {
+            id,
+            primary,
+            label: label.into(),
+            popover,
+            controlled: None,
+        }
+    }
+
+    pub(super) fn controlled(
+        mut self,
+        open: bool,
+        on_change: impl Fn(bool, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.controlled = Some((open, Rc::new(on_change)));
+        self
+    }
+}
+
+impl RenderOnce for VoiceButtonGroup {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let state = window.use_keyed_state(self.id, cx, |_, cx| (false, cx.focus_handle()));
+        let (local_open, focus) = state.read(cx).clone();
+        let (open, on_change) = self.controlled.unwrap_or_else(|| {
+            (
+                local_open,
+                Rc::new(move |open, _, cx| {
+                    state.update(cx, |(current, _), cx| {
+                        *current = open;
+                        cx.notify();
+                    });
+                }),
+            )
+        });
+        let toggle_options = {
+            let on_change = on_change.clone();
+            let focus = focus.clone();
+            move |window: &mut Window, cx: &mut App| {
+                if !open {
+                    focus.focus(window, cx);
+                }
+                on_change(!open, window, cx);
+            }
+        };
+        let options = voice_options_button(self.label, open)
+            .open(open)
+            .track_focus(&focus)
+            // An open popover dismisses on mouse-down outside its contents.
+            .on_mouse_down(MouseButton::Left, {
+                let toggle_options = toggle_options.clone();
+                move |_, window, cx| {
+                    if !open {
+                        toggle_options(window, cx);
+                    }
+                }
+            })
+            .on_click(move |event, window, cx| {
+                if !matches!(event, ClickEvent::Mouse(_)) {
+                    toggle_options(window, cx);
+                }
+            });
+        let options = OptionsAccessibility(options).aria_expanded(open).0;
+
+        let rtl = LayoutDirection::global(cx).is_rtl();
+        div()
+            .id(self.id)
+            .role(Role::Group)
+            .relative()
+            .flex()
+            .flex_row_dir(cx)
+            .items_center()
+            // ButtonGroup assigns toggle semantics to every child, including momentary actions.
+            .child(square_button_edge(self.primary, rtl))
+            .child(square_button_edge(options, !rtl))
+            // The independent anchor keeps popover input handlers off the primary button.
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .size_0()
+                    .when(rtl, |el| el.left_0())
+                    .when(!rtl, |el| el.right_0())
+                    .child(
+                        self.popover
+                            .anchor(Anchor::BottomRight)
+                            .trigger(VoiceOptionsAnchor)
+                            .open(open)
+                            .on_open_change(move |open, window, cx| on_change(*open, window, cx)),
+                    ),
+            )
+    }
+}
+
+struct OptionsAccessibility(Button);
+
+impl InteractiveElement for OptionsAccessibility {
+    fn interactivity(&mut self) -> &mut Interactivity {
+        self.0.interactivity()
+    }
+}
+
+impl StatefulInteractiveElement for OptionsAccessibility {}
+
+fn square_button_edge(button: Button, left: bool) -> Button {
+    if left {
+        button.rounded_tl(px(0.0)).rounded_bl(px(0.0))
+    } else {
+        button.rounded_tr(px(0.0)).rounded_br(px(0.0))
+    }
+}
+
+#[derive(IntoElement)]
+struct VoiceOptionsAnchor;
+
+impl Selectable for VoiceOptionsAnchor {
+    fn selected(self, _: bool) -> Self {
+        self
+    }
+
+    fn is_selected(&self) -> bool {
+        false
+    }
+}
+
+impl RenderOnce for VoiceOptionsAnchor {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        div()
+    }
 }
 
 pub(super) fn voice_popover(
@@ -251,54 +399,41 @@ impl Spk {
                     let picker_label = format!("Choose {}", device_label(kind).to_lowercase());
                     let binding = self.shortcuts.binding(action);
                     let open = self.device_picker == Some((location, kind));
-                    div()
-                        .id(device_label(kind))
-                        .flex()
-                        .items_center()
-                        .child({
-                            let button = voice_button(
-                                "toggle",
-                                themed_icon(
-                                    icon,
-                                    if off { theme.danger } else { theme.foreground },
-                                    16.0,
-                                ),
-                                label,
-                                location,
-                            )
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.voice_action(action, cx)),
-                            );
-                            if let Some(binding) = binding {
-                                let chord = binding.chord.to_string();
-                                let keys = chord.split(" + ").map(str::to_owned).collect();
-                                let tooltip = match action {
-                                    Action::Mute => "Mute / unmute",
-                                    Action::Deafen => "Deafen / undeafen",
-                                };
-                                voice_shortcut_tooltip(button, tooltip, keys).into_any_element()
-                            } else {
-                                button.tooltip(label).into_any_element()
-                            }
-                        })
-                        .child({
-                            let app = cx.weak_entity();
-                            let popup_app = app.clone();
-                            voice_popover("device-picker", px(300.0), move |open| {
-                                voice_options_button(picker_label, open)
-                            })
-                            .open(open)
-                            .on_open_change(move |open, _, cx| {
-                                let _ = app.update(cx, |app, cx| {
-                                    if *open {
-                                        app.device_picker = Some((location, kind));
-                                        app.send(Command::RefreshDevices, None, cx);
-                                    } else if app.device_picker == Some((location, kind)) {
-                                        app.device_picker = None;
-                                        cx.notify();
-                                    }
-                                });
-                            })
+                    let button = voice_button(
+                        "toggle",
+                        themed_icon(
+                            icon,
+                            if off { theme.danger } else { theme.foreground },
+                            16.0,
+                        ),
+                        label,
+                        location,
+                    )
+                    .selected(off)
+                    .when(
+                        action != Action::Mute || !mic_needs_retry(sidebar),
+                        |button| button.toggled(off),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.voice_action(action, cx)));
+                    let button = if let Some(binding) = binding {
+                        let chord = binding.chord.to_string();
+                        let keys = chord.split(" + ").map(str::to_owned).collect();
+                        let tooltip = match action {
+                            Action::Mute => "Mute / unmute",
+                            Action::Deafen => "Deafen / undeafen",
+                        };
+                        voice_shortcut_tooltip(button, tooltip, keys)
+                    } else {
+                        button.tooltip(label)
+                    };
+                    let app = cx.weak_entity();
+                    let popup_app = app.clone();
+                    VoiceButtonGroup::new(
+                        device_label(kind),
+                        button,
+                        picker_label,
+                        Popover::new("device-picker")
+                            .w(px(300.0))
                             .content(move |_, window, cx| {
                                 let Some(app) = popup_app.upgrade() else {
                                     return div();
@@ -338,8 +473,19 @@ impl Spk {
                                     .child(Label::new(label).font_semibold())
                                     .child(picker)
                                     .child(extra)
-                            })
-                        })
+                            }),
+                    )
+                    .controlled(open, move |open, _, cx| {
+                        let _ = app.update(cx, |app, cx| {
+                            if open {
+                                app.device_picker = Some((location, kind));
+                                app.send(Command::RefreshDevices, None, cx);
+                            } else if app.device_picker == Some((location, kind)) {
+                                app.device_picker = None;
+                                cx.notify();
+                            }
+                        });
+                    })
                 }),
             )
     }
@@ -419,7 +565,7 @@ fn microphone_controls(
         .gap_2()
         .child(Label::new("Noise suppression").font_semibold())
         .child(
-            Select::new(&noise)
+            control_select(&noise)
                 .small()
                 .w_full()
                 .accessibility_label("Noise suppression"),
@@ -654,7 +800,7 @@ impl RenderOnce for DevicePicker {
                 }
             })
             .child(
-                Select::new(&select)
+                control_select(&select)
                     .small()
                     .accessibility_label(label)
                     .w_full(),
@@ -743,15 +889,15 @@ pub(super) fn connection_diagnostics_with_status(
     cx: &Context<Spk>,
 ) -> Popover {
     connection_diagnostics_popover(
-        tool_button_with_label(
-            "voice-connection-status",
+        icon_label_button(
+            control_button("voice-connection-status")
+                .ghost()
+                .tab_stop(true),
             IconName::Activity,
-            format!("{status} Voice connection diagnostics"),
-            true,
+            status,
         )
-        .label(status)
-        .xsmall()
-        .px_0()
+        .accessibility_label(format!("{status} Voice connection diagnostics"))
+        .tooltip("Voice connection diagnostics")
         .text_color(cx.theme().muted_foreground),
         cx,
     )

@@ -497,19 +497,22 @@ impl Render for SearchPanel {
                             .child(Input::new(&self.query).aria_label("Search messages")),
                     )
                     .child(
-                        Button::new("submit-search")
+                        control_button("submit-search")
                             .label("Search")
                             .tab_stop(true)
                             .on_click(cx.listener(|this, _, _, cx| this.search(cx))),
                     ),
             )
             .child(
-                Button::new("search-scope")
+                control_button("search-scope")
                     .small()
                     .tab_stop(true)
                     .ghost()
-                    .label(scope)
-                    .icon(IconName::ChevronDown)
+                    .child(
+                        control_content()
+                            .child(Label::new(scope))
+                            .child(Icon::new(IconName::ChevronDown).size(ACTION_ICON_SIZE)),
+                    )
                     .accessibility_label(format!("Search scope, {scope}"))
                     .dropdown_menu(move |mut menu, _, _| {
                         for (scope, label) in &scopes {
@@ -548,7 +551,7 @@ impl Render for SearchPanel {
                     )
                     .when(search.next_cursor.is_some(), |list| {
                         list.child(
-                            Button::new("more-results")
+                            control_button("more-results")
                                 .small()
                                 .tab_stop(true)
                                 .label("Load more")

@@ -18,12 +18,15 @@ pub(super) fn user_status_picker(
     app: WeakEntity<Spk>,
 ) -> impl IntoElement {
     user_status_menu(
-        Button::new(id)
+        control_button(id)
             .small()
             .tab_stop(true)
             .ghost()
-            .label(selected.label())
-            .icon(IconName::ChevronDown)
+            .child(
+                control_content()
+                    .child(Label::new(selected.label()))
+                    .child(Icon::new(IconName::ChevronDown).size(ACTION_ICON_SIZE)),
+            )
             .accessibility_label(format!("Status, {}", selected.label())),
         selected,
         Anchor::TopLeft,
@@ -152,7 +155,7 @@ impl Spk {
             .h_8()
             .gap_1()
             .child(
-                Button::new("open-direct-message")
+                control_button("open-direct-message")
                     .ghost()
                     .small()
                     .tab_stop(true)
@@ -388,7 +391,7 @@ impl Render for PersonProfile {
                         !person.banned && sidebar.profile.id.as_deref() != Some(self.id.as_str()),
                         |profile| {
                             profile.child(
-                                Button::new("send-profile-dm")
+                                control_button("send-profile-dm")
                                     .small()
                                     .tab_stop(true)
                                     .label("Send DM")

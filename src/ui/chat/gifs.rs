@@ -5,7 +5,11 @@ use gpui_kit::component::popover::Popover;
 use crate::{api::GifItem, session::GifPickerView};
 
 fn gif_button(id: &'static str, label: &'static str) -> Button {
-    Button::new(id).ghost().small().tab_stop(true).label(label)
+    control_button(id)
+        .ghost()
+        .small()
+        .tab_stop(true)
+        .label(label)
 }
 
 impl Spk {
@@ -256,7 +260,7 @@ impl Spk {
                     })),
             )
             .child(
-                action_icon(Button::new("star-gif").small(), IconName::Star)
+                action_icon(control_button("star-gif").small(), IconName::Star)
                     .tab_stop(true)
                     .toggled(favorite)
                     .when(favorite, |button| button.bg(cx.theme().accent))

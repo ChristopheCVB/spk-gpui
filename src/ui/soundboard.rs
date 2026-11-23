@@ -99,7 +99,6 @@ impl SoundboardPanel {
                         IconName::Headphones,
                         format!("Preview {} (only you)", clip.name),
                     )
-                    .size(px(22.0))
                     .on_click(cx.listener(move |panel, _, _, cx| {
                         cx.stop_propagation();
                         panel.send(Command::PreviewSound(preview_id.clone()), cx);
@@ -160,15 +159,20 @@ impl Render for SoundboardPanel {
                     .items_center()
                     .gap_2()
                     .child(Label::new(error).text_color(theme.danger))
-                    .child(Button::new("retry").label("Retry").tab_stop(true).on_click(
-                        cx.listener(|panel, _, _, cx| panel.send(Command::LoadSoundboard, cx)),
-                    ))
+                    .child(
+                        control_button("retry")
+                            .label("Retry")
+                            .tab_stop(true)
+                            .on_click(cx.listener(|panel, _, _, cx| {
+                                panel.send(Command::LoadSoundboard, cx)
+                            })),
+                    )
             }))
             .when(
                 !board.loading && board.clips.is_none() && board.directory_error.is_none(),
                 |panel| {
                     panel.child(
-                        Button::new("load")
+                        control_button("load")
                             .label("Load sounds")
                             .tab_stop(true)
                             .on_click(cx.listener(|panel, _, _, cx| {

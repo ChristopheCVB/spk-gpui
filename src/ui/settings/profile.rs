@@ -85,20 +85,22 @@ impl Settings {
                                     cx,
                                 ))
                                 .child(
-                                    Button::new("choose-avatar")
-                                        .small()
-                                        .tab_stop(true)
-                                        .outline()
-                                        .icon(IconName::Upload)
-                                        .label(if edit == ProfileEdit::Uploading {
+                                    icon_label_button(
+                                        control_button("choose-avatar").outline(),
+                                        IconName::Upload,
+                                        if edit == ProfileEdit::Uploading {
                                             "Uploading…"
                                         } else {
                                             "Choose avatar"
-                                        })
-                                        .disabled(disabled)
-                                        .on_click(cx.listener(|this, _, window, cx| {
+                                        },
+                                    )
+                                    .tab_stop(true)
+                                    .disabled(disabled)
+                                    .on_click(cx.listener(
+                                        |this, _, window, cx| {
                                             this.choose_avatar(window, cx);
-                                        })),
+                                        },
+                                    )),
                                 ),
                         )
                         .child(
@@ -119,7 +121,7 @@ impl Settings {
                                                 .disabled(disabled),
                                         )
                                         .child(
-                                            Button::new("save-nickname")
+                                            control_button("save-nickname")
                                                 .primary()
                                                 .tab_stop(true)
                                                 .label(if edit == ProfileEdit::Saving {
@@ -171,11 +173,8 @@ impl Settings {
                 .w_full(),
             )
             .child(
-                Button::new("sign-out")
-                    .small()
+                icon_label_button(control_button("sign-out"), IconName::LogOut, "Sign out")
                     .tab_stop(true)
-                    .icon(IconName::LogOut)
-                    .label("Sign out")
                     .on_click(move |_, window, cx| {
                         let _ = spk.update(cx, |app, cx| app.send(Command::SignOut, None, cx));
                         window.close_dialog(cx);
