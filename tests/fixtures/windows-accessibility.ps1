@@ -21,6 +21,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 
 public static class SpkAccessibilityFixture {
+    [DllImport("winmm.dll")] public static extern uint waveOutGetNumDevs();
     delegate bool EnumCallback(IntPtr hwnd, IntPtr parameter);
     [DllImport("user32.dll")] static extern bool EnumWindows(EnumCallback callback, IntPtr parameter);
     [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr parent, EnumCallback callback, IntPtr parameter);
@@ -181,11 +182,15 @@ try {
     Write-Host 'Soundboard upload accessibility passed.'
 
     Invoke-Button 'Close settings'
-    Invoke-Button 'Join voice'
-    Invoke-Button 'Voice connection diagnostics'
-    Assert-Rows @('Connection quality', 'Media round-trip', 'Audio jitter (worst track)',
-        'Incoming audio packet loss', 'Audio upload', 'Audio download')
-    Write-Host 'Voice connection diagnostics accessibility passed.'
+    if ([SpkAccessibilityFixture]::waveOutGetNumDevs() -gt 0) {
+        Invoke-Button 'Join voice'
+        Invoke-Button 'Voice connection diagnostics'
+        Assert-Rows @('Connection quality', 'Media round-trip', 'Audio jitter (worst track)',
+            'Incoming audio packet loss', 'Audio upload', 'Audio download')
+        Write-Host 'Voice connection diagnostics accessibility passed.'
+    } else {
+        Write-Host '::warning::Voice connection diagnostics requires a Windows playback endpoint. The other accessibility checks passed.'
+    }
 
     Invoke-Button 'Settings'
     Invoke-Button 'Sign out'

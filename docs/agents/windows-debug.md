@@ -93,7 +93,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\fixtures\windows
 
 GPUI Kit labels use their call site as the default ID. Repeated labels share an ID unless their parent rows have distinct IDs or the labels have explicit IDs.
 
-From an interactive x64 Developer PowerShell, run the accessibility regression against a disposable SPK fixture and native LiveKit server. It builds with loopback URLs and checks that Shortcuts, Changelog, Soundboard upload fields, and Voice connection diagnostics appear in the accessibility tree.
+From an interactive x64 Developer PowerShell, run the accessibility regression against a disposable SPK fixture and native LiveKit server. It builds with loopback URLs and checks that Shortcuts, Changelog, and Soundboard upload fields appear in the accessibility tree. With a Windows playback endpoint available, it also checks Voice connection diagnostics in a joined voice channel.
 
 ```powershell
 mise exec -- python tests/fixtures/windows-accessibility.py
