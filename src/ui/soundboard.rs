@@ -93,19 +93,19 @@ impl SoundboardPanel {
                     ),
             )
             .child(
-                tool_button(
-                    "preview",
-                    IconName::Headphones,
-                    format!("Preview {} (only you)", clip.name),
-                )
-                .absolute()
-                .top_0()
-                .right_0()
-                .size(px(22.0))
-                .p_0()
-                .on_click(cx.listener(move |panel, _, _, cx| {
-                    panel.send(Command::PreviewSound(preview_id.clone()), cx);
-                })),
+                div().absolute().top_0().right_0().occlude().child(
+                    tool_button(
+                        "preview",
+                        IconName::Headphones,
+                        format!("Preview {} (only you)", clip.name),
+                    )
+                    .size(px(22.0))
+                    .p_0()
+                    .on_click(cx.listener(move |panel, _, _, cx| {
+                        cx.stop_propagation();
+                        panel.send(Command::PreviewSound(preview_id.clone()), cx);
+                    })),
+                ),
             )
     }
 }
