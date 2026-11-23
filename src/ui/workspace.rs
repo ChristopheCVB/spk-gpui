@@ -4,6 +4,7 @@ use gpui_kit::component::{
     Disableable, Placement,
     menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem},
     resizable::{HandleEdge, resize_handle},
+    scroll::ScrollableElement,
     window_paddings,
 };
 
@@ -12,7 +13,7 @@ use super::{
     *,
 };
 use crate::{
-    api::{Channel, Connection, VoiceModeration},
+    api::{Channel, Connection, UserPresence, VoiceModeration},
     session::{ChannelKind, Participant, VoiceView},
     voice::video::CameraStatus,
 };
@@ -45,6 +46,62 @@ fn section_title(title: &'static str, icon: IconName, cx: &App) -> Div {
         .font_semibold()
         .child(themed_icon(icon, color, 16.0))
         .child(title)
+}
+
+fn navigation_card(title: &'static str, cx: &App) -> Stateful<Div> {
+    div()
+        .id(title)
+        .role(Role::Group)
+        .aria_label(title)
+        .flex_shrink_0()
+        .rounded_lg()
+        .p_1()
+        .bg(cx.theme().background)
+}
+
+fn navigation_target(
+    id: SharedString,
+    scroll_on_focus: Option<&ScrollHandle>,
+    window: &mut Window,
+    cx: &mut App,
+) -> (Stateful<Div>, bool) {
+    let focus = window.with_element_namespace(id.clone(), |window| {
+        window
+            .use_keyed_state("navigation-focus", cx, |_, cx| {
+                cx.focus_handle().tab_stop(false)
+            })
+            .read(cx)
+            .clone()
+    });
+    let focused = focus.contains_focused(window, cx);
+    let target = div().id(id).track_focus(&focus).when_some(
+        scroll_on_focus.cloned().filter(|_| focused),
+        |row, scroll| {
+            row.relative().child(
+                canvas(
+                    move |bounds, window, _| {
+                        let viewport = scroll.bounds();
+                        let delta = if bounds.top() < viewport.top() {
+                            viewport.top() - bounds.top()
+                        } else {
+                            (viewport.bottom() - bounds.bottom()).min(px(0.))
+                        };
+                        if delta != px(0.) {
+                            let offset = scroll.offset() + point(px(0.), delta);
+                            window.on_next_frame(move |window, _| {
+                                scroll.set_offset(offset);
+                                window.refresh();
+                            });
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
+        },
+    );
+    (target, focused)
 }
 
 fn call_status(call: &VoiceView, switching: bool) -> &'static str {
@@ -82,14 +139,19 @@ impl Spk {
             self.close_message_search(window, cx);
             self.sidebar_drawer_open = true;
             let app = cx.weak_entity();
-            window.open_sheet_at(Placement::Left, cx, move |sheet, _, cx| {
+            window.open_sheet_at(Placement::Left, cx, move |sheet, window, cx| {
                 let drawer = app.update(cx, |this, cx| {
                     let View::SignedIn(sidebar) = &this.view else {
                         return None;
                     };
                     Some((
-                        this.navigation(sidebar, this.selected_voice_destination(sidebar), cx)
-                            .into_any_element(),
+                        this.navigation(
+                            sidebar,
+                            this.selected_voice_destination(sidebar),
+                            window,
+                            cx,
+                        )
+                        .into_any_element(),
                         this.navigation_footer(sidebar, SIDEBAR_WIDTH, cx)
                             .into_any_element(),
                     ))
@@ -103,7 +165,17 @@ impl Spk {
                     .text_color(cx.theme().sidebar_foreground)
                     .px_0()
                     .when_some(drawer.ok().flatten(), |sheet, (navigation, footer)| {
-                        sheet.child(navigation).footer(footer)
+                        // Fill the sheet body so the shared navigation owns the scroll position.
+                        sheet
+                            .child(
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .flex()
+                                    .flex_col()
+                                    .child(navigation),
+                            )
+                            .footer(footer)
                     })
                     .on_close(move |_, _, cx| {
                         let _ = app.update(cx, |this, cx| {
@@ -151,7 +223,7 @@ impl Spk {
     pub(super) fn workspace(
         &self,
         sidebar: &Sidebar,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let selected_channel = self.selected_voice_destination(sidebar);
@@ -176,6 +248,8 @@ impl Spk {
                 selected_channel.map_or("Voice channels", channel_name),
             ),
         };
+        let navigation =
+            inline_sidebar.then(|| self.navigation(sidebar, selected_channel, window, cx));
         let theme = cx.theme();
         let status = match sidebar.connection {
             Connection::Connecting => Some("Connecting to live updates…"),
@@ -202,7 +276,7 @@ impl Spk {
             .size_full()
             .relative()
             .flex()
-            .when(inline_sidebar, |page| {
+            .when_some(navigation, |page, navigation| {
                 page.on_drag_move(cx.listener(
                     |this, drag: &DragMoveEvent<SidebarResize>, _, cx| {
                         this.sidebar_width = (drag.event.position.x - drag.bounds.left())
@@ -221,7 +295,7 @@ impl Spk {
                         .min_h_0()
                         .bg(theme.sidebar)
                         .text_color(theme.sidebar_foreground)
-                        .child(self.navigation(sidebar, selected_channel, cx))
+                        .child(navigation)
                         .child(div().px_2().pb_2().child(self.navigation_footer(
                             sidebar,
                             self.sidebar_width,
@@ -384,9 +458,21 @@ impl Spk {
         &self,
         sidebar: &Sidebar,
         selected_channel: Option<&Channel>,
-        cx: &Context<Self>,
-    ) -> impl IntoElement {
-        let theme = cx.theme();
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let focused = window.focused(cx);
+        let (scroll, focus_changed) = window
+            .use_keyed_state("navigation-scroll", cx, |_, _| {
+                (ScrollHandle::new(), None::<FocusHandle>)
+            })
+            .update(cx, |(scroll, previous_focus), _| {
+                let changed = *previous_focus != focused;
+                *previous_focus = focused;
+                (scroll.clone(), changed)
+            });
+        let scroll_on_focus =
+            (focus_changed && window.last_input_was_keyboard()).then_some(&scroll);
         let selected = if sidebar.chat.is_none() {
             selected_channel.map(|channel| channel.id.as_str())
         } else {
@@ -397,148 +483,167 @@ impl Spk {
         let voice = sidebar.channels_of_kind(ChannelKind::Voice);
         let text_count = text.clone().count();
         let voice_count = voice.clone().count();
+        let voice_card = navigation_card("Voice channels", cx)
+            .child(
+                navigation_target("voice-heading".into(), scroll_on_focus, window, cx)
+                    .0
+                    .child(self.channel_section_title(sidebar, ChannelKind::Voice, cx)),
+            )
+            .children(voice.enumerate().map(|(index, channel)| {
+                let actions = sidebar.is_admin().then(|| {
+                    self.channel_actions(
+                        channel,
+                        ChannelKind::Voice,
+                        index > 0,
+                        index + 1 < voice_count,
+                        cx,
+                    )
+                    .into_any_element()
+                });
+                let target = navigation_target(
+                    format!("voice-{}", channel.id).into(),
+                    scroll_on_focus,
+                    window,
+                    cx,
+                );
+                self.channel_row(sidebar, channel, selected, actions, target, cx)
+            }));
+        let primary = cx.theme().primary;
 
-        div()
+        let destinations = div()
             .id("channel-navigation")
             .flex()
             .flex_col()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&scroll)
             .px_2()
-            .gap(if self.compact() { px(4.0) } else { px(12.0) })
+            .pb_2()
+            .gap(if self.compact() { px(4.0) } else { px(8.0) })
             .when(!self.sidebar_drawer_open, |nav| {
-                nav.flex_1().min_h_0().overflow_y_scroll().child(
+                nav.child(
                     div()
                         .flex()
-                        .h_16()
+                        .h_10()
                         .items_center()
                         .justify_center()
                         .flex_shrink_0()
                         .gap_1()
                         .text_2xl()
                         .font_bold()
-                        .text_color(theme.primary)
+                        .text_color(primary)
                         .child(logo(26.0))
                         .child("spk"),
                 )
             })
-            .when(!people.is_empty(), |nav| {
-                nav.child(
-                    div()
-                        .flex_shrink_0()
-                        .child(section_title(
-                            "Direct messages",
-                            IconName::MessageCircle,
-                            cx,
-                        ))
-                        .children(
-                            people
-                                .into_iter()
-                                .map(|(id, name)| self.person_row(sidebar, id, name, cx)),
-                        ),
-                )
-            })
-            .when(sidebar.is_admin() || text_count > 0, |nav| {
-                nav.child(
-                    div()
-                        .flex_shrink_0()
-                        .child(self.channel_section_title(sidebar, ChannelKind::Text, cx))
-                        .children(text.enumerate().map(|(index, channel)| {
-                            let id = channel.id.clone();
-                            let name = channel_name(channel).to_owned();
-                            let active = sidebar
-                                .chat
-                                .as_ref()
-                                .is_some_and(|chat| chat.channel_id == id);
-                            let counts = sidebar.unread(&id);
-                            let muted = self.notification_preferences.muted.contains(&id);
-                            let menu_id = id.clone();
-                            let app = cx.weak_entity();
-                            div()
-                                .id(SharedString::from(format!("text-{id}")))
-                                .flex()
-                                .items_center()
-                                .child(
-                                    Button::new("select")
-                                        .ghost()
-                                        .small()
-                                        .tab_stop(true)
-                                        .selected(active)
-                                        .accessibility_label(unread_label(&name, counts))
-                                        .flex_1()
-                                        .min_w_0()
-                                        .h_8()
-                                        .when(active || counts.mentions > 0, |button| {
-                                            button.bg(theme.primary.opacity(0.10))
-                                        })
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .gap_2()
-                                                .w_full()
-                                                .min_w_0()
-                                                .child(
-                                                    Label::new(name)
-                                                        .flex_1()
-                                                        .truncate()
-                                                        .when(counts.unread > 0, |label| {
-                                                            label.font_bold()
-                                                        }),
-                                                )
-                                                .child(unread_badges(counts, cx)),
-                                        )
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.close_sidebar_drawer(window, cx);
-                                            this.device_picker = None;
-                                            this.send(
-                                                Command::OpenTextChannel(id.clone()),
-                                                None,
-                                                cx,
-                                            );
-                                        })),
-                                )
-                                .children(sidebar.is_admin().then(|| {
-                                    self.channel_actions(
-                                        channel,
-                                        ChannelKind::Text,
-                                        index > 0,
-                                        index + 1 < text_count,
-                                        cx,
-                                    )
-                                }))
-                                .context_menu(move |menu, _, _| {
-                                    menu.item(mark_read_item(menu_id.clone(), app.clone()))
-                                        .item(notifications::mute_item(
-                                            menu_id.clone(),
-                                            muted,
-                                            app.clone(),
-                                        ))
-                                })
-                        })),
-                )
-            })
             .child(
-                div()
-                    .flex_shrink_0()
-                    .child(self.channel_section_title(sidebar, ChannelKind::Voice, cx))
-                    .children(voice.enumerate().map(|(index, channel)| {
-                        let actions = sidebar.is_admin().then(|| {
-                            self.channel_actions(
-                                channel,
-                                ChannelKind::Voice,
-                                index > 0,
-                                index + 1 < voice_count,
-                                cx,
-                            )
-                        });
-                        self.channel_row(sidebar, channel, selected, actions, cx)
+                navigation_card("Direct messages", cx)
+                    .child(section_title(
+                        "Direct messages",
+                        IconName::MessageCircle,
+                        cx,
+                    ))
+                    .children(people.into_iter().map(|(id, name)| {
+                        navigation_target(format!("dm-{id}").into(), scroll_on_focus, window, cx)
+                            .0
+                            .child(self.person_row(sidebar, id, name, cx))
                     })),
             )
+            .child(
+                navigation_card("Text channels", cx)
+                    .child(
+                        navigation_target("text-heading".into(), scroll_on_focus, window, cx)
+                            .0
+                            .child(self.channel_section_title(sidebar, ChannelKind::Text, cx)),
+                    )
+                    .children(text.enumerate().map(|(index, channel)| {
+                        let id = channel.id.clone();
+                        let name = channel_name(channel).to_owned();
+                        let active = sidebar
+                            .chat
+                            .as_ref()
+                            .is_some_and(|chat| chat.channel_id == id);
+                        let counts = sidebar.unread(&id);
+                        let muted = self.notification_preferences.muted.contains(&id);
+                        let menu_id = id.clone();
+                        let app = cx.weak_entity();
+                        navigation_target(format!("text-{id}").into(), scroll_on_focus, window, cx)
+                            .0
+                            .flex()
+                            .items_center()
+                            .child(
+                                Button::new("select")
+                                    .ghost()
+                                    .small()
+                                    .tab_stop(true)
+                                    .selected(active)
+                                    .accessibility_label(unread_label(&name, counts))
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h_8()
+                                    .when(active || counts.mentions > 0, |button| {
+                                        button.bg(primary.opacity(0.10))
+                                    })
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .w_full()
+                                            .min_w_0()
+                                            .child(
+                                                Label::new(name)
+                                                    .flex_1()
+                                                    .truncate()
+                                                    .when(active, |label| label.text_color(primary))
+                                                    .when(counts.unread > 0, |label| {
+                                                        label.font_bold()
+                                                    }),
+                                            )
+                                            .child(unread_badges(counts, cx)),
+                                    )
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.close_sidebar_drawer(window, cx);
+                                        this.device_picker = None;
+                                        this.send(Command::OpenTextChannel(id.clone()), None, cx);
+                                    })),
+                            )
+                            .children(sidebar.is_admin().then(|| {
+                                self.channel_actions(
+                                    channel,
+                                    ChannelKind::Text,
+                                    index > 0,
+                                    index + 1 < text_count,
+                                    cx,
+                                )
+                            }))
+                            .context_menu(move |menu, _, _| {
+                                menu.item(mark_read_item(menu_id.clone(), app.clone()))
+                                    .item(notifications::mute_item(
+                                        menu_id.clone(),
+                                        muted,
+                                        app.clone(),
+                                    ))
+                            })
+                    })),
+            )
+            .child(voice_card)
             .when(sidebar.is_admin(), |nav| {
                 nav.children(channel_admin::channel_status(
                     sidebar.channel_admin.result,
                     cx,
                 ))
-            })
+            });
+        div()
+            .id("navigation-viewport")
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(destinations)
+            .vertical_scrollbar(&scroll)
     }
 
     fn navigation_footer(
@@ -715,8 +820,9 @@ impl Spk {
         channel: &Channel,
         selected: Option<&str>,
         actions: Option<impl IntoElement>,
+        (row, focused): (Stateful<Div>, bool),
         cx: &Context<Self>,
-    ) -> impl IntoElement {
+    ) -> Stateful<Div> {
         let theme = cx.theme();
         let switching_here = sidebar.switching_to() == Some(channel.id.as_str());
         let call = sidebar
@@ -728,6 +834,8 @@ impl Spk {
         let join_id = channel.id.clone();
         let name = channel_name(channel).to_owned();
         let can_join = sidebar.can_join_voice(&id);
+        let participants = sidebar.participants(&id);
+        let participant_count = participants.len();
         let join_label = if sidebar.voice.is_some() {
             format!("Switch to {name}")
         } else {
@@ -736,13 +844,15 @@ impl Spk {
         div()
             .id(SharedString::from(format!("voice-{id}")))
             .child(
-                div()
+                row.group("voice-channel")
                     .flex()
                     .items_center()
                     .h_8()
                     .rounded_md()
                     .pr_1()
                     .when(active, |row| row.bg(theme.primary.opacity(0.10)))
+                    .when(!active && focused, |row| row.bg(theme.accent))
+                    .when(!active, |row| row.hover(|row| row.bg(theme.accent)))
                     .child(
                         Button::new("select")
                             .ghost()
@@ -753,14 +863,12 @@ impl Spk {
                             .flex_1()
                             .min_w_0()
                             .h_8()
-                            .when(active, |button| button.bg(theme.transparent))
-                            .child(Label::new(name.clone()).w_full().truncate().text_color(
-                                if active {
-                                    theme.primary
-                                } else {
-                                    theme.foreground
-                                },
-                            ))
+                            .bg(theme.transparent)
+                            .child(Label::new(name).w_full().truncate().text_color(if active {
+                                theme.primary
+                            } else {
+                                theme.foreground
+                            }))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.close_sidebar_drawer(window, cx);
                                 this.select_voice_channel(&id, cx);
@@ -778,40 +886,100 @@ impl Spk {
                         self.leave_voice("leave", call, switching_here, false, cx)
                     }))
                     .when(can_join, |row| {
-                        row.child(tool_button("join", IconName::Phone, join_label).on_click(
-                            cx.listener(move |this, _, window, cx| {
-                                this.close_sidebar_drawer(window, cx);
-                                this.join_voice_channel(&join_id, cx);
-                            }),
-                        ))
+                        row.child(
+                            div()
+                                .id("join-action")
+                                .flex_shrink_0()
+                                .when(!focused, |action| {
+                                    action
+                                        .opacity(0.)
+                                        .group_hover("voice-channel", |style| style.opacity(1.))
+                                })
+                                .child(tool_button("join", IconName::Phone, join_label).on_click(
+                                    cx.listener(move |this, _, window, cx| {
+                                        this.close_sidebar_drawer(window, cx);
+                                        this.join_voice_channel(&join_id, cx);
+                                    }),
+                                )),
+                        )
                     })
                     .children(actions),
             )
-            .children(sidebar.participants(&channel.id).into_iter().map(|person| {
+            .children(participants.into_iter().enumerate().map(|(index, person)| {
                 let flags = person.flags;
+                let speaking = flags.speaking && !flags.muted && !flags.deafened;
+                let presence = sidebar.user_presence(person.id);
+                let presence_color = match presence {
+                    UserPresence::Online => theme.success,
+                    UserPresence::Idle => theme.warning,
+                    UserPresence::Busy => theme.danger,
+                    UserPresence::Offline => theme.muted_foreground,
+                };
+                let last = index + 1 == participant_count;
                 div()
                     .id(SharedString::from(format!("member-{}", person.id)))
+                    .relative()
                     .flex()
                     .items_center()
                     .gap_2()
-                    .pl_6()
+                    .pl_7()
                     .pr_2()
                     .h_6()
-                    .child(profile_avatar(
-                        Avatar::new().name(person.name.to_owned()).xsmall(),
-                        sidebar.avatar(Some(person.id)),
-                        16.0,
-                        flags.speaking && !flags.muted && !flags.deafened,
-                        cx,
-                    ))
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_4()
+                            .w_2()
+                            .h_3()
+                            .rounded_bl_sm()
+                            .border_l_1()
+                            .border_b_1()
+                            .border_color(theme.muted_foreground.opacity(0.35)),
+                    )
+                    .when(!last, |row| {
+                        row.child(
+                            div()
+                                .absolute()
+                                .top_3()
+                                .bottom_0()
+                                .left_4()
+                                .border_l_1()
+                                .border_color(theme.muted_foreground.opacity(0.35)),
+                        )
+                    })
+                    .child(
+                        div()
+                            .relative()
+                            .flex_shrink_0()
+                            .child(profile_avatar(
+                                Avatar::new().name(person.name.to_owned()).xsmall(),
+                                sidebar.avatar(Some(person.id)),
+                                16.0,
+                                speaking,
+                                cx,
+                            ))
+                            .child(
+                                div()
+                                    .id("user-presence")
+                                    .role(Role::Image)
+                                    .aria_label(presence.label())
+                                    .absolute()
+                                    .top(px(-1.0))
+                                    .right_0()
+                                    .size_1p5()
+                                    .rounded_full()
+                                    .border_1()
+                                    .border_color(theme.background)
+                                    .bg(presence_color),
+                            ),
+                    )
                     .child(
                         Label::new(person.name.to_owned())
                             .truncate()
                             .text_color(theme.muted_foreground),
                     )
-                    .when(flags.speaking && !flags.muted && !flags.deafened, |row| {
-                        row.child(speaking_badge(cx))
-                    })
+                    .when(speaking, |row| row.child(speaking_badge(cx)))
                     .children(participant_status(flags.muted, flags.deafened, cx))
                     .children(voice_moderation_menu(&person, sidebar, cx))
                     .when(
