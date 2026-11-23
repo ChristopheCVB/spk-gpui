@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.0](https://github.com/ChristopheCVB/spk-gpui/compare/v0.3.0...v0.4.0) (2026-11-23)
+
+
+### Features
+
+* **voice:** redesign the Screen Share source picker ([#141](https://github.com/ChristopheCVB/spk-gpui/issues/141)) ([4102b83](https://github.com/ChristopheCVB/spk-gpui/commit/4102b83a5538b020254611416bddacc7cc16f4c9))
+
+
+### Bug Fixes
+
+* **ui:** standardize action sizing and sidebar alignment ([#133](https://github.com/ChristopheCVB/spk-gpui/issues/133)) ([6e3512e](https://github.com/ChristopheCVB/spk-gpui/commit/6e3512eb005bf9041db0723d7807ba1f04920d87))
+
 ## [0.3.0](https://github.com/ChristopheCVB/spk-gpui/compare/v0.2.0...v0.3.0) (2026-11-23)
 
 
