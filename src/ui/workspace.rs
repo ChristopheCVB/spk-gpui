@@ -1204,7 +1204,7 @@ impl Spk {
                                 .p_1()
                                 .overflow_x_scroll()
                                 .track_scroll(&self.video_stage.participant_scroll)
-                                .children(others().map(|person| {
+                                .children(others().enumerate().map(|(index, person)| {
                                     self.voice_tile(
                                         person,
                                         call,
@@ -1213,6 +1213,8 @@ impl Spk {
                                         window,
                                         cx,
                                     )
+                                    .when(index == 0, |tile| tile.ml_auto())
+                                    .when(index + 2 == participants.len(), |tile| tile.mr_auto())
                                 })),
                         )
                     })
@@ -1510,7 +1512,7 @@ impl Spk {
         layout: TileLayout<'_>,
         window: &Window,
         cx: &Context<Self>,
-    ) -> impl IntoElement {
+    ) -> Stateful<Div> {
         let (tile_width, scroll_on_focus) = match layout {
             TileLayout::Theater => (None, None),
             TileLayout::Strip(width) => (Some(width), None),
