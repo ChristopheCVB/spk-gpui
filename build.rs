@@ -50,6 +50,7 @@ fn compile_pipewire_capture() {
     println!("cargo::rerun-if-changed=build/pipewire-capture.cpp");
     println!("cargo::rerun-if-env-changed=LK_CUSTOM_WEBRTC");
     println!("cargo::rerun-if-env-changed=LK_DEBUG_WEBRTC");
+    println!("cargo::rerun-if-env-changed=SPK_CLANG_MAJOR");
     webrtc_sys_build::download_webrtc().expect("Could not obtain the LiveKit WebRTC SDK");
     let include = webrtc_sys_build::webrtc_dir().join("include");
     let mut compiler = cc::Build::new();
@@ -72,7 +73,10 @@ fn compile_pipewire_capture() {
         .warnings(false)
         .file("build/pipewire-capture.cpp");
     if env::var_os("CXX").is_none() {
-        compiler.compiler("clang++");
+        let clang = env::var("SPK_CLANG_MAJOR")
+            .map(|major| format!("clang++-{major}"))
+            .unwrap_or_else(|_| "clang++".into());
+        compiler.compiler(clang);
     }
     let gio = pkg_config::Config::new()
         .cargo_metadata(false)
