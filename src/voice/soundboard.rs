@@ -208,31 +208,43 @@ fn read_audio(
 }
 
 fn decode(bytes: &[u8]) -> Option<SamplesBuffer> {
-    // shortcut: decode the web uploaders' fixed PCM layout, extend the decoder if the server adds other layouts.
-    let header = bytes.get(..44)?;
-    if &header[..4] != b"RIFF"
-        || &header[8..16] != b"WAVEfmt "
-        || &header[16..22] != b"\x10\0\0\0\x01\0"
-        || &header[36..40] != b"data"
-    {
+    let header = bytes.get(..12)?;
+    if &header[..4] != b"RIFF" || &header[8..12] != b"WAVE" {
         return None;
     }
 
-    let channels = NonZero::new(u16::from_le_bytes(header[22..24].try_into().ok()?))
+    let mut chunks = &bytes[12..];
+    let mut format = None;
+    let pcm = loop {
+        let header = chunks.get(..8)?;
+        let size = u32::from_le_bytes(header[4..8].try_into().ok()?) as usize;
+        let (body, remaining) = chunks[8..].split_at_checked(size)?;
+        match &header[..4] {
+            b"fmt " => format = Some(body),
+            b"data" => break body,
+            _ => {}
+        }
+        chunks = remaining.get(size % 2..)?;
+    };
+
+    // shortcut: decode the uploaders' integer PCM, extend if SPK serves other WAV encodings.
+    let format = format?.get(..16)?;
+    if &format[..2] != b"\x01\0" {
+        return None;
+    }
+    let channels = NonZero::new(u16::from_le_bytes(format[2..4].try_into().ok()?))
         .filter(|channels| channels.get() <= 2)?;
-    let rate = NonZero::new(u32::from_le_bytes(header[24..28].try_into().ok()?))
+    let rate = NonZero::new(u32::from_le_bytes(format[4..8].try_into().ok()?))
         .filter(|rate| (8_000..=192_000).contains(&rate.get()))?;
-    let sample_bytes = match u16::from_le_bytes(header[34..36].try_into().ok()?) {
+    let sample_bytes = match u16::from_le_bytes(format[14..16].try_into().ok()?) {
         16 => 2,
         24 => 3,
         _ => return None,
     };
-    let size = u32::from_le_bytes(header[40..44].try_into().ok()?) as usize;
     let frame_bytes = usize::from(channels.get()) * sample_bytes;
-    if size == 0 || !size.is_multiple_of(frame_bytes) {
+    if pcm.is_empty() || !pcm.len().is_multiple_of(frame_bytes) {
         return None;
     }
-    let pcm = bytes.get(44..)?.get(..size)?;
     let samples = pcm
         .chunks_exact(sample_bytes)
         .take((rate.get() * MAX_SECONDS) as usize * usize::from(channels.get()))
@@ -323,6 +335,17 @@ mod tests {
         assert_eq!(clip.channels().get(), 1);
         assert_eq!(clip.sample_rate().get(), 48_000);
         assert_eq!(clip.collect::<Vec<_>>(), [-1.0, 0.0, 0.5]);
+    }
+
+    #[test]
+    fn decodes_pcm_with_padded_metadata_before_audio() {
+        let wav = b"RIFF\x34\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0\x80\xBB\0\0\0\x77\x01\0\x02\0\x10\0JUNK\x01\0\0\0x\0data\x06\0\0\0\0\x80\0\0\0\x40";
+
+        let clip = decode(wav).expect("WAV metadata should not prevent playback");
+        assert_eq!(clip.channels().get(), 1);
+        assert_eq!(clip.sample_rate().get(), 48_000);
+        assert_eq!(clip.collect::<Vec<_>>(), [-1.0, 0.0, 0.5]);
+        assert!(decode(&wav[..wav.len() - 1]).is_none());
     }
 
     #[test]
