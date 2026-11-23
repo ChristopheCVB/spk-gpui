@@ -1,10 +1,6 @@
 use super::chat::{BOLD, CODE_BLOCK, INLINE_CODE, ITALIC, QUOTE, STRIKETHROUGH};
 use super::*;
-use crate::{
-    session::VoiceProcessingSetting,
-    shortcuts::Action,
-    voice::{NoiseSuppression, screen::State as ScreenState},
-};
+use crate::{session::VoiceProcessingSetting, shortcuts::Action, voice::NoiseSuppression};
 
 impl Spk {
     pub(super) fn workspace_key(
@@ -71,19 +67,15 @@ impl Spk {
                 {
                     Command::SetCameraEnabled(!sidebar.camera_publishing())
                 }
-                "s" if sidebar
-                    .voice
-                    .as_ref()
-                    .is_some_and(session::VoiceView::is_participating) =>
-                {
-                    sidebar
+                "s" => {
+                    let Some(call) = sidebar
                         .voice
                         .as_ref()
-                        .and_then(|call| call.screen.as_ref())
-                        .filter(|report| !matches!(report.state, ScreenState::Ended(_)))
-                        .map_or(Command::OpenScreenShare, |report| {
-                            Command::StopScreenShare(report.attempt)
-                        })
+                        .filter(|call| call.is_participating())
+                    else {
+                        return false;
+                    };
+                    super::video::screen_share_action(call).1
                 }
                 "n" => Command::SetVoiceProcessing(VoiceProcessingSetting::NoiseSuppression(
                     match processing.noise_suppression {
@@ -152,7 +144,8 @@ impl Spk {
             (false, false, false, 0, "escape")
                 if !self.video_stage.fullscreen
                     && !self.sidebar_drawer_open
-                    && self.search_panel.is_none() =>
+                    && self.search_panel.is_none()
+                    && !gpui_kit::base::GlobalState::is_in_deferred_context(cx) =>
             {
                 return self.escape_chat(window, cx);
             }
@@ -198,7 +191,7 @@ pub(super) fn shortcut_reference(
     } else {
         "Alt"
     };
-    let media = |key| format!("{primary}+{alt}+Shift+{key}");
+    let media = |key| media_shortcut_keys(key, cx).join("+");
     let groups = [
         (
             "Navigation",
@@ -298,4 +291,12 @@ pub(super) fn shortcut_reference(
                         )
                 }))
         }))
+}
+
+pub(super) fn media_shortcut_keys(key: &'static str, cx: &App) -> [&'static str; 4] {
+    if cx.platform_info().is_mac() {
+        ["⌘", "Option", "Shift", key]
+    } else {
+        ["Ctrl", "Alt", "Shift", key]
+    }
 }

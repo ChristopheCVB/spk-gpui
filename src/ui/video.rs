@@ -1,8 +1,15 @@
 use std::{cell::RefCell, collections::HashMap};
 
-use gpui_kit::component::popover::Popover;
+use gpui_kit::component::{
+    IndexPath,
+    select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState},
+    switch::Switch,
+};
 
-use super::*;
+use super::{
+    voice::{voice_button, voice_options_button, voice_popover, voice_shortcut_tooltip},
+    *,
+};
 use crate::{
     session::{Participant, VoiceView},
     voice::{
@@ -17,10 +24,13 @@ pub(super) struct VideoStage {
     pub fullscreen: bool,
     pub participants_hidden: bool,
     pub participant_scroll: ScrollHandle,
+    pub grid_scroll: ScrollHandle,
+    pub grid_focus: RefCell<Option<FocusHandle>>,
     pub tile_focus: HashMap<String, FocusHandle>,
     strip_focus: RefCell<Option<FocusHandle>>,
     pub hide_preview: bool,
     pub hovered: Option<String>,
+    pub menu_for: Option<String>,
     pub frames: HashMap<(String, VideoSource), Arc<RenderImage>>,
 }
 
@@ -156,6 +166,14 @@ impl Spk {
         }
         if self
             .video_stage
+            .menu_for
+            .as_ref()
+            .is_some_and(|id| !self.video_stage.tile_focus.contains_key(id))
+        {
+            self.video_stage.menu_for = None;
+        }
+        if self
+            .video_stage
             .theater
             .as_ref()
             .is_some_and(|id| !self.video_stage.tile_focus.contains_key(id))
@@ -230,17 +248,22 @@ impl Spk {
     pub(super) fn camera_controls(
         &self,
         sidebar: &Sidebar,
+        location: VoiceControls,
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let on = sidebar.camera_publishing();
-        let label = if on { "Stop Camera" } else { "Start Camera" };
+        let label = if on {
+            "Turn camera off"
+        } else {
+            "Turn camera on"
+        };
         let app = cx.weak_entity();
         div()
+            .id("camera-controls")
             .flex()
             .items_center()
-            .gap_1()
-            .child(
-                tool_button(
+            .child(voice_shortcut_tooltip(
+                voice_button(
                     "toggle-camera",
                     if on {
                         IconName::Video
@@ -248,66 +271,112 @@ impl Spk {
                         IconName::VideoOff
                     },
                     label,
+                    location,
                 )
-                .label(label)
+                .selected(on)
+                .toggled(on)
                 .on_click(cx.listener(move |app, _, _, cx| {
-                    app.send(Command::SetCameraEnabled(!on), None, cx);
+                    if let View::SignedIn(sidebar) = &app.view {
+                        app.send(
+                            Command::SetCameraEnabled(!sidebar.camera_publishing()),
+                            None,
+                            cx,
+                        );
+                    }
                 })),
-            )
+                label,
+                super::workspace_keys::media_shortcut_keys("E", cx)
+                    .map(str::to_owned)
+                    .to_vec(),
+            ))
             .child(
-                Popover::new("camera-options")
-                    .anchor(Anchor::BottomRight)
-                    .w(px(280.0))
-                    .trigger(tool_button(
-                        "camera-settings",
-                        IconName::ChevronUp,
-                        "Camera settings",
-                    ))
-                    .content(move |_, _, cx| {
-                        let Some(app) = app.upgrade() else {
-                            return div();
+                voice_popover("camera-options", px(280.0), |open| {
+                    voice_options_button("Camera options", open)
+                })
+                .content(move |_, _, cx| {
+                    let Some(app) = app.upgrade() else {
+                        return div();
+                    };
+                    let View::SignedIn(sidebar) = &app.read(cx).view else {
+                        return div();
+                    };
+                    let devices = sidebar
+                        .voice
+                        .as_ref()
+                        .and_then(|call| call.video.as_ref())
+                        .map_or(&[][..], |report| report.devices.as_slice());
+                    camera_options(sidebar, &app, devices)
+                }),
+            )
+    }
+
+    pub(super) fn screen_controls(
+        &self,
+        call: &VoiceView,
+        location: VoiceControls,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let (label, command) = screen_share_action(call);
+        let active = !matches!(command, Command::OpenScreenShare);
+        let app = cx.weak_entity();
+        div()
+            .id("screen-controls")
+            .flex()
+            .items_center()
+            .child(voice_shortcut_tooltip(
+                voice_button("screen-share", IconName::Monitor, label, location)
+                    .selected(active)
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        let View::SignedIn(sidebar) = &app.view else {
+                            return;
                         };
-                        let View::SignedIn(sidebar) = &app.read(cx).view else {
-                            return div();
-                        };
-                        let devices = sidebar
+                        if let Some(call) = sidebar
                             .voice
                             .as_ref()
-                            .and_then(|call| call.video.as_ref())
-                            .map_or(&[][..], |report| report.devices.as_slice());
-                        camera_options(sidebar, &app, devices)
-                    }),
+                            .filter(|call| call.is_participating())
+                        {
+                            app.send(screen_share_action(call).1, None, cx);
+                        }
+                    })),
+                label,
+                super::workspace_keys::media_shortcut_keys("S", cx)
+                    .map(str::to_owned)
+                    .to_vec(),
+            ))
+            .child(
+                voice_popover("screen-options", px(280.0), |open| {
+                    voice_options_button("Screen Share options", open)
+                })
+                .content(move |_, _, cx| {
+                    let Some(app) = app.upgrade() else {
+                        return div();
+                    };
+                    let View::SignedIn(sidebar) = &app.read(cx).view else {
+                        return div();
+                    };
+                    let intent = &sidebar.voice_intent;
+                    screen_preferences(intent.screen.quality, intent.preferred.screen_audio, &app)
+                }),
             )
     }
 
-    pub(super) fn screen_button(&self, call: Option<&VoiceView>, cx: &Context<Self>) -> Button {
-        let report = call.and_then(|call| call.screen.as_ref());
-        let active = report.filter(|report| !matches!(report.state, ScreenState::Ended(_)));
-        let attempt = active.map(|report| report.attempt);
-        let label = match active.map(|report| &report.state) {
-            Some(ScreenState::Live { .. }) => "Stop Screen Share",
-            Some(_) => "Cancel Screen Share",
-            None => "Share Screen",
-        };
-        tool_button("screen-share", IconName::Monitor, label)
-            .selected(active.is_some())
-            .label(label)
-            .on_click(cx.listener(move |app, _, _, cx| {
-                let command = attempt.map_or(Command::OpenScreenShare, Command::StopScreenShare);
-                app.send(command, None, cx);
-            }))
-    }
-
-    pub(super) fn screen_options(
+    pub(super) fn screen_capture_status(
         &self,
         call: &VoiceView,
         sidebar: &Sidebar,
         cx: &Context<Self>,
-    ) -> Option<Div> {
+    ) -> Option<Stateful<Div>> {
         let report = call.screen.as_ref()?;
         let attempt = report.attempt;
         let selected = sidebar.voice_intent.screen.quality;
-        let panel = div().flex().flex_col().items_center().gap_2().px_4().pb_2();
+        let panel = div()
+            .id("screen-capture")
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .pb_2();
         Some(match &report.state {
             ScreenState::Picking => panel.child(Label::new("Choose a display or window…")),
             ScreenState::Choices(choices) => panel.child(
@@ -352,22 +421,6 @@ impl Spk {
                     .child(Label::new(label.clone()).font_semibold())
                     .child(Label::new(audio_label).text_xs())
                     .child(
-                        Button::new("include-screen-audio")
-                            .small()
-                            .secondary()
-                            .tab_stop(true)
-                            .label(if enabled {
-                                "Share audio on"
-                            } else {
-                                "Share audio off"
-                            })
-                            .selected(enabled)
-                            .on_click(cx.listener(move |app, _, _, cx| {
-                                app.send(Command::SetScreenAudio(!enabled), None, cx);
-                            })),
-                    )
-                    .child(Self::screen_quality_options(selected, cx))
-                    .child(
                         Button::new("start-screen-share")
                             .small()
                             .primary()
@@ -393,7 +446,6 @@ impl Spk {
                 quality_failed,
                 ..
             } => panel
-                .child(Self::screen_quality_options(selected, cx))
                 .child(
                     Label::new(format!("Sharing at {width} × {height} · up to {fps} fps"))
                         .text_xs(),
@@ -414,38 +466,6 @@ impl Spk {
                 ),
             ScreenState::Ended(message) => panel.child(Label::new(*message)),
         })
-    }
-
-    fn screen_quality_options(selected: Quality, cx: &Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_wrap()
-            .justify_center()
-            .gap_1()
-            .children(Quality::HEIGHTS.into_iter().map(|height| {
-                let label = SharedString::from(format!("{height}p"));
-                Button::new(label.clone())
-                    .small()
-                    .ghost()
-                    .tab_stop(true)
-                    .label(label)
-                    .selected(selected.height == height)
-                    .on_click(cx.listener(move |app, _, _, cx| {
-                        app.send(Command::SetScreenHeight(height), None, cx);
-                    }))
-            }))
-            .children(Quality::FPS.into_iter().map(|fps| {
-                let label = SharedString::from(format!("{fps} fps"));
-                Button::new(label.clone())
-                    .small()
-                    .ghost()
-                    .tab_stop(true)
-                    .label(label)
-                    .selected(selected.fps == fps)
-                    .on_click(cx.listener(move |app, _, _, cx| {
-                        app.send(Command::SetScreenFps(fps), None, cx);
-                    }))
-            }))
     }
 
     #[cfg(windows)]
@@ -616,8 +636,10 @@ impl Spk {
         participant: &Participant<'_>,
         call: &VoiceView,
         sidebar: &Sidebar,
+        reveal_actions: bool,
+        menu: Option<impl IntoElement>,
         cx: &Context<Self>,
-    ) -> impl IntoElement {
+    ) -> Div {
         let available = TileActions::for_participant(self, participant, call, sidebar);
         let id = participant.id.to_owned();
         let watch_id = id.clone();
@@ -637,6 +659,7 @@ impl Spk {
                 row.child(
                     Label::new(format!("Watching: {}", viewers.join(", ")))
                         .flex_1()
+                        .min_w_0()
                         .px_2()
                         .rounded_md()
                         .bg(cx.theme().background)
@@ -661,72 +684,169 @@ impl Spk {
                         label,
                     )
                     .secondary()
-                    .label(label)
+                    .flex_shrink_0()
+                    .when(!available.watching, |button| button.label(label))
                     .on_click(cx.listener(move |app, _, window, cx| {
                         app.apply_tile_action(&watch_id, TileAction::Watch, &available, window, cx);
                     })),
                 )
             })
-            .when(available.is_me && available.live, |row| {
-                let label = if self.video_stage.hide_preview {
-                    "Show preview"
-                } else {
-                    "Hide preview"
-                };
-                row.child(
-                    tool_button("camera-preview", IconName::Eye, label)
-                        .secondary()
-                        .on_click(cx.listener(|app, _, _, cx| {
-                            app.video_stage.hide_preview = !app.video_stage.hide_preview;
-                            cx.notify();
-                        })),
-                )
-            })
-            .when(available.permits(TileAction::Theater), |row| {
-                row.child(
-                    tool_button(
-                        "theater",
-                        IconName::Monitor,
-                        if available.theater {
-                            "Exit theater mode"
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .when(!reveal_actions, |actions| {
+                        actions
+                            .invisible()
+                            .group_hover("voice-tile", |style| style.visible())
+                    })
+                    .when(available.is_me && available.live, |row| {
+                        let label = if self.video_stage.hide_preview {
+                            "Show preview"
                         } else {
-                            "Theater mode"
-                        },
-                    )
-                    .secondary()
-                    .on_click(cx.listener(move |app, _, window, cx| {
-                        app.apply_tile_action(
-                            &theater_id,
-                            TileAction::Theater,
-                            &available,
-                            window,
-                            cx,
-                        );
-                    })),
-                )
-            })
-            .when(available.permits(TileAction::Fullscreen), |row| {
-                row.child(
-                    tool_button(
-                        "fullscreen",
-                        if available.fullscreen {
-                            IconName::Minimize
-                        } else {
-                            IconName::Maximize
-                        },
-                        if available.fullscreen {
-                            "Exit fullscreen"
-                        } else {
-                            "Fullscreen"
-                        },
-                    )
-                    .secondary()
-                    .on_click(cx.listener(move |app, _, window, cx| {
-                        app.apply_tile_action(&id, TileAction::Fullscreen, &available, window, cx);
-                    })),
-                )
-            })
+                            "Hide preview"
+                        };
+                        row.child(
+                            tool_button("camera-preview", IconName::Eye, label)
+                                .secondary()
+                                .on_click(cx.listener(|app, _, _, cx| {
+                                    app.video_stage.hide_preview = !app.video_stage.hide_preview;
+                                    cx.notify();
+                                })),
+                        )
+                    })
+                    .when(available.permits(TileAction::Theater), |row| {
+                        row.child(
+                            tool_button(
+                                "theater",
+                                IconName::Monitor,
+                                if available.theater {
+                                    "Exit theater mode"
+                                } else {
+                                    "Theater mode"
+                                },
+                            )
+                            .secondary()
+                            .on_click(cx.listener(
+                                move |app, _, window, cx| {
+                                    app.apply_tile_action(
+                                        &theater_id,
+                                        TileAction::Theater,
+                                        &available,
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            )),
+                        )
+                    })
+                    .when(available.permits(TileAction::Fullscreen), |row| {
+                        row.child(
+                            tool_button(
+                                "fullscreen",
+                                if available.fullscreen {
+                                    IconName::Minimize
+                                } else {
+                                    IconName::Maximize
+                                },
+                                if available.fullscreen {
+                                    "Exit fullscreen"
+                                } else {
+                                    "Fullscreen"
+                                },
+                            )
+                            .secondary()
+                            .on_click(cx.listener(
+                                move |app, _, window, cx| {
+                                    app.apply_tile_action(
+                                        &id,
+                                        TileAction::Fullscreen,
+                                        &available,
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            )),
+                        )
+                    })
+                    .children(menu),
+            )
     }
+}
+
+pub(super) fn screen_share_action(call: &VoiceView) -> (&'static str, Command) {
+    match &call.screen {
+        Some(report) if report.state.active() => (
+            "Stop Screen Share",
+            Command::StopScreenShare(report.attempt),
+        ),
+        Some(report) if !matches!(report.state, ScreenState::Ended(_)) => (
+            "Cancel Screen Share",
+            Command::StopScreenShare(report.attempt),
+        ),
+        _ => ("Share Screen", Command::OpenScreenShare),
+    }
+}
+
+fn screen_preferences(selected: Quality, share_audio: bool, app: &Entity<Spk>) -> Div {
+    let audio = app.downgrade();
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(
+            Switch::new("screen-share-audio")
+                .label("Share audio")
+                .accessibility_label("Share audio")
+                .tab_stop(true)
+                .checked(share_audio)
+                .on_change(move |enabled, _, cx| {
+                    let _ = audio.update(cx, |app, cx| {
+                        app.send(Command::SetScreenAudio(*enabled), None, cx)
+                    });
+                }),
+        )
+        .children(
+            [
+                (
+                    "Max resolution",
+                    Quality::HEIGHTS,
+                    selected.height,
+                    "p",
+                    Command::SetScreenHeight as fn(u32) -> Command,
+                ),
+                (
+                    "Frame rate",
+                    Quality::FPS,
+                    selected.fps,
+                    " fps",
+                    Command::SetScreenFps,
+                ),
+            ]
+            .into_iter()
+            .map(|(label, choices, selected, unit, command)| {
+                let options = choices
+                    .map(|value| VoiceOption {
+                        title: format!("{value}{unit}").into(),
+                        value,
+                    })
+                    .to_vec();
+                div()
+                    .id(label)
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(Label::new(label).font_semibold())
+                    .child(VoiceSelect {
+                        label,
+                        options,
+                        value: selected,
+                        app: app.downgrade(),
+                        command,
+                    })
+            }),
+        )
 }
 
 pub(super) fn joined_participants<'a>(
@@ -755,87 +875,150 @@ fn participant_video(video: Option<&ParticipantVideo>) -> bool {
     video.is_some_and(|video| !video.live.is_empty())
 }
 
+#[derive(Clone, PartialEq)]
+struct VoiceOption<T> {
+    title: SharedString,
+    value: T,
+}
+
+impl<T: Clone + PartialEq> SelectItem for VoiceOption<T> {
+    type Value = T;
+
+    fn title(&self) -> SharedString {
+        self.title.clone()
+    }
+
+    fn value(&self) -> &T {
+        &self.value
+    }
+}
+
+struct VoiceSelectState<T: Clone + PartialEq + 'static> {
+    select: Entity<SelectState<SearchableVec<VoiceOption<T>>>>,
+    options: Vec<VoiceOption<T>>,
+    selected: IndexPath,
+}
+
+#[derive(IntoElement)]
+struct VoiceSelect<T: Clone + PartialEq + 'static> {
+    label: &'static str,
+    options: Vec<VoiceOption<T>>,
+    value: T,
+    app: WeakEntity<Spk>,
+    command: fn(T) -> Command,
+}
+
+impl<T: Clone + PartialEq + 'static> RenderOnce for VoiceSelect<T> {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let selected = IndexPath::default().row(
+            self.options
+                .iter()
+                .position(|option| option.value == self.value)
+                .unwrap_or(0),
+        );
+        let state = window.use_keyed_state(self.label, cx, |window, cx| {
+            let select = cx.new(|cx| {
+                SelectState::new(
+                    SearchableVec::new(self.options.clone()),
+                    Some(selected),
+                    window,
+                    cx,
+                )
+            });
+            let app = self.app;
+            let command = self.command;
+            cx.subscribe(&select, move |_, _, event, cx| {
+                if let SelectEvent::Confirm(Some(value)) = event {
+                    let _ = app.update(cx, |app, cx| {
+                        app.send(command(value.clone()), None, cx);
+                    });
+                }
+            })
+            .detach();
+            VoiceSelectState {
+                select,
+                options: self.options.clone(),
+                selected,
+            }
+        });
+        let picker = state.read(cx);
+        let select = picker.select.clone();
+        if picker.options != self.options || picker.selected != selected {
+            state.update(cx, |picker, cx| {
+                select.update(cx, |select, cx| {
+                    if picker.options != self.options {
+                        select.set_items(SearchableVec::new(self.options.clone()), window, cx);
+                    }
+                    select.set_selected_index(Some(selected), window, cx);
+                });
+                picker.options = self.options;
+                picker.selected = selected;
+            });
+        }
+        Select::new(&select)
+            .small()
+            .w_full()
+            .accessibility_label(self.label)
+    }
+}
+
 pub(super) fn camera_options(
     sidebar: &Sidebar,
     app: &Entity<Spk>,
     devices: &[CameraDevice],
 ) -> Div {
-    let entity = app.downgrade();
-    let default_camera = entity.clone();
-    let resolution_entity = entity.clone();
     let choice = &sidebar.voice_intent.camera;
-    let chosen = choice.device.as_deref();
-    let unavailable = chosen.is_some_and(|id| !devices.iter().any(|device| device.id == id));
+    let options = std::iter::once(VoiceOption {
+        title: "System default".into(),
+        value: None,
+    })
+    .chain(devices.iter().map(|device| VoiceOption {
+        title: device.name.clone().into(),
+        value: Some(device.id.clone()),
+    }))
+    .collect();
+    let unavailable = choice
+        .device
+        .as_ref()
+        .is_some_and(|id| !devices.iter().any(|device| &device.id == id));
+    let resolutions = CameraResolution::ALL
+        .map(|resolution| VoiceOption {
+            title: resolution.label().into(),
+            value: resolution,
+        })
+        .to_vec();
     div()
         .flex()
         .flex_col()
         .gap_2()
-        .child(
-            div()
-                .id("camera-devices")
-                .max_h(px(180.0))
-                .overflow_y_scroll()
-                .flex()
-                .flex_col()
-                .child(
-                    Button::new("default-camera")
-                        .small()
-                        .ghost()
-                        .tab_stop(true)
-                        .label("System default")
-                        .selected(chosen.is_none())
-                        .on_click(move |_, _, cx| {
-                            let _ = default_camera.update(cx, |app, cx| {
-                                app.send(Command::ChooseCamera(None), None, cx)
-                            });
-                        }),
-                )
-                .children(devices.iter().map(|device| {
-                    let id = device.id.clone();
-                    let entity = entity.clone();
-                    Button::new(SharedString::from(format!("camera-{id}")))
-                        .small()
-                        .ghost()
-                        .tab_stop(true)
-                        .label(device.name.clone())
-                        .selected(chosen == Some(&id))
-                        .on_click(move |_, _, cx| {
-                            let _ = entity.update(cx, |app, cx| {
-                                app.send(Command::ChooseCamera(Some(id.clone())), None, cx)
-                            });
-                        })
-                }))
-                .when(unavailable, |list| {
-                    list.child("Selected Camera unavailable")
-                })
-                .when(devices.is_empty(), |list| list.child("No Cameras detected")),
-        )
-        .child(Label::new("Resolution").font_semibold())
-        .child(
-            div()
-                .flex()
-                .flex_wrap()
-                .gap_1()
-                .children(CameraResolution::ALL.into_iter().map(|resolution| {
-                    let entity = resolution_entity.clone();
-                    Button::new(resolution.label())
-                        .small()
-                        .ghost()
-                        .tab_stop(true)
-                        .label(resolution.label())
-                        .selected(choice.resolution == resolution)
-                        .on_click(move |_, _, cx| {
-                            let _ = entity.update(cx, |app, cx| {
-                                app.send(Command::ChooseCameraResolution(resolution), None, cx)
-                            });
-                        })
-                })),
-        )
+        .child(Label::new("Camera").font_semibold())
+        .child(VoiceSelect {
+            label: "Camera",
+            options,
+            value: choice.device.clone(),
+            app: app.downgrade(),
+            command: Command::ChooseCamera,
+        })
+        .when(unavailable, |panel| {
+            panel.child(Label::new("Selected Camera unavailable").text_xs())
+        })
+        .when(devices.is_empty(), |panel| {
+            panel.child(Label::new("No Cameras detected").text_xs())
+        })
+        .child(Label::new("Webcam resolution").font_semibold())
+        .child(VoiceSelect {
+            label: "Webcam resolution",
+            options: resolutions,
+            value: choice.resolution,
+            app: app.downgrade(),
+            command: Command::ChooseCameraResolution,
+        })
         .when_some(
             match sidebar.camera_status() {
                 CameraStatus::Live(width, height) => Some(format!("Live at {width} × {height}")),
+                CameraStatus::Failed(message) => Some(message.into()),
                 _ => None,
             },
-            |panel, resolution| panel.child(Label::new(resolution).text_xs()),
+            |panel, status| panel.child(Label::new(status).text_xs()),
         )
 }

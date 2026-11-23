@@ -66,14 +66,6 @@ pub struct Chord {
 }
 
 impl Chord {
-    pub fn keystroke(&self) -> Keystroke {
-        Keystroke {
-            key: self.key.clone(),
-            key_char: None,
-            modifiers: self.modifiers,
-        }
-    }
-
     pub fn capture(keystroke: &Keystroke, window: &Window) -> Option<Self> {
         let chord = Self::from_keystroke(keystroke, window);
         chord.valid().then_some(chord)

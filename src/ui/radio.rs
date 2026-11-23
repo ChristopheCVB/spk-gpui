@@ -1,57 +1,99 @@
-use super::{voice::device_picker, *};
+use super::{
+    voice::{
+        device_picker,
+        media::{MediaResult, media_results},
+    },
+    *,
+};
 use crate::{api::RadioStation, session::RadioPlayback};
 use gpui_kit::component::Disableable;
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState, SliderValue};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum RadioAction {
+    Pause,
+    Resume,
+    Retry,
+}
+
+impl RadioAction {
+    pub(super) fn for_primary(station_selected: bool, enabled: bool) -> Option<Self> {
+        station_selected.then_some(if enabled { Self::Pause } else { Self::Resume })
+    }
+
+    pub(super) fn for_sidebar(sidebar: &Sidebar) -> Option<Self> {
+        let radio = &sidebar.radio;
+        Self::for_primary(radio.station.is_some(), radio.enabled).map(|action| {
+            if action == Self::Pause && radio.playback == RadioPlayback::Unavailable {
+                Self::Retry
+            } else {
+                action
+            }
+        })
+    }
+
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Pause => "Pause",
+            Self::Resume => "Resume",
+            Self::Retry => "Retry",
+        }
+    }
+
+    pub(super) fn command(self) -> Command {
+        match self {
+            Self::Pause => Command::PauseRadio,
+            Self::Resume | Self::Retry => Command::ListenToRadio,
+        }
+    }
+}
 
 struct RadioPanel {
     spk: Entity<Spk>,
     query: Entity<InputState>,
     volume: Entity<SliderState>,
     favorites: bool,
+    station_scroll: ScrollHandle,
 }
 
-impl Spk {
-    pub(super) fn open_radio(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let View::SignedIn(sidebar) = &self.view else {
-            return;
-        };
-        self.device_picker = None;
-        let volume = f32::from(sidebar.radio.volume);
-        let spk = cx.entity();
-        let panel = cx.new(|cx: &mut Context<RadioPanel>| {
-            cx.observe(&spk, |_, _, cx| cx.notify()).detach();
-            let query = cx.new(|cx| InputState::new(window, cx).placeholder("Search stations"));
-            cx.subscribe(&query, |panel, _, event, cx| {
-                if !panel.favorites && matches!(event, InputEvent::PressEnter { .. }) {
-                    panel.search(cx);
-                }
-                cx.notify();
-            })
-            .detach();
-            let volume = cx.new(|_| SliderState::new().max(200.0).default_value(volume));
-            cx.subscribe(&volume, |panel, _, event, cx| {
-                if let SliderEvent::Release(SliderValue::Single(value)) = event {
-                    panel.send(Command::SetRadioVolume(*value as u8), cx);
-                }
-                cx.notify();
-            })
-            .detach();
-            RadioPanel {
-                spk,
-                query,
-                volume,
-                favorites: false,
+pub(super) fn radio_panel(
+    spk: Entity<Spk>,
+    volume: u8,
+    window: &mut Window,
+    cx: &mut App,
+) -> (AnyView, FocusHandle) {
+    let panel = cx.new(|cx: &mut Context<RadioPanel>| {
+        cx.observe(&spk, |_, _, cx| cx.notify()).detach();
+        let query = cx.new(|cx| InputState::new(window, cx).placeholder("Search stations"));
+        cx.subscribe(&query, |panel, _, event, cx| {
+            if !panel.favorites && matches!(event, InputEvent::PressEnter { .. }) {
+                panel.search(cx);
             }
+            cx.notify();
+        })
+        .detach();
+        let volume = cx.new(|_| {
+            SliderState::new()
+                .max(200.0)
+                .default_value(f32::from(volume))
         });
-        self.send(Command::RadioFavorites, None, cx);
-        window.open_dialog(cx, move |dialog, _, _| {
-            dialog
-                .centered()
-                .width(px(460.0))
-                .title("Channel Radio")
-                .child(panel.clone())
-        });
-    }
+        cx.subscribe(&volume, |panel, _, event, cx| {
+            if let SliderEvent::Release(SliderValue::Single(value)) = event {
+                panel.send(Command::SetRadioVolume(*value as u8), cx);
+            }
+            cx.notify();
+        })
+        .detach();
+        RadioPanel {
+            spk,
+            query,
+            volume,
+            favorites: false,
+            station_scroll: ScrollHandle::new(),
+        }
+    });
+    let focus = panel.read(cx).query.focus_handle(cx);
+    (panel.into(), focus)
 }
 
 impl RadioPanel {
@@ -91,7 +133,6 @@ impl RadioPanel {
             format!("Add {} to Favorites", station.name)
         };
         div()
-            .id(SharedString::from(id.clone()))
             .flex()
             .gap_1()
             .items_center()
@@ -155,7 +196,7 @@ impl RadioPanel {
 }
 
 impl Render for RadioPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let View::SignedIn(sidebar) = &self.spk.read(cx).view else {
             return div();
         };
@@ -168,18 +209,22 @@ impl Render for RadioPanel {
         }
         let theme = cx.theme();
         let radio = &sidebar.radio;
-        let retry = radio.playback == RadioPlayback::Unavailable;
-        let running = radio.enabled && !retry;
-        let status = if !radio.enabled {
+        let playback_action = RadioAction::for_sidebar(sidebar);
+        let status = if playback_action == Some(RadioAction::Resume) {
             "Paused for you"
-        } else if retry {
-            "This stream could not play. Retry or choose another station."
+        } else if playback_action == Some(RadioAction::Retry) {
+            "Stream unavailable. Retry or choose another."
         } else if sidebar.voice_intent.mute.deafened {
             "Deafened"
         } else if radio.playback == RadioPlayback::Playing {
             "Playing"
         } else {
             "Connecting…"
+        };
+        let reserved_height = if radio.station.is_some() {
+            365.0
+        } else {
+            275.0
         };
         let entries = if self.favorites {
             &radio.favorites
@@ -201,21 +246,27 @@ impl Render for RadioPanel {
         div()
             .flex()
             .flex_col()
-            .gap_3()
-            .children(radio.station.as_ref().map(|station| {
+            .gap_2()
+            .child(
+                div().flex().items_center().gap_2()
+                    .child(themed_icon(IconName::Radio, theme.primary, 16.0))
+                    .child(Label::new("Channel Radio").font_semibold()),
+            )
+            .when(radio.station.is_none(), |body| {
+                body.child(Label::new("Find a station to play in this channel.").text_color(theme.muted_foreground))
+            })
+            .children(radio.station.as_ref().zip(playback_action).map(|(station, action)| {
                 div().flex().flex_col().gap_2()
                     .child(Label::new(station.name.clone()).font_semibold().truncate())
                     .child(Label::new(status).text_xs().text_color(theme.muted_foreground))
                     .child(div().flex().gap_2()
                         .child(
-                            Button::new("playback").label(if retry { "Retry" } else if running { "Pause" } else { "Resume" })
+                            Button::new("playback").small().label(action.label())
                                 .tab_stop(true)
-                                .on_click(cx.listener(move |panel, _, _, cx| panel.send(
-                                    if running { Command::PauseRadio } else { Command::ListenToRadio }, cx
-                                ))),
+                                .on_click(cx.listener(move |panel, _, _, cx| panel.send(action.command(), cx))),
                         )
                         .child(
-                            Button::new("stop").ghost().label("Stop for everyone").tab_stop(true)
+                            Button::new("stop").ghost().small().label("Stop for everyone").tab_stop(true)
                                 .disabled(!matches!(sidebar.connection, crate::api::Connection::Online))
                                 .on_click(cx.listener(|panel, _, _, cx| panel.send(Command::StopRadio, cx))),
                         )
@@ -228,12 +279,12 @@ impl Render for RadioPanel {
             }))
             .children(radio.command_error.as_ref().map(|error| Label::new(error.clone()).text_color(theme.danger)))
             .child(div().flex().gap_2()
-                .child(Button::new("all-stations").label("All stations").selected(!self.favorites).tab_stop(true)
+                .child(Button::new("all-stations").small().label("All stations").selected(!self.favorites).tab_stop(true)
                     .on_click(cx.listener(|panel, _, _, cx| {
                         panel.favorites = false;
                         cx.notify();
                     })))
-                .child(Button::new("favorites").label("Favorites").selected(self.favorites).tab_stop(true)
+                .child(Button::new("favorites").small().icon(IconName::Star).label("Favorites").selected(self.favorites).tab_stop(true)
                     .on_click(cx.listener(|panel, _, _, cx| {
                         let load = matches!(&panel.spk.read(cx).view, View::SignedIn(sidebar) if sidebar.radio.favorites.is_none());
                         panel.favorites = true;
@@ -242,9 +293,9 @@ impl Render for RadioPanel {
                     })))
             )
             .child(div().flex().gap_2()
-                .child(Input::new(&self.query).w_full().aria_label(if self.favorites { "Filter Favorites" } else { "Search radio stations" }))
+                .child(Input::new(&self.query).flex_1().min_w_0().aria_label(if self.favorites { "Filter Favorites" } else { "Search radio stations" }))
                 .when(!self.favorites, |row| row.child(
-                    Button::new("search").label("Search").tab_stop(true)
+                    tool_button("search", IconName::Search, "Find stations").primary()
                         .on_click(cx.listener(|panel, _, _, cx| panel.search(cx)))
                 ))
             )
@@ -254,11 +305,38 @@ impl Render for RadioPanel {
                 body.child(Label::new(if self.favorites { "No Favorites match." } else { "No stations found." })
                     .text_color(theme.muted_foreground))
             })
-            .child(div().id("stations").flex().flex_col().max_h(px(224.0)).overflow_y_scroll()
-                .children(stations.into_iter().map(|station| self.station_row(station, sidebar, cx))))
+            .child(media_results(
+                &self.station_scroll,
+                div().id("stations").flex().flex_col()
+                    .max_h((window.viewport_size().height - px(reserved_height)).min(px(224.0)))
+                    .children(stations.into_iter().enumerate().map(|(index, station)| MediaResult {
+                        id: station.id.clone().into(),
+                        index,
+                        scroll: self.station_scroll.clone(),
+                        content: self.station_row(station, sidebar, cx).into_any_element(),
+                    })),
+            ))
             .child(
                 div().child(Label::new("Media Output").text_xs())
                     .child(device_picker(sidebar, DeviceKind::MediaOutput, &self.spk)),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Command, RadioAction};
+
+    #[test]
+    fn primary_radio_action_toggles_listening_when_a_station_is_selected() {
+        assert!(RadioAction::for_primary(false, true).is_none());
+        assert!(matches!(
+            RadioAction::for_primary(true, true).map(RadioAction::command),
+            Some(Command::PauseRadio)
+        ));
+        assert!(matches!(
+            RadioAction::for_primary(true, false).map(RadioAction::command),
+            Some(Command::ListenToRadio)
+        ));
     }
 }

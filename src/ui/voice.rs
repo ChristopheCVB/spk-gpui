@@ -1,3 +1,5 @@
+pub(super) mod media;
+
 use super::*;
 use crate::{
     session::{View, VoiceProcessingSetting},
@@ -10,13 +12,149 @@ use gpui_kit::component::{
     select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState},
     slider::{Slider, SliderEvent, SliderState, SliderValue},
     switch::Switch,
+    tooltip::Tooltip,
 };
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum VoiceControls {
     Profile,
+    Session,
     Channel,
     BottomBar,
+}
+
+impl VoiceControls {
+    pub(super) fn compact(self) -> bool {
+        self != Self::Channel
+    }
+}
+
+pub(super) fn voice_action_button(
+    id: &'static str,
+    icon: impl Into<Icon>,
+    label: impl Into<SharedString>,
+    location: VoiceControls,
+) -> Button {
+    let label = label.into();
+    voice_button(id, icon, label.clone(), location).tooltip(label)
+}
+
+pub(super) fn voice_button(
+    id: &'static str,
+    icon: impl Into<Icon>,
+    label: impl Into<SharedString>,
+    location: VoiceControls,
+) -> Button {
+    let label = label.into();
+    Button::new(id)
+        .ghost()
+        .small()
+        .icon(icon.into())
+        .accessibility_label(label.clone())
+        .tab_stop(true)
+        .when(!location.compact(), |button| button.label(label))
+}
+
+pub(super) fn voice_shortcut_tooltip(
+    button: Button,
+    label: &'static str,
+    keys: Vec<String>,
+) -> impl IntoElement {
+    div()
+        .id("voice-shortcut")
+        .tooltip(move |window, cx| {
+            let keys = keys.clone();
+            Tooltip::element(move |_, cx| {
+                let theme = cx.theme();
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(label)
+                    .child("·")
+                    .children(keys.iter().map(|key| {
+                        let key = if key == "Shift" {
+                            "⇧".to_owned()
+                        } else {
+                            key.to_uppercase()
+                        };
+                        div()
+                            .px_1()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.muted)
+                            .text_color(theme.muted_foreground)
+                            .text_xs()
+                            .child(key)
+                    }))
+            })
+            .build(window, cx)
+        })
+        .child(button)
+}
+
+pub(super) fn voice_options_button(label: impl Into<SharedString>, open: bool) -> Button {
+    tool_button(
+        "options",
+        if open {
+            IconName::ChevronDown
+        } else {
+            IconName::ChevronUp
+        },
+        label,
+    )
+    .w(px(18.0))
+    .px_0()
+}
+
+pub(super) fn voice_popover(
+    id: &'static str,
+    width: Pixels,
+    button: impl FnOnce(bool) -> Button + 'static,
+) -> Popover {
+    Popover::new(id)
+        .anchor(Anchor::BottomRight)
+        .w(width)
+        .trigger(VoicePopoverTrigger {
+            button,
+            open: false,
+        })
+}
+
+#[derive(IntoElement)]
+struct VoicePopoverTrigger<F: FnOnce(bool) -> Button + 'static> {
+    button: F,
+    open: bool,
+}
+
+impl<F: FnOnce(bool) -> Button + 'static> Selectable for VoicePopoverTrigger<F> {
+    fn selected(mut self, open: bool) -> Self {
+        self.open = open;
+        self
+    }
+
+    fn is_selected(&self) -> bool {
+        self.open
+    }
+}
+
+impl<F: FnOnce(bool) -> Button + 'static> RenderOnce for VoicePopoverTrigger<F> {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let focus = window
+            .use_keyed_state("voice-popover-trigger-focus", cx, |_, cx| cx.focus_handle())
+            .read(cx)
+            .clone();
+        div()
+            .id("voice-popover-trigger")
+            .child((self.button)(self.open).open(self.open).track_focus(&focus))
+            .capture_any_mouse_down(move |event, window, cx| {
+                // The popover saves the current focus before opening on mouse-down.
+                if event.button == MouseButton::Left && !self.open {
+                    focus.focus(window, cx);
+                }
+            })
+    }
 }
 
 fn device_label(kind: DeviceKind) -> &'static str {
@@ -66,19 +204,21 @@ impl Spk {
         } else {
             "Mute"
         };
-        let compact = location != VoiceControls::Channel;
         let theme = cx.theme();
 
         div()
             .id(match location {
                 VoiceControls::Profile => "profile-voice-controls",
+                VoiceControls::Session => "session-voice-controls",
                 VoiceControls::Channel => "room-voice-controls",
                 VoiceControls::BottomBar => "bottom-bar-voice-controls",
             })
             .flex()
             .items_center()
             .gap_1()
-            .when(compact, |controls| controls.flex_wrap().max_w_full())
+            .when(location == VoiceControls::BottomBar, |controls| {
+                controls.flex_wrap().max_w_full()
+            })
             .children(
                 [
                     (
@@ -113,8 +253,8 @@ impl Spk {
                         .id(device_label(kind))
                         .flex()
                         .items_center()
-                        .child(
-                            tool_button(
+                        .child({
+                            let button = voice_button(
                                 "toggle",
                                 themed_icon(
                                     icon,
@@ -122,114 +262,84 @@ impl Spk {
                                     16.0,
                                 ),
                                 label,
+                                location,
                             )
-                            .when(!compact, |button| button.label(label))
-                            .when_some(binding, |button, binding| {
-                                button.tooltip(format!("{label} ({})", binding.chord)).when(
-                                    location == VoiceControls::Profile,
-                                    |button| {
-                                        button.child(
-                                            gpui_kit::component::kbd::Kbd::new(
-                                                binding.chord.keystroke(),
-                                            )
-                                            .outline(),
-                                        )
-                                    },
-                                )
-                            })
                             .on_click(
                                 cx.listener(move |this, _, _, cx| this.voice_action(action, cx)),
-                            ),
-                        )
+                            );
+                            if let Some(binding) = binding {
+                                let chord = binding.chord.to_string();
+                                let keys = chord.split(" + ").map(str::to_owned).collect();
+                                let tooltip = match action {
+                                    Action::Mute => "Mute / unmute",
+                                    Action::Deafen => "Deafen / undeafen",
+                                };
+                                voice_shortcut_tooltip(button, tooltip, keys).into_any_element()
+                            } else {
+                                button.tooltip(label).into_any_element()
+                            }
+                        })
                         .child({
                             let app = cx.weak_entity();
                             let popup_app = app.clone();
-                            Popover::new("device-picker")
-                                .anchor(Anchor::BottomRight)
-                                .w(px(300.0))
-                                .open(open)
-                                .trigger(
-                                    tool_button(
-                                        "devices",
-                                        if open {
-                                            IconName::ChevronDown
-                                        } else {
-                                            IconName::ChevronUp
-                                        },
-                                        picker_label,
-                                    )
-                                    .w(px(18.0))
-                                    .px_0(),
-                                )
-                                .on_open_change(move |open, _, cx| {
-                                    let _ = app.update(cx, |app, cx| {
-                                        if *open {
-                                            app.device_picker = Some((location, kind));
-                                            app.send(Command::RefreshDevices, None, cx);
-                                        } else if app.device_picker == Some((location, kind)) {
-                                            app.device_picker = None;
-                                            cx.notify();
-                                        }
-                                    });
-                                })
-                                .content(move |_, window, cx| {
-                                    let Some(app) = popup_app.upgrade() else {
-                                        return div();
-                                    };
-                                    let View::SignedIn(sidebar) = &app.read(cx).view else {
-                                        return div();
-                                    };
-                                    let picker = device_picker(sidebar, kind, &app);
-                                    let (label, extra) = match kind {
-                                        DeviceKind::Microphone => (
-                                            "Input device",
-                                            microphone_controls(
-                                                sidebar.voice_intent.preferred.processing,
-                                                sidebar.echo_reference_unavailable(),
-                                                &app,
-                                                window,
-                                                cx,
-                                            )
-                                            .into_any_element(),
-                                        ),
-                                        DeviceKind::Speakers => {
-                                            let media = device_picker(
-                                                sidebar,
-                                                DeviceKind::MediaOutput,
-                                                &app,
-                                            );
-                                            let volume =
-                                                sidebar.voice_intent.preferred.output_volume;
-                                            (
-                                                "Voice output",
-                                                speaker_controls(media, volume, &app, window, cx)
-                                                    .into_any_element(),
-                                            )
-                                        }
-                                        DeviceKind::MediaOutput => unreachable!(),
-                                    };
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_2()
-                                        .child(Label::new(label).font_semibold())
-                                        .child(picker)
-                                        .child(extra)
-                                })
+                            voice_popover("device-picker", px(300.0), move |open| {
+                                voice_options_button(picker_label, open)
+                            })
+                            .open(open)
+                            .on_open_change(move |open, _, cx| {
+                                let _ = app.update(cx, |app, cx| {
+                                    if *open {
+                                        app.device_picker = Some((location, kind));
+                                        app.send(Command::RefreshDevices, None, cx);
+                                    } else if app.device_picker == Some((location, kind)) {
+                                        app.device_picker = None;
+                                        cx.notify();
+                                    }
+                                });
+                            })
+                            .content(move |_, window, cx| {
+                                let Some(app) = popup_app.upgrade() else {
+                                    return div();
+                                };
+                                let View::SignedIn(sidebar) = &app.read(cx).view else {
+                                    return div();
+                                };
+                                let picker = device_picker(sidebar, kind, &app);
+                                let (label, extra) = match kind {
+                                    DeviceKind::Microphone => (
+                                        "Input device",
+                                        microphone_controls(
+                                            sidebar.voice_intent.preferred.processing,
+                                            sidebar.echo_reference_unavailable(),
+                                            &app,
+                                            window,
+                                            cx,
+                                        )
+                                        .into_any_element(),
+                                    ),
+                                    DeviceKind::Speakers => {
+                                        let media =
+                                            device_picker(sidebar, DeviceKind::MediaOutput, &app);
+                                        let volume = sidebar.voice_intent.preferred.output_volume;
+                                        (
+                                            "Voice output",
+                                            speaker_controls(media, volume, &app, window, cx)
+                                                .into_any_element(),
+                                        )
+                                    }
+                                    DeviceKind::MediaOutput => unreachable!(),
+                                };
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .child(Label::new(label).font_semibold())
+                                    .child(picker)
+                                    .child(extra)
+                            })
                         })
                 }),
             )
-    }
-
-    pub(super) fn voice_media_buttons(&self, labeled: bool, cx: &Context<Self>) -> [Button; 2] {
-        [
-            tool_button("radio", IconName::Radio, "Channel Radio")
-                .when(labeled, |button| button.label("Radio"))
-                .on_click(cx.listener(|this, _, window, cx| this.open_radio(window, cx))),
-            tool_button("soundboard", IconName::Megaphone, "Soundboard")
-                .when(labeled, |button| button.label("Soundboard"))
-                .on_click(cx.listener(|this, _, window, cx| this.open_soundboard(window, cx))),
-        ]
     }
 }
 
@@ -616,75 +726,96 @@ fn device_status(active: Option<&Device>, preferred: Option<&Device>, list: &Dev
 }
 
 pub(super) fn connection_diagnostics(cx: &Context<Spk>) -> Popover {
-    let app = cx.weak_entity();
-    Popover::new("voice-connection")
-        .anchor(Anchor::BottomRight)
-        .w(px(300.0))
-        .trigger(tool_button(
+    connection_diagnostics_popover(
+        tool_button(
             "voice-connection-diagnostics",
             IconName::Activity,
             "Voice connection diagnostics",
-        ))
-        .content(move |_, _, cx| {
-            let Some(app) = app.upgrade() else {
-                return div();
-            };
-            let View::SignedIn(sidebar) = &app.read(cx).view else {
-                return div();
-            };
-            let Some(call) = &sidebar.voice else {
-                return div();
-            };
-            let diagnostics = call
-                .media
-                .as_ref()
-                .map_or_else(Default::default, |media| media.diagnostics);
-            use livekit::prelude::ConnectionQuality;
-            let quality = match diagnostics.quality {
-                Some(ConnectionQuality::Excellent) => "Excellent",
-                Some(ConnectionQuality::Good) => "Good",
-                Some(ConnectionQuality::Poor) => "Poor",
-                Some(ConnectionQuality::Lost) => "Lost",
-                None => "Unavailable",
-            };
-            let metric = |value: Option<u32>, unit| {
-                value.map_or_else(
-                    || "Unavailable".to_owned(),
-                    |value| format!("{}.{:01} {unit}", value / 10, value % 10),
-                )
-            };
-            div()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(Label::new("Voice connection").font_semibold())
-                .children(
-                    [
-                        ("Connection quality", quality.to_owned()),
-                        ("Media round-trip", metric(diagnostics.round_trip_ms, "ms")),
-                        (
-                            "Audio jitter (worst track)",
-                            metric(diagnostics.jitter_ms, "ms"),
-                        ),
-                        (
-                            "Incoming audio packet loss",
-                            metric(diagnostics.loss_percent, "%"),
-                        ),
-                        ("Audio upload", metric(diagnostics.upload_kbps, "kbps")),
-                        ("Audio download", metric(diagnostics.download_kbps, "kbps")),
-                    ]
-                    .into_iter()
-                    .map(|(label, value)| {
-                        div()
-                            .id(label)
-                            .flex()
-                            .justify_between()
-                            .gap_2()
-                            .child(Label::new(label).text_color(cx.theme().muted_foreground))
-                            .child(Label::new(value))
-                    }),
-                )
-        })
+        ),
+        cx,
+    )
+}
+
+pub(super) fn connection_diagnostics_with_status(
+    status: &'static str,
+    cx: &Context<Spk>,
+) -> Popover {
+    connection_diagnostics_popover(
+        tool_button(
+            "voice-connection-status",
+            IconName::Activity,
+            format!("{status} Voice connection diagnostics"),
+        )
+        .label(status)
+        .xsmall()
+        .px_0()
+        .text_color(cx.theme().muted_foreground),
+        cx,
+    )
+}
+
+fn connection_diagnostics_popover(trigger: Button, cx: &Context<Spk>) -> Popover {
+    let app = cx.weak_entity();
+    voice_popover("voice-connection", px(320.0), |_| trigger).content(move |_, _, cx| {
+        let Some(app) = app.upgrade() else {
+            return div();
+        };
+        let View::SignedIn(sidebar) = &app.read(cx).view else {
+            return div();
+        };
+        let Some(call) = &sidebar.voice else {
+            return div();
+        };
+        let diagnostics = call
+            .media
+            .as_ref()
+            .map_or_else(Default::default, |media| media.diagnostics);
+        use livekit::prelude::ConnectionQuality;
+        let quality = match diagnostics.quality {
+            Some(ConnectionQuality::Excellent) => "Excellent",
+            Some(ConnectionQuality::Good) => "Good",
+            Some(ConnectionQuality::Poor) => "Poor",
+            Some(ConnectionQuality::Lost) => "Lost",
+            None => "Unavailable",
+        };
+        let metric = |value: Option<u32>, unit| {
+            value.map_or_else(
+                || "Unavailable".to_owned(),
+                |value| format!("{}.{:01} {unit}", value / 10, value % 10),
+            )
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(Label::new("Voice connection").font_semibold())
+            .children(
+                [
+                    ("Connection quality", quality.to_owned()),
+                    ("Media round-trip", metric(diagnostics.round_trip_ms, "ms")),
+                    (
+                        "Audio jitter (worst track)",
+                        metric(diagnostics.jitter_ms, "ms"),
+                    ),
+                    (
+                        "Incoming audio packet loss",
+                        metric(diagnostics.loss_percent, "%"),
+                    ),
+                    ("Audio upload", metric(diagnostics.upload_kbps, "kbps")),
+                    ("Audio download", metric(diagnostics.download_kbps, "kbps")),
+                ]
+                .into_iter()
+                .map(|(label, value)| {
+                    div()
+                        .id(label)
+                        .flex()
+                        .justify_between()
+                        .gap_2()
+                        .child(Label::new(label).text_color(cx.theme().muted_foreground))
+                        .child(Label::new(value))
+                }),
+            )
+    })
 }
 
 impl Spk {
@@ -706,53 +837,67 @@ impl Spk {
             },
             format!("Volume for {name}"),
         )
-        .on_click(cx.listener(move |_, _, window, cx| {
-            let app = cx.entity();
-            let content = cx.new(|cx: &mut Context<ParticipantVolumeDialog>| {
-                use crate::voice::ParticipantVolumeChange;
-                use gpui_kit::component::slider::{SliderEvent, SliderValue};
-
-                cx.observe(&app, |_, _, cx| cx.notify()).detach();
-                let sliders = [
-                    (
-                        volume.mic,
-                        ParticipantVolumeChange::Microphone as fn(u8) -> _,
-                    ),
-                    (
-                        volume.screen,
-                        ParticipantVolumeChange::Screen as fn(u8) -> _,
-                    ),
-                ]
-                .map(|(initial, change)| {
-                    let slider = cx.new(|_| {
-                        gpui_kit::component::slider::SliderState::new()
-                            .max(200.0)
-                            .default_value(f32::from(initial))
-                    });
-                    cx.subscribe(&slider, move |dialog, _, event, cx| {
-                        if let SliderEvent::Release(SliderValue::Single(value)) = event {
-                            dialog.change(change(*value as u8), cx);
-                        }
-                        cx.notify();
-                    })
-                    .detach();
-                    slider
-                });
-                ParticipantVolumeDialog {
-                    app,
-                    id: id.clone(),
-                    sliders,
-                }
-            });
-            let title = format!("Volume for {name}");
-            window.open_dialog(cx, move |dialog, _, _| {
-                dialog
-                    .centered()
-                    .width(px(380.0))
-                    .title(title.clone())
-                    .child(content.clone())
-            });
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.open_participant_volume(&id, &name, window, cx);
         }))
+    }
+
+    pub(super) fn open_participant_volume(
+        &self,
+        id: &str,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let View::SignedIn(sidebar) = &self.view else {
+            return;
+        };
+        let volume = sidebar.voice_intent.preferred.participant_volume(id);
+        let app = cx.entity();
+        let content = cx.new(|cx: &mut Context<ParticipantVolumeDialog>| {
+            use crate::voice::ParticipantVolumeChange;
+            use gpui_kit::component::slider::{SliderEvent, SliderValue};
+
+            cx.observe(&app, |_, _, cx| cx.notify()).detach();
+            let sliders = [
+                (
+                    volume.mic,
+                    ParticipantVolumeChange::Microphone as fn(u8) -> _,
+                ),
+                (
+                    volume.screen,
+                    ParticipantVolumeChange::Screen as fn(u8) -> _,
+                ),
+            ]
+            .map(|(initial, change)| {
+                let slider = cx.new(|_| {
+                    gpui_kit::component::slider::SliderState::new()
+                        .max(200.0)
+                        .default_value(f32::from(initial))
+                });
+                cx.subscribe(&slider, move |dialog, _, event, cx| {
+                    if let SliderEvent::Release(SliderValue::Single(value)) = event {
+                        dialog.change(change(*value as u8), cx);
+                    }
+                    cx.notify();
+                })
+                .detach();
+                slider
+            });
+            ParticipantVolumeDialog {
+                app,
+                id: id.to_owned(),
+                sliders,
+            }
+        });
+        let title = format!("Volume for {name}");
+        window.open_dialog(cx, move |dialog, _, _| {
+            dialog
+                .centered()
+                .width(px(380.0))
+                .title(title.clone())
+                .child(content.clone())
+        });
     }
 }
 
