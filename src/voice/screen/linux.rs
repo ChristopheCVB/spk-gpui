@@ -1,11 +1,8 @@
 use std::{
-    ffi::c_void,
-    ptr::{NonNull, null_mut},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
-use ashpd::desktop::screencast::{Screencast, SourceType as PortalSource};
 use livekit::webrtc::{native::yuv_helper::argb_to_i420, video_frame::VideoRotation};
 use tokio::time::{MissedTickBehavior, interval, timeout};
 use webrtc_sys::desktop_capturer::{
@@ -18,60 +15,43 @@ use x11rb::protocol::xproto::ConnectionExt;
 
 use super::*;
 
+mod portal;
 mod pulse;
 
-const TYPES: [(SourceType, &str, &str, PortalSource); 2] = [
+const TYPES: [(SourceType, SourceKind, &str, &str); 2] = [
     (
         SourceType::Screen,
+        SourceKind::Display,
         "display",
         "Display",
-        PortalSource::MONITOR,
     ),
-    (SourceType::Window, "window", "Window", PortalSource::WINDOW),
+    (SourceType::Window, SourceKind::Window, "window", "Window"),
 ];
 const FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 
-unsafe extern "C" {
-    fn g_main_context_iteration(context: *mut c_void, may_block: i32) -> i32;
-    fn g_bus_get_sync(
-        bus_type: i32,
-        cancellable: *mut c_void,
-        error: *mut *mut c_void,
-    ) -> *mut c_void;
-    fn g_dbus_connection_flush(
-        connection: *mut c_void,
-        cancellable: *mut c_void,
-        callback: Option<unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void)>,
-        user_data: *mut c_void,
-    );
-    fn g_object_unref(object: *mut c_void);
+pub(super) async fn use_system_picker() -> Result<bool, CaptureError> {
+    wayland()
+}
+
+pub(super) async fn pick(playback: Option<Device>) -> Result<Selection, CaptureError> {
+    if !wayland()? {
+        return Err(CaptureError::Unavailable);
+    }
+    portal::pick(playback).await
 }
 
 pub async fn choices() -> Result<Vec<Choice>, CaptureError> {
     if wayland()? {
-        return timeout(Duration::from_secs(3), async {
-            let portal = Screencast::new()
-                .await
-                .map_err(|_| CaptureError::Unavailable)?;
-            let sources = portal
-                .available_source_types()
-                .await
-                .map_err(|_| CaptureError::Unavailable)?;
-            Ok(portal_choices(
-                sources.contains(PortalSource::MONITOR),
-                sources.contains(PortalSource::WINDOW),
-            ))
-        })
-        .await
-        .map_err(|_| CaptureError::Unavailable)?;
+        return Err(CaptureError::Unavailable);
     }
     prepare_x11_window_capture()?;
     let mut choices = Vec::new();
-    for (kind, id, label, _) in TYPES {
-        let capturer = new_desktop_capturer(options(kind));
+    for (source_type, kind, id, label) in TYPES {
+        let capturer = new_desktop_capturer(options(source_type));
         if let Some(capturer) = capturer.as_ref() {
             choices.extend(capturer.get_source_list().into_iter().enumerate().map(
                 |(index, source)| Choice {
+                    kind,
                     id: format!("{id}:{}", source.id),
                     label: if source.title.trim().is_empty() {
                         format!("{label} {}", index + 1)
@@ -86,44 +66,25 @@ pub async fn choices() -> Result<Vec<Choice>, CaptureError> {
 }
 
 pub async fn select(choice: Choice, playback: Option<Device>) -> Result<Selection, CaptureError> {
-    let wayland = wayland()?;
-    let (kind, source_id) = TYPES
+    if wayland()? {
+        return Err(CaptureError::Unavailable);
+    }
+    let (source_type, id) = TYPES
         .iter()
-        .find_map(|&(kind, id, _, _)| {
-            if wayland {
-                (choice.id == id).then_some((kind, None))
-            } else {
-                let (source_type, source_id) = choice.id.split_once(':')?;
-                (source_type == id).then_some((kind, Some(source_id.parse::<u64>().ok()?)))
-            }
+        .find_map(|&(source_type, _, prefix, _)| {
+            let (kind, id) = choice.id.split_once(':')?;
+            (kind == prefix).then_some((source_type, id.parse::<u64>().ok()?))
         })
         .ok_or(CaptureError::Unavailable)?;
-
-    let portal = if wayland {
-        Some(
-            timeout(
-                Duration::from_secs(3),
-                tokio::task::spawn_blocking(PortalConnection::open),
-            )
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .flatten()
-            .ok_or(CaptureError::Unavailable)?,
-        )
-    } else {
-        None
-    };
-    let mut capturer = new_desktop_capturer(options(kind));
+    let mut capturer = new_desktop_capturer(options(source_type));
     if capturer.is_null() {
         return Err(CaptureError::Unavailable);
     }
-    if let Some(id) = source_id
-        && (!capturer
-            .get_source_list()
-            .iter()
-            .any(|source| source.id == id)
-            || !capturer.select_source(id))
+    if !capturer
+        .get_source_list()
+        .iter()
+        .any(|source| source.id == id)
+        || !capturer.select_source(id)
     {
         return Err(CaptureError::SourceLost);
     }
@@ -134,28 +95,35 @@ pub async fn select(choice: Choice, playback: Option<Device>) -> Result<Selectio
         .start(Box::new(DesktopCapturerCallbackWrapper::new(Box::new(
             Frames(frames.clone()),
         ))));
-    let mut video = VideoCapture {
+    let video = VideoCapture {
         frames,
-        capturer,
-        portal,
+        backend: VideoBackend::X11(capturer),
     };
-    let wait = if wayland {
-        Duration::from_secs(60)
-    } else {
-        FRAME_TIMEOUT
-    };
-    timeout(wait, video.wait_for_source())
-        .await
-        .map_err(|_| selection_error(wayland))?
-        .map_err(|()| selection_error(wayland))?;
+    ready_selection(
+        video,
+        choice.label,
+        source_type == SourceType::Screen,
+        playback,
+    )
+    .await
+}
 
-    let monitor = if kind == SourceType::Screen {
+async fn ready_selection(
+    mut video: VideoCapture,
+    label: String,
+    display: bool,
+    playback: Option<Device>,
+) -> Result<Selection, CaptureError> {
+    timeout(FRAME_TIMEOUT, video.wait_for_source())
+        .await
+        .map_err(|_| CaptureError::SourceLost)??;
+    let monitor = if display {
         pulse::Monitor::open(playback).await
     } else {
         None
     };
     Ok(Selection {
-        label: choice.label,
+        label,
         audio: monitor.as_ref().map(|_| AudioScope::PlaybackMix),
         capture: Box::new(Selected { video, monitor }),
     })
@@ -186,35 +154,12 @@ fn wayland() -> Result<bool, CaptureError> {
     let display = std::env::var_os("WAYLAND_DISPLAY");
     match std::env::var("XDG_SESSION_TYPE").as_deref() {
         Ok("x11") => Ok(false),
-        Ok(session) if session.starts_with("wayland") => {
-            // Without this marker libwebrtc can silently fall back to Xwayland.
-            display
-                .filter(|name| !name.is_empty())
-                .map(|_| true)
-                .ok_or(CaptureError::Unavailable)
-        }
-        _ if display.is_some() => Err(CaptureError::Unavailable),
+        Ok(session) if session.starts_with("wayland") => display
+            .filter(|name| !name.is_empty())
+            .map(|_| true)
+            .ok_or(CaptureError::Unavailable),
+        _ if display.is_some_and(|name| !name.is_empty()) => Ok(true),
         _ => Ok(false),
-    }
-}
-
-fn portal_choices(display: bool, window: bool) -> Vec<Choice> {
-    TYPES
-        .iter()
-        .zip([display, window])
-        .filter(|(_, available)| *available)
-        .map(|(&(_, id, label, _), _)| Choice {
-            id: id.into(),
-            label: label.into(),
-        })
-        .collect()
-}
-
-fn selection_error(wayland: bool) -> CaptureError {
-    if wayland {
-        CaptureError::PortalSelection
-    } else {
-        CaptureError::SourceLost
     }
 }
 
@@ -247,34 +192,34 @@ impl Capture for Selected {
     }
 }
 
+enum VideoBackend {
+    X11(cxx::UniquePtr<DesktopCapturer>),
+    Wayland(portal::PortalVideo),
+}
+
 struct VideoCapture {
     frames: Arc<Mutex<FrameStatus>>,
-    capturer: cxx::UniquePtr<DesktopCapturer>,
-    portal: Option<PortalConnection>,
+    backend: VideoBackend,
 }
 
 impl VideoCapture {
-    fn request_frame(&self) {
-        if self.portal.is_some() {
-            // GDBus dispatches the asynchronous ScreenCast replies on the default context.
-            for _ in 0..8 {
-                if unsafe { g_main_context_iteration(null_mut(), 0) } == 0 {
-                    break;
-                }
-            }
+    fn request_frame(&self) -> Result<(), CaptureError> {
+        match &self.backend {
+            VideoBackend::X11(capturer) => capturer.capture_frame(),
+            VideoBackend::Wayland(portal) => portal.request_frame(&self.frames)?,
         }
-        self.capturer.capture_frame();
+        Ok(())
     }
 
-    async fn wait_for_source(&mut self) -> Result<(), ()> {
+    async fn wait_for_source(&mut self) -> Result<(), CaptureError> {
         let mut ticks = interval(Duration::from_millis(32));
         ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
             ticks.tick().await;
-            self.request_frame();
+            self.request_frame()?;
             let frames = self.frames.lock().unwrap();
             if frames.ended {
-                return Err(());
+                return Err(CaptureError::SourceLost);
             }
             if frames.last.is_some() {
                 return Ok(());
@@ -305,7 +250,7 @@ impl VideoCapture {
                 }
                 _ = ticks.tick() => {}
             }
-            self.request_frame();
+            self.request_frame()?;
             let frames = self.frames.lock().unwrap();
             if frames.ended
                 || frames
@@ -314,30 +259,6 @@ impl VideoCapture {
             {
                 return Err(CaptureError::SourceLost);
             }
-        }
-    }
-}
-
-// The capturer drops first and queues Session.Close on this shared GDBus connection.
-struct PortalConnection(NonNull<c_void>);
-
-// GDBusConnection methods can be used from any thread and this wrapper owns one reference.
-unsafe impl Send for PortalConnection {}
-
-impl PortalConnection {
-    fn open() -> Option<Self> {
-        const G_BUS_TYPE_SESSION: i32 = 2;
-        NonNull::new(unsafe { g_bus_get_sync(G_BUS_TYPE_SESSION, null_mut(), null_mut()) })
-            .map(Self)
-    }
-}
-
-impl Drop for PortalConnection {
-    fn drop(&mut self) {
-        // Keep the connection alive for the asynchronous flush after WebRTC releases its reference.
-        unsafe {
-            g_dbus_connection_flush(self.0.as_ptr(), null_mut(), None, null_mut());
-            g_object_unref(self.0.as_ptr());
         }
     }
 }
@@ -362,20 +283,25 @@ impl DesktopCapturerCallback for Frames {
                 return;
             }
         };
-        let (width, height, stride) = (frame.width(), frame.height(), frame.stride());
+        // WebRTC's DesktopFrame owns stride × height bytes of BGRA pixels.
+        unsafe { state.receive(frame.data(), frame.width(), frame.height(), frame.stride()) };
+    }
+}
+
+impl FrameStatus {
+    unsafe fn receive(&mut self, pixels: *const u8, width: i32, height: i32, stride: i32) {
         if width < 2 || height < 2 || width.checked_mul(4).is_none_or(|row| stride < row) {
             return;
         }
         let Some(size) = (stride as usize).checked_mul(height as usize) else {
             return;
         };
-        if frame.data().is_null() || size > isize::MAX as usize {
+        if pixels.is_null() || size > isize::MAX as usize {
             return;
         }
-        state.last = Some(Instant::now());
-        if let Some((quality, sink)) = &state.output {
-            // WebRTC's DesktopFrame owns stride × height bytes of BGRA pixels.
-            let bytes = unsafe { std::slice::from_raw_parts(frame.data(), size) };
+        self.last = Some(Instant::now());
+        if let Some((quality, sink)) = &self.output {
+            let bytes = unsafe { std::slice::from_raw_parts(pixels, size) };
             if let Some(frame) = video_frame(bytes, width, height, stride, *quality) {
                 sink.video(frame, *quality, quality.fps);
             }
