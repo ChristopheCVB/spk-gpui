@@ -10,6 +10,7 @@ use gpui_kit::component::{
 
 use super::{
     chat::{chat_destination, mark_read_item, unread_badges, unread_label},
+    video::{TileActions, TileControls},
     *,
 };
 use crate::{
@@ -1525,10 +1526,15 @@ impl Spk {
         window: &Window,
         cx: &Context<Self>,
     ) -> Stateful<Div> {
-        let (tile_width, scroll_on_focus) = match layout {
-            TileLayout::Theater => (None, None),
-            TileLayout::Strip(width) => (Some(width), None),
-            TileLayout::Grid(width, scroll) => (Some(width), scroll),
+        const COMPACT_SCREEN_WIDTH: Pixels = px(244.0);
+        let actions = TileActions::for_participant(self, participant, call, sidebar);
+        let (tile_width, strip_height, scroll_on_focus) = match layout {
+            TileLayout::Theater => (None, None, None),
+            TileLayout::Strip(width) if actions.watched_screen => {
+                (Some(COMPACT_SCREEN_WIDTH), Some(width * 9.0 / 16.0), None)
+            }
+            TileLayout::Strip(width) => (Some(width), None, None),
+            TileLayout::Grid(width, scroll) => (Some(width), None, scroll),
         };
         let theme = cx.theme();
         let is_me = sidebar.profile.id.as_deref() == Some(participant.id);
@@ -1556,12 +1562,28 @@ impl Spk {
         let tile_focus = &self.video_stage.tile_focus[participant.id];
         let menu = self.voice_tile_menu(participant, sidebar, cx);
         let tile_focused = tile_focus.contains_focused(window, cx);
-        let reveal_actions =
-            tile_focused || self.video_stage.menu_for.as_deref() == Some(participant.id);
+        let reveal_actions = (tile_focused
+            && (!actions.watched_screen || self.video_stage.keyboard_focus))
+            || self.video_stage.menu_for.as_deref() == Some(participant.id)
+            || self.video_stage.screen_volume_for.as_deref() == Some(participant.id)
+            || (actions.watched_screen
+                && self.video_stage.pointer_over_window(window)
+                && self.video_stage.hovered.as_deref() == Some(participant.id));
         let scroll_on_focus = scroll_on_focus.filter(|_| tile_focused).cloned();
         let focus_on_tile = tile_focus.is_focused(window);
         let controls = self
-            .video_tile_controls(participant, call, sidebar, reveal_actions, menu, cx)
+            .video_tile_controls(
+                participant,
+                call,
+                sidebar,
+                TileControls {
+                    actions,
+                    revealed: reveal_actions,
+                    compact: tile_width.is_some_and(|width| width <= COMPACT_SCREEN_WIDTH),
+                },
+                menu,
+                cx,
+            )
             .when_some(
                 scroll_on_focus.clone().filter(|_| !focus_on_tile),
                 |controls, scroll| controls.child(reveal_in_vertical_scroll(scroll)),
@@ -1571,15 +1593,19 @@ impl Spk {
             .id(SharedString::from(participant.id.to_owned()))
             .group("voice-tile")
             .track_focus(tile_focus)
+            .when(actions.watched_screen, |tile| {
+                tile.hover_listener_mode(HoverListenerMode::InputModalityIndependent)
+            })
             .focus_visible(|tile| {
                 tile.border_color(if speaking { theme.success } else { theme.ring })
             })
-            .on_hover(cx.listener(move |app, hovered: &bool, _, _| {
+            .on_hover(cx.listener(move |app, hovered: &bool, _, cx| {
                 if *hovered {
                     app.video_stage.hovered = Some(hover_id.clone());
                 } else if app.video_stage.hovered.as_deref() == Some(&hover_id) {
                     app.video_stage.hovered = None;
                 }
+                cx.notify();
             }))
             .on_key_down(cx.listener(move |app, event, window, cx| {
                 app.video_tile_key(&key_id, event, window, cx)
@@ -1594,7 +1620,8 @@ impl Spk {
             .when_some(tile_width, |tile, width| {
                 tile.w(width)
                     .max_w_full()
-                    .aspect_ratio(16.0 / 9.0)
+                    .when_some(strip_height, |tile, height| tile.h(height))
+                    .when(strip_height.is_none(), |tile| tile.aspect_ratio(16.0 / 9.0))
                     .flex_shrink_0()
             })
             .when(tile_width.is_none(), |tile| tile.size_full())
@@ -1655,6 +1682,17 @@ impl Spk {
                     .children(participant_status(flags.muted, flags.deafened, cx))
                     .when(flags.radio_listening == Some(true), |row| {
                         row.child(radio_badge(cx))
+                    })
+                    .when_some(actions.screen_quality, |row, quality| {
+                        row.child(
+                            div()
+                                .flex_shrink_0()
+                                .border_l_1()
+                                .border_color(theme.border)
+                                .pl_1()
+                                .text_size(px(10.0))
+                                .child(format!("{}p · {} fps", quality.height, quality.fps)),
+                        )
                     }),
             )
             .child(controls)

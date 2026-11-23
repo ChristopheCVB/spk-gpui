@@ -450,11 +450,21 @@ impl Spk {
         }
     }
 
-    fn observe_pointer<Event: MouseEvent>(app: &WeakEntity<Self>, window: &mut Window) {
+    fn observe_pointer<Event: MouseEvent>(
+        app: &WeakEntity<Self>,
+        window: &mut Window,
+        pointer_position_changed: bool,
+    ) {
         let app = app.clone();
         window.on_mouse_event(move |_: &Event, phase, window, cx| {
             if phase.capture() {
-                let _ = app.update(cx, |app, _| app.record_activity(window));
+                let _ = app.update(cx, |app, cx| {
+                    app.record_activity(window);
+                    if pointer_position_changed && !app.video_stage.pointer_in_window {
+                        app.video_stage.pointer_in_window = true;
+                        cx.notify();
+                    }
+                });
             }
         });
     }
@@ -643,9 +653,19 @@ impl Render for Spk {
                 canvas(
                     |_, _, _| (),
                     move |_, (), window, _| {
-                        Self::observe_pointer::<MouseDownEvent>(&app, window);
-                        Self::observe_pointer::<MouseMoveEvent>(&app, window);
-                        Self::observe_pointer::<ScrollEvent>(&app, window);
+                        Self::observe_pointer::<MouseDownEvent>(&app, window, true);
+                        Self::observe_pointer::<MouseMoveEvent>(&app, window, true);
+                        Self::observe_pointer::<ScrollEvent>(&app, window, false);
+                        let app = app.clone();
+                        window.on_mouse_event(move |_: &MouseExitEvent, phase, _, cx| {
+                            if phase.capture() {
+                                let _ = app.update(cx, |app, cx| {
+                                    app.video_stage.pointer_in_window = false;
+                                    app.video_stage.hovered = None;
+                                    cx.notify();
+                                });
+                            }
+                        });
                     },
                 )
                 .absolute(),

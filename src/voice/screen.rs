@@ -65,6 +65,12 @@ impl Default for Quality {
 impl Quality {
     pub const HEIGHTS: [u32; 3] = [720, 1080, 1440];
     pub const FPS: [u32; 3] = [5, 30, 60];
+    const PUBLICATION_PREFIX: &str = "spk:screen:";
+
+    fn preset(height: u32, fps: u32) -> Option<Self> {
+        (Self::HEIGHTS.contains(&height) && Self::FPS.contains(&fps))
+            .then_some(Self { height, fps })
+    }
 
     #[allow(dead_code)] // Used by native capture adapters.
     pub fn dimensions(self, width: u32, height: u32) -> Option<(u32, u32)> {
@@ -80,12 +86,23 @@ impl Quality {
         (width >= 2 && height >= 2).then_some((width, height))
     }
 
-    fn publication_name(width: u32, height: u32, fps: u32) -> String {
-        if Self::HEIGHTS.contains(&height)
-            && Self::FPS.contains(&fps)
-            && width == (height * 16 + 4) / 9
+    pub(super) fn from_publication_name(name: &str) -> Option<Self> {
+        let (height, fps) = name
+            .strip_prefix(Self::PUBLICATION_PREFIX)?
+            .split_once(':')?;
+        if ![height, fps]
+            .into_iter()
+            .all(|part| part.bytes().all(|byte| byte.is_ascii_digit()))
         {
-            format!("spk:screen:{height}:{fps}")
+            return None;
+        }
+        let (height, fps) = (height.parse().ok()?, fps.parse().ok()?);
+        Self::preset(height, fps)
+    }
+
+    fn publication_name(width: u32, height: u32, fps: u32) -> String {
+        if Self::preset(height, fps).is_some() && width == (height * 16 + 4) / 9 {
+            format!("{}{height}:{fps}", Self::PUBLICATION_PREFIX)
         } else {
             "screen".into()
         }

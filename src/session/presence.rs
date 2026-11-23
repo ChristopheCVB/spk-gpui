@@ -121,7 +121,7 @@ pub struct Participant<'a> {
 }
 
 impl Sidebar {
-    pub fn viewers(&self, channel: &str, presenter: &str) -> Vec<&str> {
+    pub fn viewers(&self, channel: &str, presenter: &str) -> Vec<Participant<'_>> {
         self.participants(channel)
             .into_iter()
             .filter(|user| {
@@ -130,7 +130,6 @@ impl Sidebar {
                         .video
                         .is_some_and(|video| video.watching.iter().any(|id| id == presenter))
             })
-            .map(|user| user.name)
             .collect()
     }
 
