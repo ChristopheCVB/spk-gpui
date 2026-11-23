@@ -237,8 +237,11 @@ pub(crate) fn register_window(
     cx.on_system_notification_response(move |response, _| {
         let _ = native.try_send(response.into());
     });
+    // Keep the accessibility fixture from replacing the desktop app's toast activator.
     #[cfg(target_os = "windows")]
-    if let Some(notifications) = windows::Notifications::register(activated) {
+    if !(cfg!(debug_assertions) && std::env::var_os("SPK_TEST_ACCESSIBILITY").is_some())
+        && let Some(notifications) = windows::Notifications::register(activated)
+    {
         cx.set_global(notifications);
     }
     #[cfg(target_os = "linux")]

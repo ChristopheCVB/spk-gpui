@@ -51,14 +51,16 @@ Check for a successful exit and the executable at `%TEMP%\spk-w\debug\spk-gpui.e
 
 ## Launch and capture logs
 
-The Windows app uses the GUI subsystem. Redirect stdout and stderr at process creation. Copy the executable into a separate run directory so subsequent builds can replace the Cargo output while the app stays open.
+The Windows app uses the GUI subsystem. Redirect stdout and stderr at process creation. Copy the executable and its matching PDB into a separate run directory so subsequent builds can replace the Cargo output while the app stays open.
 
 ```powershell
 $exe = Join-Path $env:TEMP 'spk-w\debug\spk-gpui.exe'
 $run = Join-Path $env:TEMP ('spk-debug-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $run -ErrorAction Stop | Out-Null
 Copy-Item -LiteralPath $exe -Destination $run -ErrorAction Stop
-$env:RUST_BACKTRACE = '1'
+$symbols = Join-Path (Split-Path $exe) 'spk_gpui.pdb'
+if (Test-Path -LiteralPath $symbols) { Copy-Item -LiteralPath $symbols -Destination $run -ErrorAction Stop }
+$env:RUST_BACKTRACE = 'full'
 $client = Start-Process -FilePath (Join-Path $run 'spk-gpui.exe') `
     -WorkingDirectory $run -PassThru `
     -RedirectStandardOutput (Join-Path $run 'stdout.log') `
@@ -80,6 +82,22 @@ Confirm the PID has a visible SPK window. Follow the stderr log with `Get-Conten
 - For a crash, capture the first panic line and relevant backtrace frames. Check the exact action again on the rebuilt client.
 - For audio cuts, ask for the Windows clock time and which listener or route heard each cut. Test microphone and Voice Output with a web participant, then test Channel Radio or the reported media source separately. Open **Voice connection diagnostics** in the call to check jitter and incoming packet loss.
 - The app has no built-in audio log sink. Empty files are normal in a healthy stock run. For timing bugs, use a temporary debug build that emits tagged, timestamped counters to stderr. In the audio-cut investigation, callback gaps, dropped blocks and radio refill gaps distinguished a stalled session runtime from packet loss. Keep logging I/O off audio callbacks. Redact credentials and session data before sharing logs.
+
+## Reproduce accessibility crashes
+
+For an intermittent crash opening a view, request its accessibility tree with Windows UI Automation before retrying the action. Run the probe from the repo root with the PID of the debug client. Check that it returns a node count, then retry the action and inspect stderr.
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\fixtures\windows-accessibility.ps1 -ProbePid $client.Id
+```
+
+GPUI Kit labels use their call site as the default ID. Repeated labels share an ID unless their parent rows have distinct IDs or the labels have explicit IDs.
+
+From an interactive x64 Developer PowerShell, run the accessibility regression against a disposable SPK fixture and native LiveKit server. It builds with loopback URLs and checks that Shortcuts, Changelog, Soundboard upload fields, and Voice connection diagnostics appear in the accessibility tree.
+
+```powershell
+mise exec -- python tests/fixtures/windows-accessibility.py
+```
 
 ## Run the local Screen Share fixture
 

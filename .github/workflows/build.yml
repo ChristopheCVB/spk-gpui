@@ -92,6 +92,16 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: tests/fixtures/windows-screen-share.ps1 -IfAvailable
+      - name: Test native Windows accessibility
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (![Environment]::UserInteractive) {
+            Write-Host '::warning::The accessibility fixture needs an interactive Windows desktop.'
+            exit 0
+          }
+          mise exec -- python tests/fixtures/windows-accessibility.py
+          exit $LASTEXITCODE
       - name: Test native macOS Screen Share with a controlled peer
         if: runner.os == 'macOS'
         shell: bash
