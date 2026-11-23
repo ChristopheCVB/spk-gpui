@@ -800,6 +800,7 @@ impl Spk {
                                     .when(bottom_bar, |bar| {
                                         bar.child(self.voice_controls(sidebar, location, cx))
                                     })
+                                    .child(self.camera_controls(sidebar, location, cx))
                                     .children(self.voice_media_buttons(location, cx))
                             })
                             .children(self.leave_voice(
@@ -1227,7 +1228,7 @@ impl Spk {
                             .bg(theme.sidebar)
                             .p_2()
                             .child(self.voice_controls(sidebar, VoiceControls::Channel, cx))
-                            .child(self.camera_controls(sidebar, cx))
+                            .child(self.camera_controls(sidebar, VoiceControls::Channel, cx))
                             .child(self.screen_button(Some(call), cx))
                             .children(self.voice_media_buttons(VoiceControls::Channel, cx))
                             .children(self.leave_voice(
