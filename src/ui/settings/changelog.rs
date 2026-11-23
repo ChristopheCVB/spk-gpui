@@ -85,6 +85,7 @@ impl Settings {
                 day = &entry.date;
                 let url = format!("https://github.com/meeehdi-dev/spk/commit/{}", entry.sha);
                 div()
+                    .id(SharedString::from(entry.sha.clone()))
                     .when(new_day, |group| {
                         group.child(
                             Label::new(entry.date.clone())

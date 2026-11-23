@@ -676,6 +676,7 @@ pub(super) fn connection_diagnostics(cx: &Context<Spk>) -> Popover {
                     .into_iter()
                     .map(|(label, value)| {
                         div()
+                            .id(label)
                             .flex()
                             .justify_between()
                             .gap_2()

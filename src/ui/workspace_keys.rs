@@ -278,12 +278,14 @@ pub(super) fn shortcut_reference(
         .gap_4()
         .children(groups.into_iter().map(|(title, rows)| {
             div()
+                .id(title)
                 .flex()
                 .flex_col()
                 .gap_1()
                 .child(Label::new(title).font_semibold())
                 .children(rows.into_iter().map(|(label, keys)| {
                     div()
+                        .id(label)
                         .flex()
                         .items_start()
                         .justify_between()
