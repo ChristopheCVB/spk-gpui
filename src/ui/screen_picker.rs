@@ -50,9 +50,8 @@ impl Spk {
             self.screen_picker_open = true;
             let app = cx.weak_entity();
             let cancel_focus = cx.focus_handle();
-            let start_focus = cx.focus_handle();
-            let initial_focus = Cell::new(true);
-            let focused_confirmation = Cell::new(None);
+            let primary_focus = cx.focus_handle();
+            let focused_state = Cell::new(None);
             window.open_dialog(cx, move |dialog, window, cx| {
                 let Some(app) = app.upgrade() else {
                     return dialog;
@@ -60,20 +59,19 @@ impl Spk {
                 let Some(report) = app.read(cx).screen_picker_report().cloned() else {
                     return dialog;
                 };
-                let initial_focus = initial_focus.replace(false);
-                if matches!(&report.state, State::Confirm { .. })
-                    && focused_confirmation.replace(Some(report.attempt)) != Some(report.attempt)
-                {
-                    start_focus.focus(window, cx);
-                } else if initial_focus {
-                    cancel_focus.focus(window, cx);
+                let focus_state = (report.attempt, std::mem::discriminant(&report.state));
+                if focused_state.replace(Some(focus_state)) != Some(focus_state) {
+                    match report.state {
+                        State::Confirm { .. } | State::Ended(_) => primary_focus.focus(window, cx),
+                        _ => cancel_focus.focus(window, cx),
+                    }
                 }
                 Self::screen_picker_dialog(
                     dialog,
                     &report,
                     &app,
                     &cancel_focus,
-                    &start_focus,
+                    &primary_focus,
                     window,
                     cx,
                 )
@@ -86,7 +84,7 @@ impl Spk {
         report: &Report,
         app: &Entity<Spk>,
         cancel_focus: &FocusHandle,
-        start_focus: &FocusHandle,
+        primary_focus: &FocusHandle,
         window: &mut Window,
         cx: &mut App,
     ) -> Dialog {
@@ -169,7 +167,7 @@ impl Spk {
                         Command::StartScreenShare(attempt, audio)
                     })
                     .primary()
-                    .track_focus(start_focus),
+                    .track_focus(primary_focus),
                 );
                 div()
                     .flex()
@@ -184,7 +182,8 @@ impl Spk {
                     picker_button("retry-screen-picker", "Try again", app, || {
                         Command::OpenScreenShare
                     })
-                    .primary(),
+                    .primary()
+                    .track_focus(primary_focus),
                 );
                 Label::new(*message).into_any_element()
             }
