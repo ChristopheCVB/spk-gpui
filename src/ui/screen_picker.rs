@@ -8,6 +8,13 @@ use gpui_kit::component::{
 use super::*;
 use crate::voice::screen::{Choice, Report, SourceKind, State};
 
+#[cfg(windows)]
+pub(super) struct ScreenPreviews {
+    attempt: u64,
+    images: std::collections::HashMap<String, Arc<RenderImage>>,
+    _receive: Task<()>,
+}
+
 impl Spk {
     fn screen_picker_report(&self) -> Option<&Report> {
         let View::SignedIn(sidebar) = &self.view else {
@@ -22,6 +29,8 @@ impl Spk {
     }
 
     pub(super) fn update_screen_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(windows)]
+        self.update_screen_previews(window, cx);
         let state = self.screen_picker_report().map(|report| &report.state);
         if self.screen_picker_open {
             if !matches!(
@@ -77,6 +86,65 @@ impl Spk {
                 )
             });
         }
+    }
+
+    #[cfg(windows)]
+    fn update_screen_previews(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let request = self
+            .screen_picker_report()
+            .and_then(|report| match &report.state {
+                State::Choices(choices)
+                    if self.windows_screen_picker != Some(report.attempt)
+                        && !choices.is_empty() =>
+                {
+                    Some((report.attempt, choices))
+                }
+                _ => None,
+            });
+        if request.map(|(attempt, _)| attempt)
+            == self
+                .screen_previews
+                .as_ref()
+                .map(|previews| previews.attempt)
+        {
+            return;
+        }
+        let request = request.map(|(attempt, choices)| (attempt, choices.clone()));
+        if let Some(previews) = self.screen_previews.take() {
+            for image in previews.images.into_values() {
+                let _ = window.drop_image(image);
+            }
+        }
+        let Some((attempt, choices)) = request else {
+            return;
+        };
+        let (send, receive) = async_channel::bounded(1);
+        cx.background_spawn(crate::voice::screen::preview_sources(choices, send))
+            .detach();
+        let task = cx.spawn(async move |app, cx| {
+            while let Ok((id, image)) = receive.recv().await {
+                let updated = app.update(cx, |app, cx| {
+                    let Some(previews) = app
+                        .screen_previews
+                        .as_mut()
+                        .filter(|previews| previews.attempt == attempt)
+                    else {
+                        return false;
+                    };
+                    previews.images.insert(id, image);
+                    cx.notify();
+                    true
+                });
+                if !matches!(updated, Ok(true)) {
+                    break;
+                }
+            }
+        });
+        self.screen_previews = Some(ScreenPreviews {
+            attempt,
+            images: Default::default(),
+            _receive: task,
+        });
     }
 
     fn screen_picker_dialog(
@@ -193,7 +261,7 @@ impl Spk {
     }
 
     #[cfg(windows)]
-    fn pick_windows_screen(&mut self, attempt: u64, window: &Window, cx: &mut Context<Self>) {
+    fn pick_windows_screen(&mut self, attempt: u64, window: &mut Window, cx: &mut Context<Self>) {
         use crate::voice::screen::{CaptureError, pick_system_source};
         use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -201,6 +269,7 @@ impl Spk {
             return;
         }
         self.windows_screen_picker = Some(attempt);
+        self.update_screen_previews(window, cx);
         cx.notify();
         let hwnd = HasWindowHandle::window_handle(window)
             .ok()
@@ -298,25 +367,71 @@ fn screen_sources(
                 .flex_col()
                 .gap_1()
                 .children(sources.into_iter().map(|choice| {
-                    let app = app.downgrade();
+                    let weak_app = app.downgrade();
                     let id = choice.id.clone();
-                    Button::new(SharedString::from(format!("screen-source-{id}")))
+                    let button = Button::new(SharedString::from(format!("screen-source-{id}")))
                         .secondary()
                         .w_full()
                         .justify_start()
                         .tab_stop(true)
-                        .icon(icon)
-                        .label(choice.label.clone())
                         .tooltip(choice.label.clone())
                         .on_click(move |_, _, cx| {
-                            let _ = app.update(cx, |app, cx| {
+                            let _ = weak_app.update(cx, |app, cx| {
                                 app.send(
                                     Command::ChooseScreenSource(attempt, id.clone()),
                                     None,
                                     cx,
                                 );
                             });
-                        })
+                        });
+                    #[cfg(windows)]
+                    {
+                        let image = app
+                            .read(cx)
+                            .screen_previews
+                            .as_ref()
+                            .filter(|previews| previews.attempt == attempt)
+                            .and_then(|previews| previews.images.get(&choice.id))
+                            .cloned();
+                        let preview = div()
+                            .w(px(112.))
+                            .h(px(63.))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_sm()
+                            .overflow_hidden()
+                            .bg(cx.theme().background);
+                        let preview = match image {
+                            Some(image) => {
+                                preview.child(img(image).size_full().object_fit(ObjectFit::Contain))
+                            }
+                            None => preview
+                                .child(Icon::new(icon).text_color(cx.theme().muted_foreground)),
+                        };
+                        button
+                            .h(px(76.))
+                            .accessibility_label(choice.label.clone())
+                            .child(
+                                div()
+                                    .flex()
+                                    .w_full()
+                                    .items_center()
+                                    .gap_3()
+                                    .min_w_0()
+                                    .child(preview)
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .text_ellipsis()
+                                            .overflow_hidden()
+                                            .child(choice.label.clone()),
+                                    ),
+                            )
+                    }
+                    #[cfg(not(windows))]
+                    button.icon(icon).label(choice.label.clone())
                 })),
         )
 }

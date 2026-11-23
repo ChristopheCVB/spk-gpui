@@ -144,6 +144,28 @@ async fn check_controlled_window_capture() {
         .iter()
         .find(|choice| choice.kind == SourceKind::Display)
         .expect("display in source list");
+    let fixture = choices
+        .iter()
+        .find(|choice| choice.kind == SourceKind::Window && choice.label == title)
+        .expect("fixture in window list");
+    let mut unavailable = fixture.clone();
+    unavailable.id.push_str(":closed");
+    let (preview, images) = async_channel::unbounded();
+    preview_sources(vec![display.clone(), fixture.clone(), unavailable], preview).await;
+    let mut previews = std::collections::HashMap::new();
+    while let Ok((id, image)) = images.try_recv() {
+        previews.insert(id, image);
+    }
+    assert_eq!(previews.len(), 2, "only available sources have a preview");
+    for choice in [display, fixture] {
+        let size = previews[&choice.id].size(0);
+        assert!(
+            size.width > gpui_kit::DevicePixels(0) && size.width <= gpui_kit::DevicePixels(256)
+        );
+        assert!(
+            size.height > gpui_kit::DevicePixels(0) && size.height <= gpui_kit::DevicePixels(144)
+        );
+    }
     let playback_mix = select(display.clone(), None).await.unwrap();
     assert_eq!(playback_mix.audio, Some(AudioScope::PlaybackMix));
     drop(playback_mix);
