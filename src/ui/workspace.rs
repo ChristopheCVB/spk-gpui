@@ -21,6 +21,7 @@ use crate::{
 
 pub(super) const SIDEBAR_WIDTH: Pixels = px(288.0);
 const WIDE_VOICE_SESSION_WIDTH: Pixels = px(320.0);
+const VOICE_TILE_BORDER_WIDTH: Pixels = px(2.0);
 
 pub(super) fn wide_workspace(window: &Window) -> bool {
     let padding = window_paddings(window);
@@ -77,21 +78,31 @@ pub(super) fn navigation_target(
     let focused = focus.contains_focused(window, cx);
     let target = div().id(id).track_focus(&focus).when_some(
         scroll_on_focus.cloned().filter(|_| focused),
-        |row, scroll| row.relative().child(reveal_in_vertical_scroll(scroll)),
+        |row, scroll| {
+            row.relative()
+                .child(reveal_in_vertical_scroll(scroll, px(0.)))
+        },
     );
     (target, focused)
 }
 
-fn reveal_in_vertical_scroll(scroll: ScrollHandle) -> impl IntoElement {
+fn vertical_reveal_delta(
+    bounds: Bounds<Pixels>,
+    viewport: Bounds<Pixels>,
+    outset: Pixels,
+) -> Pixels {
+    let bounds = bounds.dilate(outset);
+    if bounds.top() < viewport.top() || bounds.size.height > viewport.size.height {
+        viewport.top() - bounds.top()
+    } else {
+        (viewport.bottom() - bounds.bottom()).min(px(0.))
+    }
+}
+
+fn reveal_in_vertical_scroll(scroll: ScrollHandle, outset: Pixels) -> impl IntoElement {
     canvas(
         move |bounds, window, _| {
-            let viewport = scroll.bounds();
-            let delta =
-                if bounds.top() < viewport.top() || bounds.size.height > viewport.size.height {
-                    viewport.top() - bounds.top()
-                } else {
-                    (viewport.bottom() - bounds.bottom()).min(px(0.))
-                };
+            let delta = vertical_reveal_delta(bounds, scroll.bounds(), outset);
             if delta != px(0.) {
                 let offset = scroll.offset() + point(px(0.), delta);
                 window.on_next_frame(move |window, _| {
@@ -104,6 +115,22 @@ fn reveal_in_vertical_scroll(scroll: ScrollHandle) -> impl IntoElement {
     )
     .absolute()
     .inset_0()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SPEAKING_RING_WIDTH, VOICE_TILE_BORDER_WIDTH, vertical_reveal_delta};
+    use gpui_kit::{Bounds, point, px, size};
+
+    #[test]
+    fn tile_scroll_reveals_the_speaking_ring_at_both_edges() {
+        let viewport = Bounds::new(point(px(0.), px(0.)), size(px(300.), px(200.)));
+        let outset = VOICE_TILE_BORDER_WIDTH + SPEAKING_RING_WIDTH;
+        for (top, delta) in [(2., 2.), (98., -2.), (4., 0.), (96., 0.)] {
+            let bounds = Bounds::new(point(px(2.), px(top)), size(px(196.), px(100.)));
+            assert_eq!(vertical_reveal_delta(bounds, viewport, outset), px(delta));
+        }
+    }
 }
 
 enum TileLayout<'a> {
@@ -1159,6 +1186,7 @@ impl Spk {
                     .flex_1()
                     .min_h_0()
                     .when(!fullscreen, |tiles| tiles.p_2().gap(gap))
+                    .when(fullscreen, |tiles| tiles.p(SPEAKING_RING_WIDTH))
                     .child(div().flex_1().min_h_0().child(self.voice_tile(
                         focused,
                         call,
@@ -1210,21 +1238,29 @@ impl Spk {
                                 .aria_label("Voice participants")
                                 .flex()
                                 .flex_shrink_0()
-                                .gap(gap)
-                                .p_1()
+                                .gap(gap - SPEAKING_RING_WIDTH * 2.)
+                                .px(px(4.) - SPEAKING_RING_WIDTH)
+                                .py_1()
                                 .overflow_x_scroll()
                                 .track_scroll(&self.video_stage.participant_scroll)
                                 .children(others().enumerate().map(|(index, person)| {
-                                    self.voice_tile(
-                                        person,
-                                        call,
-                                        sidebar,
-                                        TileLayout::Strip(strip_width),
-                                        window,
-                                        cx,
-                                    )
-                                    .when(index == 0, |tile| tile.ml_auto())
-                                    .when(index + 2 == participants.len(), |tile| tile.mr_auto())
+                                    div()
+                                        .flex()
+                                        .flex_shrink_0()
+                                        .max_w_full()
+                                        .px(SPEAKING_RING_WIDTH)
+                                        .when(index == 0, |slot| slot.ml_auto())
+                                        .when(index + 2 == participants.len(), |slot| {
+                                            slot.mr_auto()
+                                        })
+                                        .child(self.voice_tile(
+                                            person,
+                                            call,
+                                            sidebar,
+                                            TileLayout::Strip(strip_width),
+                                            window,
+                                            cx,
+                                        ))
                                 })),
                         )
                     })
@@ -1386,11 +1422,11 @@ impl Spk {
             .h(px(110.0))
             .p_3()
             .rounded_lg()
+            .bg(theme.background)
             .border_1()
-            .border_color(if speaking {
-                theme.success
-            } else {
-                theme.border
+            .border_color(theme.border)
+            .when(speaking, |preview| {
+                preview.shadow(speaking_ring(theme.success))
             })
             .child(profile_avatar(
                 Avatar::new().name(participant.name.to_owned()).large(),
@@ -1586,7 +1622,7 @@ impl Spk {
             )
             .when_some(
                 scroll_on_focus.clone().filter(|_| !focus_on_tile),
-                |controls, scroll| controls.child(reveal_in_vertical_scroll(scroll)),
+                |controls, scroll| controls.child(reveal_in_vertical_scroll(scroll, px(0.))),
             );
         let name = if is_me { "You" } else { participant.name };
         div()
@@ -1596,9 +1632,7 @@ impl Spk {
             .when(actions.watched_screen, |tile| {
                 tile.hover_listener_mode(HoverListenerMode::InputModalityIndependent)
             })
-            .focus_visible(|tile| {
-                tile.border_color(if speaking { theme.success } else { theme.ring })
-            })
+            .focus_visible(|tile| tile.border_color(theme.ring))
             .on_hover(cx.listener(move |app, hovered: &bool, _, cx| {
                 if *hovered {
                     app.video_stage.hovered = Some(hover_id.clone());
@@ -1626,14 +1660,11 @@ impl Spk {
             })
             .when(tile_width.is_none(), |tile| tile.size_full())
             .overflow_hidden()
-            .border_2()
-            .border_color(if speaking {
-                theme.success
-            } else {
-                theme.sidebar
-            })
+            .border(VOICE_TILE_BORDER_WIDTH)
+            .border_color(theme.sidebar)
             .rounded_lg()
             .bg(theme.sidebar)
+            .when(speaking, |tile| tile.shadow(speaking_ring(theme.success)))
             .when(!showing_video, |tile| {
                 tile.child(profile_avatar(
                     Avatar::new().name(participant.name.to_owned()),
@@ -1697,7 +1728,11 @@ impl Spk {
             )
             .child(controls)
             .when_some(scroll_on_focus.filter(|_| focus_on_tile), |tile, scroll| {
-                tile.child(reveal_in_vertical_scroll(scroll))
+                // The absolute canvas starts inside the tile's border.
+                tile.child(reveal_in_vertical_scroll(
+                    scroll,
+                    VOICE_TILE_BORDER_WIDTH + SPEAKING_RING_WIDTH,
+                ))
             })
     }
 }

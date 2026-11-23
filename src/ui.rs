@@ -684,6 +684,12 @@ fn logo(size: f32) -> Img {
     img(Arc::clone(&LOGO)).size(px(size)).rounded_md()
 }
 
+const SPEAKING_RING_WIDTH: Pixels = px(2.0);
+
+fn speaking_ring(color: Hsla) -> Vec<BoxShadow> {
+    vec![BoxShadow::new(px(0.0), px(0.0), color).spread_radius(SPEAKING_RING_WIDTH)]
+}
+
 fn profile_avatar(
     fallback: Avatar,
     photo: Option<&Arc<AvatarPhoto>>,
@@ -696,7 +702,9 @@ fn profile_avatar(
     let Some(photo) = photo else {
         return fallback
             .size(size)
-            .when(speaking, |avatar| avatar.border_color(theme.success))
+            .when(speaking, |avatar| {
+                avatar.shadow(speaking_ring(theme.success))
+            })
             .into_any_element();
     };
 
@@ -709,10 +717,9 @@ fn profile_avatar(
         .overflow_hidden()
         .bg(theme.tokens.secondary)
         .border_1()
-        .border_color(if speaking {
-            theme.success
-        } else {
-            theme.border
+        .border_color(theme.border)
+        .when(speaking, |avatar| {
+            avatar.shadow(speaking_ring(theme.success))
         })
         .child(
             img(move |window: &mut Window, cx: &mut App| {
