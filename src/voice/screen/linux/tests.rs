@@ -378,7 +378,13 @@ async fn wayland_portal_rejection_ends_source_selection() {
         ));
     }
 
-    // Cancel a request whose portal is still waiting for the user.
-    assert!(timeout(Duration::from_secs(1), pick(None)).await.is_err());
+    // Cancel while either portal method is still waiting for the user.
+    for _ in 0..2 {
+        assert!(timeout(Duration::from_secs(1), pick(None)).await.is_err());
+    }
+    assert!(matches!(
+        timeout(Duration::from_secs(3), pick(None)).await.unwrap(),
+        Err(CaptureError::PortalSelection)
+    ));
     tokio::time::sleep(Duration::from_millis(150)).await;
 }
