@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.0](https://github.com/ChristopheCVB/spk-gpui/compare/v0.2.0...v0.3.0) (2026-11-23)
+
+
+### Features
+
+* **chat:** show attachment previews and playback controls inline ([#121](https://github.com/ChristopheCVB/spk-gpui/issues/121)) ([b32dd8b](https://github.com/ChristopheCVB/spk-gpui/commit/b32dd8b364dfb039073bee121fae1aff4fb44d50))
+* **voice:** align the desktop voice workspace with SPK Web ([#132](https://github.com/ChristopheCVB/spk-gpui/issues/132)) ([ecf7964](https://github.com/ChristopheCVB/spk-gpui/commit/ecf7964fada1b71039d556c608a1f71994928635))
+
+
+### Bug Fixes
+
+* **ui:** prevent duplicate accessibility node crashes ([#123](https://github.com/ChristopheCVB/spk-gpui/issues/123)) ([7177bf0](https://github.com/ChristopheCVB/spk-gpui/commit/7177bf095f423448bd96e741717ec1be6691feb0))
+
 ## [0.2.0](https://github.com/ChristopheCVB/spk-gpui/compare/v0.1.0...v0.2.0) (2026-11-22)
 
 
