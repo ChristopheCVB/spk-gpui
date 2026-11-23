@@ -32,7 +32,7 @@ mod windows;
 #[cfg(windows)]
 use self::windows as platform;
 #[cfg(windows)]
-pub(crate) use self::windows::pick_system_source;
+pub(crate) use self::windows::{pick_system_source, preview_sources};
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 mod platform {
