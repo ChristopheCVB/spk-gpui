@@ -10,6 +10,7 @@ use gpui_kit::component::{
 
 use super::{
     chat::{chat_destination, mark_read_item, unread_badges, unread_label},
+    video::{screen_tile_button, watching_screen},
     *,
 };
 use crate::{
@@ -1451,6 +1452,7 @@ impl Spk {
         &self,
         participant: &Participant<'_>,
         sidebar: &Sidebar,
+        watched_screen: bool,
         cx: &Context<Self>,
     ) -> Option<impl IntoElement> {
         if sidebar.profile.id.as_deref() == Some(participant.id) {
@@ -1470,6 +1472,7 @@ impl Spk {
                 format!("Actions for {name}"),
             )
             .secondary()
+            .when(watched_screen, screen_tile_button)
             .dropdown_menu_with_anchor(Anchor::TopRight, {
                 let app = app.clone();
                 move |menu, window, cx| {
@@ -1554,10 +1557,19 @@ impl Spk {
         let hover_id = participant.id.to_owned();
         let key_id = hover_id.clone();
         let tile_focus = &self.video_stage.tile_focus[participant.id];
-        let menu = self.voice_tile_menu(participant, sidebar, cx);
+        let watched_screen = watching_screen(participant, call, sidebar);
+        let quality = call
+            .video
+            .as_ref()
+            .and_then(|report| report.participants.get(participant.id))
+            .filter(|_| watched_screen)
+            .and_then(|video| video.screen_quality);
+        let menu = self.voice_tile_menu(participant, sidebar, watched_screen, cx);
         let tile_focused = tile_focus.contains_focused(window, cx);
-        let reveal_actions =
-            tile_focused || self.video_stage.menu_for.as_deref() == Some(participant.id);
+        let reveal_actions = tile_focused
+            || self.video_stage.menu_for.as_deref() == Some(participant.id)
+            || self.video_stage.screen_volume_for.as_deref() == Some(participant.id)
+            || (watched_screen && self.video_stage.hovered.as_deref() == Some(participant.id));
         let scroll_on_focus = scroll_on_focus.filter(|_| tile_focused).cloned();
         let focus_on_tile = tile_focus.is_focused(window);
         let controls = self
@@ -1574,12 +1586,13 @@ impl Spk {
             .focus_visible(|tile| {
                 tile.border_color(if speaking { theme.success } else { theme.ring })
             })
-            .on_hover(cx.listener(move |app, hovered: &bool, _, _| {
+            .on_hover(cx.listener(move |app, hovered: &bool, _, cx| {
                 if *hovered {
                     app.video_stage.hovered = Some(hover_id.clone());
                 } else if app.video_stage.hovered.as_deref() == Some(&hover_id) {
                     app.video_stage.hovered = None;
                 }
+                cx.notify();
             }))
             .on_key_down(cx.listener(move |app, event, window, cx| {
                 app.video_tile_key(&key_id, event, window, cx)
@@ -1655,6 +1668,17 @@ impl Spk {
                     .children(participant_status(flags.muted, flags.deafened, cx))
                     .when(flags.radio_listening == Some(true), |row| {
                         row.child(radio_badge(cx))
+                    })
+                    .when_some(quality, |row, quality| {
+                        row.child(
+                            div()
+                                .flex_shrink_0()
+                                .border_l_1()
+                                .border_color(theme.border)
+                                .pl_1()
+                                .text_size(px(10.0))
+                                .child(format!("{}p · {} fps", quality.height, quality.fps)),
+                        )
                     }),
             )
             .child(controls)

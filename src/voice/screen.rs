@@ -80,6 +80,19 @@ impl Quality {
         (width >= 2 && height >= 2).then_some((width, height))
     }
 
+    pub(super) fn from_publication_name(name: &str) -> Option<Self> {
+        let (height, fps) = name.strip_prefix("spk:screen:")?.split_once(':')?;
+        if ![height, fps]
+            .into_iter()
+            .all(|part| part.bytes().all(|byte| byte.is_ascii_digit()))
+        {
+            return None;
+        }
+        let (height, fps) = (height.parse().ok()?, fps.parse().ok()?);
+        (Self::HEIGHTS.contains(&height) && Self::FPS.contains(&fps))
+            .then_some(Self { height, fps })
+    }
+
     fn publication_name(width: u32, height: u32, fps: u32) -> String {
         if Self::HEIGHTS.contains(&height)
             && Self::FPS.contains(&fps)

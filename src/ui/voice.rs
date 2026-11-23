@@ -648,14 +648,14 @@ fn speaker_controls(
         )
 }
 
-fn quick_level(
+pub(super) fn quick_level(
     id: &'static str,
     value: u8,
     max: u8,
     app: &Entity<Spk>,
     window: &mut Window,
     cx: &mut App,
-    command: fn(u8) -> Command,
+    command: impl Fn(u8) -> Command + 'static,
 ) -> Entity<SliderState> {
     window.use_keyed_state(id, cx, |_, cx| {
         let app = app.downgrade();

@@ -17,7 +17,7 @@ use livekit::{
 };
 use tokio::task::JoinHandle;
 
-use super::{Update, Worker, wait_until};
+use super::{Update, Worker, screen::Quality, wait_until};
 use crate::api::VideoPresence;
 
 mod camera;
@@ -140,6 +140,8 @@ pub(crate) async fn preview_camera(
 #[derive(Clone, Default)]
 pub struct ParticipantVideo {
     pub live: HashSet<VideoSource>,
+    pub screen_quality: Option<Quality>,
+    pub screen_audio: bool,
     pub frames: HashMap<VideoSource, VideoFrameSlot>,
 }
 
@@ -411,7 +413,12 @@ impl Video {
             let wanted = watching.contains(&id);
             let video = self.report.participants.entry(id).or_default();
             for publication in participant.track_publications().values() {
-                let Some(source) = VideoSource::from_track(publication.source()) else {
+                let track_source = publication.source();
+                if track_source == TrackSource::ScreenshareAudio {
+                    video.screen_audio |= !publication.is_muted();
+                    continue;
+                }
+                let Some(source) = VideoSource::from_track(track_source) else {
                     continue;
                 };
                 if publication.is_desired() != wanted {
@@ -421,6 +428,9 @@ impl Video {
                     continue;
                 }
                 video.live.insert(source);
+                if source == VideoSource::Screen {
+                    video.screen_quality = Quality::from_publication_name(&publication.name());
+                }
                 if !wanted || reconnecting {
                     continue;
                 }
@@ -518,7 +528,7 @@ mod tests {
                 true,
             );
             let track = LocalVideoTrack::create_video_track(
-                "spk:screen:180:30",
+                "spk:screen:720:30",
                 RtcVideoSource::Native(capture.clone()),
             );
             let publication = publisher
@@ -550,6 +560,13 @@ mod tests {
         remote.sync_tracks(&receiver, &watching, false);
         let remote_tile = &remote.report.participants[&presenter];
         assert!(remote_tile.live.contains(&video_source));
+        assert_eq!(
+            remote_tile.screen_quality,
+            (video_source == VideoSource::Screen).then_some(Quality {
+                height: 720,
+                fps: 30
+            })
+        );
         assert!(remote_tile.frames.is_empty());
         assert!(!publication.is_desired());
 

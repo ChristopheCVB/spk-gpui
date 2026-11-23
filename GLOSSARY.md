@@ -172,6 +172,10 @@ A voice participant’s live camera video.
 
 A voice participant’s live view of a selected screen, window, or tab, optionally with its audio.
 
+**Screen Share Quality**
+
+The resolution and frame rate a Screen Share advertises to viewers.
+
 **Watch**
 
 A viewer’s choice to receive the camera video, screen share, and screen audio a participant is sharing.

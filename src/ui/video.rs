@@ -4,16 +4,19 @@ use gpui_kit::component::{
     IndexPath,
     popover::Popover,
     select::{SearchableVec, SelectEvent, SelectItem},
+    slider::Slider,
     switch::Switch,
+    tooltip::Tooltip,
 };
 
 use super::{
-    voice::{VoiceButtonGroup, voice_button, voice_shortcut_tooltip},
+    voice::{VoiceButtonGroup, quick_level, voice_button, voice_shortcut_tooltip},
     *,
 };
 use crate::{
     session::{Participant, VoiceView},
     voice::{
+        ParticipantVolumeChange,
         screen::{Quality, State as ScreenState},
         video::{CameraDevice, CameraResolution, CameraStatus, ParticipantVideo, VideoSource},
     },
@@ -32,6 +35,7 @@ pub(super) struct VideoStage {
     pub hide_preview: bool,
     pub hovered: Option<String>,
     pub menu_for: Option<String>,
+    pub screen_volume_for: Option<String>,
     pub frames: HashMap<(String, VideoSource), Arc<RenderImage>>,
 }
 
@@ -172,6 +176,22 @@ impl Spk {
             .is_some_and(|id| !self.video_stage.tile_focus.contains_key(id))
         {
             self.video_stage.menu_for = None;
+        }
+        if self
+            .video_stage
+            .screen_volume_for
+            .as_ref()
+            .is_some_and(|id| {
+                !self.video_stage.tile_focus.contains_key(id)
+                    || !watching.is_some_and(|ids| ids.contains(id))
+                    || !report
+                        .and_then(|report| report.participants.get(id))
+                        .is_some_and(|video| {
+                            video.screen_audio && video.live.contains(&VideoSource::Screen)
+                        })
+            })
+        {
+            self.video_stage.screen_volume_for = None;
         }
         if self
             .video_stage
@@ -566,8 +586,9 @@ impl Spk {
         let id = participant.id.to_owned();
         let watch_id = id.clone();
         let theater_id = id.clone();
+        let watched_screen = watching_screen(participant, call, sidebar);
         let viewers = sidebar.viewers(&call.channel_id, participant.id);
-        div()
+        let row = div()
             .absolute()
             .bottom_2()
             .left_2()
@@ -577,124 +598,286 @@ impl Spk {
             .items_center()
             .justify_end()
             .gap_1()
+            .when(watched_screen, |row| row.left_1().right_1())
             .when(available.live && !viewers.is_empty(), |row| {
-                row.child(
-                    Label::new(format!("Watching: {}", viewers.join(", ")))
-                        .flex_1()
-                        .min_w_0()
-                        .px_2()
-                        .rounded_md()
-                        .bg(cx.theme().background)
-                        .text_xs()
-                        .truncate(),
-                )
-            })
-            .when(available.permits(TileAction::Watch), |row| {
-                let label = if available.watching {
-                    "Stop watching"
+                if watched_screen {
+                    row.child(screen_viewers(&viewers, sidebar, cx))
                 } else {
-                    "Watch"
-                };
-                row.child(
-                    tool_button_with_label(
-                        "watch",
-                        if available.watching {
-                            IconName::EyeOff
-                        } else {
-                            IconName::Eye
-                        },
-                        label,
-                        !available.watching,
+                    let names = viewers.iter().map(|viewer| viewer.name).collect::<Vec<_>>();
+                    row.child(
+                        Label::new(format!("Watching: {}", names.join(", ")))
+                            .flex_1()
+                            .min_w_0()
+                            .px_2()
+                            .rounded_md()
+                            .bg(cx.theme().background)
+                            .text_xs()
+                            .truncate(),
                     )
-                    .secondary()
-                    .flex_shrink_0()
-                    .on_click(cx.listener(move |app, _, window, cx| {
-                        app.apply_tile_action(&watch_id, TileAction::Watch, &available, window, cx);
-                    })),
+                }
+            });
+        if watched_screen && !reveal_actions {
+            return row;
+        }
+        let watch = available.permits(TileAction::Watch).then(|| {
+            let label = if available.watching {
+                "Stop watching"
+            } else {
+                "Watch"
+            };
+            tool_button_with_label(
+                "watch",
+                if available.watching {
+                    IconName::EyeOff
+                } else {
+                    IconName::Eye
+                },
+                label,
+                !available.watching,
+            )
+            .secondary()
+            .flex_shrink_0()
+            .when(watched_screen, screen_tile_button)
+            .on_click(cx.listener(move |app, _, window, cx| {
+                app.apply_tile_action(&watch_id, TileAction::Watch, &available, window, cx);
+            }))
+        });
+        let (watch, stop) = if watched_screen {
+            (None, watch)
+        } else {
+            (watch, None)
+        };
+        row.children(watch).child(
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .when(watched_screen, |row| row.gap_0p5().flex_shrink_0())
+                .when(!reveal_actions, |actions| {
+                    actions
+                        .invisible()
+                        .group_hover("voice-tile", |style| style.visible())
+                })
+                .children(stop)
+                .when(available.is_me && available.live, |row| {
+                    let label = if self.video_stage.hide_preview {
+                        "Show preview"
+                    } else {
+                        "Hide preview"
+                    };
+                    row.child(
+                        tool_button("camera-preview", IconName::Eye, label)
+                            .secondary()
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.video_stage.hide_preview = !app.video_stage.hide_preview;
+                                cx.notify();
+                            })),
+                    )
+                })
+                .when(available.permits(TileAction::Theater), |row| {
+                    row.child(
+                        tool_button(
+                            "theater",
+                            IconName::Monitor,
+                            if available.theater {
+                                "Exit theater mode"
+                            } else {
+                                "Theater mode"
+                            },
+                        )
+                        .secondary()
+                        .when(watched_screen, screen_tile_button)
+                        .on_click(cx.listener(
+                            move |app, _, window, cx| {
+                                app.apply_tile_action(
+                                    &theater_id,
+                                    TileAction::Theater,
+                                    &available,
+                                    window,
+                                    cx,
+                                );
+                            },
+                        )),
+                    )
+                })
+                .when(available.permits(TileAction::Fullscreen), |row| {
+                    row.child(
+                        tool_button(
+                            "fullscreen",
+                            if available.fullscreen {
+                                IconName::Minimize
+                            } else {
+                                IconName::Maximize
+                            },
+                            if available.fullscreen {
+                                "Exit fullscreen"
+                            } else {
+                                "Fullscreen"
+                            },
+                        )
+                        .secondary()
+                        .when(watched_screen, screen_tile_button)
+                        .on_click(cx.listener(
+                            move |app, _, window, cx| {
+                                app.apply_tile_action(
+                                    &id,
+                                    TileAction::Fullscreen,
+                                    &available,
+                                    window,
+                                    cx,
+                                );
+                            },
+                        )),
+                    )
+                })
+                .when(
+                    watched_screen
+                        && call
+                            .video
+                            .as_ref()
+                            .and_then(|report| report.participants.get(participant.id))
+                            .is_some_and(|video| video.screen_audio),
+                    |row| row.child(screen_volume(participant.id, cx)),
                 )
-            })
-            .child(
+                .children(menu),
+        )
+    }
+}
+
+pub(super) fn watching_screen(
+    participant: &Participant<'_>,
+    call: &VoiceView,
+    sidebar: &Sidebar,
+) -> bool {
+    sidebar.voice_intent.watching.contains(participant.id)
+        && (participant.video.is_some_and(|video| video.screen)
+            || call
+                .video
+                .as_ref()
+                .and_then(|report| report.participants.get(participant.id))
+                .is_some_and(|video| video.live.contains(&VideoSource::Screen)))
+}
+
+pub(super) fn screen_tile_button(button: Button) -> Button {
+    button.size(px(24.0)).p_0()
+}
+
+fn screen_viewers(viewers: &[Participant<'_>], sidebar: &Sidebar, cx: &App) -> Div {
+    const LIMIT: usize = 5;
+    div()
+        .flex()
+        .mr_auto()
+        .flex_shrink_0()
+        .children(
+            viewers
+                .iter()
+                .take(LIMIT)
+                .enumerate()
+                .map(|(index, viewer)| {
+                    let name = viewer.name.to_owned();
+                    div()
+                        .id(SharedString::from(format!("screen-viewer-{}", viewer.id)))
+                        .role(Role::Image)
+                        .aria_label(name.clone())
+                        .when(index > 0, |avatar| avatar.ml(px(-6.0)))
+                        .tooltip(move |window, cx| Tooltip::new(name.clone()).build(window, cx))
+                        .child(profile_avatar(
+                            Avatar::new().name(viewer.name.to_owned()),
+                            sidebar.avatar(Some(viewer.id)),
+                            24.0,
+                            false,
+                            cx,
+                        ))
+                }),
+        )
+        .when(viewers.len() > LIMIT, |row| {
+            let hidden = &viewers[LIMIT..];
+            let names = hidden
+                .iter()
+                .map(|viewer| viewer.name)
+                .collect::<Vec<_>>()
+                .join(", ");
+            row.child(
                 div()
+                    .id("more-viewers")
+                    .ml(px(-6.0))
+                    .size_6()
                     .flex()
                     .items_center()
-                    .gap_1()
-                    .when(!reveal_actions, |actions| {
-                        actions
-                            .invisible()
-                            .group_hover("voice-tile", |style| style.visible())
-                    })
-                    .when(available.is_me && available.live, |row| {
-                        let label = if self.video_stage.hide_preview {
-                            "Show preview"
-                        } else {
-                            "Hide preview"
-                        };
-                        row.child(
-                            tool_button("camera-preview", IconName::Eye, label)
-                                .secondary()
-                                .on_click(cx.listener(|app, _, _, cx| {
-                                    app.video_stage.hide_preview = !app.video_stage.hide_preview;
-                                    cx.notify();
-                                })),
-                        )
-                    })
-                    .when(available.permits(TileAction::Theater), |row| {
-                        row.child(
-                            tool_button(
-                                "theater",
-                                IconName::Monitor,
-                                if available.theater {
-                                    "Exit theater mode"
-                                } else {
-                                    "Theater mode"
-                                },
-                            )
-                            .secondary()
-                            .on_click(cx.listener(
-                                move |app, _, window, cx| {
-                                    app.apply_tile_action(
-                                        &theater_id,
-                                        TileAction::Theater,
-                                        &available,
-                                        window,
-                                        cx,
-                                    );
-                                },
-                            )),
-                        )
-                    })
-                    .when(available.permits(TileAction::Fullscreen), |row| {
-                        row.child(
-                            tool_button(
-                                "fullscreen",
-                                if available.fullscreen {
-                                    IconName::Minimize
-                                } else {
-                                    IconName::Maximize
-                                },
-                                if available.fullscreen {
-                                    "Exit fullscreen"
-                                } else {
-                                    "Fullscreen"
-                                },
-                            )
-                            .secondary()
-                            .on_click(cx.listener(
-                                move |app, _, window, cx| {
-                                    app.apply_tile_action(
-                                        &id,
-                                        TileAction::Fullscreen,
-                                        &available,
-                                        window,
-                                        cx,
-                                    );
-                                },
-                            )),
-                        )
-                    })
-                    .children(menu),
+                    .justify_center()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().secondary)
+                    .text_xs()
+                    .aria_label(format!("More viewers: {names}"))
+                    .tooltip(move |window, cx| Tooltip::new(names.clone()).build(window, cx))
+                    .child(format!("+{}", hidden.len())),
             )
-    }
+        })
+}
+
+fn screen_volume(id: &str, cx: &Context<Spk>) -> Popover {
+    let id = id.to_owned();
+    let open_id = id.clone();
+    let app = cx.weak_entity();
+    Popover::new("screen-volume")
+        .anchor(Anchor::BottomRight)
+        .w(px(192.0))
+        .trigger(screen_tile_button(
+            tool_button(
+                "screen-volume-trigger",
+                IconName::Volume2,
+                "Screen Share volume",
+            )
+            .secondary(),
+        ))
+        .on_open_change({
+            let app = app.clone();
+            move |open, _, cx| {
+                let _ = app.update(cx, |app, cx| {
+                    if *open {
+                        app.video_stage.screen_volume_for = Some(open_id.clone());
+                    } else if app.video_stage.screen_volume_for.as_deref() == Some(&open_id) {
+                        app.video_stage.screen_volume_for = None;
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .content(move |_, window, cx| {
+            let Some(app) = app.upgrade() else {
+                return div();
+            };
+            let View::SignedIn(sidebar) = &app.read(cx).view else {
+                return div();
+            };
+            let volume = sidebar
+                .voice_intent
+                .preferred
+                .participant_volume(&id)
+                .screen;
+            let id = id.clone();
+            let slider = quick_level(
+                "screen-volume-level",
+                volume,
+                200,
+                &app,
+                window,
+                cx,
+                move |value| {
+                    Command::SetParticipantVolume(
+                        id.clone(),
+                        ParticipantVolumeChange::Screen(value),
+                    )
+                },
+            );
+            div().child(
+                Slider::new(&slider)
+                    .tab_stop(true)
+                    .accessibility_label("Screen Share volume"),
+            )
+        })
 }
 
 pub(super) fn screen_share_action(call: &VoiceView) -> (&'static str, Command) {

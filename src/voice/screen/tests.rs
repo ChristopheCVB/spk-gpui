@@ -18,6 +18,23 @@ fn presets_bound_capture_without_upscaling_or_distorting() {
 }
 
 #[test]
+fn screen_quality_accepts_only_advertised_spk_presets() {
+    assert_eq!(
+        Quality::from_publication_name("spk:screen:1080:30"),
+        Some(Quality::default())
+    );
+    for invalid in [
+        "screen",
+        "spk:screen:180:30",
+        "spk:screen:1080:25",
+        "spk:screen:1080:+30",
+        "spk:screen:1080:30:extra",
+    ] {
+        assert_eq!(Quality::from_publication_name(invalid), None, "{invalid}");
+    }
+}
+
+#[test]
 fn screen_audio_preferences_survive_reload_and_default_to_web_behavior() {
     let previous: super::super::DevicePreferences = serde_json::from_str("{}").unwrap();
     assert!(previous.screen_audio);
