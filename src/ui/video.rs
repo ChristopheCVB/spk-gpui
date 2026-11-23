@@ -3,7 +3,7 @@ use std::{cell::RefCell, collections::HashMap};
 use gpui_kit::component::{
     IndexPath,
     popover::Popover,
-    select::{SearchableVec, Select, SelectEvent, SelectState},
+    select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState},
     switch::Switch,
 };
 
@@ -27,6 +27,7 @@ pub(super) struct VideoStage {
     pub participant_scroll: ScrollHandle,
     pub tile_focus: HashMap<String, FocusHandle>,
     strip_focus: RefCell<Option<FocusHandle>>,
+    camera_options_focus: RefCell<[Option<FocusHandle>; 2]>,
     pub hide_preview: bool,
     pub hovered: Option<String>,
     pub menu_for: Option<String>,
@@ -248,17 +249,26 @@ impl Spk {
     pub(super) fn camera_controls(
         &self,
         sidebar: &Sidebar,
+        location: VoiceControls,
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let on = sidebar.camera_publishing();
-        let label = if on { "Stop Camera" } else { "Start Camera" };
+        let label = if on {
+            "Turn camera off"
+        } else {
+            "Turn camera on"
+        };
         let app = cx.weak_entity();
+        let trigger_focus = self.video_stage.camera_options_focus.borrow_mut()
+            [usize::from(location.compact())]
+        .get_or_insert_with(|| cx.focus_handle())
+        .clone();
         div()
+            .id("camera-controls")
             .flex()
             .items_center()
-            .gap_1()
             .child(
-                tool_button(
+                voice_action_button(
                     "toggle-camera",
                     if on {
                         IconName::Video
@@ -266,21 +276,33 @@ impl Spk {
                         IconName::VideoOff
                     },
                     label,
+                    location,
                 )
-                .label(label)
+                .selected(on)
+                .toggled(on)
                 .on_click(cx.listener(move |app, _, _, cx| {
-                    app.send(Command::SetCameraEnabled(!on), None, cx);
+                    if let View::SignedIn(sidebar) = &app.view {
+                        app.send(
+                            Command::SetCameraEnabled(!sidebar.camera_publishing()),
+                            None,
+                            cx,
+                        );
+                    }
                 })),
             )
             .child(
                 Popover::new("camera-options")
                     .anchor(Anchor::BottomRight)
                     .w(px(280.0))
-                    .trigger(tool_button(
-                        "camera-settings",
-                        IconName::ChevronUp,
-                        "Camera settings",
-                    ))
+                    .trigger(
+                        voice_options_button("Camera options", false).track_focus(&trigger_focus),
+                    )
+                    .on_open_change(move |open, window, cx| {
+                        if !open {
+                            trigger_focus.focus(window, cx);
+                            window.refresh();
+                        }
+                    })
                     .content(move |_, _, cx| {
                         let Some(app) = app.upgrade() else {
                             return div();
@@ -345,7 +367,7 @@ impl Spk {
                             window.refresh();
                         }
                     })
-                    .content(move |_, window, cx| {
+                    .content(move |_, _, cx| {
                         let Some(app) = app.upgrade() else {
                             return div();
                         };
@@ -357,8 +379,6 @@ impl Spk {
                             intent.screen.quality,
                             intent.preferred.screen_audio,
                             &app,
-                            window,
-                            cx,
                         )
                     }),
             )
@@ -793,13 +813,7 @@ pub(super) fn screen_share_action(call: &VoiceView) -> (&'static str, Command) {
     }
 }
 
-fn screen_preferences(
-    selected: Quality,
-    share_audio: bool,
-    app: &Entity<Spk>,
-    window: &mut Window,
-    cx: &mut App,
-) -> Div {
+fn screen_preferences(selected: Quality, share_audio: bool, app: &Entity<Spk>) -> Div {
     let audio = app.downgrade();
     div()
         .flex()
@@ -836,40 +850,25 @@ fn screen_preferences(
             ]
             .into_iter()
             .map(|(label, choices, selected, unit, command)| {
-                let labels = choices.map(|choice| format!("{choice}{unit}"));
-                let index = choices
-                    .iter()
-                    .position(|choice| *choice == selected)
-                    .map(IndexPath::new);
-                let select = window.use_keyed_state(label, cx, |window, cx| {
-                    let app = app.downgrade();
-                    cx.subscribe(&cx.entity(), {
-                        let labels = labels.clone();
-                        move |_, _, event, cx| {
-                            if let SelectEvent::Confirm(Some(choice)) = event
-                                && let Some(index) = labels.iter().position(|label| label == choice)
-                            {
-                                let _ = app.update(cx, |app, cx| {
-                                    app.send(command(choices[index]), None, cx)
-                                });
-                            }
-                        }
+                let options = choices
+                    .map(|value| VoiceOption {
+                        title: format!("{value}{unit}").into(),
+                        value,
                     })
-                    .detach();
-                    SelectState::new(SearchableVec::new(labels), index, window, cx)
-                });
+                    .to_vec();
                 div()
                     .id(label)
                     .flex()
                     .flex_col()
                     .gap_1()
                     .child(Label::new(label).font_semibold())
-                    .child(
-                        Select::new(&select)
-                            .small()
-                            .w_full()
-                            .accessibility_label(label),
-                    )
+                    .child(VoiceSelect {
+                        label,
+                        options,
+                        value: selected,
+                        app: app.downgrade(),
+                        command,
+                    })
             }),
         )
 }
@@ -900,87 +899,150 @@ fn participant_video(video: Option<&ParticipantVideo>) -> bool {
     video.is_some_and(|video| !video.live.is_empty())
 }
 
+#[derive(Clone, PartialEq)]
+struct VoiceOption<T> {
+    title: SharedString,
+    value: T,
+}
+
+impl<T: Clone + PartialEq> SelectItem for VoiceOption<T> {
+    type Value = T;
+
+    fn title(&self) -> SharedString {
+        self.title.clone()
+    }
+
+    fn value(&self) -> &T {
+        &self.value
+    }
+}
+
+struct VoiceSelectState<T: Clone + PartialEq + 'static> {
+    select: Entity<SelectState<SearchableVec<VoiceOption<T>>>>,
+    options: Vec<VoiceOption<T>>,
+    selected: IndexPath,
+}
+
+#[derive(IntoElement)]
+struct VoiceSelect<T: Clone + PartialEq + 'static> {
+    label: &'static str,
+    options: Vec<VoiceOption<T>>,
+    value: T,
+    app: WeakEntity<Spk>,
+    command: fn(T) -> Command,
+}
+
+impl<T: Clone + PartialEq + 'static> RenderOnce for VoiceSelect<T> {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let selected = IndexPath::default().row(
+            self.options
+                .iter()
+                .position(|option| option.value == self.value)
+                .unwrap_or(0),
+        );
+        let state = window.use_keyed_state(self.label, cx, |window, cx| {
+            let select = cx.new(|cx| {
+                SelectState::new(
+                    SearchableVec::new(self.options.clone()),
+                    Some(selected),
+                    window,
+                    cx,
+                )
+            });
+            let app = self.app;
+            let command = self.command;
+            cx.subscribe(&select, move |_, _, event, cx| {
+                if let SelectEvent::Confirm(Some(value)) = event {
+                    let _ = app.update(cx, |app, cx| {
+                        app.send(command(value.clone()), None, cx);
+                    });
+                }
+            })
+            .detach();
+            VoiceSelectState {
+                select,
+                options: self.options.clone(),
+                selected,
+            }
+        });
+        let picker = state.read(cx);
+        let select = picker.select.clone();
+        if picker.options != self.options || picker.selected != selected {
+            state.update(cx, |picker, cx| {
+                select.update(cx, |select, cx| {
+                    if picker.options != self.options {
+                        select.set_items(SearchableVec::new(self.options.clone()), window, cx);
+                    }
+                    select.set_selected_index(Some(selected), window, cx);
+                });
+                picker.options = self.options;
+                picker.selected = selected;
+            });
+        }
+        Select::new(&select)
+            .small()
+            .w_full()
+            .accessibility_label(self.label)
+    }
+}
+
 pub(super) fn camera_options(
     sidebar: &Sidebar,
     app: &Entity<Spk>,
     devices: &[CameraDevice],
 ) -> Div {
-    let entity = app.downgrade();
-    let default_camera = entity.clone();
-    let resolution_entity = entity.clone();
     let choice = &sidebar.voice_intent.camera;
-    let chosen = choice.device.as_deref();
-    let unavailable = chosen.is_some_and(|id| !devices.iter().any(|device| device.id == id));
+    let options = std::iter::once(VoiceOption {
+        title: "System default".into(),
+        value: None,
+    })
+    .chain(devices.iter().map(|device| VoiceOption {
+        title: device.name.clone().into(),
+        value: Some(device.id.clone()),
+    }))
+    .collect();
+    let unavailable = choice
+        .device
+        .as_ref()
+        .is_some_and(|id| !devices.iter().any(|device| &device.id == id));
+    let resolutions = CameraResolution::ALL
+        .map(|resolution| VoiceOption {
+            title: resolution.label().into(),
+            value: resolution,
+        })
+        .to_vec();
     div()
         .flex()
         .flex_col()
         .gap_2()
-        .child(
-            div()
-                .id("camera-devices")
-                .max_h(px(180.0))
-                .overflow_y_scroll()
-                .flex()
-                .flex_col()
-                .child(
-                    Button::new("default-camera")
-                        .small()
-                        .ghost()
-                        .tab_stop(true)
-                        .label("System default")
-                        .selected(chosen.is_none())
-                        .on_click(move |_, _, cx| {
-                            let _ = default_camera.update(cx, |app, cx| {
-                                app.send(Command::ChooseCamera(None), None, cx)
-                            });
-                        }),
-                )
-                .children(devices.iter().map(|device| {
-                    let id = device.id.clone();
-                    let entity = entity.clone();
-                    Button::new(SharedString::from(format!("camera-{id}")))
-                        .small()
-                        .ghost()
-                        .tab_stop(true)
-                        .label(device.name.clone())
-                        .selected(chosen == Some(&id))
-                        .on_click(move |_, _, cx| {
-                            let _ = entity.update(cx, |app, cx| {
-                                app.send(Command::ChooseCamera(Some(id.clone())), None, cx)
-                            });
-                        })
-                }))
-                .when(unavailable, |list| {
-                    list.child("Selected Camera unavailable")
-                })
-                .when(devices.is_empty(), |list| list.child("No Cameras detected")),
-        )
-        .child(Label::new("Resolution").font_semibold())
-        .child(
-            div()
-                .flex()
-                .flex_wrap()
-                .gap_1()
-                .children(CameraResolution::ALL.into_iter().map(|resolution| {
-                    let entity = resolution_entity.clone();
-                    Button::new(resolution.label())
-                        .small()
-                        .ghost()
-                        .tab_stop(true)
-                        .label(resolution.label())
-                        .selected(choice.resolution == resolution)
-                        .on_click(move |_, _, cx| {
-                            let _ = entity.update(cx, |app, cx| {
-                                app.send(Command::ChooseCameraResolution(resolution), None, cx)
-                            });
-                        })
-                })),
-        )
+        .child(Label::new("Camera").font_semibold())
+        .child(VoiceSelect {
+            label: "Camera",
+            options,
+            value: choice.device.clone(),
+            app: app.downgrade(),
+            command: Command::ChooseCamera,
+        })
+        .when(unavailable, |panel| {
+            panel.child(Label::new("Selected Camera unavailable").text_xs())
+        })
+        .when(devices.is_empty(), |panel| {
+            panel.child(Label::new("No Cameras detected").text_xs())
+        })
+        .child(Label::new("Webcam resolution").font_semibold())
+        .child(VoiceSelect {
+            label: "Webcam resolution",
+            options: resolutions,
+            value: choice.resolution,
+            app: app.downgrade(),
+            command: Command::ChooseCameraResolution,
+        })
         .when_some(
             match sidebar.camera_status() {
                 CameraStatus::Live(width, height) => Some(format!("Live at {width} × {height}")),
+                CameraStatus::Failed(message) => Some(message.into()),
                 _ => None,
             },
-            |panel, resolution| panel.child(Label::new(resolution).text_xs()),
+            |panel, status| panel.child(Label::new(status).text_xs()),
         )
 }

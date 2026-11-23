@@ -144,7 +144,8 @@ impl Spk {
             (false, false, false, 0, "escape")
                 if !self.video_stage.fullscreen
                     && !self.sidebar_drawer_open
-                    && self.search_panel.is_none() =>
+                    && self.search_panel.is_none()
+                    && !gpui_kit::base::GlobalState::is_in_deferred_context(cx) =>
             {
                 return self.escape_chat(window, cx);
             }
