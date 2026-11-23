@@ -1,4 +1,5 @@
 mod audio;
+mod linked_images;
 mod playback;
 mod video;
 
@@ -16,17 +17,22 @@ use video::VideoClip;
 
 use super::*;
 use crate::{
-    api::{Attachment, MAX_ATTACHMENTS},
+    api::{Attachment, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS},
     session::{AttachmentInput, UploadStatus, image_preview},
 };
 use audio::AudioClip;
+use linked_images::{LinkImage, LinkImageKey};
 use playback::Playback;
+
+const MAX_INLINE_LOADS: usize = 4;
 
 #[derive(Default)]
 pub(in crate::ui) struct AttachmentUi {
     picker: Option<Uuid>,
     picker_error: Option<&'static str>,
     cards: HashMap<String, AttachmentCard>,
+    link_images: HashMap<LinkImageKey, LinkImage>,
+    inline_loads: usize,
     opened_files: HashMap<String, TempPath>,
     playback: Option<Playback>,
     media_start: Option<Uuid>,
@@ -37,12 +43,138 @@ struct AttachmentCard {
     revealed: bool,
     pending: Option<Uuid>,
     error: Option<&'static str>,
+    preview_pending: Option<Uuid>,
+    preview_error: Option<&'static str>,
+    preview_attempted: bool,
     preview: Option<Preview>,
+}
+
+impl AttachmentCard {
+    fn request(&mut self, access: Access) -> &mut Option<Uuid> {
+        if matches!(access, Access::Preview) {
+            &mut self.preview_pending
+        } else {
+            &mut self.pending
+        }
+    }
+
+    fn begin_request(&mut self, access: Access, spoiler: bool) -> Option<Uuid> {
+        let preview = matches!(access, Access::Preview);
+        if self.request(access).is_some()
+            || (spoiler && !self.revealed)
+            || (preview && self.preview_attempted)
+        {
+            return None;
+        }
+
+        let operation = Uuid::new_v4();
+        *self.request(access) = Some(operation);
+        if preview {
+            self.preview_attempted = true;
+        } else {
+            self.error = None;
+        }
+        Some(operation)
+    }
+
+    fn media_ready(&self) -> bool {
+        self.preview.as_ref().is_some_and(Preview::is_media)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AttachmentKind {
+    Image,
+    Text,
+    Audio,
+    WebmAudio,
+    Video,
+    File,
+}
+
+impl AttachmentKind {
+    fn classify(file: &Attachment) -> Self {
+        match file.mime.as_str() {
+            mime if mime.starts_with("image/") => Self::Image,
+            "audio/webm" => Self::WebmAudio,
+            mime if is_audio(mime) => Self::Audio,
+            mime if is_video(mime) => Self::Video,
+            mime if mime.starts_with("audio/") || mime.starts_with("video/") => Self::File,
+            _ if is_text(file) => Self::Text,
+            _ => Self::File,
+        }
+    }
+
+    fn automatic_preview(self) -> bool {
+        matches!(self, Self::Image | Self::Text)
+    }
+
+    fn media_label(self) -> Option<&'static str> {
+        match self {
+            Self::Audio | Self::WebmAudio => Some("audio"),
+            Self::Video => Some("video"),
+            _ => None,
+        }
+    }
+}
+
+const TEXT_EXCERPT_BYTES: usize = 64 * 1024;
+const TEXT_INITIAL_LINES: usize = 25;
+
+struct TextPreview {
+    text: String,
+    excerpt_end: usize,
+    excerpt_lines: usize,
+    shown: usize,
+}
+
+impl TextPreview {
+    fn new(bytes: &[u8]) -> Self {
+        let text = String::from_utf8_lossy(bytes).into_owned();
+        let excerpt_end = if text.len() > TEXT_EXCERPT_BYTES {
+            let end = text.floor_char_boundary(TEXT_EXCERPT_BYTES);
+            text[..end].rfind('\n').unwrap_or(end)
+        } else {
+            text.len()
+        };
+        Self {
+            excerpt_lines: text[..excerpt_end].lines().count(),
+            excerpt_end,
+            text,
+            shown: TEXT_INITIAL_LINES,
+        }
+    }
+
+    fn displayed(&self) -> String {
+        self.text[..self.excerpt_end]
+            .lines()
+            .take(self.shown)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn can_page(&self) -> bool {
+        self.shown < self.excerpt_lines
+    }
+
+    fn has_more(&self) -> bool {
+        self.can_page() || self.excerpt_end < self.text.len()
+    }
+
+    fn can_collapse(&self) -> bool {
+        !self.has_more() && self.shown > TEXT_INITIAL_LINES
+    }
+
+    fn show_all(&mut self) {
+        self.excerpt_end = self.text.len();
+        self.excerpt_lines = self.text.lines().count();
+        self.shown = usize::MAX;
+    }
 }
 
 enum Preview {
     Image(Arc<RenderImage>),
-    Text(String),
+    Text(TextPreview),
     Audio(AudioClip),
     Video(VideoClip),
 }
@@ -79,7 +211,9 @@ impl Preview {
 #[derive(Clone, Copy)]
 enum Access {
     Preview,
+    Play,
     Open(&'static str),
+    OpenImage,
     Download,
 }
 
@@ -106,6 +240,7 @@ impl AttachmentUi {
                 .zip(next)
                 .is_some_and(|(previous, next)| Arc::ptr_eq(&previous.messages, &next.messages))
         {
+            self.sync_link_images(previous, next, switched, window);
             self.cards.retain(|id, card| {
                 let keep = !switched
                     && next.is_some_and(|chat| {
@@ -363,7 +498,6 @@ impl Spk {
             .children(message.attachments.iter().map(|file| {
                 let card = self.chat_attachments.cards.get(&file.id);
                 let mut row = div()
-                    .id(SharedString::from(file.id.clone()))
                     .max_w_full()
                     .p_2()
                     .rounded_md()
@@ -371,12 +505,13 @@ impl Spk {
                     .border_color(theme.border);
                 if file.spoiler && !card.is_some_and(|card| card.revealed) {
                     let id = file.id.clone();
-                    return row.child(
+                    return row.id(SharedString::from(file.id.clone())).child(
                         Button::new("reveal")
                             .small()
                             .tab_stop(true)
                             .label("Reveal spoiler attachment")
                             .on_click(cx.listener(move |app, _, _, cx| {
+                                app.preserve_chat_position();
                                 app.chat_attachments
                                     .cards
                                     .entry(id.clone())
@@ -388,11 +523,39 @@ impl Spk {
                 }
                 let preview = card.and_then(|card| card.preview.as_ref());
                 let pending = card.is_some_and(|card| card.pending.is_some());
+                let kind = AttachmentKind::classify(file);
                 let extension = open_extension(&file.mime);
-                let inline = file.mime.starts_with("image/")
-                    || is_text(file)
-                    || is_audio(&file.mime)
-                    || is_video(&file.mime);
+                let open = match kind {
+                    AttachmentKind::Image
+                        if extension.is_some() || matches!(preview, Some(Preview::Image(_))) =>
+                    {
+                        Some(Access::OpenImage)
+                    }
+                    AttachmentKind::Image => None,
+                    _ => extension.map(Access::Open),
+                };
+                let preview_pending = card.is_some_and(|card| card.preview_pending.is_some());
+                let auto_preview = !card.is_some_and(|card| card.preview_attempted)
+                    && file.size <= MAX_ATTACHMENT_BYTES as u64
+                    && kind.automatic_preview();
+                if auto_preview {
+                    let channel = message.channel_id.clone();
+                    let message_id = message.id.clone();
+                    let file = file.clone();
+                    let app = cx.weak_entity();
+                    row = when_visible(row, move |window, cx| {
+                        let _ = app.update(cx, |app, cx| {
+                            app.access_attachment(
+                                channel.clone(),
+                                message_id.clone(),
+                                file.clone(),
+                                Access::Preview,
+                                window,
+                                cx,
+                            );
+                        });
+                    });
+                }
                 row = row
                     .child(
                         div()
@@ -406,23 +569,21 @@ impl Spk {
                                     .text_xs()
                                     .text_color(theme.muted_foreground),
                             )
-                            .when(inline, |actions| {
-                                actions.child(self.attachment_access_button(
-                                    Access::Preview,
-                                    message,
-                                    file,
-                                    pending || preview.is_some(),
-                                    cx,
-                                ))
-                            })
-                            .when_some(extension, |actions, extension| {
-                                actions.child(self.attachment_access_button(
-                                    Access::Open(extension),
-                                    message,
-                                    file,
-                                    pending,
-                                    cx,
-                                ))
+                            .when_some(
+                                kind.media_label()
+                                    .filter(|_| file.size <= MAX_ATTACHMENT_BYTES as u64),
+                                |actions, kind| {
+                                    actions.child(self.attachment_media_controls(
+                                        message, file, kind, pending, cx,
+                                    ))
+                                },
+                            )
+                            .when_some(open, |actions, access| {
+                                actions.child(
+                                    self.attachment_access_button(
+                                        access, message, file, pending, cx,
+                                    ),
+                                )
                             })
                             .child(self.attachment_access_button(
                                 Access::Download,
@@ -432,7 +593,7 @@ impl Spk {
                                 cx,
                             )),
                     )
-                    .when(pending, |row| {
+                    .when(pending || preview_pending || auto_preview, |row| {
                         row.child(
                             div()
                                 .id("attachment-status")
@@ -441,30 +602,61 @@ impl Spk {
                         )
                     })
                     .children(
-                        card.and_then(|card| card.error)
+                        card.and_then(|card| card.error.or(card.preview_error))
                             .map(|error| Label::new(error).text_color(theme.danger)),
                     );
+                let row = row.id(SharedString::from(file.id.clone()));
                 match preview {
-                    Some(Preview::Image(image)) => row.child(
-                        img(image.clone())
-                            .max_w_full()
-                            .h(px(240.))
-                            .object_fit(ObjectFit::Contain),
-                    ),
-                    Some(Preview::Text(text)) => row.child(
-                        div().max_w_full().p_2().child(
-                            Label::new(text.clone())
-                                .text_xs()
-                                .font_family(cx.theme().mono_font_family.clone()),
-                        ),
-                    ),
-                    Some(Preview::Audio(clip)) => row
-                        .child(self.attachment_media_controls(file, "audio", pending, cx))
-                        .when(clip.truncated, |row| {
-                            row.child(
-                                Label::new("Short preview. Open for the full audio.").text_xs(),
-                            )
-                        }),
+                    Some(Preview::Image(image)) => {
+                        let image = image.clone();
+                        let channel = message.channel_id.clone();
+                        let message_id = message.id.clone();
+                        let file = file.clone();
+                        row.child(
+                            Button::new("view-attachment-image")
+                                .ghost()
+                                .tab_stop(true)
+                                .accessibility_label(format!("Enlarge {}", file.filename))
+                                .max_w_full()
+                                .h_auto()
+                                .p_0()
+                                .child(
+                                    img(image.clone())
+                                        .max_w_full()
+                                        .w(px(360.))
+                                        .h(px(240.))
+                                        .object_fit(ObjectFit::Contain),
+                                )
+                                .on_click(cx.listener(move |_, _, window, cx| {
+                                    let (channel, message_id, file) =
+                                        (channel.clone(), message_id.clone(), file.clone());
+                                    let app = cx.weak_entity();
+                                    open_chat_image(
+                                        file.filename.clone(),
+                                        image.clone(),
+                                        move |window, cx| {
+                                            window.close_dialog(cx);
+                                            let _ = app.update(cx, |app, cx| {
+                                                app.access_attachment(
+                                                    channel.clone(),
+                                                    message_id.clone(),
+                                                    file.clone(),
+                                                    Access::OpenImage,
+                                                    window,
+                                                    cx,
+                                                );
+                                            });
+                                        },
+                                        window,
+                                        cx,
+                                    );
+                                })),
+                        )
+                    }
+                    Some(Preview::Text(text)) => row.child(self.attachment_text(file, text, cx)),
+                    Some(Preview::Audio(clip)) => row.when(clip.truncated, |row| {
+                        row.child(Label::new("Short preview. Open for the full audio.").text_xs())
+                    }),
                     Some(Preview::Video(clip)) => {
                         let position = self
                             .chat_attachments
@@ -478,7 +670,6 @@ impl Spk {
                                 .h(px(240.))
                                 .object_fit(ObjectFit::Contain),
                         )
-                        .child(self.attachment_media_controls(file, "video", pending, cx))
                         .when(clip.truncated, |row| {
                             row.child(
                                 Label::new("Short preview. Open for the full video.").text_xs(),
@@ -502,8 +693,8 @@ impl Spk {
         cx: &Context<Self>,
     ) -> Button {
         let (id, label) = match access {
-            Access::Preview => ("preview", "Preview"),
-            Access::Open(_) => ("open", "Open"),
+            Access::Preview | Access::Play => unreachable!("inline attachment access"),
+            Access::Open(_) | Access::OpenImage => ("open", "Open"),
             Access::Download => ("download", "Download"),
         };
         let channel = message.channel_id.clone();
@@ -536,18 +727,35 @@ impl Spk {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let auto = matches!(access, Access::Preview);
+        let kind = AttachmentKind::classify(&file);
+        if auto
+            && (!kind.automatic_preview() || self.chat_attachments.inline_loads >= MAX_INLINE_LOADS)
+            || !chat(&self.view).is_some_and(|chat| {
+                chat.channel_id == channel
+                    && chat.history_ready()
+                    && chat.messages.iter().any(|item| {
+                        item.id == message && item.attachments.iter().any(|item| item.id == file.id)
+                    })
+            })
+        {
+            return;
+        }
         let state = self
             .chat_attachments
             .cards
             .entry(file.id.clone())
             .or_default();
-        if state.pending.is_some() || (file.spoiler && !state.revealed) {
+        let Some(operation) = state.begin_request(access, file.spoiler) else {
             return;
+        };
+        if auto {
+            self.chat_attachments.inline_loads += 1;
         }
-        let operation = Uuid::new_v4();
-        state.pending = Some(operation);
+        if matches!(access, Access::Play) {
+            self.chat_attachments.media_start = Some(operation);
+        }
         let file_id = file.id.clone();
-        state.error = None;
         let destination = matches!(access, Access::Download).then(|| {
             let root = dirs::download_dir()
                 .or_else(dirs::home_dir)
@@ -566,23 +774,20 @@ impl Spk {
                     None => None,
                 };
                 let (reply, result) = oneshot::channel();
-                app.update_in(cx, |app, _, _| {
-                    if app
-                        .chat_attachments
-                        .cards
-                        .get(&file_id)
-                        .and_then(|card| card.pending)
-                        == Some(operation)
-                    {
-                        let _ = app.commands.try_send(Command::ReadChatAttachment {
-                            channel_id: channel,
-                            message_id: message,
-                            attachment_id: file.id.clone(),
-                            reply,
-                        });
-                    }
-                })
-                .map_err(|_| "Attachment unavailable.")?;
+                let commands = app.update_in(cx, |app, _, _| {
+                    app.chat_attachments.cards.get_mut(&file_id)
+                        .is_some_and(|card| *card.request(access) == Some(operation))
+                        .then(|| app.commands.clone())
+                }).map_err(|_| "Attachment unavailable.")?;
+                let Some(commands) = commands else {
+                    return Ok(None);
+                };
+                commands.send(Command::ReadChatAttachment {
+                    channel_id: channel,
+                    message_id: message,
+                    attachment_id: file.id.clone(),
+                    reply,
+                }).await.map_err(|_| "Attachment unavailable.")?;
                 let bytes = result
                     .await
                     .map_err(|_| "Attachment unavailable.")?
@@ -591,9 +796,8 @@ impl Spk {
                     .update_in(cx, |app, _, _| {
                         app.chat_attachments
                             .cards
-                            .get(&file_id)
-                            .and_then(|card| card.pending)
-                            == Some(operation)
+                            .get_mut(&file_id)
+                            .is_some_and(|card| *card.request(access) == Some(operation))
                     })
                     .unwrap_or(false);
                 if !current {
@@ -601,21 +805,28 @@ impl Spk {
                 }
                 cx.background_executor()
                     .spawn(async move {
-                        load_attachment(access, &file.mime, bytes, destination).map(Some)
+                        load_attachment(access, kind, bytes, destination).map(Some)
                     })
                     .await
             }
             .await;
 
             let _ = app.update_in(cx, |app, window, cx| {
-                if app
-                    .chat_attachments
-                    .cards
-                    .get(&file_id)
-                    .and_then(|card| card.pending)
-                    == Some(operation)
-                    && matches!(&result, Ok(Some(AccessResult::Preview(preview))) if preview.is_media())
-                {
+                if auto {
+                    app.chat_attachments.inline_loads -= 1;
+                    cx.notify();
+                }
+                let current = app.chat_attachments.cards.get_mut(&file_id)
+                    .is_some_and(|card| *card.request(access) == Some(operation));
+                if !current {
+                    return;
+                }
+                let play = matches!(access, Access::Play);
+                let start = play && app.chat_attachments.media_start == Some(operation);
+                if auto || start && matches!(&result, Ok(Some(AccessResult::Preview(_)))) {
+                    app.preserve_chat_position();
+                }
+                if start && matches!(&result, Ok(Some(AccessResult::Preview(preview))) if preview.is_media()) {
                     app.chat_attachments.playback = None;
                     for (id, card) in &mut app.chat_attachments.cards {
                         if id != &file_id && card.preview.as_ref().is_some_and(Preview::is_media)
@@ -629,15 +840,15 @@ impl Spk {
                     .chat_attachments
                     .cards
                     .get_mut(&file_id)
-                    .filter(|card| card.pending == Some(operation))
                 {
-                    state.pending = None;
+                    *state.request(access) = None;
                     match result {
-                        Ok(Some(AccessResult::Preview(preview))) => {
+                        Ok(Some(AccessResult::Preview(preview))) if !play || start => {
                             if let Some(previous) = state.preview.replace(preview) {
                                 previous.drop_images(window);
                             }
                         }
+                        Ok(Some(AccessResult::Preview(_))) => {}
                         Ok(Some(AccessResult::Open(path))) => {
                             cx.open_with_system(&path);
                             app.chat_attachments
@@ -645,9 +856,16 @@ impl Spk {
                                 .insert(file_id.clone(), path);
                         }
                         Ok(Some(AccessResult::Downloaded) | None) => {}
+                        Err(error) if auto => state.preview_error = Some(error),
                         Err(error) => state.error = Some(error),
                     }
                     cx.notify();
+                }
+                if start {
+                    app.chat_attachments.media_start = None;
+                    if app.chat_attachments.cards.get(&file_id).is_some_and(AttachmentCard::media_ready) {
+                        app.toggle_attachment_media(file_id, window, cx);
+                    }
                 }
             });
         })
@@ -657,17 +875,20 @@ impl Spk {
 
     fn attachment_media_controls(
         &self,
+        message: &ChatMessage,
         file: &Attachment,
         kind: &'static str,
         pending: bool,
         cx: &Context<Self>,
     ) -> Button {
-        let id = file.id.clone();
         let playing = self
             .chat_attachments
             .playback
             .as_ref()
-            .is_some_and(|playback| playback.id == id && playback.started.is_some());
+            .is_some_and(|playback| playback.id == file.id && playback.started.is_some());
+        let file = file.clone();
+        let channel = message.channel_id.clone();
+        let message = message.id.clone();
         Button::new("play-attachment")
             .small()
             .tab_stop(true)
@@ -678,49 +899,106 @@ impl Spk {
             })
             .disabled(pending)
             .on_click(cx.listener(move |app, _, window, cx| {
-                app.toggle_attachment_media(id.clone(), window, cx);
+                if app
+                    .chat_attachments
+                    .cards
+                    .get(&file.id)
+                    .is_some_and(AttachmentCard::media_ready)
+                {
+                    app.toggle_attachment_media(file.id.clone(), window, cx);
+                } else {
+                    app.access_attachment(
+                        channel.clone(),
+                        message.clone(),
+                        file.clone(),
+                        Access::Play,
+                        window,
+                        cx,
+                    );
+                }
             }))
+    }
+
+    fn attachment_text(&self, file: &Attachment, text: &TextPreview, cx: &Context<Self>) -> Div {
+        let action = |id, label, update: fn(&mut TextPreview)| {
+            let file = file.id.clone();
+            Button::new(id)
+                .ghost()
+                .small()
+                .tab_stop(true)
+                .label(label)
+                .on_click(cx.listener(move |app, _, _, cx| {
+                    app.preserve_chat_position();
+                    if let Some(Preview::Text(text)) = app
+                        .chat_attachments
+                        .cards
+                        .get_mut(&file)
+                        .and_then(|card| card.preview.as_mut())
+                    {
+                        update(text);
+                        cx.notify();
+                    }
+                }))
+        };
+        div()
+            .max_w_full()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div().max_w_full().p_2().child(
+                    Label::new(text.displayed())
+                        .text_xs()
+                        .font_family(cx.theme().mono_font_family.clone()),
+                ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_1()
+                    .when(text.can_page(), |row| {
+                        row.child(action("text-more", "Show 50 more", |text| text.shown += 50))
+                    })
+                    .when(text.has_more(), |row| {
+                        row.child(action("text-all", "Show all", TextPreview::show_all))
+                    })
+                    .when(text.can_collapse(), |row| {
+                        row.child(action("text-collapse", "Collapse", |text| {
+                            text.shown = TEXT_INITIAL_LINES;
+                        }))
+                    }),
+            )
     }
 }
 
 fn load_attachment(
     access: Access,
-    mime: &str,
+    kind: AttachmentKind,
     bytes: Vec<u8>,
     destination: Option<PathBuf>,
 ) -> Result<AccessResult, &'static str> {
     match access {
-        Access::Preview if mime.starts_with("image/") => image_preview(&bytes)
-            .map(Preview::Image)
-            .map(AccessResult::Preview)
-            .ok_or("Image preview unavailable. Try downloading the file."),
-        Access::Preview if mime == "audio/webm" => AudioClip::decode_webm(bytes)
-            .map(Preview::Audio)
-            .map(AccessResult::Preview),
-        Access::Preview if is_audio(mime) => AudioClip::decode(&bytes)
-            .map(Preview::Audio)
-            .map(AccessResult::Preview),
-        Access::Preview if is_video(mime) => VideoClip::decode(bytes)
-            .map(Preview::Video)
-            .map(AccessResult::Preview),
-        Access::Preview => {
-            let text = String::from_utf8_lossy(&bytes[..bytes.len().min(64 * 1024)]);
-            let mut lines = text.lines();
-            let mut preview = lines.by_ref().take(25).collect::<Vec<_>>().join("\n");
-            if lines.next().is_some() || bytes.len() > 64 * 1024 {
-                preview.push_str("\n…");
-            }
-            Ok(AccessResult::Preview(Preview::Text(preview)))
+        Access::Preview | Access::Play => match kind {
+            AttachmentKind::Image => image_preview(&bytes)
+                .map(Preview::Image)
+                .ok_or("Image preview unavailable. Try downloading the file."),
+            AttachmentKind::Text => Ok(Preview::Text(TextPreview::new(&bytes))),
+            AttachmentKind::WebmAudio => AudioClip::decode_webm(bytes).map(Preview::Audio),
+            AttachmentKind::Audio => AudioClip::decode(&bytes).map(Preview::Audio),
+            AttachmentKind::Video => VideoClip::decode(bytes).map(Preview::Video),
+            AttachmentKind::File => Err("Attachment preview unavailable."),
         }
-        Access::Open(extension) => {
-            let error = "Could not open the file.";
-            let mut file = Builder::new()
-                .prefix("spk-")
-                .suffix(extension)
-                .tempfile()
-                .map_err(|_| error)?;
-            file.write_all(&bytes).map_err(|_| error)?;
-            Ok(AccessResult::Open(file.into_temp_path()))
+        .map(AccessResult::Preview),
+        Access::Open(extension) => open_original(extension, &bytes),
+        Access::OpenImage => {
+            // Use the recognized image format, since the advertised MIME can be an alias.
+            let format = image::guess_format(&bytes).map_err(|_| "Could not open the image.")?;
+            let extension = format
+                .extensions_str()
+                .first()
+                .ok_or("Could not open the image.")?;
+            open_original(&format!(".{extension}"), &bytes)
         }
         Access::Download => {
             let error = "Could not save the file.";
@@ -735,6 +1013,17 @@ fn load_attachment(
             Ok(AccessResult::Downloaded)
         }
     }
+}
+
+fn open_original(extension: &str, bytes: &[u8]) -> Result<AccessResult, &'static str> {
+    let error = "Could not open the file.";
+    let mut file = Builder::new()
+        .prefix("spk-")
+        .suffix(extension)
+        .tempfile()
+        .map_err(|_| error)?;
+    file.write_all(bytes).map_err(|_| error)?;
+    Ok(AccessResult::Open(file.into_temp_path()))
 }
 
 fn safe_filename(filename: &str) -> String {
@@ -772,7 +1061,6 @@ fn is_audio(mime: &str) -> bool {
             | "audio/wav"
             | "audio/x-wav"
             | "audio/ogg"
-            | "audio/webm"
             | "audio/flac"
             | "audio/x-flac"
             | "audio/aac"
@@ -831,7 +1119,7 @@ fn is_text(file: &Attachment) -> bool {
 fn open_extension(mime: &str) -> Option<&'static str> {
     // Pick passive document and media types; uploading a filename cannot choose an executable association.
     Some(match mime {
-        "image/png" => ".png",
+        "image/png" | "image/x-png" => ".png",
         "image/jpeg" => ".jpg",
         "image/gif" => ".gif",
         "image/webp" => ".webp",
@@ -858,16 +1146,109 @@ fn open_extension(mime: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Access, AccessResult, Preview, is_audio, load_attachment};
+    use super::{
+        Access, AccessResult, Attachment, AttachmentCard, AttachmentKind, Preview, TextPreview,
+        load_attachment,
+    };
     use rodio::Source;
+
+    #[test]
+    fn text_preview_expands_in_pages_and_restores_the_initial_excerpt() {
+        let contents = (1..=80)
+            .map(|line| format!("Line {line}\n"))
+            .collect::<String>();
+        let mut preview = TextPreview::new(contents.as_bytes());
+        let initial = preview.displayed();
+        assert_eq!(initial.lines().count(), 25);
+        assert!(preview.has_more());
+        preview.shown += 50;
+        assert_eq!(preview.displayed().lines().count(), 75);
+        assert!(preview.has_more());
+        preview.show_all();
+        assert_eq!(preview.displayed(), contents.trim_end());
+        assert!(!preview.has_more());
+        preview.shown = 25;
+        assert_eq!(preview.displayed(), initial);
+
+        let overlong = "€".repeat(30_000);
+        let mut preview = TextPreview::new(overlong.as_bytes());
+        assert!(preview.displayed().len() <= 64 * 1024);
+        assert!(preview.has_more());
+        preview.show_all();
+        assert_eq!(preview.displayed(), overlong);
+        assert!(preview.can_collapse());
+    }
+
+    #[test]
+    fn paging_does_not_cross_the_initial_text_excerpt() {
+        let contents = "x".repeat(1000) + "\n";
+        let mut preview = TextPreview::new(contents.repeat(100).as_bytes());
+        preview.shown = 75;
+
+        assert_eq!(preview.displayed().lines().count(), 65);
+        assert!(!preview.can_page());
+        assert!(preview.has_more());
+        assert!(!preview.can_collapse());
+
+        preview.show_all();
+        assert_eq!(preview.displayed().lines().count(), 100);
+        assert!(preview.can_collapse());
+    }
+
+    #[test]
+    fn preview_loading_leaves_file_actions_available() {
+        let mut card = AttachmentCard::default();
+        assert!(card.begin_request(Access::Preview, true).is_none());
+        let preview = card.begin_request(Access::Preview, false).unwrap();
+        assert!(card.begin_request(Access::OpenImage, false).is_some());
+        assert_eq!(*card.request(Access::Preview), Some(preview));
+
+        *card.request(Access::OpenImage) = None;
+        assert!(card.begin_request(Access::Download, false).is_some());
+        assert_eq!(*card.request(Access::Preview), Some(preview));
+    }
+
+    #[test]
+    fn opens_the_original_image_using_its_recognized_format() {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(1, 1)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let bytes = png.into_inner();
+        let file = Attachment {
+            id: "image".into(),
+            filename: "uploaded-image".into(),
+            mime: "image/x-png".into(),
+            size: bytes.len() as u64,
+            spoiler: false,
+        };
+        let kind = AttachmentKind::classify(&file);
+        assert!(matches!(
+            load_attachment(Access::Preview, kind, bytes.clone(), None),
+            Ok(AccessResult::Preview(Preview::Image(_)))
+        ));
+        let Ok(AccessResult::Open(path)) =
+            load_attachment(Access::OpenImage, kind, bytes.clone(), None)
+        else {
+            panic!("a decoded image should open in the system viewer");
+        };
+        assert_eq!(
+            path.extension().and_then(|extension| extension.to_str()),
+            Some("png")
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert!(load_attachment(Access::OpenImage, kind, b"not an image".to_vec(), None).is_err());
+    }
 
     #[test]
     fn previews_audio_only_webm() {
         let bytes = include_bytes!("../../../tests/fixtures/attachments/preview.weba");
-        assert!(is_audio("audio/webm"));
-        let Ok(AccessResult::Preview(Preview::Audio(clip))) =
-            load_attachment(Access::Preview, "audio/webm", bytes.to_vec(), None)
-        else {
+        let Ok(AccessResult::Preview(Preview::Audio(clip))) = load_attachment(
+            Access::Play,
+            AttachmentKind::WebmAudio,
+            bytes.to_vec(),
+            None,
+        ) else {
             panic!("audio-only WebM should open an inline audio preview");
         };
         assert!(clip.samples.take(4_800).any(|sample| sample.abs() > 0.05));
@@ -876,7 +1257,17 @@ mod tests {
     #[test]
     fn previews_audio_instead_of_rendering_it_as_text() {
         let wav = b"RIFF\x2A\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0\x80\xBB\0\0\0\x77\x01\0\x02\0\x10\0data\x06\0\0\0\0\x80\0\0\0\x40";
-        let result = load_attachment(Access::Preview, "audio/wav", wav.to_vec(), None);
+        let file = Attachment {
+            id: "sample".into(),
+            filename: "recording.txt".into(),
+            mime: "audio/wav".into(),
+            size: wav.len() as u64,
+            spoiler: false,
+        };
+        let kind = AttachmentKind::classify(&file);
+        assert_eq!(kind.media_label(), Some("audio"));
+        assert!(!kind.automatic_preview());
+        let result = load_attachment(Access::Play, kind, wav.to_vec(), None);
         let Ok(AccessResult::Preview(Preview::Audio(clip))) = result else {
             panic!("WAV attachment should produce an inline audio preview");
         };
@@ -884,6 +1275,6 @@ mod tests {
         assert_eq!(clip.samples.sample_rate().get(), 48_000);
         assert_eq!(clip.samples.collect::<Vec<_>>(), [-1.0, 0.0, 0.5]);
         assert!(!clip.truncated);
-        assert!(load_attachment(Access::Preview, "audio/wav", b"bad WAV".to_vec(), None).is_err());
+        assert!(load_attachment(Access::Play, kind, b"bad WAV".to_vec(), None).is_err());
     }
 }

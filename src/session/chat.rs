@@ -9,7 +9,7 @@ pub use attachments::{AttachmentInput, UploadStatus, image_preview};
 use attachments::{AttachmentWork, QueuedAttachment};
 pub use gifs::GifPickerView;
 use gifs::{GifPicker, StagedGif};
-use preview_images::{MessageImage, MessageImageResult, PreviewImages, PreviewResult};
+use preview_images::{PreviewImages, PreviewResult};
 
 use std::{
     collections::{HashMap, HashSet},
@@ -56,7 +56,6 @@ pub struct ChatView {
     pub pins: Option<Pins>,
     pub preview_images: PreviewImages,
     pub gifs: Option<GifPickerView>,
-    pub message_image: Option<MessageImage>,
     pub action_pending: bool,
     pub action_outcome: Option<ActionOutcome>,
     pub paging_forward: bool,
@@ -182,7 +181,7 @@ pub(super) struct ChatSession {
     pub action_tasks: JoinSet<Result<MessageChange, Failure>>,
     pub pin_tasks: JoinSet<Result<Vec<ChatMessage>, Failure>>,
     pub preview_tasks: JoinSet<PreviewResult>,
-    pub message_preview: JoinSet<MessageImageResult>,
+    pub message_preview: JoinSet<()>,
     deleted_during_load: HashSet<String>,
     pub tasks: JoinSet<Result<MessagePage, Failure>>,
     pub(super) attachments: AttachmentWork,
@@ -207,7 +206,6 @@ impl ChatSession {
             view.messages = Arc::default();
             view.pins = None;
             view.preview_images = PreviewImages::default();
-            view.message_image = None;
             view.has_more_before = false;
             view.has_more_after = false;
         } else if !view.unavailable() {
@@ -287,7 +285,6 @@ impl ChatSession {
             pins: Some(Pins::Loading),
             preview_images: PreviewImages::default(),
             gifs: None,
-            message_image: None,
             action_pending: false,
             action_outcome: None,
             paging_forward: false,
@@ -525,7 +522,6 @@ impl ChatSession {
                     view.messages = Arc::default();
                     view.pins = None;
                     view.preview_images = PreviewImages::default();
-                    view.message_image = None;
                     self.gifs.close();
                     self.message_preview = JoinSet::new();
                     self.pin_tasks = JoinSet::new();

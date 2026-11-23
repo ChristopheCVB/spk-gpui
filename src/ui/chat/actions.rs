@@ -862,6 +862,7 @@ impl MessageActions {
                         .icon(IconName::Eye)
                         .on_click(move |_, _, cx| {
                             let _ = app.update(cx, |this, cx| {
+                                this.preserve_chat_position();
                                 this.chat_spoilers
                                     .entry(spoiler_key.clone())
                                     .or_default()

@@ -5,22 +5,16 @@ use std::io::Cursor;
 use gpui_kit::{Image, ImageFormat, RenderImage, SvgRenderer};
 use image_webp::WebPDecoder;
 
-use crate::chat_markdown::{image_preview_links, message_markdown};
+use crate::{
+    api::MessageTarget,
+    chat_markdown::{image_preview_links, message_markdown},
+};
+use url::Url;
 
 pub(in crate::session) type PreviewImage = Option<Arc<RenderImage>>;
 
 type PreviewKey = (String, String);
 pub(in crate::session) type PreviewResult = (PreviewKey, Result<Arc<RenderImage>, Failure>);
-
-pub(in crate::session) type MessageImageResult = (String, String, PreviewImage);
-
-#[derive(Clone)]
-pub struct MessageImage {
-    pub message_id: String,
-    pub url: String,
-    pub image: Option<Arc<RenderImage>>,
-    pub loading: bool,
-}
 
 #[derive(Clone, Default)]
 pub struct PreviewImages(Arc<HashMap<PreviewKey, Option<Arc<RenderImage>>>>);
@@ -84,15 +78,6 @@ impl ChatSession {
         let Some(view) = self.selected.as_mut() else {
             return;
         };
-        if view.message_image.as_ref().is_some_and(|preview| {
-            !view
-                .messages
-                .iter()
-                .any(|message| message.id == preview.message_id)
-        }) {
-            view.message_image = None;
-            self.message_preview = JoinSet::new();
-        }
         if view.preview_images.0.is_empty() {
             return;
         }
@@ -106,53 +91,38 @@ impl ChatSession {
             })
         });
     }
-    pub fn preview_message_image(&mut self, client: &SpkClient, message_id: String, url: String) {
-        let Some(view) = self
+    pub fn read_message_image(
+        &mut self,
+        client: &SpkClient,
+        target: &MessageTarget,
+        url: Url,
+        body: &str,
+        mut reply: tokio::sync::oneshot::Sender<PreviewImage>,
+    ) {
+        let Some(message) = self
             .selected
-            .as_mut()
-            .filter(|view| view.history == History::Ready)
-        else {
-            return;
-        };
-        let Some(message) = view
-            .messages
-            .iter()
-            .find(|message| message.id == message_id)
+            .as_ref()
+            .filter(|view| view.channel_id == target.channel_id() && view.history_ready())
+            .and_then(|view| {
+                view.messages
+                    .iter()
+                    .find(|message| message.id == target.message_id() && message.body == body)
+            })
         else {
             return;
         };
         let rendered = message_markdown(&message.body, |_| "", |_| true, Some("spk-spoiler:"));
-        if !image_preview_links(&rendered)
-            .iter()
-            .any(|link| link.as_str() == url)
-        {
+        if !image_preview_links(&rendered).contains(&url) {
             return;
         }
-        view.message_image = Some(MessageImage {
-            message_id: message_id.clone(),
-            url: url.clone(),
-            image: None,
-            loading: true,
-        });
-        self.message_preview = JoinSet::new();
+
         let client = client.clone();
         self.message_preview.spawn(async move {
-            let image = load_image(&client, &url, 480, 300).await;
-            (message_id, url, image)
+            tokio::select! {
+                image = load_image(&client, url.as_str(), 800, 600) => { let _ = reply.send(image); }
+                _ = reply.closed() => {}
+            }
         });
-    }
-
-    pub fn message_image_complete(&mut self, (id, url, image): MessageImageResult) {
-        if let Some(preview) = self
-            .selected
-            .as_mut()
-            .and_then(|view| view.message_image.as_mut())
-            && preview.message_id == id
-            && preview.url == url
-        {
-            preview.loading = false;
-            preview.image = image;
-        }
     }
 }
 

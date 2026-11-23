@@ -78,6 +78,10 @@ The chat area where a user prepares and sends a message, including the draft edi
 
 A file included with a message.
 
+**Inline Preview**
+
+A view of an attachment or a direct image link within the message itself.
+
 **Spoiler**
 
 Text or an attachment hidden until a reader chooses to reveal it.
