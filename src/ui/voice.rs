@@ -12,6 +12,7 @@ use gpui_kit::component::{
     select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState},
     slider::{Slider, SliderEvent, SliderState, SliderValue},
     switch::Switch,
+    tooltip::Tooltip,
 };
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -35,7 +36,62 @@ pub(super) fn voice_action_button(
     location: VoiceControls,
 ) -> Button {
     let label = label.into();
-    tool_button(id, icon, label.clone()).when(!location.compact(), |button| button.label(label))
+    voice_button(id, icon, label.clone(), location).tooltip(label)
+}
+
+pub(super) fn voice_button(
+    id: &'static str,
+    icon: impl Into<Icon>,
+    label: impl Into<SharedString>,
+    location: VoiceControls,
+) -> Button {
+    let label = label.into();
+    Button::new(id)
+        .ghost()
+        .small()
+        .icon(icon.into())
+        .accessibility_label(label.clone())
+        .tab_stop(true)
+        .when(!location.compact(), |button| button.label(label))
+}
+
+pub(super) fn voice_shortcut_tooltip(
+    button: Button,
+    label: &'static str,
+    keys: Vec<String>,
+) -> impl IntoElement {
+    div()
+        .id("voice-shortcut")
+        .tooltip(move |window, cx| {
+            let keys = keys.clone();
+            Tooltip::element(move |_, cx| {
+                let theme = cx.theme();
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(label)
+                    .child("·")
+                    .children(keys.iter().map(|key| {
+                        let key = if key == "Shift" {
+                            "⇧".to_owned()
+                        } else {
+                            key.to_uppercase()
+                        };
+                        div()
+                            .px_1()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.muted)
+                            .text_color(theme.muted_foreground)
+                            .text_xs()
+                            .child(key)
+                    }))
+            })
+            .build(window, cx)
+        })
+        .child(button)
 }
 
 pub(super) fn voice_options_button(label: impl Into<SharedString>, open: bool) -> Button {
@@ -197,8 +253,8 @@ impl Spk {
                         .id(device_label(kind))
                         .flex()
                         .items_center()
-                        .child(
-                            voice_action_button(
+                        .child({
+                            let button = voice_button(
                                 "toggle",
                                 themed_icon(
                                     icon,
@@ -208,13 +264,21 @@ impl Spk {
                                 label,
                                 location,
                             )
-                            .when_some(binding, |button, binding| {
-                                button.tooltip(format!("{label} ({})", binding.chord))
-                            })
                             .on_click(
                                 cx.listener(move |this, _, _, cx| this.voice_action(action, cx)),
-                            ),
-                        )
+                            );
+                            if let Some(binding) = binding {
+                                let chord = binding.chord.to_string();
+                                let keys = chord.split(" + ").map(str::to_owned).collect();
+                                let tooltip = match action {
+                                    Action::Mute => "Mute / unmute",
+                                    Action::Deafen => "Deafen / undeafen",
+                                };
+                                voice_shortcut_tooltip(button, tooltip, keys).into_any_element()
+                            } else {
+                                button.tooltip(label).into_any_element()
+                            }
+                        })
                         .child({
                             let app = cx.weak_entity();
                             let popup_app = app.clone();

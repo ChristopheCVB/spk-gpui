@@ -6,64 +6,17 @@ use crate::ui::{
 };
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 
+type MediaPanel = fn(Entity<Spk>, u8, &mut Window, &mut App) -> (AnyView, FocusHandle);
+
 #[derive(Clone, Copy)]
 enum MediaControl {
-    Radio(Option<RadioAction>),
-    Soundboard,
-}
-
-impl MediaControl {
-    fn id(self) -> &'static str {
-        match self {
-            Self::Radio(_) => "radio",
-            Self::Soundboard => "soundboard",
-        }
-    }
-
-    fn set_open(
-        self,
-        state: &Entity<MediaPopover>,
-        app: &WeakEntity<Spk>,
-        open: bool,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Option<FocusHandle> {
-        let panel = if open {
-            let app = app.upgrade()?;
-            let View::SignedIn(sidebar) = &app.read(cx).view else {
-                return None;
-            };
-            let (panel, load) = match self {
-                Self::Radio(_) => {
-                    let volume = sidebar.radio.volume;
-                    (
-                        radio_panel(app.clone(), volume, window, cx),
-                        Command::RadioFavorites,
-                    )
-                }
-                Self::Soundboard => {
-                    let volume = sidebar.voice_intent.preferred.soundboard_volume.min(100);
-                    (
-                        soundboard_panel(app.clone(), volume, window, cx),
-                        Command::LoadSoundboard,
-                    )
-                }
-            };
-            app.update(cx, |app, cx| {
-                app.send(load, None, cx);
-                app.send(Command::RefreshDevices, None, cx);
-            });
-            Some(panel)
-        } else {
-            None
-        };
-        let search = panel.as_ref().map(|(_, search)| search.clone());
-        state.update(cx, |state, cx| {
-            state.panel = panel;
-            cx.notify();
-        });
-        search
-    }
+    Radio {
+        action: Option<RadioAction>,
+        volume: u8,
+    },
+    Soundboard {
+        volume: u8,
+    },
 }
 
 struct MediaPopover {
@@ -81,14 +34,21 @@ pub(super) struct MediaButton {
 impl Spk {
     pub(in crate::ui) fn voice_media_buttons(
         &self,
+        sidebar: &Sidebar,
         location: VoiceControls,
         cx: &Context<Self>,
     ) -> [impl IntoElement + use<>; 2] {
-        let action = match &self.view {
-            View::SignedIn(sidebar) => RadioAction::for_sidebar(sidebar),
-            _ => None,
+        let radio = MediaControl::Radio {
+            action: RadioAction::for_primary(
+                sidebar.radio.station.is_some(),
+                sidebar.radio.enabled,
+            ),
+            volume: sidebar.radio.volume,
         };
-        [MediaControl::Radio(action), MediaControl::Soundboard].map(|control| MediaButton {
+        let soundboard = MediaControl::Soundboard {
+            volume: sidebar.voice_intent.preferred.soundboard_volume.min(100),
+        };
+        [radio, soundboard].map(|control| MediaButton {
             control,
             location,
             app: cx.weak_entity(),
@@ -98,8 +58,23 @@ impl Spk {
 
 impl RenderOnce for MediaButton {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let control = self.control;
-        let id = control.id();
+        let (id, load, build_panel, volume, radio): (_, fn() -> Command, MediaPanel, _, _) =
+            match self.control {
+                MediaControl::Radio { action, volume } => (
+                    "radio",
+                    || Command::RadioFavorites,
+                    radio_panel,
+                    volume,
+                    Some(action),
+                ),
+                MediaControl::Soundboard { volume } => (
+                    "soundboard",
+                    || Command::LoadSoundboard,
+                    soundboard_panel,
+                    volume,
+                    None,
+                ),
+            };
         let state =
             window.use_keyed_state((id, self.location as usize), cx, |_, cx| MediaPopover {
                 panel: None,
@@ -110,57 +85,77 @@ impl RenderOnce for MediaButton {
         let panel = current.panel.clone();
         let primary_focus = current.radio_primary.clone();
         let location = self.location;
-        let playing = matches!(control, MediaControl::Radio(Some(RadioAction::Pause)));
-        let primary = match control {
-            MediaControl::Radio(action) => {
-                let label = action.map_or_else(
-                    || "Channel Radio".to_owned(),
-                    |action| format!("{} Radio", action.label()),
-                );
-                let primary =
-                    voice_action_button("radio-primary", IconName::Radio, "Radio", location)
-                        .accessibility_label(label.clone())
-                        .tooltip(label)
-                        .track_focus(&primary_focus)
-                        .when_some(action, |button, _| {
-                            button.toggled(playing).selected(playing)
-                        })
-                        .on_click({
-                            let app = self.app.clone();
-                            let state = state.clone();
-                            move |_, window, cx| {
-                                if let Some(action) = action {
-                                    let _ = app.update(cx, |app, cx| {
-                                        app.send(action.command(), None, cx);
-                                    });
-                                } else if state.read(cx).panel.is_none() {
-                                    primary_focus.focus(window, cx);
-                                    control.set_open(&state, &app, true, window, cx);
-                                }
-                            }
-                        });
-                Some(primary)
+        let open_panel = {
+            let state = state.clone();
+            let app = self.app.clone();
+            move |open, window: &mut Window, cx: &mut App| {
+                let panel = if open {
+                    let app = app.upgrade()?;
+                    let panel = build_panel(app.clone(), volume, window, cx);
+                    app.update(cx, |app, cx| {
+                        app.send(load(), None, cx);
+                        app.send(Command::RefreshDevices, None, cx);
+                    });
+                    Some(panel)
+                } else {
+                    None
+                };
+                let search = panel.as_ref().map(|(_, search)| search.clone());
+                state.update(cx, |state, cx| {
+                    state.panel = panel;
+                    cx.notify();
+                });
+                search
             }
-            MediaControl::Soundboard => None,
         };
+        let playing = radio.flatten() == Some(RadioAction::Pause);
+        let primary = radio.map(|action| {
+            let label = action.map_or_else(
+                || "Channel Radio".to_owned(),
+                |action| format!("{} Radio", action.label()),
+            );
+            voice_action_button("radio-primary", IconName::Radio, "Radio", location)
+                .accessibility_label(label.clone())
+                .tooltip(label)
+                .track_focus(&primary_focus)
+                .when_some(action, |button, _| {
+                    button.toggled(playing).selected(playing)
+                })
+                .on_click({
+                    let app = self.app.clone();
+                    let state = state.clone();
+                    let open_panel = open_panel.clone();
+                    move |_, window, cx| {
+                        if let Some(action) = action {
+                            let _ = app.update(cx, |app, cx| {
+                                app.send(action.command(), None, cx);
+                            });
+                        } else if state.read(cx).panel.is_none() {
+                            primary_focus.focus(window, cx);
+                            open_panel(true, window, cx);
+                        }
+                    }
+                })
+        });
         let popover = voice_popover(
             id,
             px(330.0).min(window.viewport_size().width - px(16.0)),
-            move |open| match control {
-                MediaControl::Radio(_) => {
+            move |open| {
+                if radio.is_some() {
                     voice_options_button("Radio options", open).selected(playing)
+                } else {
+                    voice_action_button(
+                        "soundboard-trigger",
+                        IconName::Megaphone,
+                        "Soundboard",
+                        location,
+                    )
                 }
-                MediaControl::Soundboard => voice_action_button(
-                    "soundboard-trigger",
-                    IconName::Megaphone,
-                    "Soundboard",
-                    location,
-                ),
             },
         )
         .open(open)
         .on_open_change(move |open, window, cx| {
-            if let Some(search) = control.set_open(&state, &self.app, *open, window, cx) {
+            if let Some(search) = open_panel(*open, window, cx) {
                 search.focus(window, cx);
             }
         })

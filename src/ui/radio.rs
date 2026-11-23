@@ -17,15 +17,18 @@ pub(super) enum RadioAction {
 }
 
 impl RadioAction {
+    pub(super) fn for_primary(station_selected: bool, enabled: bool) -> Option<Self> {
+        station_selected.then_some(if enabled { Self::Pause } else { Self::Resume })
+    }
+
     pub(super) fn for_sidebar(sidebar: &Sidebar) -> Option<Self> {
         let radio = &sidebar.radio;
-        radio.station.as_ref()?;
-        Some(if !radio.enabled {
-            Self::Resume
-        } else if radio.playback == RadioPlayback::Unavailable {
-            Self::Retry
-        } else {
-            Self::Pause
+        Self::for_primary(radio.station.is_some(), radio.enabled).map(|action| {
+            if action == Self::Pause && radio.playback == RadioPlayback::Unavailable {
+                Self::Retry
+            } else {
+                action
+            }
         })
     }
 
@@ -317,5 +320,23 @@ impl Render for RadioPanel {
                 div().child(Label::new("Media Output").text_xs())
                     .child(device_picker(sidebar, DeviceKind::MediaOutput, &self.spk)),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Command, RadioAction};
+
+    #[test]
+    fn primary_radio_action_toggles_listening_when_a_station_is_selected() {
+        assert!(RadioAction::for_primary(false, true).is_none());
+        assert!(matches!(
+            RadioAction::for_primary(true, true).map(RadioAction::command),
+            Some(Command::PauseRadio)
+        ));
+        assert!(matches!(
+            RadioAction::for_primary(true, false).map(RadioAction::command),
+            Some(Command::ListenToRadio)
+        ));
     }
 }

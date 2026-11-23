@@ -191,7 +191,7 @@ pub(super) fn shortcut_reference(
     } else {
         "Alt"
     };
-    let media = |key| format!("{primary}+{alt}+Shift+{key}");
+    let media = |key| media_shortcut_keys(key, cx).join("+");
     let groups = [
         (
             "Navigation",
@@ -291,4 +291,12 @@ pub(super) fn shortcut_reference(
                         )
                 }))
         }))
+}
+
+pub(super) fn media_shortcut_keys(key: &'static str, cx: &App) -> [&'static str; 4] {
+    if cx.platform_info().is_mac() {
+        ["⌘", "Option", "Shift", key]
+    } else {
+        ["Ctrl", "Alt", "Shift", key]
+    }
 }

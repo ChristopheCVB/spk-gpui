@@ -13,7 +13,7 @@ use super::{
     *,
 };
 use crate::{
-    api::{Channel, Connection, UserPresence, VoiceModeration},
+    api::{Channel, Connection, VoiceModeration},
     session::{ChannelKind, Participant, VoiceView},
     voice::video::CameraStatus,
 };
@@ -447,11 +447,33 @@ impl Spk {
                             && !self.video_stage.fullscreen
                             && !stage_has_controls,
                         |area| {
-                            area.children(
-                                sidebar.voice.as_ref().map(|call| {
-                                    self.persistent_voice_session(sidebar, call, None, cx)
-                                }),
-                            )
+                            area.when_some(sidebar.voice.as_ref(), |area, call| {
+                                let (label, action) = super::video::screen_share_action(call);
+                                area.children(self.screen_capture_status(call, sidebar, cx).map(
+                                    |panel| {
+                                        let attempt = match action {
+                                            Command::StopScreenShare(attempt) => Some(attempt),
+                                            _ => None,
+                                        };
+                                        panel.when_some(attempt, |panel, attempt| {
+                                            panel.child(
+                                                Button::new("dismiss-screen-capture")
+                                                    .small()
+                                                    .tab_stop(true)
+                                                    .label(label)
+                                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                                        app.send(
+                                                            Command::StopScreenShare(attempt),
+                                                            None,
+                                                            cx,
+                                                        );
+                                                    })),
+                                            )
+                                        })
+                                    },
+                                ))
+                                .child(self.persistent_voice_session(sidebar, call, None, cx))
+                            })
                         },
                     ),
             )
@@ -821,7 +843,7 @@ impl Spk {
                                         card.child(self.camera_controls(sidebar, location, cx))
                                             .child(self.screen_controls(call, location, cx))
                                     })
-                                    .children(self.voice_media_buttons(location, cx))
+                                    .children(self.voice_media_buttons(sidebar, location, cx))
                             })
                             .children(self.leave_voice(
                                 "persistent-voice-leave",
@@ -931,12 +953,7 @@ impl Spk {
                 let flags = person.flags;
                 let speaking = flags.speaking && !flags.muted && !flags.deafened;
                 let presence = sidebar.user_presence(person.id);
-                let presence_color = match presence {
-                    UserPresence::Online => theme.success,
-                    UserPresence::Idle => theme.warning,
-                    UserPresence::Busy => theme.danger,
-                    UserPresence::Offline => theme.muted_foreground,
-                };
+                let presence_color = super::profile::user_presence_color(presence, cx);
                 let last = index + 1 == participant_count;
                 div()
                     .id(SharedString::from(format!("member-{}", person.id)))
@@ -998,22 +1015,34 @@ impl Spk {
                     )
                     .child(
                         Label::new(person.name.to_owned())
+                            .min_w_0()
                             .truncate()
                             .text_color(theme.muted_foreground),
                     )
                     .when(speaking, |row| row.child(speaking_badge(cx)))
                     .children(participant_status(flags.muted, flags.deafened, cx))
-                    .children(voice_moderation_menu(&person, sidebar, cx))
-                    .when(
-                        sidebar.profile.id.as_deref() != Some(person.id)
-                            && call.is_some_and(|call| {
-                                call.channel_id == channel.id && call.is_participating()
-                            }),
-                        |row| row.child(self.participant_volume_button(&person, sidebar, cx)),
-                    )
                     .when(flags.radio_listening == Some(true), |row| {
                         row.child(radio_badge(cx))
                     })
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .flex_shrink_0()
+                            .gap_1()
+                            .when(
+                                sidebar.profile.id.as_deref() != Some(person.id)
+                                    && call.is_some_and(|call| {
+                                        call.channel_id == channel.id && call.is_participating()
+                                    }),
+                                |actions| {
+                                    actions
+                                        .child(self.participant_volume_button(&person, sidebar, cx))
+                                },
+                            )
+                            .children(voice_moderation_menu(&person, sidebar, cx)),
+                    )
             }))
     }
 
@@ -1259,7 +1288,7 @@ impl Spk {
                             .child(self.voice_controls(sidebar, VoiceControls::Channel, cx))
                             .child(self.camera_controls(sidebar, VoiceControls::Channel, cx))
                             .child(self.screen_controls(call, VoiceControls::Channel, cx))
-                            .children(self.voice_media_buttons(VoiceControls::Channel, cx))
+                            .children(self.voice_media_buttons(sidebar, VoiceControls::Channel, cx))
                             .children(self.leave_voice(
                                 "voice-channel-leave",
                                 call,
@@ -1414,14 +1443,7 @@ impl Spk {
             return None;
         }
 
-        let destinations = sidebar
-            .voice_moderation_channels(participant.id)
-            .map(|channels| {
-                channels
-                    .into_iter()
-                    .map(|channel| (channel.id.clone(), channel_name(channel).to_owned()))
-                    .collect::<Vec<_>>()
-            });
+        let destinations = voice_moderation_destinations(sidebar, participant.id);
         let enabled = !sidebar.voice_moderation_pending;
         let id = participant.id.to_owned();
         let name = participant.name.to_owned();
@@ -1628,16 +1650,25 @@ impl Spk {
     }
 }
 
+fn voice_moderation_destinations(
+    sidebar: &Sidebar,
+    user_id: &str,
+) -> Option<Vec<(String, String)>> {
+    Some(
+        sidebar
+            .voice_moderation_channels(user_id)?
+            .into_iter()
+            .map(|channel| (channel.id.clone(), channel_name(channel).to_owned()))
+            .collect(),
+    )
+}
+
 fn voice_moderation_menu(
     participant: &Participant<'_>,
     sidebar: &Sidebar,
     cx: &Context<Spk>,
 ) -> Option<impl IntoElement> {
-    let destinations = sidebar
-        .voice_moderation_channels(participant.id)?
-        .into_iter()
-        .map(|channel| (channel.id.clone(), channel_name(channel).to_owned()))
-        .collect::<Vec<_>>();
+    let destinations = voice_moderation_destinations(sidebar, participant.id)?;
     let user_id = participant.id.to_owned();
     let app = cx.weak_entity();
     Some(

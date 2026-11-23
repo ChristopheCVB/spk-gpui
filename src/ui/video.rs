@@ -7,7 +7,7 @@ use gpui_kit::component::{
 };
 
 use super::{
-    voice::{voice_action_button, voice_options_button, voice_popover},
+    voice::{voice_button, voice_options_button, voice_popover, voice_shortcut_tooltip},
     *,
 };
 use crate::{
@@ -262,8 +262,8 @@ impl Spk {
             .id("camera-controls")
             .flex()
             .items_center()
-            .child(
-                voice_action_button(
+            .child(voice_shortcut_tooltip(
+                voice_button(
                     "toggle-camera",
                     if on {
                         IconName::Video
@@ -284,7 +284,11 @@ impl Spk {
                         );
                     }
                 })),
-            )
+                label,
+                super::workspace_keys::media_shortcut_keys("E", cx)
+                    .map(str::to_owned)
+                    .to_vec(),
+            ))
             .child(
                 voice_popover("camera-options", px(280.0), |open| {
                     voice_options_button("Camera options", open)
@@ -319,8 +323,8 @@ impl Spk {
             .id("screen-controls")
             .flex()
             .items_center()
-            .child(
-                voice_action_button("screen-share", IconName::Monitor, label, location)
+            .child(voice_shortcut_tooltip(
+                voice_button("screen-share", IconName::Monitor, label, location)
                     .selected(active)
                     .on_click(cx.listener(move |app, _, _, cx| {
                         let View::SignedIn(sidebar) = &app.view else {
@@ -334,7 +338,11 @@ impl Spk {
                             app.send(screen_share_action(call).1, None, cx);
                         }
                     })),
-            )
+                label,
+                super::workspace_keys::media_shortcut_keys("S", cx)
+                    .map(str::to_owned)
+                    .to_vec(),
+            ))
             .child(
                 voice_popover("screen-options", px(280.0), |open| {
                     voice_options_button("Screen Share options", open)

@@ -33,12 +33,13 @@ pub(super) fn user_status_picker(
 
 pub(super) fn profile_status_avatar(sidebar: &Sidebar, cx: &Context<Spk>) -> impl IntoElement {
     let name = sidebar.profile.name();
-    let color = match sidebar.user_status {
-        UserStatus::Online => cx.theme().success,
-        UserStatus::Away => cx.theme().warning,
-        UserStatus::Busy => cx.theme().danger,
-        UserStatus::Invisible => cx.theme().muted_foreground,
+    let presence = match sidebar.user_status {
+        UserStatus::Online => UserPresence::Online,
+        UserStatus::Away => UserPresence::Idle,
+        UserStatus::Busy => UserPresence::Busy,
+        UserStatus::Invisible => UserPresence::Offline,
     };
+    let color = user_presence_color(presence, cx);
     let avatar = div()
         .relative()
         .child(profile_avatar(
@@ -102,15 +103,20 @@ fn user_status_menu(
     })
 }
 
-fn user_presence_label(status: UserPresence, cx: &App) -> Label {
+pub(super) fn user_presence_color(status: UserPresence, cx: &App) -> Hsla {
     let theme = cx.theme();
-    let color = match status {
+    match status {
         UserPresence::Online => theme.success,
         UserPresence::Idle => theme.warning,
         UserPresence::Busy => theme.danger,
         UserPresence::Offline => theme.muted_foreground,
-    };
-    Label::new(status.label()).text_xs().text_color(color)
+    }
+}
+
+fn user_presence_label(status: UserPresence, cx: &App) -> Label {
+    Label::new(status.label())
+        .text_xs()
+        .text_color(user_presence_color(status, cx))
 }
 
 impl Spk {
