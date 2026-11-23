@@ -26,6 +26,7 @@ pub(super) struct VideoStage {
     pub participant_scroll: ScrollHandle,
     pub tile_focus: HashMap<String, FocusHandle>,
     strip_focus: RefCell<Option<FocusHandle>>,
+    camera_options_focus: RefCell<[Option<FocusHandle>; 2]>,
     pub hide_preview: bool,
     pub hovered: Option<String>,
     pub menu_for: Option<String>,
@@ -256,6 +257,10 @@ impl Spk {
             "Turn camera on"
         };
         let app = cx.weak_entity();
+        let trigger_focus = self.video_stage.camera_options_focus.borrow_mut()
+            [usize::from(location.compact())]
+        .get_or_insert_with(|| cx.focus_handle())
+        .clone();
         div()
             .id("camera-controls")
             .flex()
@@ -272,6 +277,7 @@ impl Spk {
                     location,
                 )
                 .selected(on)
+                .toggled(on)
                 .on_click(cx.listener(move |app, _, _, cx| {
                     if let View::SignedIn(sidebar) = &app.view {
                         app.send(
@@ -286,7 +292,15 @@ impl Spk {
                 Popover::new("camera-options")
                     .anchor(Anchor::BottomRight)
                     .w(px(280.0))
-                    .trigger(voice_options_button("Camera options", false))
+                    .trigger(
+                        voice_options_button("Camera options", false).track_focus(&trigger_focus),
+                    )
+                    .on_open_change(move |open, window, cx| {
+                        if !open {
+                            trigger_focus.focus(window, cx);
+                            window.refresh();
+                        }
+                    })
                     .content(move |_, _, cx| {
                         let Some(app) = app.upgrade() else {
                             return div();
