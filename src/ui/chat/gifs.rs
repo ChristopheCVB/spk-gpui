@@ -256,9 +256,7 @@ impl Spk {
                     })),
             )
             .child(
-                Button::new("star-gif")
-                    .icon(IconName::Star)
-                    .small()
+                action_icon(Button::new("star-gif").small(), IconName::Star)
                     .tab_stop(true)
                     .toggled(favorite)
                     .when(favorite, |button| button.bg(cx.theme().accent))

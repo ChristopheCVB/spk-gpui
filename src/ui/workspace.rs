@@ -601,6 +601,7 @@ impl Spk {
                             .0
                             .flex()
                             .items_center()
+                            .pr_1()
                             .child(
                                 Button::new("select")
                                     .ghost()
@@ -957,12 +958,15 @@ impl Spk {
                 let last = index + 1 == participant_count;
                 div()
                     .id(SharedString::from(format!("member-{}", person.id)))
+                    .role(Role::Group)
+                    .aria_label(person.name.to_owned())
+                    .when(speaking, |row| row.aria_description("Speaking"))
                     .relative()
                     .flex()
                     .items_center()
                     .gap_2()
                     .pl_7()
-                    .pr_2()
+                    .pr_1()
                     .h_6()
                     .child(
                         div()
@@ -1019,7 +1023,6 @@ impl Spk {
                             .truncate()
                             .text_color(theme.muted_foreground),
                     )
-                    .when(speaking, |row| row.child(speaking_badge(cx)))
                     .children(participant_status(flags.muted, flags.deafened, cx))
                     .when(flags.radio_listening == Some(true), |row| {
                         row.child(radio_badge(cx))
@@ -1164,7 +1167,7 @@ impl Spk {
                             "Show participants"
                         };
                         stage.child(
-                            tool_button(
+                            tool_button_with_label(
                                 "voice-strip-toggle",
                                 if show_strip {
                                     IconName::PanelBottom
@@ -1172,8 +1175,8 @@ impl Spk {
                                     IconName::PanelBottomOpen
                                 },
                                 label,
+                                true,
                             )
-                            .label(label)
                             .self_center()
                             .flex_shrink_0()
                             .track_focus(&self.voice_strip_toggle_focus)
@@ -1424,14 +1427,17 @@ impl Spk {
             _ => (IconName::PhoneOff, "Leave voice"),
         };
         Some(
-            tool_button(id, themed_icon(icon, cx.theme().danger, 16.0), label)
-                .when(labeled, |button| {
-                    button.label(label).text_color(cx.theme().danger)
-                })
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.device_picker = None;
-                    this.send(Command::LeaveVoice, None, cx);
-                })),
+            tool_button_with_label(
+                id,
+                Icon::new(icon).text_color(cx.theme().danger),
+                label,
+                labeled,
+            )
+            .when(labeled, |button| button.text_color(cx.theme().danger))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.device_picker = None;
+                this.send(Command::LeaveVoice, None, cx);
+            })),
         )
     }
 
@@ -1740,17 +1746,6 @@ fn voice_moderation_item(
             );
         });
     })
-}
-
-fn speaking_badge(cx: &App) -> impl IntoElement {
-    div()
-        .id("speaking")
-        .role(Role::Image)
-        .aria_label("Speaking")
-        .px_1()
-        .rounded_sm()
-        .bg(cx.theme().popover)
-        .child(themed_icon(IconName::Volume2, cx.theme().success, 14.0))
 }
 
 fn radio_badge(cx: &App) -> impl IntoElement {

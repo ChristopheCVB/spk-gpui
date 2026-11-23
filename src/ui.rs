@@ -692,14 +692,37 @@ fn tool_button(
     icon: impl Into<Icon>,
     label: impl Into<SharedString>,
 ) -> Button {
+    tool_button_with_label(id, icon, label, false)
+}
+
+fn tool_button_with_label(
+    id: impl Into<ElementId>,
+    icon: impl Into<Icon>,
+    label: impl Into<SharedString>,
+    show_label: bool,
+) -> Button {
     let label = label.into();
-    Button::new(id)
+    let button = Button::new(id)
         .ghost()
         .small()
-        .icon(icon.into())
         .accessibility_label(label.clone())
-        .tooltip(label)
-        .tab_stop(true)
+        .tooltip(label.clone())
+        .tab_stop(true);
+    if show_label {
+        button.icon(icon.into()).label(label)
+    } else {
+        action_icon(button, icon)
+    }
+}
+
+const ACTION_ICON_SIZE: Pixels = px(20.0);
+
+fn action_icon(button: Button, icon: impl Into<Icon>) -> Button {
+    // The button's icon slot derives its size from the button size.
+    button
+        .size_6()
+        .p_0()
+        .child(icon.into().size(ACTION_ICON_SIZE))
 }
 
 fn themed_icon(icon: IconName, color: Hsla, size: f32) -> Icon {

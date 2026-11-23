@@ -712,8 +712,9 @@ impl MessageActions {
                     .xsmall()
                     .w(px(24.))
                     .h(px(24.))
+                    .p_0()
                     .ghost()
-                    .child(reaction_glyph(emoji, px(16.)))
+                    .child(reaction_glyph(emoji, ACTION_ICON_SIZE))
                     .accessibility_label(label.clone())
                     .tooltip(label)
             }))
@@ -726,7 +727,6 @@ impl MessageActions {
                             IconName::FaceSlightlySmilingPlus,
                             "Add reaction",
                         )
-                        .size(px(24.))
                         .open(picker_open)
                         .disabled(self.disabled)
                         .on_click(self.open_reaction_picker()),

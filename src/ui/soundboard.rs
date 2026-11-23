@@ -100,7 +100,6 @@ impl SoundboardPanel {
                         format!("Preview {} (only you)", clip.name),
                     )
                     .size(px(22.0))
-                    .p_0()
                     .on_click(cx.listener(move |panel, _, _, cx| {
                         cx.stop_propagation();
                         panel.send(Command::PreviewSound(preview_id.clone()), cx);

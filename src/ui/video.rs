@@ -674,7 +674,7 @@ impl Spk {
                     "Watch"
                 };
                 row.child(
-                    tool_button(
+                    tool_button_with_label(
                         "watch",
                         if available.watching {
                             IconName::EyeOff
@@ -682,10 +682,10 @@ impl Spk {
                             IconName::Eye
                         },
                         label,
+                        !available.watching,
                     )
                     .secondary()
                     .flex_shrink_0()
-                    .when(!available.watching, |button| button.label(label))
                     .on_click(cx.listener(move |app, _, window, cx| {
                         app.apply_tile_action(&watch_id, TileAction::Watch, &available, window, cx);
                     })),

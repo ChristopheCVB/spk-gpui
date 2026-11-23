@@ -46,13 +46,16 @@ pub(super) fn voice_button(
     location: VoiceControls,
 ) -> Button {
     let label = label.into();
-    Button::new(id)
+    let button = Button::new(id)
         .ghost()
         .small()
-        .icon(icon.into())
         .accessibility_label(label.clone())
-        .tab_stop(true)
-        .when(!location.compact(), |button| button.label(label))
+        .tab_stop(true);
+    if location.compact() {
+        action_icon(button, icon)
+    } else {
+        button.icon(icon.into()).label(label)
+    }
 }
 
 pub(super) fn voice_shortcut_tooltip(
@@ -104,8 +107,7 @@ pub(super) fn voice_options_button(label: impl Into<SharedString>, open: bool) -
         },
         label,
     )
-    .w(px(18.0))
-    .px_0()
+    .w(px(22.0))
 }
 
 pub(super) fn voice_popover(
@@ -741,10 +743,11 @@ pub(super) fn connection_diagnostics_with_status(
     cx: &Context<Spk>,
 ) -> Popover {
     connection_diagnostics_popover(
-        tool_button(
+        tool_button_with_label(
             "voice-connection-status",
             IconName::Activity,
             format!("{status} Voice connection diagnostics"),
+            true,
         )
         .label(status)
         .xsmall()
