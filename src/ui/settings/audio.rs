@@ -162,7 +162,7 @@ impl Settings {
                 .child(Label::new("Noise suppression"))
                 .child(noise)
                 .child(
-                    Button::new("deepfilternet-license")
+                    control_button("deepfilternet-license")
                         .ghost()
                         .small()
                         .tab_stop(true)
@@ -215,7 +215,7 @@ impl Settings {
                     .gap_3()
                     .child(device_picker(sidebar, DeviceKind::Microphone, &self.spk))
                     .child(
-                        Button::new("test-microphone")
+                        control_button("test-microphone")
                             .small()
                             .tab_stop(true)
                             .disabled(sidebar.voice.is_some())
@@ -257,7 +257,7 @@ impl Settings {
                             .accessibility_label("Output volume"),
                     )
                     .child(
-                        Button::new("test-sound")
+                        control_button("test-sound")
                             .small()
                             .tab_stop(true)
                             .disabled(self.playback_pending)

@@ -188,7 +188,7 @@ impl Settings {
                                     .disabled(view.busy),
                             )
                             .child(
-                                Button::new("create-invite")
+                                control_button("create-invite")
                                     .primary()
                                     .tab_stop(true)
                                     .label("Create")
@@ -457,7 +457,7 @@ impl Settings {
                         this.ban_target = None;
                         cx.notify();
                     })))
-                    .child(Button::new("confirm-ban").danger().tab_stop(true).label("Ban").disabled(busy)
+                    .child(control_button("confirm-ban").danger().tab_stop(true).label("Ban").disabled(busy)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let reason = this.ban_reason.read(cx).value().to_string();
                             this.account_action(AdminAccountAction::Ban { id: id.clone(), reason }, cx);
@@ -476,7 +476,7 @@ impl Settings {
 }
 
 fn admin_button(id: &'static str, label: &'static str) -> Button {
-    Button::new(id)
+    control_button(id)
         .small()
         .outline()
         .tab_stop(true)

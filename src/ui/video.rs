@@ -2,12 +2,13 @@ use std::{cell::RefCell, collections::HashMap};
 
 use gpui_kit::component::{
     IndexPath,
-    select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState},
+    popover::Popover,
+    select::{SearchableVec, SelectEvent, SelectItem},
     switch::Switch,
 };
 
 use super::{
-    voice::{voice_button, voice_options_button, voice_popover, voice_shortcut_tooltip},
+    voice::{VoiceButtonGroup, voice_button, voice_shortcut_tooltip},
     *,
 };
 use crate::{
@@ -258,11 +259,9 @@ impl Spk {
             "Turn camera on"
         };
         let app = cx.weak_entity();
-        div()
-            .id("camera-controls")
-            .flex()
-            .items_center()
-            .child(voice_shortcut_tooltip(
+        VoiceButtonGroup::new(
+            "camera-controls",
+            voice_shortcut_tooltip(
                 voice_button(
                     "toggle-camera",
                     if on {
@@ -288,11 +287,10 @@ impl Spk {
                 super::workspace_keys::media_shortcut_keys("E", cx)
                     .map(str::to_owned)
                     .to_vec(),
-            ))
-            .child(
-                voice_popover("camera-options", px(280.0), |open| {
-                    voice_options_button("Camera options", open)
-                })
+            ),
+            "Camera options",
+            Popover::new("camera-options")
+                .w(px(280.0))
                 .content(move |_, _, cx| {
                     let Some(app) = app.upgrade() else {
                         return div();
@@ -307,7 +305,7 @@ impl Spk {
                         .map_or(&[][..], |report| report.devices.as_slice());
                     camera_options(sidebar, &app, devices)
                 }),
-            )
+        )
     }
 
     pub(super) fn screen_controls(
@@ -319,11 +317,9 @@ impl Spk {
         let (label, command) = screen_share_action(call);
         let active = !matches!(command, Command::OpenScreenShare);
         let app = cx.weak_entity();
-        div()
-            .id("screen-controls")
-            .flex()
-            .items_center()
-            .child(voice_shortcut_tooltip(
+        VoiceButtonGroup::new(
+            "screen-controls",
+            voice_shortcut_tooltip(
                 voice_button("screen-share", IconName::Monitor, label, location)
                     .selected(active)
                     .on_click(cx.listener(move |app, _, _, cx| {
@@ -342,11 +338,10 @@ impl Spk {
                 super::workspace_keys::media_shortcut_keys("S", cx)
                     .map(str::to_owned)
                     .to_vec(),
-            ))
-            .child(
-                voice_popover("screen-options", px(280.0), |open| {
-                    voice_options_button("Screen Share options", open)
-                })
+            ),
+            "Screen Share options",
+            Popover::new("screen-options")
+                .w(px(280.0))
                 .content(move |_, _, cx| {
                     let Some(app) = app.upgrade() else {
                         return div();
@@ -357,7 +352,7 @@ impl Spk {
                     let intent = &sidebar.voice_intent;
                     screen_preferences(intent.screen.quality, intent.preferred.screen_audio, &app)
                 }),
-            )
+        )
     }
 
     pub(super) fn screen_capture_status(
@@ -421,7 +416,7 @@ impl Spk {
                     .child(Label::new(label.clone()).font_semibold())
                     .child(Label::new(audio_label).text_xs())
                     .child(
-                        Button::new("start-screen-share")
+                        control_button("start-screen-share")
                             .small()
                             .primary()
                             .tab_stop(true)
@@ -674,7 +669,7 @@ impl Spk {
                     "Watch"
                 };
                 row.child(
-                    tool_button(
+                    tool_button_with_label(
                         "watch",
                         if available.watching {
                             IconName::EyeOff
@@ -682,10 +677,10 @@ impl Spk {
                             IconName::Eye
                         },
                         label,
+                        !available.watching,
                     )
                     .secondary()
                     .flex_shrink_0()
-                    .when(!available.watching, |button| button.label(label))
                     .on_click(cx.listener(move |app, _, window, cx| {
                         app.apply_tile_action(&watch_id, TileAction::Watch, &available, window, cx);
                     })),
@@ -955,7 +950,7 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for VoiceSelect<T> {
                 picker.selected = selected;
             });
         }
-        Select::new(&select)
+        control_select(&select)
             .small()
             .w_full()
             .accessibility_label(self.label)

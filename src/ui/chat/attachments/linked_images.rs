@@ -129,7 +129,7 @@ impl Spk {
                                             })),
                                     )
                                     .child(
-                                        Button::new("copy-image-link")
+                                        control_button("copy-image-link")
                                             .ghost()
                                             .small()
                                             .tab_stop(true)

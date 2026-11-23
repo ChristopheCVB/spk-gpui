@@ -396,7 +396,7 @@ impl Spk {
                                 .px_4()
                                 .py_1()
                                 .child("Could not load all channel data.")
-                                .child(Button::new("refresh").small().label("Retry").on_click(
+                                .child(control_button("refresh").small().label("Retry").on_click(
                                     cx.listener(|this, _, _, cx| {
                                         this.send(Command::Refresh, None, cx)
                                     }),
@@ -422,7 +422,7 @@ impl Spk {
                                 .child(notice)
                                 .when_some(rejoin, |row, id| {
                                     row.child(
-                                        Button::new("voice-rejoin")
+                                        control_button("voice-rejoin")
                                             .small()
                                             .tab_stop(true)
                                             .label("Rejoin voice")
@@ -457,7 +457,7 @@ impl Spk {
                                         };
                                         panel.when_some(attempt, |panel, attempt| {
                                             panel.child(
-                                                Button::new("dismiss-screen-capture")
+                                                control_button("dismiss-screen-capture")
                                                     .small()
                                                     .tab_stop(true)
                                                     .label(label)
@@ -601,8 +601,9 @@ impl Spk {
                             .0
                             .flex()
                             .items_center()
+                            .pr_1()
                             .child(
-                                Button::new("select")
+                                control_button("select")
                                     .ghost()
                                     .small()
                                     .tab_stop(true)
@@ -800,7 +801,7 @@ impl Spk {
                         details.flex_1().flex_col().items_start()
                     })
                     .child(
-                        Button::new("current-call")
+                        control_button("current-call")
                             .ghost()
                             .small()
                             .tab_stop(true)
@@ -809,13 +810,19 @@ impl Spk {
                             .max_w_full()
                             .flex_shrink_1()
                             .justify_start()
-                            .px_0()
-                            .icon(themed_icon(IconName::Volume2, channel_color, 16.0))
                             .child(
-                                Label::new(voice_channel_name)
-                                    .min_w_0()
-                                    .font_semibold()
-                                    .truncate(),
+                                control_content()
+                                    .child(
+                                        Icon::new(IconName::Volume2)
+                                            .size(ACTION_ICON_SIZE)
+                                            .text_color(channel_color),
+                                    )
+                                    .child(
+                                        Label::new(voice_channel_name)
+                                            .min_w_0()
+                                            .font_semibold()
+                                            .truncate(),
+                                    ),
                             )
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.close_sidebar_drawer(window, cx);
@@ -898,7 +905,7 @@ impl Spk {
                     .when(!active && focused, |row| row.bg(theme.accent))
                     .when(!active, |row| row.hover(|row| row.bg(theme.accent)))
                     .child(
-                        Button::new("select")
+                        control_button("select")
                             .ghost()
                             .small()
                             .tab_stop(true)
@@ -957,20 +964,23 @@ impl Spk {
                 let last = index + 1 == participant_count;
                 div()
                     .id(SharedString::from(format!("member-{}", person.id)))
+                    .role(Role::Group)
+                    .aria_label(person.name.to_owned())
+                    .when(speaking, |row| row.aria_description("Speaking"))
                     .relative()
                     .flex()
                     .items_center()
                     .gap_2()
                     .pl_7()
-                    .pr_2()
-                    .h_6()
+                    .pr_1()
+                    .h(CONTROL_HEIGHT)
                     .child(
                         div()
                             .absolute()
                             .top_0()
                             .left_4()
                             .w_2()
-                            .h_3()
+                            .h_4()
                             .rounded_bl_sm()
                             .border_l_1()
                             .border_b_1()
@@ -980,7 +990,7 @@ impl Spk {
                         row.child(
                             div()
                                 .absolute()
-                                .top_3()
+                                .top_4()
                                 .bottom_0()
                                 .left_4()
                                 .border_l_1()
@@ -1019,7 +1029,6 @@ impl Spk {
                             .truncate()
                             .text_color(theme.muted_foreground),
                     )
-                    .when(speaking, |row| row.child(speaking_badge(cx)))
                     .children(participant_status(flags.muted, flags.deafened, cx))
                     .when(flags.radio_listening == Some(true), |row| {
                         row.child(radio_badge(cx))
@@ -1164,7 +1173,7 @@ impl Spk {
                             "Show participants"
                         };
                         stage.child(
-                            tool_button(
+                            tool_button_with_label(
                                 "voice-strip-toggle",
                                 if show_strip {
                                     IconName::PanelBottom
@@ -1172,8 +1181,8 @@ impl Spk {
                                     IconName::PanelBottomOpen
                                 },
                                 label,
+                                true,
                             )
-                            .label(label)
                             .self_center()
                             .flex_shrink_0()
                             .track_focus(&self.voice_strip_toggle_focus)
@@ -1312,16 +1321,16 @@ impl Spk {
                         let id = channel.id.clone();
                         if sidebar.can_join_voice(&id) {
                             Some(
-                                Button::new("voice-channel-join")
-                                    .primary()
-                                    .small()
-                                    .tab_stop(true)
-                                    .icon(IconName::Phone)
-                                    .label(label)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.join_voice_channel(&id, cx)
-                                    }))
-                                    .into_any_element(),
+                                icon_label_button(
+                                    control_button("voice-channel-join").primary(),
+                                    IconName::Phone,
+                                    label,
+                                )
+                                .tab_stop(true)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.join_voice_channel(&id, cx)
+                                }))
+                                .into_any_element(),
                             )
                         } else {
                             departing
@@ -1424,14 +1433,17 @@ impl Spk {
             _ => (IconName::PhoneOff, "Leave voice"),
         };
         Some(
-            tool_button(id, themed_icon(icon, cx.theme().danger, 16.0), label)
-                .when(labeled, |button| {
-                    button.label(label).text_color(cx.theme().danger)
-                })
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.device_picker = None;
-                    this.send(Command::LeaveVoice, None, cx);
-                })),
+            tool_button_with_label(
+                id,
+                Icon::new(icon).text_color(cx.theme().danger),
+                label,
+                labeled,
+            )
+            .when(labeled, |button| button.text_color(cx.theme().danger))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.device_picker = None;
+                this.send(Command::LeaveVoice, None, cx);
+            })),
         )
     }
 
@@ -1740,17 +1752,6 @@ fn voice_moderation_item(
             );
         });
     })
-}
-
-fn speaking_badge(cx: &App) -> impl IntoElement {
-    div()
-        .id("speaking")
-        .role(Role::Image)
-        .aria_label("Speaking")
-        .px_1()
-        .rounded_sm()
-        .bg(cx.theme().popover)
-        .child(themed_icon(IconName::Volume2, cx.theme().success, 14.0))
 }
 
 fn radio_badge(cx: &App) -> impl IntoElement {

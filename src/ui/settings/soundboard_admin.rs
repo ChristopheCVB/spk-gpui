@@ -1,7 +1,4 @@
-use gpui_kit::component::{
-    Disableable, IndexPath,
-    select::{SearchableVec, Select, SelectState},
-};
+use gpui_kit::component::{Disableable, IndexPath, select::SearchableVec};
 
 use super::*;
 use crate::{
@@ -69,7 +66,7 @@ impl Metadata {
                             .gap_2()
                             .children(icon.map(clip_icon))
                             .child(
-                                Select::new(&self.icon)
+                                control_select(&self.icon)
                                     .w_full()
                                     .accessibility_label("Icon")
                                     .placeholder(original_icon.unwrap_or("Choose icon").to_owned())
@@ -251,8 +248,10 @@ impl Settings {
             .children(error.or(status).map(|message| div().id("soundboard-admin-status").role(Role::Status)
                 .child(Label::new(message).text_color(if error.is_some() { theme.danger } else { theme.muted_foreground }))))
             .child(card("Add a sound", div().flex().flex_col().gap_3().items_start()
-                .child(Button::new("choose-sound-file").label(if board.decoding { "Reading audio…" } else { "Choose audio file" })
-                    .outline().icon(IconName::Upload).tab_stop(true).disabled(disabled)
+                .child(icon_label_button(
+                    control_button("choose-sound-file").outline(), IconName::Upload,
+                    if board.decoding { "Reading audio…" } else { "Choose audio file" },
+                ).tab_stop(true).disabled(disabled)
                     .on_click(cx.listener(|settings, _, window, cx| settings.choose_sound_file(window, cx))))
                 .child(Label::new("Choose a mono or stereo WAV, MP3, M4A, Ogg Vorbis, or FLAC file up to 20 MB. SPK receives only the selected audio.").text_color(theme.muted_foreground))
                 .children(board.duration.map(|duration| {
@@ -264,25 +263,25 @@ impl Settings {
                             .child(field("Upload gain (%)", &form.gain, disabled)))
                         .child(form.upload.render(None, disabled, cx))
                         .child(div().flex().gap_2()
-                            .child(Button::new("preview-crop").label("Play selection").tab_stop(true).disabled(disabled)
+                            .child(control_button("preview-crop").label("Play selection").tab_stop(true).disabled(disabled)
                                 .on_click(cx.listener(move |settings, _, _, cx| {
                                     let crop = settings.soundboard.crop(duration, cx);
                                     settings.soundboard_action(Action::Preview(crop), cx);
                                 })))
-                            .child(Button::new("save-sound").label("Save").primary().tab_stop(true).disabled(disabled)
+                            .child(control_button("save-sound").label("Save").primary().tab_stop(true).disabled(disabled)
                                 .on_click(cx.listener(move |settings, _, _, cx| {
                                     let crop = settings.soundboard.crop(duration, cx);
                                     let (name, icon) = settings.soundboard.upload.values(cx);
                                     settings.soundboard_action(Action::Add { crop, name, icon }, cx);
                                 })))
-                            .child(Button::new("discard-sound").label("Discard").ghost().tab_stop(true).disabled(disabled)
+                            .child(control_button("discard-sound").label("Discard").ghost().tab_stop(true).disabled(disabled)
                                 .on_click(cx.listener(|settings, _, _, cx| settings.soundboard_action(Action::Discard, cx)))))
                 })), cx))
-            .children(board.previewing.then(|| Button::new("stop-sound-preview").label("Stop preview").tab_stop(true)
+            .children(board.previewing.then(|| control_button("stop-sound-preview").label("Stop preview").tab_stop(true)
                 .on_click(cx.listener(|settings, _, _, cx| settings.soundboard_action(Action::StopPreview, cx)))))
             .child(card("Sounds", div().flex().flex_col().gap_3()
                 .when(!board.loading && (board.clips.is_none() || board.error.is_some()), |body| body.child(
-                    Button::new("reload-sounds").label("Reload sounds").tab_stop(true).disabled(disabled)
+                    control_button("reload-sounds").label("Reload sounds").tab_stop(true).disabled(disabled)
                         .on_click(cx.listener(|settings, _, _, cx| settings.soundboard_action(Action::Show, cx)))))
                 .when(board.clips.as_ref().is_some_and(|clips| clips.is_empty()), |body| body.child(Label::new("No sounds yet.")))
                 .children(form.clip_action.as_ref().map(|action| self.sound_clip_editor(action, disabled, cx)))
@@ -354,7 +353,7 @@ impl Settings {
                 (
                     format!("Edit {}", clip.name),
                     Some(self.soundboard.edit.render(Some(&clip.icon), disabled, cx)),
-                    Button::new("apply-sound-edit")
+                    control_button("apply-sound-edit")
                         .primary()
                         .label("Save")
                         .on_click(cx.listener(move |settings, _, _, cx| {
@@ -379,7 +378,7 @@ impl Settings {
                 (
                     format!("Delete “{}”? This can’t be undone.", clip.name),
                     None,
-                    Button::new("confirm-sound-delete")
+                    control_button("confirm-sound-delete")
                         .danger()
                         .label("Delete")
                         .on_click(cx.listener(move |settings, _, _, cx| {
@@ -400,7 +399,7 @@ impl Settings {
                     .gap_2()
                     .child(button.disabled(disabled).tab_stop(true))
                     .child(
-                        Button::new("cancel-sound-change")
+                        control_button("cancel-sound-change")
                             .label("Cancel")
                             .ghost()
                             .tab_stop(true)

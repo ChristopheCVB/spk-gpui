@@ -140,7 +140,7 @@ impl Spk {
             ActionForm::Edit => ("Edit message", "Save"),
             ActionForm::Delete => ("Delete this message?", "Delete"),
         };
-        let button = Button::new("submit-message-action")
+        let button = control_button("submit-message-action")
             .small()
             .tab_stop(true)
             .label(action)
@@ -169,7 +169,7 @@ impl Spk {
                             button.primary()
                         })
                         .child(
-                            Button::new("cancel-message-action")
+                            control_button("cancel-message-action")
                                 .small()
                                 .tab_stop(true)
                                 .label("Cancel")
@@ -244,8 +244,11 @@ impl Spk {
                     .outline()
                     .xsmall()
                     .rounded(px(10.))
-                    .child(reaction_glyph(emoji, px(14.)))
-                    .child(count.to_string())
+                    .child(
+                        control_content()
+                            .child(reaction_glyph(emoji, ACTION_ICON_SIZE))
+                            .child(count.to_string()),
+                    )
                     .tooltip(names)
                     .accessibility_label(format!("{emoji}, {count} reactions. {action}"))
             }))
@@ -295,7 +298,7 @@ impl Spk {
                                 .justify_between()
                                 .items_center()
                                 .child(
-                                    Button::new("open-preview")
+                                    control_button("open-preview")
                                         .small()
                                         .ghost()
                                         .tab_stop(true)
@@ -307,7 +310,7 @@ impl Spk {
                                 )
                                 .when(can_remove, |row| {
                                     row.child(
-                                        Button::new("remove-preview")
+                                        control_button("remove-preview")
                                             .small()
                                             .ghost()
                                             .tab_stop(true)
@@ -383,7 +386,7 @@ impl Spk {
                             Label::new("Could not load Pins.").text_color(theme.muted_foreground),
                         )
                         .child(
-                            Button::new("retry-pins")
+                            control_button("retry-pins")
                                 .small()
                                 .tab_stop(true)
                                 .label("Retry")
@@ -417,7 +420,7 @@ impl Spk {
                     .px_4()
                     .py_1()
                     .child(
-                        Button::new("latest-pin")
+                        control_button("latest-pin")
                             .small()
                             .ghost()
                             .selected(latest_open)
@@ -436,10 +439,10 @@ impl Spk {
                                     .flex_1()
                                     .min_w_0()
                                     .items_center()
-                                    .gap_2()
+                                    .gap(CONTROL_PADDING)
                                     .child(
                                         Icon::new(IconName::Pin)
-                                            .small()
+                                            .size(ACTION_ICON_SIZE)
                                             .flex_shrink_0()
                                             .text_color(theme.primary),
                                     )
@@ -453,7 +456,7 @@ impl Spk {
                     )
                     .when(pins.len() > 1, |row| {
                         row.child(
-                            Button::new("all-pins")
+                            control_button("all-pins")
                                 .small()
                                 .ghost()
                                 .selected(all_open)
@@ -529,7 +532,7 @@ impl Spk {
                                         .flex()
                                         .gap_2()
                                         .child(
-                                            Button::new("jump-to-pin")
+                                            control_button("jump-to-pin")
                                                 .small()
                                                 .tab_stop(true)
                                                 .label("Go to message")
@@ -549,7 +552,7 @@ impl Spk {
                                         )
                                         .when(can_pin, |row| {
                                             row.child(
-                                                Button::new("unpin")
+                                                control_button("unpin")
                                                     .small()
                                                     .ghost()
                                                     .tab_stop(true)
@@ -634,7 +637,7 @@ fn reaction_button(
     let channel_id = chat.channel_id.clone();
     let message_id = message.id.clone();
     let emoji = emoji.to_owned();
-    Button::new(SharedString::from(format!("reaction-{emoji}")))
+    control_button(SharedString::from(format!("reaction-{emoji}")))
         .tab_stop(true)
         .selected(mine)
         .toggled(mine)
@@ -710,10 +713,13 @@ impl MessageActions {
                 let label = format!("{} {name} reaction", if own { "Remove" } else { "Add" });
                 reaction_button(chat, message, emoji, own, ReactionSelection::Choice, cx)
                     .xsmall()
-                    .w(px(24.))
-                    .h(px(24.))
+                    .w(CONTROL_HEIGHT)
+                    .h(px(28.0))
+                    .px(px(8.0))
+                    .py(CONTROL_PADDING)
+                    .self_center()
                     .ghost()
-                    .child(reaction_glyph(emoji, px(16.)))
+                    .child(reaction_glyph(emoji, px(16.0)))
                     .accessibility_label(label.clone())
                     .tooltip(label)
             }))
@@ -726,7 +732,6 @@ impl MessageActions {
                             IconName::FaceSlightlySmilingPlus,
                             "Add reaction",
                         )
-                        .size(px(24.))
                         .open(picker_open)
                         .disabled(self.disabled)
                         .on_click(self.open_reaction_picker()),

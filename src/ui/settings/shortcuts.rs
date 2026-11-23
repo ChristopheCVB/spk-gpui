@@ -378,5 +378,5 @@ impl Settings {
 }
 
 fn control(id: &'static str, label: &'static str) -> Button {
-    Button::new(id).small().tab_stop(true).label(label)
+    control_button(id).small().tab_stop(true).label(label)
 }

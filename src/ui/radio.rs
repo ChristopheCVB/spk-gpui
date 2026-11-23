@@ -261,12 +261,12 @@ impl Render for RadioPanel {
                     .child(Label::new(status).text_xs().text_color(theme.muted_foreground))
                     .child(div().flex().gap_2()
                         .child(
-                            Button::new("playback").small().label(action.label())
+                            control_button("playback").small().label(action.label())
                                 .tab_stop(true)
                                 .on_click(cx.listener(move |panel, _, _, cx| panel.send(action.command(), cx))),
                         )
                         .child(
-                            Button::new("stop").ghost().small().label("Stop for everyone").tab_stop(true)
+                            control_button("stop").ghost().small().label("Stop for everyone").tab_stop(true)
                                 .disabled(!matches!(sidebar.connection, crate::api::Connection::Online))
                                 .on_click(cx.listener(|panel, _, _, cx| panel.send(Command::StopRadio, cx))),
                         )
@@ -279,12 +279,12 @@ impl Render for RadioPanel {
             }))
             .children(radio.command_error.as_ref().map(|error| Label::new(error.clone()).text_color(theme.danger)))
             .child(div().flex().gap_2()
-                .child(Button::new("all-stations").small().label("All stations").selected(!self.favorites).tab_stop(true)
+                .child(control_button("all-stations").small().label("All stations").selected(!self.favorites).tab_stop(true)
                     .on_click(cx.listener(|panel, _, _, cx| {
                         panel.favorites = false;
                         cx.notify();
                     })))
-                .child(Button::new("favorites").small().icon(IconName::Star).label("Favorites").selected(self.favorites).tab_stop(true)
+                .child(icon_label_button(control_button("favorites"), IconName::Star, "Favorites").selected(self.favorites).tab_stop(true)
                     .on_click(cx.listener(|panel, _, _, cx| {
                         let load = matches!(&panel.spk.read(cx).view, View::SignedIn(sidebar) if sidebar.radio.favorites.is_none());
                         panel.favorites = true;

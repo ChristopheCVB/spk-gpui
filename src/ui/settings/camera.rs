@@ -125,7 +125,7 @@ impl Settings {
                 .gap_3()
                 .child(camera_options(sidebar, &self.spk, &self.camera.devices))
                 .child(
-                    Button::new("settings-camera-preview")
+                    control_button("settings-camera-preview")
                         .small()
                         .tab_stop(true)
                         .disabled(sidebar.camera_publishing())
