@@ -1,3 +1,4 @@
+mod clipboard_html;
 mod markdown;
 
 pub(in crate::ui) use markdown::Format;
@@ -404,6 +405,7 @@ pub(in crate::ui) fn clipboard_key(
         }
         let markdown = format!("{start}{}{end}", &source[selection.clone()]);
         let mut plain = String::new();
+        let mut mentions = Vec::new();
         let mut offset = selection.start;
         for span in input.tokens().iter().filter(|span| {
             span.token().id() != SYNTAX
@@ -413,17 +415,27 @@ pub(in crate::ui) fn clipboard_key(
             plain.push_str(&projection.plain(&source, offset..span.range().start));
             if !matches!(span.token().id().as_ref(), PENDING | PENDING_OFF) {
                 plain.push_str(span.token().label());
+                if span.token().text().starts_with("<@") {
+                    let range = span.range();
+                    let base = start.len();
+                    mentions.push((
+                        base + range.start - selection.start..base + range.end - selection.start,
+                        span.token().label().to_string(),
+                    ));
+                }
             }
             offset = span.range().end;
         }
         plain.push_str(&projection.plain(&source, offset..selection.end));
-        cx.write_to_clipboard(ClipboardItem::new_string_with_json_metadata(
-            plain,
-            ClipboardMarkdown {
-                kind: CLIPBOARD.to_owned(),
-                source: markdown,
-            },
-        ));
+        if clipboard_html::write(&markdown, &plain, mentions, cx).is_none() {
+            cx.write_to_clipboard(ClipboardItem::new_string_with_json_metadata(
+                plain,
+                ClipboardMarkdown {
+                    kind: CLIPBOARD.to_owned(),
+                    source: markdown,
+                },
+            ));
+        }
         if cut && input.is_editable() {
             input.replace("", window, cx);
         }
@@ -455,7 +467,15 @@ pub(in crate::ui) fn paste(
             input.replace(source, window, cx);
             return true;
         }
-        let Some(text) = item.text() else {
+        let text = item.text();
+        if !plain
+            && !code
+            && let Some(markdown) = clipboard_html::read(text.as_deref(), cx)
+        {
+            input.replace(markdown, window, cx);
+            return true;
+        }
+        let Some(text) = text else {
             return false;
         };
         let mut text = text.replace("\r\n", "\n").replace('\r', "\n");
