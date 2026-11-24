@@ -235,7 +235,8 @@ impl Spk {
             .detach();
         }
 
-        let (commands, requests) = async_channel::bounded(8);
+        // Keep draft changes ordered with sends and navigation when the session falls behind.
+        let (commands, requests) = async_channel::unbounded();
         let (updates, views) = async_channel::bounded(16);
         let shortcuts = Shortcuts::new(window);
         let (window_activation, window_active) =
