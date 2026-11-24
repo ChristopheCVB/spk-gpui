@@ -39,8 +39,8 @@ pub(in crate::ui) fn textarea(input: &Entity<TextareaState>) -> Textarea {
             .text_color(cx.theme().link)
             .into_any_element(),
         SPOILER_MENTION => InputToken::new(context)
-            .bg(cx.theme().muted_foreground)
-            .text_color(cx.theme().muted_foreground)
+            .bg(cx.theme().muted)
+            .text_color(cx.theme().link)
             .into_any_element(),
         _ => InputToken::new(context).into_any_element(),
     })
