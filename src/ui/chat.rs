@@ -7,6 +7,7 @@ mod history;
 mod poll_composer;
 mod poll_results;
 mod reaction_picker;
+mod recovery;
 pub(super) mod suggestions;
 
 pub(super) use actions::{MessageActionForm, PinPanel};
@@ -455,7 +456,7 @@ impl Spk {
     ) {
         if editing {
             editor::toggle(&self.message_action_input, format, window, cx);
-        } else if chat(&self.view).is_some_and(|chat| chat.can_send() && chat.outgoing.is_none()) {
+        } else if chat(&self.view).is_some_and(|chat| chat.can_send()) {
             editor::toggle(&self.chat_input, format, window, cx);
         }
     }
@@ -531,6 +532,7 @@ impl Spk {
             self.chat_pins = None;
         }
         if reset {
+            self.chat_submitting = false;
             self.suggestions = Default::default();
             self.chat_input.update(cx, |input, cx| {
                 input.set_value(
@@ -559,17 +561,15 @@ impl Spk {
                 self.chat_scroll_anchor = history_anchor(previous, &self.chat_scroll)
                     .map(|(id, offset)| (id.to_owned(), offset));
             }
-            let acknowledged = previous.outgoing.as_ref().is_some_and(|pending| {
-                next.outgoing.is_none()
-                    && !next.loading()
-                    && next.draft.body.is_empty()
-                    && editor::wire(self.chat_input.read(cx)) == pending.body
-            });
-            let restored = previous.loading()
+            if previous.draft_generation != next.draft_generation {
+                self.chat_submitting = false;
+            }
+            let restored = !self.chat_submitting
+                && previous.loading()
                 && !next.loading()
                 && !next.draft.body.is_empty()
                 && editor::wire(self.chat_input.read(cx)).is_empty();
-            if acknowledged || restored {
+            if restored {
                 self.chat_input.update(cx, |input, cx| {
                     input.set_value(next.draft.body.clone(), window, cx)
                 });
@@ -663,13 +663,12 @@ impl Spk {
         }
     }
 
-    pub(super) fn submit_chat(&mut self, cx: &mut Context<Self>) {
-        let Some(chat) = chat(&self.view).filter(|chat| chat.can_send() && chat.outgoing.is_none())
-        else {
+    pub(super) fn submit_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chat) = chat(&self.view).filter(|chat| chat.can_send()) else {
             return;
         };
         let body = editor::wire(self.chat_input.read(cx));
-        if !chat.draft.can_send(&body) {
+        if self.chat_submitting || !chat.draft.can_send(&body) {
             return;
         }
         let reading_older = chat.has_more_after;
@@ -681,8 +680,17 @@ impl Spk {
             None,
             cx,
         );
-        if self.form_error.is_none() && !reading_older {
-            self.chat_scroll.scroll_to_bottom();
+        if self.form_error.is_none() {
+            self.chat_submitting = true;
+            self.slash_choice = None;
+            self.chat_input.update(cx, |input, cx| {
+                input.set_value("", window, cx);
+                input.focus(window, cx);
+            });
+            editor::refresh(&self.chat_input, cx);
+            if !reading_older {
+                self.chat_scroll.scroll_to_bottom();
+            }
         }
     }
 
@@ -794,9 +802,10 @@ impl Spk {
                 .into_iter()
                 .filter_map(|(id, error)| {
                     error.map(|error| {
-                        div().px_4().py_2().child(
-                            Label::new(error.to_owned()).id(id).text_color(theme.danger),
-                        )
+                        div()
+                            .px_4()
+                            .py_2()
+                            .child(Label::new(error.to_owned()).id(id).text_color(theme.danger))
                     })
                 }),
             )
@@ -877,31 +886,38 @@ impl Spk {
             ))
             .when(chat.has_more_after && !chat.loading(), |area| {
                 area.child(
-                    div().px_4().py_2().flex().gap_2().child(
-                        control_button("newer-messages")
-                            .small()
-                            .tab_stop(true)
-                            .label("Load newer messages")
-                            .disabled(!chat.history_ready() || chat.messages.is_empty())
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.send(Command::LoadNewerMessages, None, cx)
-                            })),
-                    ).child(
-                        control_button("latest-messages")
-                            .small()
-                            .tab_stop(true)
-                            .label("Jump to latest messages")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.send(Command::LoadLatestMessages, None, cx)
-                            })),
-                    ),
+                    div()
+                        .px_4()
+                        .py_2()
+                        .flex()
+                        .gap_2()
+                        .child(
+                            control_button("newer-messages")
+                                .small()
+                                .tab_stop(true)
+                                .label("Load newer messages")
+                                .disabled(!chat.history_ready() || chat.messages.is_empty())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.send(Command::LoadNewerMessages, None, cx)
+                                })),
+                        )
+                        .child(
+                            control_button("latest-messages")
+                                .small()
+                                .tab_stop(true)
+                                .label("Jump to latest messages")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.send(Command::LoadLatestMessages, None, cx)
+                                })),
+                        ),
                 )
             })
             .when(chat.webhook && !chat.unavailable(), |area| {
                 area.child(
-                    div().px_4().py_3().child(
-                        Label::new("Read-only feed").text_color(theme.muted_foreground),
-                    ),
+                    div()
+                        .px_4()
+                        .py_3()
+                        .child(Label::new("Read-only feed").text_color(theme.muted_foreground)),
                 )
             })
             .children((!chat.webhook && !chat.unavailable()).then(|| {
@@ -914,7 +930,7 @@ impl Spk {
                     .min_h_0()
                     .border_1()
                     .border_color(theme.background.opacity(0.0))
-                    .when(chat.can_send() && chat.outgoing.is_none(), |composer| {
+                    .when(chat.can_send(), |composer| {
                         let accent = theme.primary;
                         composer
                             .drag_over::<ExternalPaths>(move |style, _, _, _| {
@@ -937,148 +953,84 @@ impl Spk {
                         };
                         composer.child(Label::new(text).text_color(theme.muted_foreground))
                     })
-                    .when_some(chat.draft.reply.as_ref(), |composer, reply| {
-                        let channel_id = chat.channel_id.clone();
-                        composer.child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .mb_2()
-                                .px_2()
-                                .rounded_md()
-                                .bg(theme.muted)
-                                .child(
-                                    Icon::new(IconName::Reply)
-                                        .size(ACTION_ICON_SIZE)
-                                        .flex_none(),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .gap_2()
-                                        .child(
-                                            Label::new(format!(
-                                                "Replying to {}",
-                                                sidebar.message_author(&reply.user_id)
-                                            ))
-                                            .max_w(px(220.))
-                                            .font_semibold()
-                                            .truncate(),
-                                        )
-                                        .child(
-                                            Label::new(reply_preview(&reply.preview, |id| {
-                                                sidebar.message_author(id)
-                                            }))
-                                            .min_w_0()
-                                            .text_color(theme.muted_foreground)
-                                            .truncate(),
-                                        ),
-                                )
-                                .child(
-                                    tool_button("cancel-reply", IconName::X, "Cancel reply")
-                                        .flex_none()
-                                        .disabled(chat.outgoing.is_some() || !chat.can_send())
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.send(
-                                                Command::SetChatReply {
-                                                    channel_id: channel_id.clone(),
-                                                    message_id: None,
-                                                },
-                                                None,
-                                                cx,
-                                            );
-                                            this.chat_input.update(cx, |input, cx| {
-                                                input.focus(window, cx);
-                                            });
-                                        })),
-                                ),
-                        )
-                    })
-                    .when_some(chat.outgoing.as_ref(), |composer, outgoing| {
-                        let channel_id = chat.channel_id.clone();
-                        let (status, retry, dismiss) = match &outgoing.status {
-                            Delivery::Sending(_) => ("Sending…".into(), false, false),
-                            Delivery::Failed(error) => {
-                                (format!("Could not send message. {error}"), true, true)
-                            }
-                            Delivery::Unconfirmed => (
-                                "Delivery unconfirmed. Resending may post a duplicate. Check message history."
-                                    .into(),
-                                false,
-                                true,
-                            ),
-                        };
-                        composer.child(
-                            div()
-                                .pb_2()
-                                .child(
-                                    Label::new(
-                                        message_markdown(
-                                            &outgoing.body,
-                                            |id| sidebar.message_author(id),
-                                            |_| false,
-                                            None,
-                                        )
-                                        .into_owned(),
+                    .when_some(
+                        chat.draft.reply.as_ref().filter(|_| !self.chat_submitting),
+                        |composer, reply| {
+                            let channel_id = chat.channel_id.clone();
+                            composer.child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .mb_2()
+                                    .px_2()
+                                    .rounded_md()
+                                    .bg(theme.muted)
+                                    .child(
+                                        Icon::new(IconName::Reply)
+                                            .size(ACTION_ICON_SIZE)
+                                            .flex_none(),
                                     )
-                                    .truncate(),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_wrap()
-                                        .items_center()
-                                        .gap_2()
-                                        .child(
-                                            Label::new(status).text_color(theme.muted_foreground),
-                                        )
-                                        .when(retry, |bar| {
-                                            bar.child(
-                                                control_button("retry-send")
-                                                    .small()
-                                                    .tab_stop(true)
-                                                    .label("Retry send")
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.send(Command::RetryChatSend, None, cx)
-                                                    })),
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .gap_2()
+                                            .child(
+                                                Label::new(format!(
+                                                    "Replying to {}",
+                                                    sidebar.message_author(&reply.user_id)
+                                                ))
+                                                .max_w(px(220.))
+                                                .font_semibold()
+                                                .truncate(),
                                             )
-                                        })
-                                        .when(dismiss, |bar| {
-                                            bar.child(
-                                                control_button("dismiss-send")
-                                                    .small()
-                                                    .tab_stop(true)
-                                                    .label(if retry {
-                                                        "Edit message"
-                                                    } else {
-                                                        "Edit and resend"
-                                                    })
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.send(
-                                                            Command::DismissChatSend,
-                                                            None,
-                                                            cx,
-                                                        )
-                                                    })),
-                                            )
-                                        })
-                                        .when(matches!(outgoing.status, Delivery::Unconfirmed), |bar| {
-                                            bar.child(
-                                                control_button("mark-send-delivered")
-                                                    .small()
-                                                    .tab_stop(true)
-                                                    .label("Already sent")
-                                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                                        this.send(Command::MarkChatSendDelivered(channel_id.clone()), None, cx)
-                                                    })),
-                                            )
-                                        }),
-                                ),
-                        )
-                    })
+                                            .child(
+                                                Label::new(reply_preview(&reply.preview, |id| {
+                                                    sidebar.message_author(id)
+                                                }))
+                                                .min_w_0()
+                                                .text_color(theme.muted_foreground)
+                                                .truncate(),
+                                            ),
+                                    )
+                                    .child(
+                                        tool_button("cancel-reply", IconName::X, "Cancel reply")
+                                            .flex_none()
+                                            .disabled(!chat.can_send())
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.send(
+                                                    Command::SetChatReply {
+                                                        channel_id: channel_id.clone(),
+                                                        message_id: None,
+                                                    },
+                                                    None,
+                                                    cx,
+                                                );
+                                                this.chat_input.update(cx, |input, cx| {
+                                                    input.focus(window, cx);
+                                                });
+                                            })),
+                                    ),
+                            )
+                        },
+                    )
+                    .child(
+                        div()
+                            .id("send-recovery-list")
+                            .max_h(px(176.))
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .children(
+                                chat.outgoing
+                                    .iter()
+                                    .filter(|outgoing| {
+                                        !matches!(outgoing.status, Delivery::Sending(_))
+                                    })
+                                    .map(|outgoing| self.chat_send_recovery(sidebar, outgoing, cx)),
+                            ),
+                    )
                     .child(self.message_composer(sidebar, chat, window, cx))
             }))
     }
@@ -1092,8 +1044,10 @@ impl Spk {
     ) -> impl IntoElement {
         let theme = cx.theme();
         let surface = theme.popover;
-        let disabled = chat.outgoing.is_some() || !chat.can_send();
-        let can_send = !disabled && chat.draft.can_send(&editor::wire(self.chat_input.read(cx)));
+        let disabled = !chat.can_send();
+        let can_send = !disabled
+            && !self.chat_submitting
+            && chat.draft.can_send(&editor::wire(self.chat_input.read(cx)));
         let app = cx.weak_entity();
         div()
             .id("message-composer")
@@ -1110,8 +1064,11 @@ impl Spk {
                     .id("composer-media")
                     .min_h_0()
                     .overflow_y_scroll()
-                    .child(self.staged_gif(chat, cx))
-                    .child(self.attachment_queue(chat, cx)),
+                    .when(!self.chat_submitting, |media| {
+                        media
+                            .child(self.staged_gif(chat, cx))
+                            .child(self.attachment_queue(chat, cx))
+                    }),
             )
             .children(self.suggestion_menu(false, window, cx))
             .child(
@@ -1145,7 +1102,7 @@ impl Spk {
                         .tab_stop(true)
                         .flex_shrink_0()
                         .disabled(!can_send)
-                        .on_click(cx.listener(|this, _, _, cx| this.submit_chat(cx))),
+                        .on_click(cx.listener(|this, _, window, cx| this.submit_chat(window, cx))),
                     ),
             )
     }
@@ -1267,7 +1224,7 @@ impl Spk {
             .entry(message.id.clone())
             .or_insert_with(|| cx.focus_handle().tab_stop(true))
             .clone();
-        let composer_busy = chat.outgoing.is_some() || !chat.can_send();
+        let composer_busy = !chat.can_send();
         let message_actions = Rc::new(actions::MessageActions {
             app: app.clone(),
             channel: channel.clone(),
@@ -1598,7 +1555,7 @@ impl Spk {
         cx: &mut Context<Self>,
     ) {
         if !active_chat_message(chat(&self.view), &channel_id, &message_id)
-            .is_some_and(|(chat, _)| chat.outgoing.is_none())
+            .is_some_and(|(chat, _)| chat.can_send())
         {
             return;
         }
@@ -1712,7 +1669,7 @@ impl Spk {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !chat(&self.view).is_some_and(|chat| chat.can_send() && chat.outgoing.is_none()) {
+        if !chat(&self.view).is_some_and(|chat| chat.can_send()) {
             return;
         }
         self.chat_input.update(cx, |input, cx| {

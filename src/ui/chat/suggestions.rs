@@ -265,7 +265,7 @@ impl Spk {
             || (if editing {
                 chat.action_pending
             } else {
-                !chat.can_send() || chat.outgoing.is_some() || chat.gifs.is_some()
+                !chat.can_send() || chat.gifs.is_some()
             })
         {
             return None;
@@ -285,7 +285,7 @@ impl Spk {
         if (value.contains("/poll ") || value.contains("/gif "))
             && input.focus_handle(cx).is_focused(window)
             && !window.has_active_dialog(cx)
-            && chat(&self.view).is_some_and(|chat| chat.can_send() && chat.outgoing.is_none())
+            && chat(&self.view).is_some_and(ChatView::can_send)
         {
             let text = editor::plain_text(&value);
             if let Some(command) = text

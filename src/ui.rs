@@ -54,6 +54,7 @@ pub(super) struct Spk {
     password: Entity<InputState>,
     nickname: Entity<InputState>,
     chat_input: Entity<TextareaState>,
+    chat_submitting: bool,
     suggestions: [chat::suggestions::MenuState; 2],
     gif_input: Entity<InputState>,
     gif_button_focus: FocusHandle,
@@ -160,8 +161,10 @@ impl Spk {
                     secondary,
                     shift: false,
                 } => {
-                    if *secondary || !chat::editor::enter(&this.chat_input, window, cx) {
-                        this.submit_chat(cx);
+                    if !this.chat_suggestion_key("enter", false, window, cx)
+                        && (*secondary || !chat::editor::enter(&this.chat_input, window, cx))
+                    {
+                        this.submit_chat(window, cx);
                     }
                 }
                 _ => {}
@@ -428,6 +431,7 @@ impl Spk {
             password,
             nickname,
             chat_input,
+            chat_submitting: false,
             suggestions: Default::default(),
             gif_input,
             gif_button_focus: cx.focus_handle(),
