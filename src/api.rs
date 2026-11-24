@@ -290,6 +290,22 @@ pub struct EmbedField {
     pub inline: bool,
 }
 
+impl EmbedField {
+    pub fn link(&self) -> Option<Url> {
+        let (scheme, authority) = self.value.split_once("://")?;
+        if !(scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+            || authority.starts_with('/')
+            || self
+                .value
+                .chars()
+                .any(|c| c == '\\' || c.is_whitespace() || c.is_control())
+        {
+            return None;
+        }
+        Url::parse(&self.value).ok()
+    }
+}
+
 #[derive(Clone, Deserialize)]
 pub struct Poll {
     pub options: Vec<PollOption>,
