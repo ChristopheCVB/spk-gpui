@@ -65,6 +65,7 @@ impl SoundboardPanel {
             .min_w_0()
             .child(
                 Button::new("play")
+                    .bg(cx.theme().background)
                     .w_full()
                     .h(px(64.0))
                     .px_1()
@@ -155,7 +156,7 @@ impl Render for SoundboardPanel {
             .flex_col()
             .gap_3()
             .child(
-                Input::new(&self.query)
+                surface_input(&self.query, theme.background, cx)
                     .prefix(themed_icon(IconName::Search, theme.muted_foreground, 16.0))
                     .aria_label("Search sounds"),
             )

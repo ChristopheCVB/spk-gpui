@@ -340,6 +340,7 @@ impl Spk {
             let viewport = window.viewport_size();
             dialog
                 .centered()
+                .border_0()
                 .width(px(1152.0))
                 .h(if viewport.width < SETTINGS_WIDE_WIDTH {
                     viewport.height
@@ -427,8 +428,6 @@ impl Render for Settings {
                     .px(if compact { px(16.0) } else { px(24.0) })
                     .py(if compact { px(12.0) } else { px(16.0) })
                     .flex_shrink_0()
-                    .border_b_1()
-                    .border_color(theme.border)
                     .child(
                         div()
                             .flex()
@@ -464,7 +463,6 @@ impl Render for Settings {
                             .min_w_0()
                             .min_h_0()
                             .overflow_y_scroll()
-                            .bg(theme.background)
                             .p(if compact { px(16.0) } else { px(24.0) })
                             .child(body),
                     ),
@@ -616,21 +614,16 @@ impl Settings {
 }
 
 fn card(title: &'static str, body: impl IntoElement, cx: &App) -> impl IntoElement + Styled {
-    let border = cx.theme().border;
     div()
         .id(title)
         .flex()
         .flex_col()
         .rounded_lg()
-        .bg(cx.theme().popover)
-        .border_1()
-        .border_color(border)
+        .bg(cx.theme().background)
         .child(
             div()
                 .px_6()
                 .py_4()
-                .border_b_1()
-                .border_color(border)
                 .child(Label::new(title).text_base().font_semibold()),
         )
         .child(div().p_6().child(body))

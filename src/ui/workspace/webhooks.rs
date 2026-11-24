@@ -135,6 +135,8 @@ impl Spk {
             let pending = state.pending;
             dialog
                 .centered()
+                .border_0()
+                .bg(cx.theme().popover)
                 .entrance(DialogEntrance::None)
                 .width(px(440.0))
                 .title(title)
@@ -371,7 +373,7 @@ impl Render for WebhookEditor {
         if let Some(url) = &self.url {
             return body
                 .child(Label::new("Shown only once. Copy the URL now. Generating a new URL stops this one from working."))
-                .child(Input::new(url).w_full().aria_label("Webhook URL").readonly(true))
+                .child(surface_input(url, cx.theme().background, cx).w_full().aria_label("Webhook URL").readonly(true))
                 .child(
                     div().flex().justify_end().gap_2()
                         .child(
@@ -409,13 +411,18 @@ impl Render for WebhookEditor {
                     .gap_1()
                     .child(Label::new("Name"))
                     .child(
-                        Input::new(&fields.name)
+                        surface_input(&fields.name, cx.theme().background, cx)
                             .w_full()
                             .aria_label("Name")
                             .disabled(self.pending),
                     ),
             )
-            .child(icon_picker_field(&fields.icon, self.pending))
+            .child(icon_picker_field(
+                &fields.icon,
+                self.pending,
+                cx.theme().background,
+                cx,
+            ))
             .child(
                 div()
                     .flex()

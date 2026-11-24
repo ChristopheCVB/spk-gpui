@@ -35,11 +35,11 @@ pub(in crate::ui) fn textarea(input: &Entity<TextareaState>) -> Textarea {
             })
             .into_any_element(),
         MENTION => InputToken::new(context)
-            .bg(cx.theme().accent)
+            .bg(cx.theme().background)
             .text_color(cx.theme().link)
             .into_any_element(),
         SPOILER_MENTION => InputToken::new(context)
-            .bg(cx.theme().muted)
+            .bg(cx.theme().background)
             .text_color(cx.theme().link)
             .into_any_element(),
         _ => InputToken::new(context).into_any_element(),
@@ -52,7 +52,7 @@ pub(in crate::ui) fn refresh(
     cx: &mut App,
 ) {
     let theme = cx.theme();
-    let muted = theme.muted;
+    let panel = theme.background;
     let muted_text = theme.muted_foreground;
     let link = theme.link;
     input.update(cx, |input, cx| {
@@ -129,9 +129,9 @@ pub(in crate::ui) fn refresh(
                             ..Default::default()
                         });
                     }
-                    Format::Code | Format::CodeBlock => style.background_color = Some(muted),
+                    Format::Code | Format::CodeBlock => style.background_color = Some(panel),
                     Format::Quote => style.color = Some(muted_text),
-                    Format::Spoiler => style.background_color = Some(muted),
+                    Format::Spoiler => style.background_color = Some(panel),
                     Format::Link => {
                         style.color = Some(link);
                         style.underline = Some(UnderlineStyle {

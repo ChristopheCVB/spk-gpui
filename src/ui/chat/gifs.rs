@@ -1,7 +1,5 @@
 use super::*;
 
-use gpui_kit::component::popover::Popover;
-
 use crate::{api::GifItem, session::GifPickerView};
 
 fn gif_button(id: &'static str, label: &'static str) -> Button {
@@ -62,7 +60,7 @@ impl Spk {
                 }))
             });
         let app = cx.weak_entity();
-        Popover::new("gif-picker")
+        floating_popover("gif-picker", cx)
             .anchor(Anchor::BottomLeft)
             .w(px(320.))
             .p_2()
@@ -127,7 +125,7 @@ impl Spk {
                         }),
                     ),
             )
-            .child(Input::new(&self.gif_input).aria_label("Search GIFs"))
+            .child(surface_input(&self.gif_input, theme.background, cx).aria_label("Search GIFs"))
             .when_some(gifs.favorites_error, |panel, error| {
                 panel.child(
                     div()
@@ -220,6 +218,7 @@ impl Spk {
             .child(
                 Button::new("select-gif")
                     .ghost()
+                    .bg(cx.theme().background)
                     .w_full()
                     .h(px(106.0))
                     .small()
@@ -255,7 +254,9 @@ impl Spk {
                 action_icon(control_button("star-gif").small(), IconName::Star)
                     .tab_stop(true)
                     .toggled(favorite)
-                    .when(favorite, |button| button.bg(cx.theme().accent))
+                    .when(favorite, |button| {
+                        button.bg(cx.theme().primary.opacity(0.20))
+                    })
                     .absolute()
                     .top_0()
                     .right_0()

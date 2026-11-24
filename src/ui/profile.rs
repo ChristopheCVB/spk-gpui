@@ -340,9 +340,11 @@ impl Spk {
             }
             PersonProfile { app, id, email: cached_email }
         });
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, _, cx| {
             dialog
                 .centered()
+                .border_0()
+                .bg(cx.theme().popover)
                 .width(px(380.0))
                 .title("Profile")
                 .child(profile.clone())

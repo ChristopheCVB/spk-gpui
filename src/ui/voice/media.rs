@@ -4,7 +4,6 @@ use crate::ui::{
     soundboard::soundboard_panel,
     *,
 };
-use gpui_kit::component::popover::Popover;
 
 type MediaPanel = fn(Entity<Spk>, u8, &mut Window, &mut App) -> (AnyView, FocusHandle);
 
@@ -139,9 +138,9 @@ impl RenderOnce for MediaButton {
         });
         let width = px(330.0).min(window.viewport_size().width - px(16.0));
         let popover = if primary.is_some() {
-            Popover::new(id).w(width)
+            floating_popover(id, cx).w(width)
         } else {
-            voice_popover(id, width, move |_| {
+            voice_popover(id, width, cx, move |_| {
                 voice_action_button(
                     "soundboard-trigger",
                     IconName::Megaphone,

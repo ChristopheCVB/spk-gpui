@@ -25,7 +25,7 @@ use gpui_kit::component::{
     Disableable,
     menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
     separator::Separator,
-    text::{MarkdownExtensions, TextView},
+    text::{MarkdownExtensions, TextView, TextViewStyle},
     tooltip::Tooltip,
 };
 
@@ -1200,7 +1200,16 @@ impl Spk {
         let link_filter = self.chat_spoiler_link.clone();
         let link_prefix = self.chat_spoiler_link.clone();
         let source = SharedString::from(rendered);
+        let base = cx.theme().popover;
         let view = TextView::markdown(id, source.clone())
+            .style(
+                TextViewStyle::default()
+                    .code_block(StyleRefinement::default().bg(base))
+                    .inline_code(HighlightStyle {
+                        background_color: Some(base),
+                        ..Default::default()
+                    }),
+            )
             .markdown_extensions(
                 MarkdownExtensions::default()
                     .parser_revision(1)
@@ -1376,7 +1385,8 @@ impl Spk {
                                 div()
                                     .id("sent-at")
                                     .tooltip(move |window, cx| {
-                                        Tooltip::new(exact.clone()).build(window, cx)
+                                        floating_tooltip(Tooltip::new(exact.clone()), cx)
+                                            .build(window, cx)
                                     })
                                     .child(
                                         Label::new(relative_time(message.created_at, now))
@@ -1629,7 +1639,8 @@ impl Spk {
                                     .opacity(if row_focused { 1. } else { 0. })
                                     .group_hover("message-row", |clock| clock.opacity(1.))
                                     .tooltip(move |window, cx| {
-                                        Tooltip::new(exact.clone()).build(window, cx)
+                                        floating_tooltip(Tooltip::new(exact.clone()), cx)
+                                            .build(window, cx)
                                     })
                                     .child(
                                         Label::new(time.format("%H:%M").to_string())

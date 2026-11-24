@@ -80,6 +80,7 @@ impl Spk {
         &self,
         message: Option<&'static str>,
         retry_restore: bool,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         account_card("Sign in to SPK", cx)
@@ -88,12 +89,16 @@ impl Spk {
                 InputContentType::EmailAddress,
                 &self.email,
                 0,
+                window,
+                cx,
             ))
             .child(field(
                 "Password",
                 InputContentType::Password,
                 &self.password,
                 1,
+                window,
+                cx,
             ))
             .children(self.form_message(message, cx))
             .child(self.submit_button("Sign in", Some(IconName::LogIn), 2, cx))
@@ -105,6 +110,7 @@ impl Spk {
             .when(retry_restore, |card| {
                 card.child(
                     control_button("restore")
+                        .bg(cx.theme().popover)
                         .label("Retry saved session")
                         .tab_index(3)
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -128,6 +134,7 @@ impl Spk {
         &self,
         form: AccountLinkForm,
         message: Option<&'static str>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let (title, button, label, content_type) = match form {
@@ -157,9 +164,11 @@ impl Spk {
                     InputContentType::EmailAddress,
                     &self.email,
                     0,
+                    window,
+                    cx,
                 ))
             })
-            .child(field(label, content_type, &self.password, 1))
+            .child(field(label, content_type, &self.password, 1, window, cx))
             .when(!matches!(form, AccountLinkForm::Link), |card| {
                 card.child(Label::new("At least 8 characters").text_sm())
             })
@@ -193,6 +202,7 @@ impl Spk {
         &self,
         message: Option<&'static str>,
         notice: Option<&'static str>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         account_card("Welcome to SPK", cx)
@@ -201,6 +211,8 @@ impl Spk {
                 InputContentType::Nickname,
                 &self.nickname,
                 0,
+                window,
+                cx,
             ))
             .child(Label::new("2 to 32 characters").text_sm())
             .children(self.form_message(message, cx))
@@ -254,9 +266,7 @@ fn account_card(title: &'static str, cx: &Context<Spk>) -> Div {
         .mx_auto()
         .p_6()
         .rounded_lg()
-        .bg(cx.theme().popover)
-        .border_1()
-        .border_color(cx.theme().border)
+        .bg(cx.theme().background)
         .flex()
         .flex_col()
         .gap_3()
@@ -274,14 +284,23 @@ fn field(
     content_type: InputContentType,
     input: &Entity<InputState>,
     tab_index: isize,
+    window: &Window,
+    cx: &App,
 ) -> Div {
+    let theme = cx.theme();
+    let focused = input.focus_handle(cx).is_focused(window);
+    let fill = if focused {
+        theme.secondary_hover
+    } else {
+        theme.popover
+    };
     div()
         .flex()
         .flex_col()
         .gap_1()
         .child(Label::new(label).id(label).font_medium())
         .child(
-            Input::new(input)
+            surface_input(input, fill, cx)
                 .aria_label(label)
                 .content_type(content_type)
                 .tab_index(tab_index),

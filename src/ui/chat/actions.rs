@@ -364,6 +364,11 @@ impl Spk {
                 };
                 reaction_button(chat, message, emoji, mine, ReactionSelection::Chip, cx)
                     .outline()
+                    .bg(if mine {
+                        cx.theme().primary.opacity(0.10)
+                    } else {
+                        cx.theme().popover
+                    })
                     .xsmall()
                     .rounded(px(10.))
                     .child(
@@ -408,7 +413,7 @@ impl Spk {
                         .border_l_2()
                         .border_color(theme.primary)
                         .rounded_md()
-                        .bg(theme.muted)
+                        .bg(theme.popover)
                         .p_2()
                         .flex()
                         .flex_col()
@@ -820,10 +825,8 @@ impl MessageActions {
             .flex_wrap()
             .justify_end()
             .bg(theme.popover)
-            .border_1()
-            .border_color(theme.border)
             .rounded_md()
-            .shadow_sm()
+            .shadow(floating_shadow(cx))
             .when(!visible && !picker_open, |toolbar| {
                 toolbar
                     .invisible()
