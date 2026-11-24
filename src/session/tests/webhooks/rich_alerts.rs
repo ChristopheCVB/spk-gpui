@@ -13,7 +13,11 @@ async fn signed_in_reader_receives_plain_and_rich_alerts_in_history_and_live() {
             "description":"**Tests passed**",
             "fields":[
                 {"name":"Branch","value":"main","inline":true},
-                {"name":"Summary","value":"No failures"}
+                {"name":"Summary","value":"No failures"},
+                {"name":"Run","value":"https://ci.example.test/runs/12","inline":true},
+                {"name":"Contact","value":"mailto:ci@example.test","inline":true},
+                {"name":"Note","value":"https://ci.example.test is online","inline":true},
+                {"name":"Incomplete","value":"https://","inline":true}
             ],
             "footer":"Build service", "timestamp":"2026-11-24T09:15:00.000Z"
         }}),
@@ -53,13 +57,18 @@ async fn signed_in_reader_receives_plain_and_rich_alerts_in_history_and_live() {
         assert_eq!(embed.title_link().unwrap().as_str(), link);
         assert_eq!(embed.description.as_deref(), Some("**Tests passed**"));
         assert_eq!(embed.color, Some(crate::api::EmbedColor::Success));
-        assert_eq!(embed.fields.len(), 2);
+        assert_eq!(embed.fields.len(), 6);
         assert_eq!(embed.fields[0].name, "Branch");
         assert_eq!(embed.fields[0].value, "main");
         assert!(embed.fields[0].inline);
         assert_eq!(embed.fields[1].name, "Summary");
         assert_eq!(embed.fields[1].value, "No failures");
         assert!(!embed.fields[1].inline);
+        assert_eq!(
+            embed.fields[2].link().unwrap().as_str(),
+            "https://ci.example.test/runs/12"
+        );
+        assert!(embed.fields[3..].iter().all(|field| field.link().is_none()));
         assert_eq!(embed.footer.as_deref(), Some("Build service"));
         assert_eq!(embed.timestamp.as_deref(), Some("2026-11-24T09:15:00.000Z"));
         assert_eq!(combined.body, "Deployment needs attention");
