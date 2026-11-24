@@ -7767,6 +7767,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.30.0",
+ "unicode-segmentation",
  "url",
  "uuid",
  "wasapi",

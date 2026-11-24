@@ -71,6 +71,9 @@ pub(super) fn filter<T>(
         return items.into_iter().take(LIMIT).collect();
     }
     let normalize = |value: &str| {
+        if value.is_ascii() {
+            return value.to_ascii_lowercase();
+        }
         use icu_properties::{
             CodePointMapData,
             props::{GeneralCategory, GeneralCategoryGroup},
@@ -98,11 +101,15 @@ pub(super) fn filter<T>(
                 .into_iter()
                 .filter_map(|field| {
                     let field = normalize(field);
+                    let rank = score(&field);
+                    if rank == Some(0) || !field.contains([' ', '_', '-']) {
+                        return rank;
+                    }
                     let compact: String = field
                         .chars()
                         .filter(|ch| !matches!(ch, ' ' | '_' | '-'))
                         .collect();
-                    score(&field).into_iter().chain(score(&compact)).min()
+                    rank.into_iter().chain(score(&compact)).min()
                 })
                 .min()?;
             Some((rank, item))
@@ -149,30 +156,46 @@ impl SlashCommand {
 
 #[derive(Clone, PartialEq, Eq)]
 enum Item {
+    Emoji(&'static reaction_picker::Emoji),
     Command(SlashCommand),
 }
 
 impl Item {
     fn label(&self) -> String {
         match self {
+            Self::Emoji(emoji) => emoji.annotation.clone(),
             Self::Command(command) => format!("/{}", command.name()),
         }
     }
 
     fn description(&self) -> Option<&str> {
         match self {
+            Self::Emoji(_) => None,
             Self::Command(command) => Some(command.description()),
         }
     }
 
     fn leading(&self, cx: &App) -> AnyElement {
         match self {
+            Self::Emoji(emoji) => reaction_glyph(&emoji.emoji, px(16.)),
             Self::Command(command) => Icon::new(command.icon())
                 .size(px(16.))
                 .text_color(cx.theme().muted_foreground)
                 .into_any_element(),
         }
     }
+}
+
+fn emoji_items(query: &str) -> Vec<Item> {
+    filter(query, reaction_picker::EMOJI.iter(), |emoji| {
+        std::iter::once(emoji.annotation.as_str())
+            .chain(emoji.shortcodes.iter().map(String::as_str))
+            .chain(emoji.tags.iter().map(String::as_str))
+            .collect()
+    })
+    .into_iter()
+    .map(Item::Emoji)
+    .collect()
 }
 
 #[derive(Default)]
@@ -242,13 +265,14 @@ impl Spk {
 
     fn suggestion_items(&self, matched: &SuggestionMatch) -> Vec<Item> {
         match matched.trigger {
+            Trigger::Emoji => emoji_items(&matched.query),
             Trigger::Slash => filter(&matched.query, SlashCommand::ALL, |command| {
                 vec![command.name()]
             })
             .into_iter()
             .map(Item::Command)
             .collect(),
-            Trigger::Mention | Trigger::Emoji => Vec::new(),
+            Trigger::Mention => Vec::new(),
         }
     }
 
@@ -313,6 +337,11 @@ impl Spk {
     ) {
         self.suggestion_state_mut(editing).dismiss();
         match item {
+            Item::Emoji(emoji) => self.suggestion_input(editing).update(cx, |input, cx| {
+                input.set_selected_range(range, cx);
+                input.replace(&emoji.emoji, window, cx);
+                input.focus(window, cx);
+            }),
             Item::Command(command) => {
                 self.chat_input.update(cx, |input, cx| {
                     let range = editor::empty_suggestion_range(&input.value(), range);
@@ -468,6 +497,35 @@ impl Spk {
 #[cfg(test)]
 mod tests {
     use super::{SuggestionMatch, Trigger, filter, match_prefix};
+
+    #[test]
+    fn emoji_menu_searches_the_web_catalog_and_matches_at_the_caret() {
+        use super::emoji_items;
+
+        assert_eq!(emoji_items("").len(), 42);
+        assert_eq!(emoji_items("")[0].label(), "grinning face");
+        assert_eq!(emoji_items("THUMBSUP")[0].label(), "thumbs up");
+        assert_eq!(emoji_items("pepperoni")[0].label(), "pizza");
+
+        let source = "👍 Choose :redheart, please";
+        let caret = source.find(',').unwrap();
+        let matched = match_prefix(source, 0..caret, false).unwrap();
+        assert_eq!(matched.trigger, Trigger::Emoji);
+        assert_eq!(&source[matched.range], ":redheart");
+        assert_eq!(emoji_items(&matched.query)[0].label(), "red heart");
+        for source in [
+            "https://example.com",
+            "word:joy",
+            "::joy",
+            ":joy:",
+            "x\t:joy",
+        ] {
+            assert!(
+                match_prefix(source, 0..source.len(), false).is_none(),
+                "{source}"
+            );
+        }
+    }
 
     #[test]
     fn suggestions_rank_names_and_keep_a_bounded_stable_menu() {

@@ -8,10 +8,13 @@ use gpui_kit::{
     base::input::TextDecoration,
     component::input::{InlineToken, InputContent, InputToken},
 };
+use unicode_segmentation::UnicodeSegmentation as _;
 
 use super::super::*;
+use super::{reaction_artwork_path, reaction_glyph};
 use markdown::{Projection, current_line, enter_change, quote_prefix};
 
+const EMOJI: &str = "spk:emoji";
 const SYNTAX: &str = "spk:markdown";
 const PENDING: &str = "spk:pending-format";
 const PENDING_OFF: &str = "spk:pending-unformatted";
@@ -19,6 +22,7 @@ const CLIPBOARD: &str = "spk-message-markdown-v1";
 
 pub(in crate::ui) fn textarea(input: &Entity<TextareaState>) -> Textarea {
     Textarea::new(input).token(|context, _, cx| match context.token().id().as_ref() {
+        EMOJI => reaction_glyph(context.token().text(), px(16.)),
         SYNTAX | PENDING | PENDING_OFF => div()
             .text_color(cx.theme().muted_foreground)
             .child(context.token().label().trim_end_matches(' ').to_owned())
@@ -42,11 +46,26 @@ pub(in crate::ui) fn refresh(input: &Entity<TextareaState>, cx: &mut App) {
         for span in input
             .tokens()
             .iter()
-            .filter(|span| span.token().id() != SYNTAX)
+            .filter(|span| !matches!(span.token().id().as_ref(), EMOJI | SYNTAX))
         {
             tokens = attach(tokens, span.range(), span.token().clone());
         }
         let selection = input.selected_range();
+        for (start, emoji) in source.grapheme_indices(true) {
+            let range = start..start + emoji.len();
+            if emoji.is_ascii()
+                || [selection.start, selection.end]
+                    .iter()
+                    .any(|offset| range.start < *offset && *offset < range.end)
+                || [Format::Code, Format::CodeBlock, Format::Spoiler]
+                    .into_iter()
+                    .any(|format| projection.active(format, &range))
+                || reaction_artwork_path(emoji).is_none()
+            {
+                continue;
+            }
+            tokens = attach(tokens, range, InlineToken::new(EMOJI, emoji.to_owned()));
+        }
         for syntax in projection.syntax {
             if [selection.start, selection.end]
                 .iter()
@@ -339,6 +358,9 @@ pub(super) fn suggestion_prefix(
     let line_start = prefix.rfind('\n').map_or(0, |newline| newline + 1);
     let mut start = line_start;
     for span in input.tokens().iter().rev() {
+        if span.token().id() == EMOJI {
+            continue;
+        }
         let range = span.range();
         if range.start >= caret {
             continue;

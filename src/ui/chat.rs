@@ -1595,8 +1595,7 @@ impl Spk {
         disabled: bool,
         cx: &Context<Self>,
     ) -> impl IntoElement {
-        let app = cx.weak_entity();
-        let mention_app = app.clone();
+        let mention_app = cx.weak_entity();
         let active = editor::active_formats(self.chat_input.read(cx));
         let people: Vec<_> = sidebar
             .people()
@@ -1640,31 +1639,6 @@ impl Spk {
                                 move |_, window, cx| {
                                     let _ = app.update(cx, |this, cx| {
                                         this.insert_chat_text("", &mention, window, cx)
-                                    });
-                                },
-                            ))
-                        })
-                    }),
-            )
-            .child(
-                tool_button("emoji-menu", IconName::FaceSlightlySmiling, "Emoji")
-                    .disabled(disabled)
-                    .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
-                        [
-                            ("👍", "Thumbs up"),
-                            ("❤️", "Heart"),
-                            ("😂", "Laugh"),
-                            ("😊", "Smile"),
-                            ("👋", "Wave"),
-                            ("🎉", "Celebrate"),
-                        ]
-                        .into_iter()
-                        .fold(menu, |menu, (emoji, name)| {
-                            let app = app.clone();
-                            menu.item(PopupMenuItem::new(format!("{emoji} {name}")).on_click(
-                                move |_, window, cx| {
-                                    let _ = app.update(cx, |this, cx| {
-                                        this.insert_chat_text("", emoji, window, cx)
                                     });
                                 },
                             ))
