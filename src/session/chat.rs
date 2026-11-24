@@ -22,8 +22,7 @@ use std::{
 use tokio::{task::JoinSet, time::Instant};
 
 use crate::api::{
-    AttachmentRef, Channel, ChatMessage, Failure, MessageChange, MessagePage, ReplyRef, SpkClient,
-    VoiceSocket,
+    Channel, ChatMessage, Failure, MessageChange, MessagePage, ReplyRef, SpkClient, VoiceSocket,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -55,7 +54,8 @@ pub struct ChatView {
     pub jump_failed: bool,
     hold_read: bool,
     pending_unread: Option<u64>,
-    pub outgoing: Option<Outgoing>,
+    pub outgoing: Vec<Outgoing>,
+    pub draft_generation: u64,
     pub pins: Option<Pins>,
     pub preview_images: PreviewImages,
     pub gifs: Option<GifPickerView>,
@@ -132,26 +132,27 @@ pub struct Draft {
 impl Draft {
     pub fn can_send(&self, body: &str) -> bool {
         !self.attachments_block_send()
-            && (!body.trim().is_empty() || self.gif.is_some() || self.attachments_ready())
+            && (!trim_composer_text(body).is_empty()
+                || self.gif.is_some()
+                || self.attachments_ready())
     }
 }
 
 #[derive(Clone)]
 pub struct Outgoing {
-    pub body: String,
+    pub nonce: String,
+    pub draft: Draft,
     pub status: Delivery,
-    nonce: String,
-    gif_url: Option<String>,
-    reply: Option<ReplyRef>,
-    attachments: Vec<AttachmentRef>,
+    channel_id: String,
 }
 
 impl Outgoing {
     fn matches_attachment(&self, message: &ChatMessage) -> bool {
         // SPK claims each uploaded attachment for a single message in the send transaction.
-        self.attachments
-            .first()
-            .is_some_and(|sent| message.attachments.iter().any(|file| file.id == sent.id))
+        self.draft.uploads.iter().any(|upload| {
+            matches!(&upload.status, UploadStatus::Ready(id)
+                if message.attachments.iter().any(|file| &file.id == id))
+        })
     }
 }
 
@@ -174,7 +175,7 @@ enum HistoryRequest {
 #[derive(Default)]
 pub(super) struct ChatSession {
     selected: Option<ChatView>,
-    outgoing: HashMap<String, Outgoing>,
+    outgoing: Vec<Outgoing>,
     message_send_error: Option<String>,
     vote_error: Option<&'static str>,
     drafts: HashMap<String, Draft>,
@@ -252,7 +253,12 @@ impl ChatSession {
             view.has_more_before = false;
             view.has_more_after = false;
         } else if !view.unavailable() {
-            view.outgoing = self.outgoing.get(&view.channel_id).cloned();
+            view.outgoing = self
+                .outgoing
+                .iter()
+                .filter(|outgoing| outgoing.channel_id == view.channel_id)
+                .cloned()
+                .collect();
             if !view.webhook {
                 view.draft = self
                     .drafts
@@ -327,7 +333,8 @@ impl ChatSession {
             typing: Vec::new(),
             jump: None,
             jump_failed: false,
-            outgoing: None,
+            outgoing: Vec::new(),
+            draft_generation: 0,
             pins: (!channel.is_webhook()).then_some(Pins::Loading),
             preview_images: PreviewImages::default(),
             gifs: None,
@@ -385,7 +392,7 @@ impl ChatSession {
         self.socket = None;
         self.typers.clear();
         self.last_typing = None;
-        for outgoing in self.outgoing.values_mut() {
+        for outgoing in &mut self.outgoing {
             if matches!(outgoing.status, Delivery::Sending(_)) {
                 outgoing.status = Delivery::Unconfirmed;
             }
@@ -495,16 +502,16 @@ impl ChatSession {
         own_id: Option<&str>,
         result: Result<MessagePage, Failure>,
     ) {
-        if let (Some(view), Some(own_id), Ok(page)) = (&self.selected, own_id, &result)
-            && let Some(outgoing) = self.outgoing.get(&view.channel_id)
-            && !outgoing.attachments.is_empty()
-            && page.messages.iter().any(|message| {
-                message.channel_id == view.channel_id
-                    && message.user_id == own_id
-                    && outgoing.matches_attachment(message)
-            })
-        {
-            self.clear_delivered_send(&view.channel_id.clone());
+        if let (Some(view), Some(own_id), Ok(page)) = (&self.selected, own_id, &result) {
+            self.outgoing.retain(|outgoing| {
+                outgoing.channel_id != view.channel_id
+                    || !outgoing.draft.attachments_ready()
+                    || !page.messages.iter().any(|message| {
+                        message.channel_id == view.channel_id
+                            && message.user_id == own_id
+                            && outgoing.matches_attachment(message)
+                    })
+            });
         }
         let (Some(view), Some(request)) = (&mut self.selected, &self.history) else {
             return;
@@ -584,7 +591,8 @@ impl ChatSession {
                     view.has_more_before = false;
                     view.has_more_after = false;
                     if view.direct_message_peer.is_some() {
-                        self.outgoing.remove(&view.channel_id);
+                        self.outgoing
+                            .retain(|outgoing| outgoing.channel_id != view.channel_id);
                         if let Some(draft) = self.drafts.remove(&view.channel_id) {
                             if !draft.body.is_empty() {
                                 self.draft_changes
@@ -728,27 +736,48 @@ impl ChatSession {
     }
 
     pub fn send(&mut self, channel_id: String, body: String) {
-        if self
+        let Some(view) = self
             .selected
-            .as_ref()
-            .is_none_or(|view| view.channel_id != channel_id || !view.can_send())
-            || self.outgoing.contains_key(&channel_id)
-        {
+            .as_mut()
+            .filter(|view| view.channel_id == channel_id && !view.webhook && !view.unavailable())
+        else {
             return;
-        }
+        };
+        view.draft_generation += 1;
+        let can_send = view.can_send();
         let draft = self.drafts.entry(channel_id.clone()).or_default();
+        let body = trim_composer_text(&body).to_owned();
         if !draft.can_send(&body) {
+            // The attachment queue can change before an already accepted UI command is processed.
+            if !body.is_empty() {
+                draft.body.clear();
+                self.draft_changes.insert(channel_id.clone(), String::new());
+                self.outgoing.push(Outgoing {
+                    nonce: uuid::Uuid::new_v4().to_string(),
+                    draft: Draft {
+                        body,
+                        ..Draft::default()
+                    },
+                    status: Delivery::Failed(
+                        "Wait for attachments to finish before sending.".into(),
+                    ),
+                    channel_id,
+                });
+            }
             return;
         }
-        if draft.body != body {
-            draft.body.clone_from(&body);
-            self.draft_changes.insert(channel_id.clone(), body.clone());
-        }
-        let reply = draft.reply.clone();
-        let attachments = draft.attachment_refs();
-        let gif_url = draft.gif.as_ref().map(|gif| gif.item.url.clone());
+        let mut sent = std::mem::take(draft);
+        draft.uploads = sent
+            .uploads
+            .extract_if(.., |upload| {
+                matches!(upload.status, UploadStatus::Failed(_))
+            })
+            .collect();
+        sent.body = body;
+        sent.upload_notice = None;
+        self.draft_changes.insert(channel_id.clone(), String::new());
         self.gifs.close();
-        self.send_draft(channel_id, body, gif_url, reply, attachments);
+        self.queue_send(channel_id, sent, can_send);
     }
 
     pub fn send_poll(
@@ -775,107 +804,80 @@ impl ChatSession {
         Ok(())
     }
 
-    fn send_draft(
-        &mut self,
-        channel_id: String,
-        body: String,
-        gif_url: Option<String>,
-        reply: Option<ReplyRef>,
-        attachments: Vec<AttachmentRef>,
-    ) {
-        let wire_body = match (body.trim(), gif_url.as_deref()) {
-            (_, None) => std::borrow::Cow::Borrowed(body.as_str()),
-            ("", Some(url)) => std::borrow::Cow::Borrowed(url),
-            (text, Some(url)) => std::borrow::Cow::Owned(format!("{text}\n{url}")),
-        };
+    fn queue_send(&mut self, channel_id: String, draft: Draft, can_send: bool) {
         let nonce = uuid::Uuid::new_v4().to_string();
-        let status = if self.socket.as_ref().is_some_and(|socket| {
-            socket.send_message(
-                &channel_id,
-                &wire_body,
-                &nonce,
-                reply.as_ref().map(|reply| reply.id.as_str()),
-                &attachments,
-            )
-        }) {
+        let status = if can_send && self.send_snapshot(&channel_id, &nonce, &draft) {
             Delivery::Sending(Instant::now() + Duration::from_secs(12))
         } else {
             Delivery::Failed("Could not reach SPK. Try again.".into())
         };
-        self.outgoing.insert(
+        self.outgoing.push(Outgoing {
+            nonce,
+            draft,
+            status,
             channel_id,
-            Outgoing {
-                body,
-                status,
+        });
+    }
+
+    fn send_snapshot(&self, channel_id: &str, nonce: &str, draft: &Draft) -> bool {
+        let wire_body = match (draft.body.as_str(), draft.gif.as_ref()) {
+            (text, None) => std::borrow::Cow::Borrowed(text),
+            ("", Some(gif)) => std::borrow::Cow::Borrowed(gif.item.url.as_str()),
+            (text, Some(gif)) => std::borrow::Cow::Owned(format!("{text}\n{}", gif.item.url)),
+        };
+        self.socket.as_ref().is_some_and(|socket| {
+            socket.send_message(
+                channel_id,
+                &wire_body,
                 nonce,
-                gif_url,
-                reply,
-                attachments,
-            },
-        );
+                draft.reply.as_ref().map(|reply| reply.id.as_str()),
+                &draft.attachment_refs(),
+            )
+        })
     }
 
-    pub fn retry_send(&mut self) {
-        if let Some(view) = &self.selected
-            && view.can_send()
-            && self
-                .outgoing
-                .get(&view.channel_id)
-                .is_some_and(|outgoing| matches!(outgoing.status, Delivery::Failed(_)))
+    pub fn retry_send(&mut self, nonce: &str, body: Option<String>) -> Result<(), &'static str> {
+        let Some(view) = self.selected.as_ref().filter(|view| view.can_send()) else {
+            return Err("This conversation is unavailable.");
+        };
+        let Some(index) = self
+            .outgoing
+            .iter()
+            .position(|outgoing| outgoing.channel_id == view.channel_id && outgoing.nonce == nonce)
+        else {
+            return Err("This message has already been resolved. Check message history.");
+        };
+        let outgoing = &self.outgoing[index];
+        if !matches!(outgoing.status, Delivery::Failed(_))
+            && !(matches!(outgoing.status, Delivery::Unconfirmed) && body.is_some())
         {
-            let channel = view.channel_id.clone();
-            let outgoing = self.outgoing.remove(&channel).unwrap();
-            self.send_draft(
-                channel,
-                outgoing.body,
-                outgoing.gif_url,
-                outgoing.reply,
-                outgoing.attachments,
-            );
+            return Err("This message is awaiting confirmation.");
         }
+        let mut draft = outgoing.draft.clone();
+        if let Some(body) = body {
+            draft.body = trim_composer_text(&body).to_owned();
+        }
+        if !draft.can_send(&draft.body) {
+            return Err("Write a message to resend.");
+        }
+        let nonce = uuid::Uuid::new_v4().to_string();
+        if !self.send_snapshot(&outgoing.channel_id, &nonce, &draft) {
+            return Err("Could not reach SPK. Try again.");
+        }
+        let outgoing = &mut self.outgoing[index];
+        outgoing.nonce = nonce;
+        outgoing.draft = draft;
+        outgoing.status = Delivery::Sending(Instant::now() + Duration::from_secs(12));
+        Ok(())
     }
 
-    pub fn dismiss_send(&mut self) {
-        if let Some(view) = &self.selected
-            && self
-                .outgoing
-                .get(&view.channel_id)
-                .is_some_and(|outgoing| !matches!(outgoing.status, Delivery::Sending(_)))
-        {
-            self.outgoing.remove(&view.channel_id);
-        }
-    }
-
-    pub fn mark_send_delivered(&mut self, channel_id: &str) {
-        if self
-            .selected
-            .as_ref()
-            .is_some_and(|view| view.channel_id == channel_id)
-            && self
-                .outgoing
-                .get(channel_id)
-                .is_some_and(|outgoing| matches!(outgoing.status, Delivery::Unconfirmed))
-        {
-            self.clear_delivered_send(channel_id);
-        }
-    }
-
-    fn clear_delivered_send(&mut self, channel_id: &str) {
-        let outgoing = self.outgoing.remove(channel_id).unwrap();
-        if let Some(draft) = self.drafts.get_mut(channel_id) {
-            draft.uploads.clear();
-            if draft.gif.as_ref().map(|gif| &gif.item.url) == outgoing.gif_url.as_ref() {
-                draft.gif = None;
-            }
-            if draft.body == outgoing.body && draft.reply == outgoing.reply {
-                if !draft.body.is_empty() {
-                    draft.body.clear();
-                    self.draft_changes
-                        .insert(channel_id.to_owned(), String::new());
-                }
-                draft.reply = None;
-                draft.upload_notice = None;
-            }
+    pub fn mark_send_delivered(&mut self, nonce: &str) {
+        if let Some(view) = &self.selected {
+            self.outgoing.retain(|outgoing| {
+                outgoing.channel_id != view.channel_id
+                    || outgoing.nonce != nonce
+                    || !matches!(outgoing.status, Delivery::Unconfirmed)
+            });
         }
     }
 
@@ -886,15 +888,12 @@ impl ChatSession {
         own_id: Option<&str>,
         window_active: bool,
     ) {
-        if own_id == Some(message.user_id.as_str())
-            && self
-                .outgoing
-                .get(&message.channel_id)
-                .is_some_and(|pending| {
-                    Some(pending.nonce.as_str()) == nonce || pending.matches_attachment(&message)
-                })
-        {
-            self.clear_delivered_send(&message.channel_id);
+        if own_id == Some(message.user_id.as_str()) {
+            self.outgoing.retain(|outgoing| {
+                outgoing.channel_id != message.channel_id
+                    || (Some(outgoing.nonce.as_str()) != nonce
+                        && !outgoing.matches_attachment(&message))
+            });
         }
         if let Some(view) = &mut self.selected
             && view.channel_id == message.channel_id
@@ -942,10 +941,19 @@ impl ChatSession {
         {
             draft.reply = None;
         }
-        if let Some(outgoing) = self.outgoing.get_mut(channel_id)
-            && outgoing.reply.as_ref().is_some_and(|reply| reply.id == id)
+        for outgoing in self
+            .outgoing
+            .iter_mut()
+            .filter(|outgoing| outgoing.channel_id == channel_id)
         {
-            outgoing.reply = None;
+            if outgoing
+                .draft
+                .reply
+                .as_ref()
+                .is_some_and(|reply| reply.id == id)
+            {
+                outgoing.draft.reply = None;
+            }
         }
         if let Some(view) = &mut self.selected
             && view.channel_id == channel_id
@@ -959,7 +967,7 @@ impl ChatSession {
     pub fn error(&mut self, nonce: Option<&str>, error: String) {
         if let Some(outgoing) = self
             .outgoing
-            .values_mut()
+            .iter_mut()
             .find(|outgoing| Some(outgoing.nonce.as_str()) == nonce)
         {
             outgoing.status = Delivery::Failed(error);
@@ -970,7 +978,7 @@ impl ChatSession {
 
     pub fn next_timeout(&self) -> Option<Instant> {
         self.outgoing
-            .values()
+            .iter()
             .filter_map(|outgoing| match outgoing.status {
                 Delivery::Sending(deadline) => Some(deadline),
                 _ => None,
@@ -982,7 +990,7 @@ impl ChatSession {
     pub fn expire(&mut self) {
         let now = Instant::now();
         self.typers.retain(|_, until| *until > now);
-        for outgoing in self.outgoing.values_mut() {
+        for outgoing in &mut self.outgoing {
             if matches!(outgoing.status, Delivery::Sending(deadline) if deadline <= now) {
                 outgoing.status = Delivery::Unconfirmed;
             }
@@ -996,6 +1004,10 @@ pub const POLL_MIN_OPTIONS: usize = 2;
 pub const POLL_MAX_OPTIONS: usize = 10;
 
 pub fn trim_poll_text(text: &str) -> &str {
+    trim_composer_text(text)
+}
+
+fn trim_composer_text(text: &str) -> &str {
     // JavaScript trim includes BOM and excludes NEL.
     text.trim_matches(|ch: char| ch == '\u{feff}' || ch != '\u{85}' && ch.is_whitespace())
 }

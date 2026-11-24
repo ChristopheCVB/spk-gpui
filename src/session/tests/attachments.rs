@@ -272,8 +272,9 @@ async fn attachment_queue_cancels_in_flight_uploads_and_sends_only_ready_files()
         let received = wait_for_sidebar(&rx, |s| s.chat.as_ref().is_some_and(|chat|
             chat.messages.iter().any(|message| message.id == "message"))).await;
         let chat = received.chat.unwrap();
-        assert!(chat.draft.uploads.is_empty());
-        assert!(chat.outgoing.is_none());
+        assert_eq!(chat.draft.uploads.len(), 1);
+        assert_eq!(chat.draft.uploads[0].filename, "fail.txt");
+        assert!(chat.outgoing.is_empty());
         assert!(chat.messages[0].attachments[0].spoiler);
 
         let (reply, bytes) = oneshot::channel();

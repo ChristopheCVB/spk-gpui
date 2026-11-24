@@ -105,7 +105,7 @@ async fn draft_text_survives_restart_by_conversation_and_account() {
                 assert!(draft.reply.is_none());
                 assert!(draft.gif.is_none());
                 assert!(draft.uploads.is_empty());
-                assert!(ready.chat.unwrap().outgoing.is_none());
+                assert!(ready.chat.unwrap().outgoing.is_empty());
                 if first_launch {
                     tx.send(Command::UpdateChatDraft {
                         channel_id: conversation.into(),
@@ -388,16 +388,30 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         }).to_string())).await.unwrap();
         wait_for_sidebar(&rx, |view| {
             view.chat.as_ref().is_some_and(|chat| chat.message_send_error.as_deref() == Some("Poll rejected")
-                && chat.outgoing.is_none() && chat.messages.len() == 2)
+                && chat.outgoing.is_empty() && chat.messages.len() == 2)
         }).await;
 
         tx.send(Command::SendChatMessage {
             channel_id: "general".into(),
-            body: "Hi from desktop".into(),
+            body: "  Hi from desktop  ".into(),
         })
         .await
         .unwrap();
         let first = receive_chat_send(&mut peer, "general", "Hi from desktop").await;
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat|
+            chat.draft.body.is_empty() && !chat.outgoing.is_empty()
+        )).await;
+        tx.send(Command::SendChatMessage {
+            channel_id: "general".into(),
+            body: "Next message".into(),
+        }).await.unwrap();
+        let second = receive_chat_send(&mut peer, "general", "Next message").await;
+        assert_ne!(first["nonce"], second["nonce"]);
+        tx.send(Command::UpdateChatDraft {
+            channel_id: "general".into(), body: "Newest draft".into(),
+        }).await.unwrap();
+        receive_typing(&mut peer, "general").await;
+        live(&mut peer, &message("m3-early", 3, "alice", "Next message"), second["nonce"].as_str()).await;
         peer.send(Message::text(
             value!({"type":"message:error","nonce":first["nonce"],"error":"Slow down"}).to_string(),
         ))
@@ -408,17 +422,18 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
             |delivery| matches!(delivery, Delivery::Failed(error) if error == "Slow down"),
         )
         .await;
-        tx.send(Command::RetryChatSend).await.unwrap();
+        tx.send(Command::RetryChatSend(first["nonce"].as_str().unwrap().into())).await.unwrap();
         let retry = receive_chat_send(&mut peer, "general", "Hi from desktop").await;
         assert_ne!(first["nonce"], retry["nonce"]);
-        let sent = message("m3", 3, "alice", "Hi from desktop <@alice>");
+        let sent = message("m3", 4, "alice", "Hi from desktop <@alice>");
         live(&mut peer, &sent, retry["nonce"].as_str()).await;
         live(&mut peer, &sent, retry["nonce"].as_str()).await;
         wait_for_sidebar(&rx, |view| {
             assert!(view.alerts.is_empty(), "self-authored frames must stay silent");
             view.chat.as_ref().is_some_and(|chat| {
-                chat.messages.iter().map(|message| message.id.as_str()).eq(["m1", "m2", "m3"])
-                    && chat.messages[2].poll.is_none()
+                chat.messages.iter().map(|message| message.id.as_str()).eq(["m1", "m2", "m3-early", "m3"])
+                    && chat.messages[3].poll.is_none()
+                    && chat.draft.body == "Newest draft"
             })
         }).await;
         tx.send(Command::MutateChatMessage {
@@ -470,18 +485,28 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
             !chat.loading() && chat.messages.last().is_some_and(|message| message.previews.is_empty())
         })).await;
 
-        tx.send(Command::RetryChatSend).await.unwrap();
         tx.send(Command::SendChatMessage {
             channel_id: "general".into(),
             body: "Closed before confirmation".into(),
         })
         .await
         .unwrap();
-        receive_chat_send(&mut peer, "general", "Closed before confirmation").await;
+        let interrupted = receive_chat_send(&mut peer, "general", "Closed before confirmation").await;
+        let interrupted_nonce = interrupted["nonce"].as_str().unwrap();
+        tx.send(Command::SendChatMessage { channel_id: "general".into(), body: "Another interrupted message".into() }).await.unwrap();
+        let interrupted_also = receive_chat_send(&mut peer, "general", "Another interrupted message").await;
+        let edit_nonce = interrupted_also["nonce"].as_str().unwrap();
         peer.close(None).await.unwrap();
         wait_for_delivery(&rx, |delivery| matches!(delivery, Delivery::Unconfirmed)).await;
         let completed = send_poll(&tx, "general", "Offline poll?", &["Yes", "No"]).await;
         assert!(completed.await.unwrap().is_err());
+        tx.send(Command::SendChatMessage { channel_id: "general".into(), body: "Offline message".into() }).await.unwrap();
+        let offline = wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat|
+            chat.draft.body.is_empty() && chat.outgoing.iter().any(|outgoing|
+                outgoing.draft.body == "Offline message" && matches!(outgoing.status, Delivery::Failed(_)))
+        )).await;
+        let offline_nonce = offline.chat.unwrap().outgoing.into_iter()
+            .find(|outgoing| outgoing.draft.body == "Offline message").unwrap().nonce;
         let mut peer = accept_async(sockets.accept().await.unwrap().0)
             .await
             .unwrap();
@@ -620,16 +645,23 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
             chat.latest_ready() && chat.jump.is_none()
         })).await;
 
-        tx.send(Command::RetryChatSend).await.unwrap();
-        tx.send(Command::MarkChatSendDelivered("general".into())).await.unwrap();
-        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| chat.outgoing.is_none() && chat.draft.body.is_empty())).await;
-        tx.send(Command::SendChatMessage {
-            channel_id: "general".into(),
-            body: "Still here".into(),
-        })
-        .await
-        .unwrap();
-        receive_chat_send(&mut peer, "general", "Still here").await;
+        tx.send(Command::RetryChatSend(interrupted_nonce.into())).await.unwrap();
+        tx.send(Command::MarkChatSendDelivered(interrupted_nonce.into())).await.unwrap();
+        tx.send(Command::RetryChatSend(offline_nonce)).await.unwrap();
+        receive_chat_send(&mut peer, "general", "Offline message").await;
+        tx.send(Command::UpdateChatDraft { channel_id: "general".into(), body: "Still here".into() }).await.unwrap();
+        receive_typing(&mut peer, "general").await;
+        let (completed, resend) = oneshot::channel();
+        tx.send(Command::ResendChatMessage {
+            nonce: edit_nonce.into(), body: "  Edited while still composing  ".into(), completed,
+        }).await.unwrap();
+        assert_eq!(resend.await.unwrap(), Ok(()));
+        let edited_send = receive_chat_send(&mut peer, "general", "Edited while still composing").await;
+        assert_ne!(edited_send["nonce"].as_str(), Some(edit_nonce));
+        live(&mut peer, &message("edited-recovery", 7, "alice", "Edited while still composing"), edited_send["nonce"].as_str()).await;
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat|
+            chat.draft.body == "Still here" && chat.outgoing.len() == 1 && chat.outgoing[0].draft.body == "Offline message"
+        )).await;
 
         let completed = send_poll(&tx, "general", "Which day?", &["Monday", "Friday"]).await;
         assert_eq!(completed.await.unwrap(), Ok(()));
@@ -637,7 +669,7 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         live(&mut peer, &message("legacy-poll", 8, "alice", "Which day?"), old_server["nonce"].as_str()).await;
         wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
             chat.messages.iter().any(|message| message.id == "legacy-poll" && message.poll.is_none())
-                && chat.outgoing.is_some() && chat.draft.body == "Still here"
+                && !chat.outgoing.is_empty() && chat.draft.body == "Still here"
         })).await;
 
         let completed = send_poll(&tx, "general", "Rejected after switching?", &["Yes", "No"]).await;
@@ -780,10 +812,11 @@ async fn wait_for_messages(views: &Receiver<View>, expected: &[&str]) {
 
 async fn wait_for_delivery(views: &Receiver<View>, predicate: impl Fn(&Delivery) -> bool) {
     wait_for_sidebar(views, |view| {
-        view.chat
-            .as_ref()
-            .and_then(|chat| chat.outgoing.as_ref())
-            .is_some_and(|outgoing| predicate(&outgoing.status))
+        view.chat.as_ref().is_some_and(|chat| {
+            chat.outgoing
+                .iter()
+                .any(|outgoing| predicate(&outgoing.status))
+        })
     })
     .await;
 }
@@ -1051,7 +1084,7 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
         http,
     } = direct_message_http(false).await;
 
-    timeout(Duration::from_secs(10), async {
+    timeout(Duration::from_secs(25), async {
         let (alice, alice_views, sockets, mut alice_peer, alice_session) =
             direct_message_session(base.clone(), "alice").await;
         let (bob, bob_views, _, mut bob_peer, bob_session) =
@@ -1172,7 +1205,12 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
         bob.send(Command::SendChatMessage { channel_id: "private".into(), body: body.into() }).await.unwrap();
         let reply = receive_chat_send(&mut bob_peer, "private", body).await;
         assert_eq!(reply["replyToId"], "private-1");
-        wait_for_sidebar(&bob_views, |view| view.chat.as_ref().is_some_and(|chat| chat.outgoing.is_some() && chat.draft.body == body)).await;
+        wait_for_sidebar(&bob_views, |view| view.chat.as_ref().is_some_and(|chat|
+            chat.outgoing.len() == 1 && chat.draft.body.is_empty() && chat.draft.reply.is_none()
+        )).await;
+        bob.send(Command::UpdateChatDraft { channel_id: "private".into(), body: "Next private draft".into() }).await.unwrap();
+        bob.send(Command::SetChatReply { channel_id: "private".into(), message_id: Some("private-1".into()) }).await.unwrap();
+        wait_for_delivery(&bob_views, |delivery| matches!(delivery, Delivery::Unconfirmed)).await;
         let second = value!({"id":"private-2","channelId":"private","userId":"bob","body":body,"createdAt":2,
             "replyTo":{"id":"private-1","userId":"alice","preview":"Hello Bob","deleted":false}});
         live(&mut bob_peer, &second, reply["nonce"].as_str()).await;
@@ -1183,8 +1221,14 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
             })
         })).await;
         wait_for_sidebar(&bob_views, |view| view.chat.as_ref().is_some_and(|chat| {
-            chat.messages.len() == 2 && chat.draft.body.is_empty() && chat.draft.reply.is_none() && chat.outgoing.is_none()
+            chat.messages.len() == 2 && chat.draft.body == "Next private draft"
+                && chat.draft.reply.as_ref().is_some_and(|reply| reply.id == "private-1") && chat.outgoing.is_empty()
         })).await;
+        let (completed, resend) = oneshot::channel();
+        bob.send(Command::ResendChatMessage {
+            nonce: reply["nonce"].as_str().unwrap().into(), body: "Edited original".into(), completed,
+        }).await.unwrap();
+        assert_eq!(resend.await.unwrap(), Err("This message has already been resolved. Check message history."));
 
         alice_peer.close(None).await.unwrap();
         let mut alice_peer = accept_async(sockets.accept().await.unwrap().0).await.unwrap();
@@ -1431,7 +1475,7 @@ async fn direct_message_participants_vote_edit_create_and_reopen_polls() {
             })).await;
             if received.profile.id.as_deref() == Some("bob") {
                 let chat = received.chat.unwrap();
-                assert!(chat.outgoing.is_none());
+                assert!(chat.outgoing.is_empty());
                 assert_eq!(chat.draft.body, "Unsent draft");
                 assert_eq!(chat.draft.reply.unwrap().id, "private-2");
             }

@@ -54,6 +54,7 @@ pub(super) struct Spk {
     password: Entity<InputState>,
     nickname: Entity<InputState>,
     chat_input: Entity<TextareaState>,
+    chat_submitting: bool,
     slash_choice: Option<usize>,
     gif_input: Entity<InputState>,
     gif_button_focus: FocusHandle,
@@ -150,7 +151,7 @@ impl Spk {
                 InputEvent::Change => this.on_chat_input(window, cx),
                 InputEvent::PressEnter { shift: false, .. } => {
                     if !this.chat_slash_key("enter", window, cx) {
-                        this.submit_chat(cx);
+                        this.submit_chat(window, cx);
                     }
                 }
                 _ => {}
@@ -392,6 +393,7 @@ impl Spk {
             password,
             nickname,
             chat_input,
+            chat_submitting: false,
             slash_choice: None,
             gif_input,
             gif_button_focus: cx.focus_handle(),

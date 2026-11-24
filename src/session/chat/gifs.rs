@@ -323,11 +323,7 @@ impl GifPicker {
 
 impl ChatSession {
     pub fn open_gifs(&mut self, client: &SpkClient) {
-        if self
-            .selected
-            .as_ref()
-            .is_some_and(|view| view.can_send() && !self.outgoing.contains_key(&view.channel_id))
-        {
+        if self.selected.as_ref().is_some_and(ChatView::can_send) {
             self.gifs.show(client);
         }
     }
@@ -338,9 +334,6 @@ impl ChatSession {
         }) else {
             return;
         };
-        if self.outgoing.contains_key(&view.channel_id) {
-            return;
-        }
         let gif = if let Some(id) = id {
             let Some(gif) = self.gifs.pick(id) else {
                 return;

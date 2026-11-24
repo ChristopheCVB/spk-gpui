@@ -865,9 +865,7 @@ impl MessageActions {
                         .on_click(move |_, window, cx| {
                             let _ = quote_app.update(cx, |this, cx| {
                                 if chat(&this.view).is_some_and(|chat| {
-                                    chat.channel_id == quote_channel
-                                        && chat.can_send()
-                                        && chat.outgoing.is_none()
+                                    chat.channel_id == quote_channel && chat.can_send()
                                 }) {
                                     this.chat_input.update(cx, |input, cx| {
                                         let draft = input.value();

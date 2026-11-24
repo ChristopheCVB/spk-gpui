@@ -61,9 +61,9 @@ pub use {
     avatars::AvatarPhoto,
     channel_admin::{ChannelAction, ChannelAdmin, ChannelKind},
     chat::{
-        AttachmentInput, ChatView, Delivery, GifPickerView, POLL_MAX_OPTIONS, POLL_MIN_OPTIONS,
-        POLL_OPTION_LIMIT, POLL_QUESTION_LIMIT, Pins, PollEditOutcome, PollEditReply, UploadStatus,
-        image_preview, trim_poll_text, validate_poll,
+        AttachmentInput, ChatView, Delivery, GifPickerView, Outgoing, POLL_MAX_OPTIONS,
+        POLL_MIN_OPTIONS, POLL_OPTION_LIMIT, POLL_QUESTION_LIMIT, Pins, PollEditOutcome,
+        PollEditReply, UploadStatus, image_preview, trim_poll_text, validate_poll,
     },
     presence::Participant,
     profiles::ProfileEdit,
@@ -175,8 +175,12 @@ pub enum Command {
     MoreSearchResults,
     OpenMessageTarget(crate::api::MessageTarget),
     OpenConversationTarget(String),
-    RetryChatSend,
-    DismissChatSend,
+    RetryChatSend(String),
+    ResendChatMessage {
+        nonce: String,
+        body: String,
+        completed: oneshot::Sender<Result<(), &'static str>>,
+    },
     MarkChatSendDelivered(String),
     MutateChatMessage {
         channel_id: String,
@@ -1030,9 +1034,13 @@ async fn watch_session(
                         expired
                     });
                 }
-                Ok(Command::RetryChatSend) => chat.retry_send(),
-                Ok(Command::DismissChatSend) => chat.dismiss_send(),
-                Ok(Command::MarkChatSendDelivered(channel)) => chat.mark_send_delivered(&channel),
+                Ok(Command::RetryChatSend(nonce)) => {
+                    let _ = chat.retry_send(&nonce, None);
+                }
+                Ok(Command::ResendChatMessage { nonce, body, completed }) => {
+                    let _ = completed.send(chat.retry_send(&nonce, Some(body)));
+                }
+                Ok(Command::MarkChatSendDelivered(nonce)) => chat.mark_send_delivered(&nonce),
                 Ok(Command::MutateChatMessage { channel_id, message_id, action }) => {
                     chat.mutate(client, &sidebar, &channel_id, message_id, action);
                 }

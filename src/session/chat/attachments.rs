@@ -145,7 +145,6 @@ impl ChatSession {
         self.selected
             .as_ref()
             .is_some_and(|view| view.channel_id == channel_id && view.can_send())
-            && !self.outgoing.contains_key(channel_id)
     }
 
     pub fn add_attachments(
