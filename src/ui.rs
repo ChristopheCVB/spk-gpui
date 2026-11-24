@@ -83,14 +83,21 @@ pub(super) struct Spk {
     device_picker: Option<(VoiceControls, DeviceKind)>,
     selected_voice_channel: Option<String>,
     sidebar_open: bool,
+    sidebar_motion: workspace::PanelMotion,
     sidebar_width: Pixels,
     sidebar_drawer_open: bool,
+    sidebar_drawer_motion: workspace::PanelMotion,
+    sidebar_drawer_focus: FocusHandle,
+    sidebar_close_focus: FocusHandle,
     sidebar_toggle_focus: FocusHandle,
     new_text_channel_focus: FocusHandle,
     new_voice_channel_focus: FocusHandle,
     search_button_focus: FocusHandle,
+    search_drawer_focus: FocusHandle,
     search_query: Entity<InputState>,
     search_panel: Option<Entity<search::SearchPanel>>,
+    closing_search_panel: Option<Entity<search::SearchPanel>>,
+    search_motion: workspace::PanelMotion,
     voice_strip_toggle_focus: FocusHandle,
     quick_switcher: Option<WeakEntity<gpui_kit::component::command::CommandState>>,
     video_stage: video::VideoStage,
@@ -403,7 +410,10 @@ impl Spk {
                             this.selected_voice_channel = None;
                             this.device_picker = None;
                             this.close_sidebar_drawer(window, cx);
+                            this.sidebar_drawer_motion = Default::default();
                             this.search_panel = None;
+                            this.closing_search_panel = None;
+                            this.search_motion = Default::default();
                             this.clear_search_query(window, cx);
                             this.dismiss_workspace_dialogs(window, cx);
                         }
@@ -420,6 +430,7 @@ impl Spk {
                 this.shortcuts.signed_in(false);
                 this.close_sidebar_drawer(window, cx);
                 this.search_panel = None;
+                this.closing_search_panel = None;
                 this.clear_search_query(window, cx);
                 this.dismiss_workspace_dialogs(window, cx);
                 this.set_session_view(
@@ -469,14 +480,21 @@ impl Spk {
             device_picker: None,
             selected_voice_channel: None,
             sidebar_open: true,
+            sidebar_motion: Default::default(),
             sidebar_width: workspace::SIDEBAR_WIDTH,
             sidebar_drawer_open: false,
+            sidebar_drawer_motion: Default::default(),
+            sidebar_drawer_focus: cx.focus_handle().tab_stop(false),
+            sidebar_close_focus: cx.focus_handle().tab_stop(true),
             sidebar_toggle_focus: cx.focus_handle(),
             new_text_channel_focus: cx.focus_handle(),
             new_voice_channel_focus: cx.focus_handle(),
             search_button_focus: cx.focus_handle(),
+            search_drawer_focus: cx.focus_handle().tab_stop(false),
             search_query,
             search_panel: None,
+            closing_search_panel: None,
+            search_motion: Default::default(),
             voice_strip_toggle_focus: cx.focus_handle(),
             quick_switcher: None,
             video_stage: video::VideoStage::default(),

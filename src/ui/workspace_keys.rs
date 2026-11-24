@@ -64,6 +64,13 @@ impl Spk {
         {
             return false;
         }
+        if count == 0
+            && key_name == "escape"
+            && !gpui_kit::base::GlobalState::is_in_deferred_context(cx)
+            && self.sidebar_drawer_open
+        {
+            return self.close_sidebar_drawer(window, cx);
+        }
         let typing = window.has_focused_input(cx);
         if media_shortcut {
             let processing = sidebar.voice_intent.preferred.processing;

@@ -2,12 +2,15 @@ mod channel_admin;
 mod voice_session_layout;
 mod webhooks;
 
-use gpui_kit::component::{
-    Disableable, Placement,
-    menu::{ContextMenu, ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem},
-    resizable::{HandleEdge, resize_handle},
-    tooltip::Tooltip,
-    window_paddings,
+use gpui_kit::{
+    base::FocusTrapElement,
+    component::{
+        Disableable,
+        menu::{ContextMenu, ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem},
+        resizable::{HandleEdge, resize_handle},
+        tooltip::Tooltip,
+        window_paddings,
+    },
 };
 
 use super::{
@@ -26,6 +29,41 @@ pub(super) const SIDEBAR_WIDTH: Pixels = px(288.0);
 const SIDEBAR_MAX_WIDTH: Pixels = px(500.0);
 const VOICE_TILE_BORDER_WIDTH: Pixels = px(2.0);
 
+pub(super) const PANEL_DURATION: Duration = Duration::from_millis(200);
+
+#[derive(Default)]
+pub(super) struct PanelMotion(Option<(Instant, f32)>);
+
+impl PanelMotion {
+    pub(super) fn toggle(&mut self, open: bool, cx: &App) {
+        let now = Instant::now();
+        self.0 = (!cx.reduce_motion()).then(|| (now, self.sample(open, now).0));
+    }
+
+    fn sample(&self, open: bool, now: Instant) -> (f32, bool) {
+        let end = if open { 1.0 } else { 0.0 };
+        if let Some((start, from)) = self.0 {
+            let elapsed = now.saturating_duration_since(start);
+            if elapsed < PANEL_DURATION && from != end {
+                let progress = elapsed.as_secs_f32() / PANEL_DURATION.as_secs_f32();
+                return (from + (end - from) * (1.0 - (1.0 - progress).powi(3)), true);
+            }
+        }
+        (end, false)
+    }
+
+    pub(super) fn progress(&self, open: bool, window: &Window, cx: &App) -> f32 {
+        if cx.reduce_motion() {
+            return if open { 1.0 } else { 0.0 };
+        }
+        let (progress, moving) = self.sample(open, Instant::now());
+        if moving {
+            window.request_animation_frame();
+        }
+        progress
+    }
+}
+
 pub(super) fn wide_workspace(window: &Window) -> bool {
     let padding = window_paddings(window);
     window.viewport_size().width - padding.left - padding.right >= px(1024.0)
@@ -37,6 +75,21 @@ impl Render for SidebarResize {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
     }
+}
+
+fn sidebar_brand(cx: &App) -> Div {
+    div()
+        .flex()
+        .h_10()
+        .items_center()
+        .justify_center()
+        .flex_shrink_0()
+        .gap_1()
+        .text_2xl()
+        .font_bold()
+        .text_color(cx.theme().primary)
+        .child(logo(26.0))
+        .child("spk")
 }
 
 fn section_title(title: &'static str, icon: IconName, cx: &App) -> Div {
@@ -123,8 +176,27 @@ fn reveal_in_vertical_scroll(scroll: ScrollHandle, outset: Pixels) -> impl IntoE
 
 #[cfg(test)]
 mod tests {
-    use super::{SPEAKING_RING_WIDTH, VOICE_TILE_BORDER_WIDTH, vertical_reveal_delta};
+    use super::{
+        Instant, PANEL_DURATION, PanelMotion, SPEAKING_RING_WIDTH, VOICE_TILE_BORDER_WIDTH,
+        vertical_reveal_delta,
+    };
     use gpui_kit::{Bounds, point, px, size};
+
+    #[test]
+    fn panel_transition_reverses_from_its_current_width() {
+        let start = Instant::now();
+        let mut motion = PanelMotion(Some((start, 0.0)));
+        assert_eq!(motion.sample(true, start), (0.0, true));
+        let reversal = start + PANEL_DURATION / 2;
+        let (open, moving) = motion.sample(true, reversal);
+        assert!(moving && open > 0.5 && open < 1.0);
+        motion.0 = Some((reversal, open));
+        assert_eq!(motion.sample(false, reversal), (open, true));
+        assert_eq!(
+            motion.sample(false, reversal + PANEL_DURATION),
+            (0.0, false)
+        );
+    }
 
     #[test]
     fn tile_scroll_reveals_the_speaking_ring_at_both_edges() {
@@ -173,57 +245,13 @@ impl Spk {
         }
         self.device_picker = None;
         if wide_workspace(window) {
+            self.sidebar_motion.toggle(self.sidebar_open, cx);
             self.sidebar_open = !self.sidebar_open;
         } else {
             self.close_message_search(window, cx);
+            self.sidebar_drawer_motion.toggle(false, cx);
             self.sidebar_drawer_open = true;
-            let app = cx.weak_entity();
-            window.open_sheet_at(Placement::Left, cx, move |sheet, window, cx| {
-                let drawer = app.update(cx, |this, cx| {
-                    let View::SignedIn(sidebar) = &this.view else {
-                        return None;
-                    };
-                    Some((
-                        this.navigation(
-                            sidebar,
-                            this.selected_voice_destination(sidebar),
-                            window,
-                            cx,
-                        )
-                        .into_any_element(),
-                        this.navigation_footer(sidebar, VoiceSessionPlacement::Drawer, cx)
-                            .into_any_element(),
-                    ))
-                });
-                let app = app.clone();
-                sheet
-                    .title("Channels and direct messages")
-                    .size(SIDEBAR_WIDTH)
-                    .resizable(false)
-                    .bg(cx.theme().sidebar)
-                    .text_color(cx.theme().sidebar_foreground)
-                    .px_0()
-                    .when_some(drawer.ok().flatten(), |sheet, (navigation, footer)| {
-                        // Fill the sheet body so the shared navigation owns the scroll position.
-                        sheet
-                            .child(
-                                div()
-                                    .absolute()
-                                    .inset_0()
-                                    .flex()
-                                    .flex_col()
-                                    .child(navigation),
-                            )
-                            .footer(footer)
-                    })
-                    .on_close(move |_, _, cx| {
-                        let _ = app.update(cx, |this, cx| {
-                            this.sidebar_drawer_open = false;
-                            this.device_picker = None;
-                            cx.notify();
-                        });
-                    })
-            });
+            self.sidebar_close_focus.focus(window, cx);
         }
         cx.notify();
     }
@@ -233,18 +261,18 @@ impl Spk {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !std::mem::take(&mut self.sidebar_drawer_open) {
+        if !self.sidebar_drawer_open {
             return false;
         }
-        self.device_picker = None;
-        let dialog_focus = if window.has_active_dialog(cx) {
-            window.focused(cx)
+        if wide_workspace(window) {
+            self.sidebar_drawer_motion = PanelMotion::default();
         } else {
-            None
-        };
-        window.close_sheet(cx);
-        if let Some(focus) = dialog_focus {
-            focus.focus(window, cx);
+            self.sidebar_drawer_motion.toggle(true, cx);
+        }
+        self.sidebar_drawer_open = false;
+        self.device_picker = None;
+        if !window.has_active_dialog(cx) {
+            self.sidebar_toggle_focus.focus(window, cx);
         }
         cx.notify();
         true
@@ -268,6 +296,10 @@ impl Spk {
         let selected_channel = self.selected_voice_destination(sidebar);
         let wide = wide_workspace(window);
         let inline_sidebar = wide && self.sidebar_open && !self.video_stage.fullscreen;
+        let sidebar_progress = self.sidebar_motion.progress(self.sidebar_open, window, cx);
+        let drawer_progress =
+            self.sidebar_drawer_motion
+                .progress(self.sidebar_drawer_open, window, cx);
         let chat = sidebar
             .chat
             .as_ref()
@@ -287,8 +319,8 @@ impl Spk {
                 selected_channel.map_or("Voice channels", channel_name),
             ),
         };
-        let navigation =
-            inline_sidebar.then(|| self.navigation(sidebar, selected_channel, window, cx));
+        let navigation = (wide && sidebar_progress > 0.0 && !self.video_stage.fullscreen)
+            .then(|| self.navigation(sidebar, selected_channel, true, window, cx));
         let theme = cx.theme();
         let status = match sidebar.connection {
             Connection::Connecting => Some("Connecting to live updates…"),
@@ -316,6 +348,7 @@ impl Spk {
             .size_full()
             .relative()
             .flex()
+            .overflow_hidden()
             .when_some(navigation, |page, navigation| {
                 page.on_drag_move(cx.listener(
                     |this, drag: &DragMoveEvent<SidebarResize>, _, cx| {
@@ -327,30 +360,42 @@ impl Spk {
                 .child(
                     div()
                         .relative()
-                        .w(self.sidebar_width)
+                        .w(self.sidebar_width * sidebar_progress)
                         .h_full()
                         .flex_shrink_0()
-                        .flex()
-                        .flex_col()
-                        .min_h_0()
-                        .bg(theme.sidebar)
-                        .text_color(theme.sidebar_foreground)
-                        .child(navigation)
+                        .overflow_hidden()
                         .child(
                             div()
-                                .px(VOICE_SESSION_INSET)
-                                .pb_2()
-                                .child(self.navigation_footer(
-                                    sidebar,
-                                    VoiceSessionPlacement::Sidebar(self.sidebar_width),
-                                    cx,
-                                )),
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .w(self.sidebar_width)
+                                .h_full()
+                                .flex_shrink_0()
+                                .flex()
+                                .flex_col()
+                                .min_h_0()
+                                .bg(theme.sidebar)
+                                .text_color(theme.sidebar_foreground)
+                                .child(navigation)
+                                .child(div().px(VOICE_SESSION_INSET).pb_2().child(
+                                    self.navigation_footer(
+                                        sidebar,
+                                        VoiceSessionPlacement::Sidebar(self.sidebar_width),
+                                        cx,
+                                    ),
+                                ))
+                                .child(
+                                    resize_handle("sidebar-edge", Axis::Horizontal)
+                                        .inside(HandleEdge::Trailing)
+                                        .on_drag(SidebarResize, |_, _, _, cx| {
+                                            cx.new(|_| SidebarResize)
+                                        }),
+                                ),
                         )
-                        .child(
-                            resize_handle("sidebar-edge", Axis::Horizontal)
-                                .inside(HandleEdge::Trailing)
-                                .on_drag(SidebarResize, |_, _, _, cx| cx.new(|_| SidebarResize)),
-                        ),
+                        .when(!self.sidebar_open, |panel| {
+                            panel.child(div().absolute().inset_0().occlude())
+                        }),
                 )
             })
             .child(
@@ -526,16 +571,82 @@ impl Spk {
                         },
                     ),
             )
+            .when(!self.video_stage.fullscreen, |page| {
+                page.child(self.search_surface(wide, window, cx))
+            })
             .when(
-                !self.video_stage.fullscreen && self.search_panel.is_some(),
-                |page| page.child(self.search_surface(wide, window, cx)),
+                !wide
+                    && !self.video_stage.fullscreen
+                    && (self.sidebar_drawer_open || drawer_progress > 0.0),
+                |page| {
+                    page.child(self.sidebar_drawer(
+                        sidebar,
+                        selected_channel,
+                        drawer_progress,
+                        window,
+                        cx,
+                    ))
+                },
             )
+    }
+
+    fn sidebar_drawer(
+        &self,
+        sidebar: &Sidebar,
+        selected_channel: Option<&Channel>,
+        progress: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        let drawer = div()
+            .id("sidebar-drawer")
+            .role(Role::Dialog)
+            .aria_label("Channels and direct messages")
+            .absolute()
+            .top_0()
+            .left(window.viewport_size().width * (progress - 1.0))
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(theme.sidebar)
+            .text_color(theme.sidebar_foreground)
+            .occlude()
+            .child(
+                sidebar_brand(cx).relative().child(
+                    div().absolute().left_2().child(
+                        tool_button("close-sidebar", IconName::X, "Close sidebar")
+                            .track_focus(&self.sidebar_close_focus)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.close_sidebar_drawer(window, cx);
+                            })),
+                    ),
+                ),
+            )
+            .child(self.navigation(sidebar, selected_channel, false, window, cx))
+            .child(self.navigation_footer(sidebar, VoiceSessionPlacement::Drawer, cx))
+            .when(!self.sidebar_drawer_open, |drawer| {
+                drawer.child(div().absolute().inset_0().occlude())
+            });
+        let drawer = if self.sidebar_drawer_open {
+            drawer
+                .focus_trap("sidebar-drawer", &self.sidebar_drawer_focus)
+                .into_any_element()
+        } else {
+            drawer.into_any_element()
+        };
+        div()
+            .absolute()
+            .inset_0()
+            .when(self.sidebar_drawer_open, |layer| layer.occlude())
+            .child(drawer)
     }
 
     fn navigation(
         &self,
         sidebar: &Sidebar,
         selected_channel: Option<&Channel>,
+        show_brand: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
@@ -586,7 +697,6 @@ impl Spk {
                 );
                 self.channel_row(sidebar, channel, selected, actions, target, cx)
             }));
-        let primary = cx.theme().primary;
         let mut feeds = sidebar.webhook_feeds().peekable();
         let webhook_card =
             navigation_card("Webhooks", cx)
@@ -639,22 +749,7 @@ impl Spk {
             .track_scroll(&scroll)
             .pb_2()
             .gap(if self.compact() { px(4.0) } else { px(8.0) })
-            .when(!self.sidebar_drawer_open, |nav| {
-                nav.child(
-                    div()
-                        .flex()
-                        .h_10()
-                        .items_center()
-                        .justify_center()
-                        .flex_shrink_0()
-                        .gap_1()
-                        .text_2xl()
-                        .font_bold()
-                        .text_color(primary)
-                        .child(logo(26.0))
-                        .child("spk"),
-                )
-            })
+            .when(show_brand, |nav| nav.child(sidebar_brand(cx)))
             .child(
                 navigation_card("Direct messages", cx)
                     .child(section_title(

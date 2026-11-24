@@ -29,7 +29,7 @@ pub(super) struct SearchPanel {
     scope: SearchScope,
     selected_result: Option<MessageTarget>,
     results_scroll: ScrollHandle,
-    _keyboard: Subscription,
+    keyboard: Option<Subscription>,
 }
 
 impl Spk {
@@ -171,7 +171,7 @@ impl Spk {
                 scope,
                 selected_result: None,
                 results_scroll: ScrollHandle::new(),
-                _keyboard: keyboard,
+                keyboard: Some(keyboard),
             }
         });
         self.send(
@@ -183,8 +183,11 @@ impl Spk {
             cx,
         );
 
+        self.search_motion.toggle(false, cx);
+        self.closing_search_panel = None;
         self.search_panel = Some(panel);
         query_focus.focus(window, cx);
+        cx.notify();
     }
 
     pub(super) fn sync_search_conversation(&self, sidebar: &Sidebar, cx: &mut Context<Self>) {
@@ -201,11 +204,11 @@ impl Spk {
 
     pub(super) fn close_message_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(panel) = self.search_panel.take() {
-            let panel = panel.read(cx);
+            let search = panel.read(cx);
             if self.search_query.focus_handle(cx).is_focused(window)
-                || panel.focus.contains_focused(window, cx)
+                || search.focus.contains_focused(window, cx)
             {
-                let return_focus = panel
+                let return_focus = search
                     .return_focus
                     .as_ref()
                     .filter(|focus| self.workspace_focus.contains(focus, window))
@@ -218,6 +221,25 @@ impl Spk {
                     })
                     .clone();
                 return_focus.focus(window, cx);
+            }
+            self.search_motion.toggle(true, cx);
+            if !cx.reduce_motion() {
+                panel.update(cx, |search, _| search.keyboard = None);
+                let closing_id = panel.entity_id();
+                self.closing_search_panel = Some(panel);
+                let timer = cx.background_executor().timer(workspace::PANEL_DURATION);
+                cx.spawn(async move |this, cx| {
+                    timer.await;
+                    let _ = this.update(cx, |this, cx| {
+                        if this.closing_search_panel.as_ref().map(Entity::entity_id)
+                            == Some(closing_id)
+                        {
+                            this.closing_search_panel = None;
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
             }
             self.clear_search_query(window, cx);
             cx.notify();
@@ -264,12 +286,21 @@ impl Spk {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Div {
-        let mut layer = div();
-        let Some(panel) = &self.search_panel else {
-            return layer;
+        let open = self.search_panel.is_some();
+        let Some(panel) = self
+            .search_panel
+            .as_ref()
+            .or(self.closing_search_panel.as_ref())
+        else {
+            return div().flex_shrink_0();
         };
+        let progress = self.search_motion.progress(open, window, cx);
+        if progress == 0.0 && !open {
+            return div().flex_shrink_0();
+        }
         let theme = cx.theme();
-        let viewport_width = window.viewport_size().width;
+        let padding = gpui_kit::component::window_paddings(window);
+        let viewport_width = window.viewport_size().width - padding.left - padding.right;
         let width = if wide {
             if wide_search(viewport_width) {
                 px(384.0)
@@ -277,7 +308,9 @@ impl Spk {
                 px(320.0)
             }
         } else {
-            (viewport_width * 0.3).clamp(px(304.0), px(384.0))
+            (viewport_width * 0.3)
+                .clamp(px(304.0), px(384.0))
+                .min(viewport_width)
         };
         let search = div()
             .id("search-surface")
@@ -292,11 +325,28 @@ impl Spk {
             .flex_shrink_0()
             .bg(theme.sidebar)
             .occlude()
-            .child(panel.clone());
+            .child(panel.clone())
+            .when(!open, |panel| {
+                panel.child(div().absolute().inset_0().occlude())
+            });
         if wide {
-            layer = layer.h_full().child(search);
+            div()
+                .relative()
+                .w(width * progress)
+                .h_full()
+                .flex_shrink_0()
+                .overflow_hidden()
+                .child(search.absolute().top_0().left_0())
         } else {
-            layer = layer
+            let search = search.absolute().right(width * (progress - 1.0)).top_0();
+            let search = if open {
+                search
+                    .focus_trap("search-surface", &self.search_drawer_focus)
+                    .into_any_element()
+            } else {
+                search.into_any_element()
+            };
+            div()
                 .absolute()
                 .inset_0()
                 .child(
@@ -304,22 +354,14 @@ impl Spk {
                         .id("search-backdrop")
                         .absolute()
                         .inset_0()
-                        .bg(black().opacity(0.35))
+                        .bg(black().opacity(0.35 * progress))
                         .occlude()
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.close_message_search(window, cx);
                         })),
                 )
-                .child(
-                    search
-                        .absolute()
-                        .right_0()
-                        .top_0()
-                        .max_w_full()
-                        .focus_trap("search-surface", &cx.focus_handle().tab_stop(false)),
-                );
+                .child(search)
         }
-        layer
     }
 }
 
