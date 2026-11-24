@@ -64,6 +64,13 @@ pub fn conversation_link<'a>(base: &Url, link: &'a Url) -> Option<&'a str> {
     conversation_path(base, link).filter(|id| valid_id(id))
 }
 
+pub fn conversation_permalink(base: &Url, channel_id: &str) -> Option<Url> {
+    valid_id(channel_id).then(|| {
+        base.join(&format!("/c/{channel_id}"))
+            .expect("validated SPK channel ID")
+    })
+}
+
 fn conversation_path<'a>(base: &Url, link: &'a Url) -> Option<&'a str> {
     if link.origin() != base.origin() || !link.username().is_empty() || link.password().is_some() {
         return None;

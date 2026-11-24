@@ -1230,7 +1230,7 @@ async fn watch_session(
                 if result.as_ref().is_err_and(Failure::unauthorized) {
                     break SessionEnd::Invalidated(SESSION_EXPIRED);
                 }
-                SearchSession::complete(&mut sidebar.search, result);
+                search.complete(&mut sidebar.search, result);
             }
             () = RadioSession::playback_changed(&mut radio.player) => {}
             Some(Ok((id, result))) = radio.tasks.join_next_with_id() => {
@@ -1307,7 +1307,12 @@ async fn watch_session(
                 let refresh_avatars = data.is_ok() && matches!(resource, Resource::Users | Resource::Presence);
                 let listed_voice_channel = matches!(resource, Resource::Channels)
                     && sidebar.voice.as_ref().is_some_and(|voice| sidebar.has_voice_channel(&voice.channel_id));
+                let previous_webhooks = (resource == Resource::Channels && presence_loaded)
+                    .then(|| sidebar.webhook_feeds().map(|feed| feed.id.clone()).collect());
                 refresh.complete(&mut sidebar, resource, data);
+                if let Some(previous) = previous_webhooks {
+                    search.reconcile_webhooks(&mut sidebar, previous);
+                }
                 account_admin.clear_if_demoted(&mut sidebar);
                 if resource == Resource::Channels
                     && !refresh.dirty.contains(&resource)

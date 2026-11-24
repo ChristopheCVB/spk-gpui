@@ -9,7 +9,7 @@ use url::Url;
 
 use super::*;
 use crate::{
-    api::{MessageTarget, SearchHit, SearchScope, conversation_link},
+    api::{MessageTarget, SearchHit, SearchScope, conversation_link, conversation_permalink},
     chat_markdown::{message_markdown, plain_text},
 };
 
@@ -252,7 +252,9 @@ fn conversation_scope(sidebar: &Sidebar) -> Option<(SearchScope, &'static str)> 
         .map(|chat| {
             (
                 SearchScope::Conversation(chat.channel_id.clone()),
-                if chat.direct_message_peer.is_some() {
+                if chat.webhook {
+                    "This feed"
+                } else if chat.direct_message_peer.is_some() {
                     "This conversation"
                 } else {
                     "This channel"
@@ -343,20 +345,34 @@ impl SearchPanel {
             if let Some(peer) = &channel.other_user_id {
                 sidebar.message_author(peer)
             } else {
-                channel.name.as_deref().unwrap_or("Text channel")
+                channel.name.as_deref().unwrap_or(if channel.is_webhook() {
+                    "Webhook feed"
+                } else {
+                    "Text channel"
+                })
             }
         });
-        let author = sidebar.message_author(&hit.user_id);
-        let context = if hit.attachments > 0 {
+        let webhook = channel.is_some_and(|channel| channel.is_webhook());
+        let (mut context, accessibility_label) = if webhook {
+            (
+                conversation.to_owned(),
+                format!("Jump to alert in {conversation}"),
+            )
+        } else {
+            let author = sidebar.message_author(&hit.user_id);
+            (
+                format!("{author} · {conversation}"),
+                format!("Jump to message from {author} in {conversation}"),
+            )
+        };
+        if hit.attachments > 0 {
             let suffix = if hit.attachments == 1 {
                 "attachment"
             } else {
                 "attachments"
             };
-            format!("{author} · {conversation} · {} {suffix}", hit.attachments)
-        } else {
-            format!("{author} · {conversation}")
-        };
+            context.push_str(&format!(" · {} {suffix}", hit.attachments));
+        }
         let copy_text =
             message_markdown(&hit.text, |id| sidebar.message_author(id), |_| false, None)
                 .into_owned();
@@ -381,7 +397,7 @@ impl SearchPanel {
                     .flex_1()
                     .min_w_0()
                     .tab_stop(true)
-                    .accessibility_label(format!("Jump to message from {author} in {conversation}"))
+                    .accessibility_label(accessibility_label)
                     .selected(self.selected_result.as_ref() == Some(&target))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.open_result(target.clone(), window, cx);
@@ -564,6 +580,12 @@ impl Render for SearchPanel {
                         )
                     }),
             )
+    }
+}
+
+pub(super) fn copy_conversation_link(channel_id: &str, cx: &mut App) {
+    if let Some(link) = conversation_permalink(&SPK_BASE, channel_id) {
+        cx.write_to_clipboard(ClipboardItem::new_string(link.into()));
     }
 }
 

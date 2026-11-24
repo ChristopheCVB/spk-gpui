@@ -17,7 +17,9 @@ pub use channel_admin::{ChannelKind, ChannelMutation};
 pub use chat_actions::{LinkPreview, MessageAction, MessageChange, Reaction};
 pub use gifs::{GifItem, GifPage, image_message_url};
 pub(crate) use public_media::{PublicDns, public_media_url};
-pub use search::{MessageTarget, SearchHit, SearchPage, SearchScope, conversation_link};
+pub use search::{
+    MessageTarget, SearchHit, SearchPage, SearchScope, conversation_link, conversation_permalink,
+};
 pub use soundboard_admin::MAX_SOUND_BYTES;
 pub use webhooks::{WebhookSettings, WebhookUrl};
 
@@ -223,6 +225,7 @@ pub struct ChatMessage {
     pub channel_id: String,
     pub user_id: String,
     pub body: String,
+    pub embed: Option<ChatEmbed>,
     pub created_at: i64,
     pub reply_to: Option<ReplyRef>,
     #[serde(default)]
@@ -234,6 +237,44 @@ pub struct ChatMessage {
     pub previews: Vec<LinkPreview>,
     #[serde(default)]
     pub pinned: bool,
+}
+
+#[derive(Clone, Deserialize)]
+pub struct ChatEmbed {
+    pub title: Option<String>,
+    pub description: Option<String>,
+    url: Option<String>,
+    pub color: Option<EmbedColor>,
+    #[serde(default)]
+    pub fields: Vec<EmbedField>,
+    pub footer: Option<String>,
+    pub timestamp: Option<String>,
+}
+
+impl ChatEmbed {
+    pub fn title_link(&self) -> Option<Url> {
+        let url = Url::parse(self.url.as_deref()?).ok()?;
+        matches!(url.scheme(), "http" | "https").then_some(url)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum EmbedColor {
+    Success,
+    Error,
+    Warning,
+    Info,
+    #[serde(other)]
+    Neutral,
+}
+
+#[derive(Clone, Deserialize)]
+pub struct EmbedField {
+    pub name: String,
+    pub value: String,
+    #[serde(default)]
+    pub inline: bool,
 }
 
 impl ChatMessage {

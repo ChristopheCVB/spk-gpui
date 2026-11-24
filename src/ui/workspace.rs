@@ -809,6 +809,14 @@ impl Spk {
                         muted,
                         app.clone(),
                     ))
+                    .when(webhook, |menu| {
+                        let id = menu_id.clone();
+                        menu.item(
+                            PopupMenuItem::new("Copy link")
+                                .icon(IconName::Link)
+                                .on_click(move |_, _, cx| search::copy_conversation_link(&id, cx)),
+                        )
+                    })
             })
     }
 

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use tokio::task::JoinSet;
 
@@ -18,6 +18,7 @@ pub struct SearchView {
 #[derive(Default)]
 pub(super) struct SearchSession {
     query: Option<(String, SearchScope)>,
+    revoked_webhooks: HashSet<String>,
     pub tasks: JoinSet<Result<SearchPage, Failure>>,
 }
 
@@ -48,6 +49,25 @@ impl SearchSession {
         }
     }
 
+    pub fn reconcile_webhooks(&mut self, sidebar: &mut Sidebar, previous: Vec<String>) {
+        self.revoked_webhooks
+            .retain(|id| sidebar.webhook_feed(id).is_none());
+        self.revoked_webhooks.extend(
+            previous
+                .into_iter()
+                .filter(|id| sidebar.webhook_feed(id).is_none()),
+        );
+        if sidebar
+            .search
+            .results
+            .iter()
+            .any(|hit| self.revoked_webhooks.contains(hit.target.channel_id()))
+        {
+            Arc::make_mut(&mut sidebar.search.results)
+                .retain(|hit| !self.revoked_webhooks.contains(hit.target.channel_id()));
+        }
+    }
+
     pub fn more(&mut self, view: &mut SearchView, client: &SpkClient) {
         if !view.loading && view.next_cursor.is_some() {
             self.load(view, client);
@@ -69,12 +89,16 @@ impl SearchSession {
         });
     }
 
-    pub fn complete(view: &mut SearchView, result: Result<SearchPage, Failure>) {
+    pub fn complete(&self, view: &mut SearchView, result: Result<SearchPage, Failure>) {
         view.loading = false;
         match result {
             Ok(page) => {
                 view.searched = true;
-                Arc::make_mut(&mut view.results).extend(page.results);
+                Arc::make_mut(&mut view.results).extend(
+                    page.results
+                        .into_iter()
+                        .filter(|hit| !self.revoked_webhooks.contains(hit.target.channel_id())),
+                );
                 view.next_cursor = page.next_cursor;
             }
             Err(_) => view.failed = true,
