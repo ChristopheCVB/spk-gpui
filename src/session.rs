@@ -761,6 +761,7 @@ async fn watch_session(
         }
         let retry_at = voice.retry_at();
         let chat_timeout = chat.next_timeout();
+        let soundboard_transition = soundboard.next_transition;
         let active = *settings.presence.activity.borrow_and_update();
         let alert_activation = &mut settings.alert_activation;
         let mut from_alert = false;
@@ -768,6 +769,7 @@ async fn watch_session(
             () = presence.report(sidebar.user_status, active) => {}
             Ok(()) = settings.presence.activity.changed() => {}
             _ = sleep_until(chat_timeout.unwrap_or_else(Instant::now)), if chat_timeout.is_some() => chat.expire(),
+            _ = sleep_until(soundboard_transition.unwrap_or_else(Instant::now)), if soundboard_transition.is_some() => {},
             _ = sleep_until(draft_save_at.unwrap_or_else(Instant::now)), if draft_save_at.is_some() => {
                 draft_save_at = None;
                 if let Some(store) = &draft_store {
@@ -1308,7 +1310,7 @@ async fn watch_session(
                         sidebar.radio.command_error = Some(error);
                     }
                     Frame::VoiceSound { user_id, sound_id } => {
-                        soundboard.relay(&sidebar, client, &user_id, &sound_id);
+                        soundboard.relay(&mut sidebar, client, user_id, sound_id);
                     }
                     Frame::VoiceKicked { sid } => voice.kicked(&mut sidebar, &sid),
                     Frame::VoiceDisconnected { sid } => voice.server_disconnected(&mut sidebar, &sid),
