@@ -709,10 +709,7 @@ impl ChatSession {
                     .lines()
                     .find(|line| !line.trim().is_empty())
                     .unwrap_or_default()
-                    .trim()
-                    .chars()
-                    .take(120)
-                    .collect(),
+                    .to_owned(),
                 deleted: false,
             })
         } else {

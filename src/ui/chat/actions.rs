@@ -1,6 +1,9 @@
 use super::*;
 
-use gpui_kit::component::menu::PopupMenu;
+use gpui_kit::{
+    base::{ElementExt, TextSelection},
+    component::menu::PopupMenu,
+};
 
 use crate::{
     chat_markdown::{notification_preview, plain_text},
@@ -32,6 +35,16 @@ pub(in crate::ui) struct MessageActionForm {
 }
 
 impl Spk {
+    pub(super) fn cancel_inline_message_edit(&mut self) {
+        if self
+            .message_action_form
+            .as_ref()
+            .is_some_and(|form| matches!(form.kind, ActionForm::Edit { .. }))
+        {
+            self.message_action_form = None;
+        }
+    }
+
     pub(super) fn update_message_actions(
         form_state: &mut Option<MessageActionForm>,
         previous: Option<&ChatView>,
@@ -228,7 +241,7 @@ impl Spk {
         let View::SignedIn(sidebar) = &self.view else {
             return;
         };
-        let Some((_, message)) = reaction_message(sidebar.chat.as_ref(), channel_id, message_id)
+        let Some((_, message)) = active_chat_message(sidebar.chat.as_ref(), channel_id, message_id)
             .filter(|(chat, _)| !chat.action_pending)
         else {
             return;
@@ -799,6 +812,7 @@ impl MessageActions {
             })
             .child(
                 tool_button("more-message-actions", IconName::Ellipsis, "More actions")
+                    .keep_text_selection("more-message-actions-selection")
                     .dropdown_menu_with_anchor(Anchor::TopRight, move |popup, window, cx| {
                         menu.menu(popup, window, cx)
                     }),
@@ -821,9 +835,14 @@ impl MessageActions {
             (self.app.clone(), self.channel.clone(), self.message.clone());
         let quote_app = app.clone();
         let quote_channel = channel.clone();
-        let quoted = self
-            .body
-            .lines()
+        let selected = TextSelection::selected_text(window, cx);
+        let source = if selected.trim().is_empty() {
+            &self.body
+        } else {
+            selected.trim()
+        };
+        let quoted = source
+            .split('\n')
             .map(|line| format!("> {line}"))
             .collect::<Vec<_>>()
             .join("\n");
@@ -851,9 +870,15 @@ impl MessageActions {
                                         && chat.outgoing.is_none()
                                 }) {
                                     this.chat_input.update(cx, |input, cx| {
-                                        let end = input.value().len();
-                                        input.set_selected_range(end..end, cx);
-                                        input.insert(format!("\n\n{quoted}\n\n"), window, cx);
+                                        let draft = input.value();
+                                        if draft.trim().is_empty() {
+                                            input.set_selected_range(0..draft.len(), cx);
+                                            input.replace(format!("{quoted}\n\n"), window, cx);
+                                        } else {
+                                            let end = draft.len();
+                                            input.set_selected_range(end..end, cx);
+                                            input.insert(format!("\n\n{quoted}\n\n"), window, cx);
+                                        }
                                         input.focus(window, cx);
                                     });
                                     this.update_chat_draft(cx);

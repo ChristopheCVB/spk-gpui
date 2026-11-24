@@ -190,8 +190,12 @@ async fn attachment_queue_cancels_in_flight_uploads_and_sends_only_ready_files()
         drop(in_flight);
 
         tx.send(Command::OpenDirectMessage("private".into())).await.unwrap();
+        let target = value!({
+            "id":"target", "channelId":"private", "userId":"bob",
+            "body":format!(" \nHello Alice ||{}|| are you there?\nSecond line", "secret".repeat(25)), "createdAt":1
+        });
         request("GET /api/channels/private/messages?unread=1").await
-            .respond(&[], r#"{"messages":[],"hasMoreBefore":false}"#).await;
+            .respond(&[], &value!({"messages":[target],"hasMoreBefore":false}).to_string()).await;
         wait_for_sidebar(&rx, |s| s.chat.as_ref().is_some_and(|chat| chat.channel_id == "private" && chat.latest_ready())).await;
 
         tx.send(queue("private", "fail.txt")).await.unwrap();
@@ -214,6 +218,37 @@ async fn attachment_queue_cancels_in_flight_uploads_and_sends_only_ready_files()
         let key = ready.chat.unwrap().draft.uploads.into_iter()
             .find(|upload| matches!(upload.status, crate::session::UploadStatus::Ready(_))).unwrap().key;
         tx.send(Command::ToggleChatAttachmentSpoiler { channel_id: "private".into(), key }).await.unwrap();
+
+        let body = "I’ll send a file instead.";
+        tx.send(Command::UpdateChatDraft { channel_id: "private".into(), body: body.into() }).await.unwrap();
+        let set_reply = |message_id: Option<&str>| Command::SetChatReply {
+            channel_id: "private".into(), message_id: message_id.map(str::to_owned),
+        };
+        let replying = |s: &Sidebar| s.chat.as_ref().is_some_and(|chat| {
+            chat.draft.reply.as_ref().is_some_and(|reply| {
+                assert_eq!(reply.id, "target");
+                assert_eq!(
+                    crate::chat_markdown::reply_preview(&reply.preview, |id| s.message_author(id)),
+                    "Hello Alice ▒▒▒ are you there?",
+                );
+                true
+            })
+        });
+        let kept_draft = |s: &Sidebar| s.chat.as_ref().is_some_and(|chat| {
+            chat.draft.reply.is_none() && chat.draft.body == body && chat.draft.attachments_ready()
+        });
+        tx.send(set_reply(Some("target"))).await.unwrap();
+        wait_for_sidebar(&rx, replying).await;
+        tx.send(set_reply(None)).await.unwrap();
+        wait_for_sidebar(&rx, kept_draft).await;
+
+        tx.send(set_reply(Some("target"))).await.unwrap();
+        wait_for_sidebar(&rx, replying).await;
+        peer.send(Message::text(value!({
+            "type":"message:delete","channelId":"private","id":"target"
+        }).to_string())).await.unwrap();
+        wait_for_sidebar(&rx, kept_draft).await;
+
         tx.send(Command::SendChatMessage { channel_id: "private".into(), body: String::new() }).await.unwrap();
         let frame = loop {
             let raw = peer.next().await.unwrap().unwrap();
@@ -224,6 +259,7 @@ async fn attachment_queue_cancels_in_flight_uploads_and_sends_only_ready_files()
         };
         assert_eq!(frame["channelId"], "private");
         assert_eq!(frame["body"], "");
+        assert!(frame["replyToId"].is_null());
         assert_eq!(frame["attachments"], value!([{"id":"ready","spoiler":true}]));
         peer.close(None).await.unwrap();
         let _peer = accept_async(sockets.accept().await.unwrap().0).await.unwrap();
