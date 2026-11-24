@@ -15,15 +15,17 @@ enum Group {
     Text,
     Direct,
     Voice,
+    Webhooks,
     People,
     Actions,
 }
 
 impl Group {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Text,
         Self::Direct,
         Self::Voice,
+        Self::Webhooks,
         Self::People,
         Self::Actions,
     ];
@@ -33,19 +35,21 @@ impl Group {
             Self::Text => "Text channels",
             Self::Direct => "Direct messages",
             Self::Voice => "Voice channels",
+            Self::Webhooks => "Webhooks",
             Self::People => "People",
             Self::Actions => "Actions",
         }
     }
 
-    fn icon(self) -> IconName {
-        match self {
+    fn icon(self, feed_icon: Option<&str>) -> Icon {
+        Icon::new(match self {
             Self::Text => IconName::Hash,
             Self::Direct => IconName::MessageCircle,
             Self::Voice => IconName::Volume2,
+            Self::Webhooks => return webhook_icon(feed_icon),
             Self::People => IconName::User,
             Self::Actions => IconName::Settings,
-        }
+        })
     }
 }
 
@@ -54,6 +58,7 @@ enum Destination {
     Text(String),
     Direct(String),
     Voice(String),
+    Webhook(String),
     Person(String),
     Settings,
     Shortcuts,
@@ -67,6 +72,7 @@ impl Destination {
             "text" => Some((Group::Text, Self::Text(id))),
             "dm" if channel.is_conversation() => Some((Group::Direct, Self::Direct(id))),
             "voice" => Some((Group::Voice, Self::Voice(id))),
+            "webhook" => Some((Group::Webhooks, Self::Webhook(id))),
             _ => None,
         }
     }
@@ -77,6 +83,7 @@ impl Destination {
             Self::Text(id) => app.send(Command::OpenTextChannel(id), None, cx),
             Self::Direct(id) => app.send(Command::OpenDirectMessage(id), None, cx),
             Self::Voice(id) => app.select_voice_channel(&id, cx),
+            Self::Webhook(id) => app.send(Command::OpenWebhook(id), None, cx),
             Self::Person(id) => app.send(Command::StartDirectMessage(id), None, cx),
             Self::Settings => app.open_settings(window, cx),
             Self::Shortcuts => app.open_shortcut_reference(window, cx),
@@ -96,6 +103,7 @@ impl Destination {
 struct Entry {
     label: String,
     destination: Destination,
+    icon: Icon,
 }
 
 impl Spk {
@@ -113,6 +121,7 @@ impl Spk {
                 groups[group as usize].push(Entry {
                     label: label.to_owned(),
                     destination,
+                    icon: group.icon(channel.icon.as_deref()),
                 });
             }
         }
@@ -120,6 +129,7 @@ impl Spk {
             Entry {
                 label: name.to_owned(),
                 destination: Destination::Person(id.to_owned()),
+                icon: Group::People.icon(None),
             }
         }));
         groups[Group::Actions as usize].extend(
@@ -131,6 +141,7 @@ impl Spk {
             .map(|(label, destination)| Entry {
                 label: label.to_owned(),
                 destination,
+                icon: Group::Actions.icon(None),
             }),
         );
         let state = cx.new(|cx| CommandState::new(window, cx));
@@ -172,11 +183,12 @@ impl Spk {
                 palette = palette.group(CommandGroup::new().label(group.label()).items(
                     entries.iter().map(|entry| {
                         let label = entry.label.clone();
+                        let icon = entry.icon.clone();
                         CommandItem::new()
                             .label(label.clone())
                             .child(move |_, _| {
                                 control_content()
-                                    .child(Icon::new(group.icon()).size(ACTION_ICON_SIZE))
+                                    .child(icon.clone().size(ACTION_ICON_SIZE))
                                     .child(div().min_w_0().truncate().child(label.clone()))
                             })
                             .keywords([group.label()])
@@ -211,7 +223,7 @@ impl Spk {
                     .next()
                     .map(|channel| channel.id.as_str())
             });
-        let channels = ["dm", "text", "voice"]
+        let channels = ["dm", "text", "voice", "webhook"]
             .into_iter()
             .flat_map(|kind| {
                 sidebar
@@ -256,14 +268,18 @@ mod tests {
 
     #[test]
     fn keyboard_navigation_wraps_and_can_skip_read_channels() {
-        let channels = ["dm", "text", "voice"];
-        assert_eq!(step_channel(&channels, Some("dm"), true, |_| true), Some(2));
+        let channels = ["dm", "text", "voice", "webhook"];
+        assert_eq!(step_channel(&channels, Some("dm"), true, |_| true), Some(3));
         assert_eq!(
             step_channel(&channels, Some("voice"), false, |_| true),
+            Some(3)
+        );
+        assert_eq!(
+            step_channel(&channels, Some("webhook"), false, |_| true),
             Some(0)
         );
         assert_eq!(step_channel(&channels, None, false, |_| true), Some(0));
-        assert_eq!(step_channel(&channels, None, true, |_| true), Some(2));
+        assert_eq!(step_channel(&channels, None, true, |_| true), Some(3));
         assert_eq!(
             step_channel(&channels, Some("dm"), false, |id| id == "voice"),
             Some(2)

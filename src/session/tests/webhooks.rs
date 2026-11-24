@@ -314,10 +314,18 @@ async fn channel_refresh_discards_revoked_webhook_history_and_in_flight_pages() 
                     "messages":[{"id":"open","channelId":"feed","userId":"alice","createdAt":2,"body":"Build passed"}],
                     "hasMoreBefore":true,"hasMoreAfter":false
                 }),
-                "GET /api/channels/feed/messages?before=open HTTP/1.1" => {
-                    requests.send(request).await.unwrap();
+                "GET /api/channels/feed/messages?before=open HTTP/1.1"
+                | "GET /api/search?q=build&scope=everything&cursor=20 HTTP/1.1" => {
+                    requests.send((line, request)).await.unwrap();
                     continue;
                 }
+                "GET /api/search?q=build&scope=everything HTTP/1.1" => value!({
+                    "results":[{
+                        "messageId":"open","channelId":"feed","userId":"alice","createdAt":2,
+                        "snippet":"Build passed","text":"Build passed","attachments":0
+                    }],
+                    "nextCursor":"20"
+                }),
                 _ => panic!("unexpected request {line}"),
             };
             request.respond(&[], &body.to_string()).await;
@@ -329,22 +337,35 @@ async fn channel_refresh_discards_revoked_webhook_history_and_in_flight_pages() 
         commands.send(Command::OpenWebhook("feed".into())).await.unwrap();
         wait_for_sidebar(&views, |view| view.chat.as_ref().is_some_and(ChatView::history_ready)).await;
         commands.send(Command::LoadOlderMessages).await.unwrap();
-        let mut page = pages.recv().await.unwrap();
+        let (line, mut page) = pages.recv().await.unwrap();
+        assert!(line.contains("before=open"));
+        commands.send(Command::SearchMessages {
+            query: "build".into(),
+            scope: crate::api::SearchScope::Everything,
+        }).await.unwrap();
+        wait_for_sidebar(&views, |view| view.search.results.len() == 1).await;
+        commands.send(Command::MoreSearchResults).await.unwrap();
+        let (line, search_page) = pages.recv().await.unwrap();
+        assert!(line.contains("cursor=20"));
 
         revoke.send_replace(true);
         peer.send(Message::text(r#"{"type":"channels:changed"}"#)).await.unwrap();
         let missing = wait_for_sidebar(&views, |view| view.webhook_feeds().next().is_none()).await;
         assert!(missing.chat.is_none());
+        assert!(missing.search.results.is_empty());
         assert_eq!(missing.chat_notice, Some("Webhook feed unavailable."));
 
         let late_page = r#"{"messages":[{"id":"older","channelId":"feed","userId":"alice","createdAt":1,"body":"Earlier build"}],"hasMoreBefore":false,"hasMoreAfter":false}"#;
         let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{late_page}", late_page.len());
         // The client may close the request socket when it cancels the page.
         let _ = page.stream.write_all(response.as_bytes()).await;
+        search_page.respond(&[], r#"{"results":[{"messageId":"older","channelId":"feed","userId":"alice","createdAt":1,"snippet":"Earlier build","text":"Earlier build","attachments":0}],"nextCursor":null}"#).await;
+        wait_for_sidebar(&views, |view| !view.search.loading).await;
         peer.send(Message::text(r#"{"type":"message:new","message":{"id":"late","channelId":"feed","userId":"alice","createdAt":3,"body":"Late alert"}}"#)).await.unwrap();
         peer.send(Message::text(r#"{"type":"presence:update","userId":"alice","status":"busy"}"#)).await.unwrap();
         let after = wait_for_sidebar(&views, |view| view.user_presence("alice") == UserPresence::Busy).await;
         assert!(after.chat.is_none());
+        assert!(after.search.results.is_empty());
         assert!(after.alerts.is_empty());
         assert_eq!(after.chat_notice, Some("Webhook feed unavailable."));
 

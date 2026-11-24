@@ -1,5 +1,8 @@
 use super::*;
-use crate::{api::SearchScope, notifications};
+use crate::{
+    api::{SearchScope, conversation_link, conversation_permalink},
+    notifications,
+};
 
 #[tokio::test]
 async fn searches_messages_and_opens_authenticated_exact_targets() {
@@ -25,7 +28,7 @@ async fn searches_messages_and_opens_authenticated_exact_targets() {
                     request.respond(&[], r#"{"id":"alice","email":"alice@example.test","displayName":"Alice"}"#).await
                 }
                 "GET /api/channels HTTP/1.1" => {
-                    request.respond(&[], r#"[{"id":"general","type":"text","name":"general"},{"id":"dm-1","type":"dm","otherUserId":"bob"}]"#).await
+                    request.respond(&[], r#"[{"id":"general","type":"text","name":"general"},{"id":"dm-1","type":"dm","otherUserId":"bob"},{"id":"builds","type":"webhook","name":"Builds","ownerId":"bob"}]"#).await
                 }
                 "GET /api/voice HTTP/1.1" | "GET /api/users HTTP/1.1" => {
                     request.respond(&[], "[]").await
@@ -36,6 +39,7 @@ async fn searches_messages_and_opens_authenticated_exact_targets() {
             }
         }
     });
+    let link_base = base.clone();
     let (tx, commands) = async_channel::unbounded();
     let (views, rx) = async_channel::unbounded();
     let (activate, activation) = watch::channel(None);
@@ -85,13 +89,14 @@ async fn searches_messages_and_opens_authenticated_exact_targets() {
             (
                 SearchScope::Conversation("general".into()),
                 "scope=channel&channelId=general",
+                "general",
                 "c1",
             ),
-            (SearchScope::TextChannels, "scope=channels", "c2"),
-            (SearchScope::DirectMessages, "scope=dms", "d1"),
-            (SearchScope::Everything, "scope=everything", "m1"),
+            (SearchScope::TextChannels, "scope=channels", "general", "c2"),
+            (SearchScope::DirectMessages, "scope=dms", "dm-1", "d1"),
+            (SearchScope::Everything, "scope=everything", "builds", "m1"),
         ];
-        for (scope, expected, found) in cases {
+        for (scope, expected, channel, found) in cases {
             tx.send(Command::SearchMessages {
                 query: "from:Bob word".into(),
                 scope,
@@ -103,14 +108,14 @@ async fn searches_messages_and_opens_authenticated_exact_targets() {
                 line,
                 format!("GET /api/search?q=from%3ABob+word&{expected} HTTP/1.1")
             );
-            request.respond(&[], &result(found, Some("20"))).await;
+            request.respond(&[], &result_in(channel, found, Some("20"))).await;
             wait_for_sidebar(&rx, |view| {
                 !view.search.loading
                     && view
                         .search
                         .results
                         .first()
-                        .is_some_and(|hit| hit.target.message_id() == found)
+                        .is_some_and(|hit| hit.target.channel_id() == channel && hit.target.message_id() == found)
             })
             .await;
         }
@@ -214,6 +219,51 @@ async fn searches_messages_and_opens_authenticated_exact_targets() {
             view.chat.as_ref().is_some_and(|chat| chat.channel_id == "dm-1" && chat.history_ready())
         }).await;
 
+        let feed_link = conversation_permalink(&link_base, "builds").unwrap();
+        assert_eq!(feed_link.path(), "/c/builds");
+        tx.send(Command::OpenConversationTarget(
+            conversation_link(&link_base, &feed_link).unwrap().into(),
+        )).await.unwrap();
+        let (line, request) = search.recv().await.unwrap();
+        assert_eq!(line, "GET /api/channels/builds/messages?unread=1 HTTP/1.1");
+        request.respond(&[], r#"{"messages":[],"hasMoreBefore":false,"hasMoreAfter":false}"#).await;
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| chat.webhook && chat.history_ready())).await;
+
+        tx.send(Command::SearchMessages {
+            query: "build".into(),
+            scope: SearchScope::Conversation("builds".into()),
+        }).await.unwrap();
+        let (line, request) = search.recv().await.unwrap();
+        assert_eq!(line, "GET /api/search?q=build&scope=channel&channelId=builds HTTP/1.1");
+        request.respond(&[], &result_in("builds", "b1", None)).await;
+        let results = wait_for_sidebar(&rx, |view| {
+            view.search.results.first().is_some_and(|hit| hit.target.message_id() == "b1")
+        }).await;
+        let hit = &results.search.results[0];
+        assert_eq!(hit.target.channel_id(), "builds");
+        tx.send(Command::OpenMessageTarget(hit.target.clone())).await.unwrap();
+        let (line, request) = search.recv().await.unwrap();
+        assert_eq!(line, "GET /api/channels/builds/messages?around=b1 HTTP/1.1");
+        request.respond(&[], r#"{"messages":[{"id":"b1","channelId":"builds","userId":"bob","body":"Build passed","createdAt":9}],"hasMoreBefore":false,"hasMoreAfter":false}"#).await;
+        wait_for_sidebar(&rx, |view| {
+            view.chat.as_ref().is_some_and(|chat| chat.jump.as_ref().is_some_and(|jump| jump.message_id == "b1"))
+        }).await;
+
+        let missing_alert = link_base.join("/c/builds/m/removed").unwrap();
+        tx.send(Command::OpenMessageTarget(MessageTarget::parse(&link_base, &missing_alert).unwrap())).await.unwrap();
+        let (line, request) = search.recv().await.unwrap();
+        assert_eq!(line, "GET /api/channels/builds/messages?around=removed HTTP/1.1");
+        request.respond_raw("404 Not Found", &[], b"").await;
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| chat.webhook && chat.jump_failed)).await;
+
+        let private_feed = link_base.join("/c/private-feed").unwrap();
+        tx.send(Command::OpenConversationTarget(conversation_link(&link_base, &private_feed).unwrap().into())).await.unwrap();
+        wait_for_sidebar(&rx, |view| view.chat_notice == Some("Conversation unavailable.")).await;
+        let private_alert = link_base.join("/c/private-feed/m/hidden").unwrap();
+        tx.send(Command::OpenMessageTarget(MessageTarget::parse(&link_base, &private_alert).unwrap())).await.unwrap();
+        wait_for_sidebar(&rx, |view| view.chat_notice == Some("Message unavailable.")).await;
+        assert!(search.is_empty(), "the session must not fetch history for an unlisted feed");
+
         tx.close();
         session.await.unwrap();
     })
@@ -223,10 +273,14 @@ async fn searches_messages_and_opens_authenticated_exact_targets() {
 }
 
 fn result(id: &str, next: Option<&str>) -> String {
+    result_in("general", id, next)
+}
+
+fn result_in(channel: &str, id: &str, next: Option<&str>) -> String {
     value!({
         "results": [{
             "messageId": id,
-            "channelId": "general",
+            "channelId": channel,
             "userId": "bob",
             "createdAt": 12,
             "snippet": "\u{1}word\u{2}",
