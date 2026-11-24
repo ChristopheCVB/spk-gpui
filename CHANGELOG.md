@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/ChristopheCVB/spk-gpui/compare/v0.6.0...v0.7.0) (2026-11-24)
+
+
+### Features
+
+* **ui:** preview icons in searchable pickers ([#175](https://github.com/ChristopheCVB/spk-gpui/issues/175)) ([3b6940b](https://github.com/ChristopheCVB/spk-gpui/commit/3b6940b940713fc84beb3e78e9b5b14eedf41761))
+
 ## [0.6.0](https://github.com/ChristopheCVB/spk-gpui/compare/v0.5.1...v0.6.0) (2026-11-24)
 
 
