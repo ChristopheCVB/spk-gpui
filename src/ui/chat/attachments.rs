@@ -5,7 +5,7 @@ mod video;
 
 use std::{
     collections::HashMap,
-    io::Write,
+    io::BufReader,
     path::{Path, PathBuf},
 };
 
@@ -17,7 +17,7 @@ use video::VideoClip;
 
 use super::*;
 use crate::{
-    api::{Attachment, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS},
+    api::{Attachment, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENT_PREVIEW_BYTES, MAX_ATTACHMENTS},
     session::{AttachmentInput, UploadStatus, image_preview},
 };
 use audio::AudioClip;
@@ -217,6 +217,11 @@ enum Access {
     Download,
 }
 
+enum AttachmentData {
+    Preview(Vec<u8>),
+    Original(NamedTempFile),
+}
+
 enum AccessResult {
     Preview(Preview),
     Open(TempPath),
@@ -310,14 +315,14 @@ impl Spk {
                 }
                 ClipboardEntry::Image(image) => {
                     let format = image.format();
-                    files.push(AttachmentInput::Clipboard {
-                        filename: format!("pasted-image.{}", format.extension()),
-                        mime: format.mime_type(),
-                        bytes: image.bytes()[..image
-                            .bytes()
-                            .len()
-                            .min(crate::api::MAX_ATTACHMENT_BYTES + 1)]
-                            .to_vec(),
+                    files.push(if image.bytes().len() as u64 > MAX_ATTACHMENT_BYTES {
+                        AttachmentInput::Oversized
+                    } else {
+                        AttachmentInput::Clipboard {
+                            filename: format!("pasted-image.{}", format.extension()),
+                            mime: format.mime_type(),
+                            bytes: bytes::Bytes::copy_from_slice(image.bytes()),
+                        }
                     });
                 }
                 ClipboardEntry::String(_) => {}
@@ -401,6 +406,7 @@ impl Spk {
                 let key = file.key;
                 let channel = chat.channel_id.clone();
                 let cancel_channel = channel.clone();
+                let retry_channel = channel.clone();
                 let status = match file.status {
                     UploadStatus::Uploading(percent) => format!("Uploading {percent}%"),
                     UploadStatus::Ready(_) => "Ready".into(),
@@ -459,6 +465,26 @@ impl Spk {
                                 );
                             })),
                     )
+                    .when(matches!(file.status, UploadStatus::Failed(_)), |row| {
+                        row.child(
+                            control_button("retry")
+                                .ghost()
+                                .small()
+                                .tab_stop(true)
+                                .label("Retry")
+                                .disabled(disabled)
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.send(
+                                        Command::RetryChatAttachment {
+                                            channel_id: retry_channel.clone(),
+                                            key,
+                                        },
+                                        None,
+                                        cx,
+                                    );
+                                })),
+                        )
+                    })
                     .child(
                         control_button("cancel")
                             .ghost()
@@ -536,7 +562,7 @@ impl Spk {
                 };
                 let preview_pending = card.is_some_and(|card| card.preview_pending.is_some());
                 let auto_preview = !card.is_some_and(|card| card.preview_attempted)
-                    && file.size <= MAX_ATTACHMENT_BYTES as u64
+                    && file.size <= MAX_ATTACHMENT_PREVIEW_BYTES as u64
                     && kind.automatic_preview();
                 if auto_preview {
                     let channel = message.channel_id.clone();
@@ -571,7 +597,7 @@ impl Spk {
                             )
                             .when_some(
                                 kind.media_label()
-                                    .filter(|_| file.size <= MAX_ATTACHMENT_BYTES as u64),
+                                    .filter(|_| file.size <= MAX_ATTACHMENT_PREVIEW_BYTES as u64),
                                 |actions, kind| {
                                     actions.child(self.attachment_media_controls(
                                         message, file, kind, pending, cx,
@@ -729,6 +755,11 @@ impl Spk {
     ) {
         let auto = matches!(access, Access::Preview);
         let kind = AttachmentKind::classify(&file);
+        if matches!(access, Access::Preview | Access::Play)
+            && file.size > MAX_ATTACHMENT_PREVIEW_BYTES as u64
+        {
+            return;
+        }
         if auto
             && (!kind.automatic_preview() || self.chat_attachments.inline_loads >= MAX_INLINE_LOADS)
             || !chat(&self.view).is_some_and(|chat| {
@@ -773,7 +804,6 @@ impl Spk {
                     },
                     None => None,
                 };
-                let (reply, result) = oneshot::channel();
                 let commands = app.update_in(cx, |app, _, _| {
                     app.chat_attachments.cards.get_mut(&file_id)
                         .is_some_and(|card| *card.request(access) == Some(operation))
@@ -782,16 +812,36 @@ impl Spk {
                 let Some(commands) = commands else {
                     return Ok(None);
                 };
-                commands.send(Command::ReadChatAttachment {
-                    channel_id: channel,
-                    message_id: message,
-                    attachment_id: file.id.clone(),
-                    reply,
-                }).await.map_err(|_| "Attachment unavailable.")?;
-                let bytes = result
-                    .await
-                    .map_err(|_| "Attachment unavailable.")?
-                    .map_err(|_| "Could not access the attachment.")?;
+                let data = if matches!(access, Access::Preview | Access::Play) {
+                    let (reply, result) = oneshot::channel();
+                    commands.send(Command::ReadChatAttachment {
+                        channel_id: channel,
+                        message_id: message,
+                        attachment_id: file.id.clone(),
+                        reply,
+                    }).await.map_err(|_| "Attachment unavailable.")?;
+                    AttachmentData::Preview(
+                        result.await.map_err(|_| "Attachment unavailable.")?
+                            .map_err(|_| "Could not access the attachment.")?,
+                    )
+                } else {
+                    let save_path = destination.clone();
+                    let staged = cx.background_executor()
+                        .spawn(async move { stage_original(access, save_path.as_deref()) })
+                        .await?;
+                    let (reply, result) = oneshot::channel();
+                    commands.send(Command::DownloadChatAttachment {
+                        channel_id: channel,
+                        message_id: message,
+                        attachment_id: file.id.clone(),
+                        destination: staged,
+                        reply,
+                    }).await.map_err(|_| "Attachment unavailable.")?;
+                    AttachmentData::Original(
+                        result.await.map_err(|_| "Attachment unavailable.")?
+                            .map_err(|_| "Could not access the attachment.")?,
+                    )
+                };
                 let current = app
                     .update_in(cx, |app, _, _| {
                         app.chat_attachments
@@ -805,7 +855,10 @@ impl Spk {
                 }
                 cx.background_executor()
                     .spawn(async move {
-                        load_attachment(access, kind, bytes, destination).map(Some)
+                        match data {
+                            AttachmentData::Preview(bytes) => load_preview(kind, bytes),
+                            AttachmentData::Original(file) => finish_original(access, file, destination),
+                        }.map(Some)
                     })
                     .await
             }
@@ -972,58 +1025,74 @@ impl Spk {
     }
 }
 
-fn load_attachment(
+fn load_preview(kind: AttachmentKind, bytes: Vec<u8>) -> Result<AccessResult, &'static str> {
+    match kind {
+        AttachmentKind::Image => image_preview(&bytes)
+            .map(Preview::Image)
+            .ok_or("Image preview unavailable. Try downloading the file."),
+        AttachmentKind::Text => Ok(Preview::Text(TextPreview::new(&bytes))),
+        AttachmentKind::WebmAudio => AudioClip::decode_webm(bytes).map(Preview::Audio),
+        AttachmentKind::Audio => AudioClip::decode(&bytes).map(Preview::Audio),
+        AttachmentKind::Video => VideoClip::decode(bytes).map(Preview::Video),
+        AttachmentKind::File => Err("Attachment preview unavailable."),
+    }
+    .map(AccessResult::Preview)
+}
+
+fn stage_original(
     access: Access,
-    kind: AttachmentKind,
-    bytes: Vec<u8>,
+    destination: Option<&Path>,
+) -> Result<NamedTempFile, &'static str> {
+    if let Some(destination) = destination {
+        let directory = destination
+            .parent()
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        return NamedTempFile::new_in(directory).map_err(|_| "Could not save the file.");
+    }
+    let suffix = match access {
+        Access::Open(extension) => extension,
+        _ => "",
+    };
+    Builder::new()
+        .prefix("spk-")
+        .suffix(suffix)
+        .tempfile()
+        .map_err(|_| "Could not open the file.")
+}
+
+fn finish_original(
+    access: Access,
+    mut file: NamedTempFile,
     destination: Option<PathBuf>,
 ) -> Result<AccessResult, &'static str> {
     match access {
-        Access::Preview | Access::Play => match kind {
-            AttachmentKind::Image => image_preview(&bytes)
-                .map(Preview::Image)
-                .ok_or("Image preview unavailable. Try downloading the file."),
-            AttachmentKind::Text => Ok(Preview::Text(TextPreview::new(&bytes))),
-            AttachmentKind::WebmAudio => AudioClip::decode_webm(bytes).map(Preview::Audio),
-            AttachmentKind::Audio => AudioClip::decode(&bytes).map(Preview::Audio),
-            AttachmentKind::Video => VideoClip::decode(bytes).map(Preview::Video),
-            AttachmentKind::File => Err("Attachment preview unavailable."),
-        }
-        .map(AccessResult::Preview),
-        Access::Open(extension) => open_original(extension, &bytes),
+        Access::Open(_) => Ok(AccessResult::Open(file.into_temp_path())),
         Access::OpenImage => {
-            // Use the recognized image format, since the advertised MIME can be an alias.
-            let format = image::guess_format(&bytes).map_err(|_| "Could not open the image.")?;
-            let extension = format
-                .extensions_str()
-                .first()
-                .ok_or("Could not open the image.")?;
-            open_original(&format!(".{extension}"), &bytes)
+            let error = "Could not open the image.";
+            let reader = image::ImageReader::new(BufReader::new(file.as_file_mut()))
+                .with_guessed_format()
+                .map_err(|_| error)?;
+            let extension = reader
+                .format()
+                .and_then(|format| format.extensions_str().first())
+                .ok_or(error)?;
+            let path = Builder::new()
+                .prefix("spk-")
+                .suffix(&format!(".{extension}"))
+                .tempfile()
+                .map_err(|_| error)?
+                .into_temp_path();
+            file.persist(&path).map_err(|_| error)?;
+            Ok(AccessResult::Open(path))
         }
         Access::Download => {
             let error = "Could not save the file.";
-            let destination = destination.ok_or(error)?;
-            let directory = destination
-                .parent()
-                .filter(|dir| !dir.as_os_str().is_empty())
-                .unwrap_or_else(|| Path::new("."));
-            let mut file = NamedTempFile::new_in(directory).map_err(|_| error)?;
-            file.write_all(&bytes).map_err(|_| error)?;
-            file.persist(destination).map_err(|_| error)?;
+            file.persist(destination.ok_or(error)?).map_err(|_| error)?;
             Ok(AccessResult::Downloaded)
         }
+        Access::Preview | Access::Play => unreachable!("received original for preview"),
     }
-}
-
-fn open_original(extension: &str, bytes: &[u8]) -> Result<AccessResult, &'static str> {
-    let error = "Could not open the file.";
-    let mut file = Builder::new()
-        .prefix("spk-")
-        .suffix(extension)
-        .tempfile()
-        .map_err(|_| error)?;
-    file.write_all(bytes).map_err(|_| error)?;
-    Ok(AccessResult::Open(file.into_temp_path()))
 }
 
 fn safe_filename(filename: &str) -> String {
@@ -1148,9 +1217,10 @@ fn open_extension(mime: &str) -> Option<&'static str> {
 mod tests {
     use super::{
         Access, AccessResult, Attachment, AttachmentCard, AttachmentKind, Preview, TextPreview,
-        load_attachment,
+        finish_original, load_preview, stage_original,
     };
     use rodio::Source;
+    use std::io::{Seek, Write};
 
     #[test]
     fn text_preview_expands_in_pages_and_restores_the_initial_excerpt() {
@@ -1224,12 +1294,16 @@ mod tests {
         };
         let kind = AttachmentKind::classify(&file);
         assert!(matches!(
-            load_attachment(Access::Preview, kind, bytes.clone(), None),
+            load_preview(kind, bytes.clone()),
             Ok(AccessResult::Preview(Preview::Image(_)))
         ));
-        let Ok(AccessResult::Open(path)) =
-            load_attachment(Access::OpenImage, kind, bytes.clone(), None)
-        else {
+        let original = |bytes: &[u8]| {
+            let mut file = stage_original(Access::OpenImage, None).unwrap();
+            file.write_all(bytes).unwrap();
+            file.rewind().unwrap();
+            finish_original(Access::OpenImage, file, None)
+        };
+        let Ok(AccessResult::Open(path)) = original(&bytes) else {
             panic!("a decoded image should open in the system viewer");
         };
         assert_eq!(
@@ -1237,18 +1311,15 @@ mod tests {
             Some("png")
         );
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
-        assert!(load_attachment(Access::OpenImage, kind, b"not an image".to_vec(), None).is_err());
+        assert!(original(b"not an image").is_err());
     }
 
     #[test]
     fn previews_audio_only_webm() {
         let bytes = include_bytes!("../../../tests/fixtures/attachments/preview.weba");
-        let Ok(AccessResult::Preview(Preview::Audio(clip))) = load_attachment(
-            Access::Play,
-            AttachmentKind::WebmAudio,
-            bytes.to_vec(),
-            None,
-        ) else {
+        let Ok(AccessResult::Preview(Preview::Audio(clip))) =
+            load_preview(AttachmentKind::WebmAudio, bytes.to_vec())
+        else {
             panic!("audio-only WebM should open an inline audio preview");
         };
         assert!(clip.samples.take(4_800).any(|sample| sample.abs() > 0.05));
@@ -1267,7 +1338,7 @@ mod tests {
         let kind = AttachmentKind::classify(&file);
         assert_eq!(kind.media_label(), Some("audio"));
         assert!(!kind.automatic_preview());
-        let result = load_attachment(Access::Play, kind, wav.to_vec(), None);
+        let result = load_preview(kind, wav.to_vec());
         let Ok(AccessResult::Preview(Preview::Audio(clip))) = result else {
             panic!("WAV attachment should produce an inline audio preview");
         };
@@ -1275,6 +1346,6 @@ mod tests {
         assert_eq!(clip.samples.sample_rate().get(), 48_000);
         assert_eq!(clip.samples.collect::<Vec<_>>(), [-1.0, 0.0, 0.5]);
         assert!(!clip.truncated);
-        assert!(load_attachment(Access::Play, kind, b"bad WAV".to_vec(), None).is_err());
+        assert!(load_preview(kind, b"bad WAV".to_vec()).is_err());
     }
 }
