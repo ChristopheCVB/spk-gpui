@@ -689,7 +689,7 @@ async fn watch_session(
             break SessionEnd::Closed;
         }
         if draft_store.is_some() && chat.drafts_to_save() {
-            draft_save_at.get_or_insert_with(|| Instant::now() + Duration::from_millis(250));
+            draft_save_at.get_or_insert_with(|| Instant::now() + std::time::Duration::from_millis(250));
         }
         unread.write_next(client);
         chat.fill_previews(client);
