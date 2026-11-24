@@ -240,6 +240,7 @@ async fn soundboard_turn_ends_after_the_clip_and_releases_everyone_but_its_playe
             let join = establish_voice(&requests, &mut desktop).await;
             let sid = &join["sid"];
 
+            advance.send(()).await.unwrap();
             assert_eq!(
                 receive_voice_frame(&mut desktop).await,
                 voice_state(sid, true, true)
@@ -296,6 +297,7 @@ async fn soundboard_turn_ends_after_the_clip_and_releases_everyone_but_its_playe
         },
         async |commands, views| {
             join_test_voice(&commands, &views).await;
+            step.recv().await.unwrap();
             commands.send(Command::ToggleDeafen).await.unwrap();
             wait_for_sidebar(&views, |s| s.voice_intent.mute.deafened).await;
             commands.send(Command::LoadSoundboard).await.unwrap();
