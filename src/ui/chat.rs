@@ -456,7 +456,7 @@ impl Spk {
     ) {
         if editing {
             editor::toggle(&self.message_action_input, format, window, cx);
-        } else if chat(&self.view).is_some_and(|chat| chat.can_send() && chat.outgoing.is_none()) {
+        } else if chat(&self.view).is_some_and(|chat| chat.can_send()) {
             editor::toggle(&self.chat_input, format, window, cx);
         }
     }
