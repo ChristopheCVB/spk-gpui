@@ -330,6 +330,53 @@ pub(in crate::ui) fn enter(
     })
 }
 
+pub(super) fn suggestion_prefix(
+    input: &TextareaState,
+    source: &str,
+    caret: usize,
+) -> Option<Range<usize>> {
+    let prefix = source.get(..caret)?;
+    let line_start = prefix.rfind('\n').map_or(0, |newline| newline + 1);
+    let mut start = line_start;
+    for span in input.tokens().iter().rev() {
+        let range = span.range();
+        if range.start >= caret {
+            continue;
+        }
+        if range.end > caret {
+            return None;
+        }
+        // A Markdown escape changes one character without splitting the text node.
+        if span.token().id() == SYNTAX && span.token().text() == "\\" {
+            continue;
+        }
+        start = start.max(range.end);
+        break;
+    }
+    (start < caret).then_some(start..caret)
+}
+
+pub(super) fn empty_suggestion_range(source: &str, mut range: Range<usize>) -> Range<usize> {
+    if range.len() == source.len() {
+        return range;
+    }
+    // Erase the Markdown delimiters when the command was the entire marked span.
+    for mark in Projection::parse(source).marks.into_iter().rev() {
+        if range == mark.range
+            && !mark.open.is_empty()
+            && !mark.close.is_empty()
+            && !matches!(mark.format, Format::CodeBlock)
+        {
+            range = mark.open.start..mark.close.end;
+        }
+    }
+    range
+}
+
+pub(super) fn plain_text(source: &str) -> String {
+    Projection::parse(source).plain(source, 0..source.len())
+}
+
 pub(in crate::ui) fn wire(input: &TextareaState) -> String {
     let source = input.value();
     let projection = Projection::parse(&source);

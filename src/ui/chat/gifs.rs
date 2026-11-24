@@ -244,8 +244,11 @@ impl Spk {
                     )
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.send(Command::PickGif(select.clone()), None, cx);
-                        this.chat_input
-                            .update(cx, |input, cx| input.focus(window, cx));
+                        this.chat_input.update(cx, |input, cx| {
+                            let end = input.value().len();
+                            input.set_selected_range(end..end, cx);
+                            input.focus(window, cx);
+                        });
                     })),
             )
             .child(

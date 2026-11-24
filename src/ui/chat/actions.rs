@@ -177,6 +177,7 @@ impl Spk {
         &self,
         chat: &ChatView,
         message: &ChatMessage,
+        window: &Window,
         cx: &Context<Self>,
     ) -> Option<impl IntoElement> {
         let form = self
@@ -201,14 +202,16 @@ impl Spk {
                 .child(Label::new(title).font_semibold())
                 .when(!matches!(form.kind, ActionForm::Delete), |panel| {
                     let input = self.message_action_input.clone();
-                    panel.child(
-                        editor::textarea(&self.message_action_input)
-                            .aria_label(title)
-                            .on_paste(move |item, window, cx| {
-                                editor::paste(&input, item, false, window, cx)
-                            })
-                            .disabled(chat.action_pending),
-                    )
+                    panel
+                        .children(self.suggestion_menu(true, window, cx))
+                        .child(
+                            editor::textarea(&self.message_action_input)
+                                .aria_label(title)
+                                .on_paste(move |item, window, cx| {
+                                    editor::paste(&input, item, false, window, cx)
+                                })
+                                .disabled(chat.action_pending),
+                        )
                 })
                 .child(
                     div()

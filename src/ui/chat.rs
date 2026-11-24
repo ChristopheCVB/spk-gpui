@@ -7,7 +7,7 @@ mod history;
 mod poll_composer;
 mod poll_results;
 mod reaction_picker;
-mod slash_commands;
+pub(super) mod suggestions;
 
 pub(super) use actions::{MessageActionForm, PinPanel};
 pub(super) use attachments::AttachmentUi;
@@ -531,7 +531,7 @@ impl Spk {
             self.chat_pins = None;
         }
         if reset {
-            self.slash_choice = None;
+            self.suggestions = Default::default();
             self.chat_input.update(cx, |input, cx| {
                 input.set_value(
                     next.map_or("", |chat| chat.draft.body.as_str()).to_owned(),
@@ -1079,7 +1079,7 @@ impl Spk {
                                 ),
                         )
                     })
-                    .child(self.message_composer(sidebar, chat, cx))
+                    .child(self.message_composer(sidebar, chat, window, cx))
             }))
     }
 
@@ -1087,6 +1087,7 @@ impl Spk {
         &self,
         sidebar: &Sidebar,
         chat: &ChatView,
+        window: &Window,
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
@@ -1112,7 +1113,7 @@ impl Spk {
                     .child(self.staged_gif(chat, cx))
                     .child(self.attachment_queue(chat, cx)),
             )
-            .children(self.slash_suggestions(cx))
+            .children(self.suggestion_menu(false, window, cx))
             .child(
                 editor::textarea(&self.chat_input)
                     .flex_shrink_0()
@@ -1437,7 +1438,7 @@ impl Spk {
             .when(!message.attachments.is_empty(), |row| {
                 row.child(self.attachment_cards(message, cx))
             })
-            .children(self.message_action_form(chat, message, cx))
+            .children(self.message_action_form(chat, message, window, cx))
             .when(!message.previews.is_empty(), |row| {
                 row.child(self.link_previews(sidebar, chat, message, cx))
             })

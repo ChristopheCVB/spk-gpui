@@ -110,7 +110,7 @@ impl Spk {
                 .message_action_input
                 .focus_handle(cx)
                 .is_focused(window);
-        if composer && count == 0 && self.chat_slash_key(key_name, window, cx) {
+        if (composer || editor) && self.chat_suggestion_key(key_name, editor, window, cx) {
             return true;
         }
         if composer || editor {

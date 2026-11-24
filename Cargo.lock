@@ -7733,6 +7733,8 @@ dependencies = [
  "futures",
  "global-hotkey",
  "gpui-kit",
+ "icu_normalizer",
+ "icu_properties",
  "image",
  "image-webp",
  "keyring",
