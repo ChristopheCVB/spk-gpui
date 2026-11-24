@@ -354,3 +354,222 @@ async fn channel_refresh_discards_revoked_webhook_history_and_in_flight_pages() 
     assert!(!http.is_finished());
     http.abort();
 }
+
+mod creation {
+    use super::*;
+    use crate::api::WebhookSettings;
+
+    #[tokio::test]
+    async fn ordinary_user_creates_and_opens_webhook_with_one_time_url() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let (requests, submissions) = async_channel::unbounded();
+        let (created, listed) = watch::channel(false);
+        let (hold_channels, holding_channels) = watch::channel(false);
+        let (channel_requests, channel_replies) = async_channel::unbounded();
+        let http = tokio::spawn(async move {
+            loop {
+                let (line, request) = Request::receive(&listener).await;
+                assert_eq!(request.header("cookie"), Some("session=alice"));
+                let body = match line.as_str() {
+                    "GET /api/channels HTTP/1.1" if *holding_channels.borrow() => {
+                        channel_requests.send(request).await.unwrap();
+                        continue;
+                    }
+                    "GET /api/channels HTTP/1.1" if *listed.borrow() => value!([feed()]),
+                    "GET /api/channels HTTP/1.1"
+                    | "GET /api/users HTTP/1.1"
+                    | "GET /api/voice HTTP/1.1" => value!([]),
+                    "GET /api/users/presence HTTP/1.1" | "GET /api/unread HTTP/1.1" => value!({}),
+                    "GET /api/channels/feed/messages?unread=1 HTTP/1.1" => value!({
+                        "messages":[],"hasMoreBefore":false,"hasMoreAfter":false
+                    }),
+                    "POST /api/webhooks HTTP/1.1" => {
+                        requests.send(request).await.unwrap();
+                        continue;
+                    }
+                    _ => panic!("unexpected request {line}"),
+                };
+                request.respond(&[], &body.to_string()).await;
+            }
+        });
+
+        timeout(Duration::from_secs(10), async {
+            let (commands, views, _, mut peer, session) =
+                chat::direct_message_session(base.clone(), "alice").await;
+            let initial = wait_for_sidebar(&views, |_| true).await;
+            assert!(!initial.is_admin());
+            assert!(initial.webhook_feeds().next().is_none());
+
+            hold_channels.send_replace(true);
+            commands.send(Command::Refresh).await.unwrap();
+            let stale_channels = channel_replies.recv().await.unwrap();
+            let result = create(&commands, " \0Builds\u{feff} ", true).await;
+            let request = submissions.recv().await.unwrap();
+            assert_eq!(
+                serde_json::from_slice::<Value>(&request.body).unwrap(),
+                value!({"name":"Builds","icon":"webhook","private":true}),
+            );
+            assert!(matches!(
+                create(&commands, "Duplicate", false).await.await.unwrap(),
+                Err("A webhook change is already in progress.")
+            ));
+            created.send_replace(true);
+            let url = format!("{base}api/hooks/feed/test-fixture-secret");
+            request
+                .respond(&[], &value!({"channel":feed(),"url":url}).to_string())
+                .await;
+            let issued = result.await.unwrap().ok().expect("webhook URL");
+            assert!(issued.as_str() == url);
+            let opened = wait_for_sidebar(&views, |view| {
+                view.chat.as_ref().is_some_and(ChatView::history_ready)
+            })
+            .await;
+            assert_eq!(opened.chat.unwrap().channel_id, "feed");
+
+            stale_channels.respond(&[], "[]").await;
+            let fresh_channels = channel_replies.recv().await.unwrap();
+            peer.send(Message::text(
+                r#"{"type":"presence:update","userId":"bob","status":"busy"}"#,
+            ))
+            .await
+            .unwrap();
+            let reconciling = wait_for_sidebar(&views, |view| {
+                view.user_presence("bob") == UserPresence::Busy
+            })
+            .await;
+            assert!(reconciling.webhook_feed("feed").is_some());
+            assert_eq!(reconciling.chat.unwrap().channel_id, "feed");
+            hold_channels.send_replace(false);
+            fresh_channels
+                .respond(&[], &value!([feed()]).to_string())
+                .await;
+            commands.send(Command::SignOut).await.unwrap();
+            assert!(matches!(session.await.unwrap(), SessionEnd::SignOut));
+        })
+        .await
+        .expect("webhook creation timed out");
+        assert!(!http.is_finished());
+        http.abort();
+    }
+
+    #[tokio::test]
+    async fn webhook_create_errors_leave_existing_chat_available() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let (requests, submissions) = async_channel::unbounded();
+        let http = tokio::spawn(async move {
+            loop {
+                let (line, request) = Request::receive(&listener).await;
+                assert_eq!(request.header("cookie"), Some("session=alice"));
+                let body = match line.as_str() {
+                    "GET /api/channels HTTP/1.1" => {
+                        value!([{"id":"general","type":"text","name":"General"}])
+                    }
+                    "GET /api/users HTTP/1.1"
+                    | "GET /api/voice HTTP/1.1"
+                    | "GET /api/channels/general/pins HTTP/1.1" => value!([]),
+                    "GET /api/users/presence HTTP/1.1" | "GET /api/unread HTTP/1.1" => value!({}),
+                    "GET /api/channels/general/messages?unread=1 HTTP/1.1" => value!({
+                        "messages":[],"hasMoreBefore":false,"hasMoreAfter":false
+                    }),
+                    "POST /api/webhooks HTTP/1.1" => {
+                        requests.send(request).await.unwrap();
+                        continue;
+                    }
+                    _ => panic!("unexpected request {line}"),
+                };
+                request.respond(&[], &body.to_string()).await;
+            }
+        });
+
+        timeout(Duration::from_secs(10), async {
+            let (commands, views, _, _peer, session) =
+                chat::direct_message_session(base, "alice").await;
+            assert!(matches!(
+                create(&commands, &"😀".repeat(17), false)
+                    .await
+                    .await
+                    .unwrap(),
+                Err("Webhook names must be 1–32 characters.")
+            ));
+            for (status, expected_error) in [
+                (
+                    "404 Not Found",
+                    "This SPK server needs a version that supports Webhooks.",
+                ),
+                (
+                    "403 Forbidden",
+                    "SPK denied permission to create this webhook.",
+                ),
+                (
+                    "422 Unprocessable Entity",
+                    "SPK rejected the webhook settings. Check the name and icon, then try again.",
+                ),
+                (
+                    "503 Service Unavailable",
+                    "Could not create the webhook. Refresh the feed list before trying again.",
+                ),
+            ] {
+                let result = create(&commands, "Deployments", false).await;
+                let request = submissions.recv().await.unwrap();
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&request.body).unwrap(),
+                    value!({"name":"Deployments","icon":"webhook","private":false}),
+                );
+                request
+                    .respond_raw(status, &[], b"untrusted server error body")
+                    .await;
+                assert!(matches!(result.await.unwrap(), Err(message) if message == expected_error));
+            }
+
+            commands
+                .send(Command::OpenTextChannel("general".into()))
+                .await
+                .unwrap();
+            let opened = wait_for_sidebar(&views, |view| {
+                view.chat.as_ref().is_some_and(ChatView::history_ready)
+            })
+            .await;
+            assert!(opened.webhook_feeds().next().is_none());
+            assert_eq!(opened.chat.unwrap().channel_id, "general");
+
+            let signed_out = create(&commands, "Deployments", false).await;
+            let pending = submissions.recv().await.unwrap();
+            commands.send(Command::SignOut).await.unwrap();
+            assert!(signed_out.await.is_err());
+            drop(pending);
+            assert!(matches!(session.await.unwrap(), SessionEnd::SignOut));
+        })
+        .await
+        .expect("webhook failure handling timed out");
+        assert!(!http.is_finished());
+        http.abort();
+    }
+
+    async fn create(
+        commands: &Sender<Command>,
+        name: &str,
+        private: bool,
+    ) -> oneshot::Receiver<Result<crate::api::WebhookUrl, &'static str>> {
+        let (reply, result) = oneshot::channel();
+        commands
+            .send(Command::CreateWebhook {
+                settings: WebhookSettings {
+                    name: name.to_owned(),
+                    icon: "webhook".to_owned(),
+                    private,
+                },
+                reply,
+            })
+            .await
+            .unwrap();
+        result
+    }
+
+    fn feed() -> Value {
+        value!({"id":"feed","type":"webhook","name":"Builds","icon":"webhook","ownerId":"alice","private":true})
+    }
+}

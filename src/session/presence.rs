@@ -296,6 +296,8 @@ impl Refresh {
             Ok(data) => {
                 self.failed.remove(&resource);
                 match data {
+                    // A snapshot started before a mutation may omit the confirmed feed.
+                    Data::Channels(_) if self.dirty.contains(&resource) => {}
                     Data::Channels(mut channels) => {
                         channels.retain(|channel| {
                             !channel.is_webhook()

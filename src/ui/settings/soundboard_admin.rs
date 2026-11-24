@@ -1,13 +1,14 @@
-use gpui_kit::component::{Disableable, IndexPath, select::SearchableVec};
+use gpui_kit::component::Disableable;
 
 use super::*;
 use crate::{
     api::SoundboardClip,
     session::{SoundboardAdminAction as Action, SoundboardCrop},
-    ui::soundboard::clip_icon,
+    ui::{
+        icon_picker::{IconPicker, bundled_icon_names, icon_picker, icon_picker_field},
+        soundboard::clip_icon,
+    },
 };
-
-type IconPicker = Entity<SelectState<SearchableVec<SharedString>>>;
 
 struct Metadata {
     name: Entity<InputState>,
@@ -16,17 +17,9 @@ struct Metadata {
 
 impl Metadata {
     fn new(icons: &[SharedString], window: &mut Window, cx: &mut App) -> Self {
-        let index = icons.iter().position(|icon| icon.as_ref() == "audio-lines");
         Self {
             name: cx.new(|cx| InputState::new(window, cx)),
-            icon: cx.new(|cx| {
-                SelectState::new(
-                    SearchableVec::new(icons.to_vec()),
-                    index.map(|index| IndexPath::default().row(index)),
-                    window,
-                    cx,
-                )
-            }),
+            icon: icon_picker(icons, "audio-lines", window, cx),
         }
     }
 
@@ -41,40 +34,17 @@ impl Metadata {
     }
 
     fn render(&self, original_icon: Option<&str>, disabled: bool, cx: &App) -> impl IntoElement {
-        let icon = self
-            .icon
-            .read(cx)
-            .selected_value()
-            .map(AsRef::as_ref)
-            .or(original_icon);
         div()
             .flex()
             .gap_3()
             .child(field("Name", &self.name, disabled))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .flex_1()
-                    .min_w_0()
-                    .child(Label::new("Icon"))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .children(icon.map(clip_icon))
-                            .child(
-                                control_select(&self.icon)
-                                    .w_full()
-                                    .accessibility_label("Icon")
-                                    .placeholder(original_icon.unwrap_or("Choose icon").to_owned())
-                                    .search_placeholder("Search icons")
-                                    .disabled(disabled),
-                            ),
-                    ),
-            )
+            .child(icon_picker_field(
+                &self.icon,
+                original_icon,
+                clip_icon,
+                disabled,
+                cx,
+            ))
     }
 }
 
@@ -98,18 +68,7 @@ pub(super) struct SoundboardForm {
 
 impl SoundboardForm {
     pub(super) fn new(window: &mut Window, cx: &mut Context<Settings>) -> Self {
-        let mut icons: Vec<SharedString> = assets::AllAssets
-            .list("icons/")
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|path| path.strip_prefix("icons/")?.strip_suffix(".svg"))
-            .filter(|name| {
-                name.bytes()
-                    .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == b'-')
-            })
-            .map(|name| name.to_owned().into())
-            .collect();
-        icons.sort_unstable();
+        let icons = bundled_icon_names();
         let upload = Metadata::new(&icons, window, cx);
         let edit = Metadata::new(&icons, window, cx);
         for state in [&upload.icon, &edit.icon] {

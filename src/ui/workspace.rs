@@ -1,5 +1,6 @@
 mod channel_admin;
 mod voice_session_layout;
+mod webhooks;
 
 use gpui_kit::component::{
     Disableable, Placement,
@@ -587,13 +588,24 @@ impl Spk {
                     div()
                         .flex()
                         .items_center()
-                        .gap_2()
-                        .h_8()
-                        .px_2()
-                        .text_color(cx.theme().muted_foreground)
-                        .font_semibold()
-                        .child(webhook_icon(None).size(px(16.0)))
-                        .child("Webhooks"),
+                        .justify_between()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .h_8()
+                                .px_2()
+                                .text_color(cx.theme().muted_foreground)
+                                .font_semibold()
+                                .child(webhook_icon(None).size(px(16.0)))
+                                .child("Webhooks"),
+                        )
+                        .child(
+                            tool_button("new-webhook", IconName::Plus, "New webhook").on_click(
+                                cx.listener(|this, _, window, cx| this.new_webhook(window, cx)),
+                            ),
+                        ),
                 )
                 .when(feeds.peek().is_none(), |card| {
                     card.child(div().px_2().py_1().child(

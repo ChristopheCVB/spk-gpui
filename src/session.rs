@@ -12,6 +12,7 @@ mod soundboard;
 mod soundboard_admin;
 mod unread;
 mod voice_session;
+mod webhooks;
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
@@ -27,7 +28,7 @@ use url::Url;
 
 use crate::api::{
     Channel, Connection, Failure, Frame, MessageChange, MessageTarget, Profile, SocketEvent,
-    SpkClient, UnreadState, User, UserPresence, VoiceModeration,
+    SpkClient, UnreadState, User, UserPresence, VoiceModeration, WebhookSettings,
 };
 use crate::notifications::{Alert, LiveAlerts};
 use crate::sounds::{Sound, VoiceSounds};
@@ -88,6 +89,10 @@ pub enum Command {
     SetUserStatus(UserStatus),
     Refresh,
     ManageChannel(ChannelAction),
+    CreateWebhook {
+        settings: WebhookSettings,
+        reply: webhooks::WebhookCreateReply,
+    },
     OpenTextChannel(String),
     OpenWebhook(String),
     OpenDirectMessage(String),
@@ -629,6 +634,7 @@ async fn watch_session(
     let mut camera_previews = JoinSet::new();
     let mut voice_moderation = JoinSet::new();
     let mut channel_mutations = JoinSet::new();
+    let mut webhook_creates = JoinSet::<webhooks::WebhookCreateCompletion>::new();
     let mut channel_mutation_result = None;
     let mut profiles = JoinSet::new();
     let mut account_admin = AccountAdmin::default();
@@ -746,6 +752,27 @@ async fn watch_session(
                 }
             }
             Ok(event) = chat.attachments.events.recv() => chat.attachment_event(client, event),
+            Some(Ok((result, reply))) = webhook_creates.join_next() => {
+                match result {
+                    Ok((channel, url)) => {
+                        direct_message_opens = JoinSet::new();
+                        sidebar.chat_notice = None;
+                        ChatNavigation::open_chat(&mut chat_navigation, &mut chat, client, &channel);
+                        let channels = sidebar.channels.get_or_insert_default();
+                        if let Some(listed) = channels.iter_mut().find(|listed| listed.id == channel.id) {
+                            *listed = channel;
+                        } else {
+                            channels.push(channel);
+                        }
+                        refresh.fetch(client, Resource::Channels);
+                        let _ = reply.send(Ok(url));
+                    }
+                    Err(error) if error.unauthorized() => break SessionEnd::Invalidated(SESSION_EXPIRED),
+                    Err(error) => {
+                        let _ = reply.send(Err(webhooks::create_error(error)));
+                    }
+                }
+            }
             Some(result) = direct_message_opens.join_next() => {
                 match result.unwrap_or(Err(Failure::Connection)) {
                     Ok(channel) => {
@@ -802,6 +829,23 @@ async fn watch_session(
                                 });
                             }
                             Err(notice) => sidebar.channel_admin.result = Some(Err(notice)),
+                        }
+                    }
+                }
+                Ok(Command::CreateWebhook { settings, reply }) => {
+                    if !webhook_creates.is_empty() {
+                        let _ = reply.send(Err("A webhook change is already in progress."));
+                    } else {
+                        match settings.validated() {
+                            Ok(settings) => {
+                                let client = client.clone();
+                                webhook_creates.spawn(async move {
+                                    (client.create_webhook(settings).await, reply)
+                                });
+                            }
+                            Err(message) => {
+                                let _ = reply.send(Err(message));
+                            }
                         }
                     }
                 }
@@ -1349,6 +1393,7 @@ async fn watch_session(
     {
         settings.alert_activation.mark_changed();
     }
+    drop(webhook_creates);
     drop(chat);
     camera_previews.shutdown().await;
     drop(soundboard);

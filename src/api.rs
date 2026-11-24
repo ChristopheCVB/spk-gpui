@@ -6,6 +6,7 @@ mod gifs;
 mod public_media;
 mod search;
 mod soundboard_admin;
+mod webhooks;
 
 pub(crate) use account_admin::account_link_token;
 pub use account_admin::{
@@ -18,6 +19,7 @@ pub use gifs::{GifItem, GifPage, image_message_url};
 pub(crate) use public_media::{PublicDns, public_media_url};
 pub use search::{MessageTarget, SearchHit, SearchPage, SearchScope, conversation_link};
 pub use soundboard_admin::MAX_SOUND_BYTES;
+pub use webhooks::{WebhookSettings, WebhookUrl};
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 

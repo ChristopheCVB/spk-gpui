@@ -1,5 +1,6 @@
 mod accounts;
 mod chat;
+mod icon_picker;
 mod notifications;
 mod profile;
 mod radio;
