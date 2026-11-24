@@ -431,6 +431,9 @@ impl Spk {
         else {
             return false;
         };
+        if let Some(index) = history_message_index(chat, &message.id) {
+            self.chat_scroll.scroll_to_item(index);
+        }
         let channel_id = chat.channel_id.clone();
         let message_id = message.id.clone();
         self.begin_message_action(
