@@ -14,7 +14,7 @@ mod unread;
 mod voice_session;
 mod webhooks;
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
 use async_channel::{Receiver, Sender};
 use gpui_kit::RenderImage;
@@ -700,7 +700,7 @@ async fn watch_session(
             break SessionEnd::Closed;
         }
         if draft_store.is_some() && chat.drafts_to_save() {
-            draft_save_at.get_or_insert_with(|| Instant::now() + std::time::Duration::from_millis(250));
+            draft_save_at.get_or_insert_with(|| Instant::now() + Duration::from_millis(250));
         }
         unread.write_next(client);
         chat.fill_previews(client);
