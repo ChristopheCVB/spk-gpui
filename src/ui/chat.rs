@@ -990,17 +990,10 @@ impl Spk {
                     .flex()
                     .flex_col()
                     .min_h_0()
-                    .border_1()
-                    .border_color(theme.background.opacity(0.0))
                     .when(chat.can_send(), |composer| {
-                        let accent = theme.primary;
-                        composer
-                            .drag_over::<ExternalPaths>(move |style, _, _, _| {
-                                style.border_color(accent)
-                            })
-                            .on_drop(cx.listener(|app, paths: &ExternalPaths, _, cx| {
-                                app.add_attachment_paths(paths.paths().to_vec(), cx);
-                            }))
+                        composer.on_drop(cx.listener(|app, paths: &ExternalPaths, _, cx| {
+                            app.add_attachment_paths(paths.paths().to_vec(), cx);
+                        }))
                     })
                     .when(!chat.typing.is_empty(), |composer| {
                         let names: Vec<_> = chat
@@ -1120,6 +1113,11 @@ impl Spk {
             .bg(surface)
             .border_1()
             .border_color(surface)
+            .when(!disabled, |composer| {
+                let accent = theme.primary;
+                composer
+                    .drag_over::<ExternalPaths>(move |style, _, _, _| style.border_color(accent))
+            })
             .child(
                 div()
                     .id("composer-media")
@@ -1136,7 +1134,7 @@ impl Spk {
                 editor::textarea(&self.chat_input)
                     .flex_shrink_0()
                     .bg(surface)
-                    .border_color(surface)
+                    .bordered(false)
                     .aria_label("Write a message")
                     .on_paste(move |item, window, cx| {
                         app.update(cx, |app, cx| {
