@@ -19,6 +19,7 @@ pub struct ActionOutcome {
 pub(in crate::session) struct PendingAction {
     message_id: String,
     saw_change: bool,
+    voting: bool,
 }
 
 impl ChatView {
@@ -68,6 +69,7 @@ impl ChatSession {
             }
             MessageAction::Pin(_) => view.can_pin(sidebar.is_admin()),
             MessageAction::React { .. } => true,
+            MessageAction::Vote(_) => message.poll.is_some(),
         };
         if !allowed {
             view.action_outcome = Some(ActionOutcome {
@@ -81,6 +83,7 @@ impl ChatSession {
         self.pending_action = Some(PendingAction {
             message_id: message_id.clone(),
             saw_change: false,
+            voting: matches!(action, MessageAction::Vote(_)),
         });
         view.action_pending = true;
         view.action_outcome = None;
@@ -107,19 +110,22 @@ impl ChatSession {
                 Err(Failure::Http(reqwest::StatusCode::NOT_FOUND)) => {
                     Some("This message is unavailable.")
                 }
+                Err(Failure::Http(reqwest::StatusCode::BAD_REQUEST)) if pending.voting => {
+                    Some("SPK rejected the vote. Try again.")
+                }
                 Err(Failure::Http(reqwest::StatusCode::BAD_REQUEST)) => {
                     Some("SPK rejected the change. Check the message or emoji.")
                 }
                 Err(Failure::Http(reqwest::StatusCode::TOO_MANY_REQUESTS)) => {
                     Some("Too many changes. Try again shortly.")
                 }
+                Err(_) if pending.voting => Some("Could not vote. Try again."),
                 Err(_) => Some("Could not change the message. Try again."),
             },
         });
-        // SPK broadcasts to the initiating session as well as peers. A late HTTP response
-        // must not overwrite any newer state for this message received on the socket.
-        if !pending.saw_change
-            && let Ok(change) = result
+        // Poll votes share the web client's last-arriving HTTP and socket update handling.
+        if let Ok(change) = result
+            && (!pending.saw_change || pending.voting)
         {
             let channel_id = view.channel_id.clone();
             self.apply_message_change(client, &channel_id, &pending.message_id, change);
@@ -139,6 +145,7 @@ impl ChatSession {
             .is_some_and(|view| view.channel_id == channel_id)
             && let Some(pending) = &mut self.pending_action
             && pending.message_id == message_id
+            && !matches!(change, MessageChange::Poll(_))
         {
             pending.saw_change = true;
         }
@@ -248,6 +255,7 @@ pub(super) fn change_message(
         match change {
             MessageChange::Edit(edited) => message.clone_from(edited),
             MessageChange::Reactions(reactions) => message.reactions.clone_from(reactions),
+            MessageChange::Poll(poll) => message.poll = Some(poll.clone()),
             MessageChange::Pin(pinned) => message.pinned = *pinned,
             MessageChange::Previews(previews) => message.previews.clone_from(previews),
             MessageChange::RemovePreview(url) => {

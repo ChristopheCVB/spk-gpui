@@ -1052,6 +1052,9 @@ async fn watch_session(
                     Frame::ReactionUpdate { channel_id, message_id, reactions } => {
                         chat.message_changed(client, &channel_id, &message_id, MessageChange::Reactions(reactions));
                     }
+                    Frame::PollUpdate { channel_id, message_id, poll } => {
+                        chat.message_changed(client, &channel_id, &message_id, MessageChange::Poll(poll));
+                    }
                     Frame::PinUpdate { channel_id, message_id, pinned } => {
                         chat.message_changed(client, &channel_id, &message_id, MessageChange::Pin(pinned));
                     }

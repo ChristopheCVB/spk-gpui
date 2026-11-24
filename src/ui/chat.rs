@@ -2,6 +2,7 @@ mod actions;
 mod attachments;
 mod gifs;
 mod history;
+mod poll_results;
 mod reaction_picker;
 
 pub(super) use actions::{MessageActionForm, PinPanel};
@@ -1314,6 +1315,15 @@ impl Spk {
             .children(self.message_action_form(chat, message, cx))
             .when(!message.previews.is_empty(), |row| {
                 row.child(self.link_previews(sidebar, chat, message, cx))
+            })
+            .when_some(message.poll.as_ref(), |row, poll| {
+                row.child(poll_results::poll_results(
+                    sidebar,
+                    chat,
+                    &message.id,
+                    poll,
+                    cx,
+                ))
             })
             .when(!message.reactions.is_empty(), |row| {
                 row.child(self.reactions(sidebar, chat, message, cx))

@@ -85,7 +85,18 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         })
         .await;
         tx.send(Command::RetryChatHistory).await.unwrap();
-        let latest = message("m2", 2, "bob", "Hi from web <@alice>");
+        let poll = |tea: &[&str], coffee: &[&str]| value!({"options":[
+            {"id":"tea","label":"Tea","userIds":tea},
+            {"id":"coffee","label":"Coffee","userIds":coffee}
+        ]});
+        let mut latest = message("m2", 2, "bob", "Hi from web <@alice>");
+        latest["poll"] = poll(&["bob"], &[]);
+        let initial = poll(&["bob", "eve"], &[]);
+        poll_update(&mut peer, "general", "m2", &initial).await;
+        peer.send(Message::text(value!({
+            "type":"unread:update","channelId":"quiet","unread":1,"mentions":0
+        }).to_string())).await.unwrap();
+        wait_for_sidebar(&rx, |view| view.unread("quiet").unread == 1).await;
         page(
             history_request(&history, "?unread=1").await,
             std::slice::from_ref(&latest),
@@ -99,14 +110,91 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
             })
         }).await;
         tx.send(Command::LoadOlderMessages).await.unwrap();
-        let older = message("m1", 1, "bob", "Earlier message");
+        let mut older = message("m1", 1, "bob", "Earlier message");
+        older["poll"] = Value::Null;
         page(
             history_request(&history, "?before=m2").await,
             std::slice::from_ref(&older),
             false,
         )
         .await;
-        wait_for_messages(&rx, &["m1", "m2"]).await;
+        wait_for_sidebar(&rx, |view| {
+            let chat = view.chat.as_ref().unwrap();
+            if !chat.history_ready() || chat.messages.len() != 2 {
+                return false;
+            }
+            assert!(chat.messages[0].poll.is_none());
+            let poll = chat.messages[1].poll.as_ref().expect("history Poll");
+            assert_eq!(chat.messages[1].body, "Hi from web <@alice>");
+            assert_eq!(poll.options[0].id, "tea");
+            assert_eq!(poll.options[0].label, "Tea");
+            assert_eq!(poll.options[0].user_ids, ["bob", "eve"]);
+            assert_eq!(poll.options[1].label, "Coffee");
+            assert!(poll.options[1].user_ids.is_empty());
+            true
+        }).await;
+
+        let vote = |choice_id: Option<&str>| Command::MutateChatMessage {
+            channel_id: "general".into(),
+            message_id: "m2".into(),
+            action: MessageAction::Vote(choice_id.map(str::to_owned)),
+        };
+        let vote_path = "POST /api/messages/m2/vote HTTP/1.1";
+        let result = |tea: &[&str], coffee: &[&str]| value!({
+            "channelId":"general", "messageId":"m2", "poll":poll(tea, coffee)
+        });
+        tx.send(vote(Some("tea"))).await.unwrap();
+        let request = chat_action_request(&history, vote_path, value!({"choiceId":"tea"})).await;
+        request.respond(&[], &result(&["bob", "alice"], &[]).to_string()).await;
+        wait_for_sidebar(&rx, |view| {
+            view.chat.as_ref().is_some_and(|chat| !chat.action_pending
+                && chat.messages[1].poll.as_ref().unwrap().options[0].user_ids == ["bob", "alice"])
+        }).await;
+
+        tx.send(vote(Some("coffee"))).await.unwrap();
+        let request = chat_action_request(&history, vote_path, value!({"choiceId":"coffee"})).await;
+        let switched = result(&["bob"], &["alice"]);
+        request.respond(&[], &switched.to_string()).await;
+        wait_for_sidebar(&rx, |view| {
+            view.chat.as_ref().is_some_and(|chat| !chat.action_pending
+                && chat.messages[1].poll.as_ref().unwrap().options[0].user_ids == ["bob"]
+                && chat.messages[1].poll.as_ref().unwrap().options[1].user_ids == ["alice"])
+        }).await;
+
+        tx.send(vote(None)).await.unwrap();
+        let request = chat_action_request(&history, vote_path, value!({"choiceId":null})).await;
+        request.respond_raw("400 Bad Request", &[], b"").await;
+        wait_for_sidebar(&rx, |view| {
+            view.chat.as_ref().is_some_and(|chat|
+                chat.action_outcome.as_ref().is_some_and(|outcome| outcome.message_id == "m2" && outcome.error.is_some())
+                    && chat.messages[1].poll.as_ref().unwrap().options[1].user_ids == ["alice"])
+        }).await;
+
+        tx.send(vote(None)).await.unwrap();
+        let request = chat_action_request(&history, vote_path, value!({"choiceId":null})).await;
+        request.respond(&[], &result(&["bob"], &[]).to_string()).await;
+        wait_for_sidebar(&rx, |view| {
+            view.chat.as_ref().is_some_and(|chat| !chat.action_pending
+                && chat.messages[1].poll.as_ref().unwrap().options[1].user_ids.is_empty())
+        }).await;
+
+        poll_update(&mut peer, "general", "m2", &poll(&[], &["bob"])).await;
+        poll_update(&mut peer, "quiet", "m2", &poll(&["bob"], &[])).await;
+        poll_update(&mut peer, "general", "unloaded", &poll(&["bob"], &[])).await;
+        peer.send(Message::text(value!({
+            "type":"unread:update","channelId":"quiet","unread":2,"mentions":0
+        }).to_string())).await.unwrap();
+        wait_for_sidebar(&rx, |view| {
+            if view.unread("quiet").unread != 2 {
+                return false;
+            }
+            let chat = view.chat.as_ref().unwrap();
+            assert_eq!(chat.messages.len(), 2);
+            let poll = chat.messages[1].poll.as_ref().unwrap();
+            assert!(poll.options[0].user_ids.is_empty());
+            assert_eq!(poll.options[1].user_ids, ["bob"]);
+            true
+        }).await;
 
         tx.send(Command::SendChatMessage {
             channel_id: "general".into(),
@@ -133,7 +221,10 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         live(&mut peer, &sent, retry["nonce"].as_str()).await;
         wait_for_sidebar(&rx, |view| {
             assert!(view.alerts.is_empty(), "self-authored frames must stay silent");
-            view.chat.as_ref().is_some_and(|chat| chat.messages.iter().map(|message| message.id.as_str()).eq(["m1", "m2", "m3"]))
+            view.chat.as_ref().is_some_and(|chat| {
+                chat.messages.iter().map(|message| message.id.as_str()).eq(["m1", "m2", "m3"])
+                    && chat.messages[2].poll.is_none()
+            })
         }).await;
         tx.send(Command::MutateChatMessage {
             channel_id: "general".into(),
@@ -208,6 +299,7 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         )
         .await;
         let overlap_request = history_request(&history, "?before=m4").await;
+        poll_update(&mut peer, "general", "m2", &poll(&[], &["alice", "bob"])).await;
         let mut later = message("m6", 6, "bob", "");
         later["replyTo"] = value!({"id":"m3","userId":"alice","preview":"Hi","deleted":false});
         later["attachments"] = value!([{"id":"image","filename":"private.png","mime":"image/png","size":10,"spoiler":true}]);
@@ -228,7 +320,16 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
             state.unread == 2 && state.mentions == 1
         }).await;
         page(overlap_request, &[older, latest.clone(), sent], false).await;
-        wait_for_messages(&rx, &["m1", "m2", "m3", "m4", "m5", "m6"]).await;
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
+            if !chat.latest_ready() || chat.messages.len() != 6 {
+                return false;
+            }
+            assert!(chat.messages.iter().map(|message| message.id.as_str()).eq(["m1", "m2", "m3", "m4", "m5", "m6"]));
+            let poll = chat.messages[1].poll.as_ref().unwrap();
+            assert!(poll.options[0].user_ids.is_empty());
+            assert_eq!(poll.options[1].user_ids, ["alice", "bob"]);
+            true
+        })).await;
 
         tx.send(Command::JumpToChatMessage {
             channel_id: "general".into(),
@@ -252,11 +353,22 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         })).await;
         tx.send(Command::LoadNewerMessages).await.unwrap();
         let request = history_request(&history, "?after=m1").await;
+        let mut fresh_poll = latest.clone();
+        fresh_poll["poll"] = poll(&["alice"], &["bob"]);
         request.respond(&[], &value!({
-            "messages":[message("m2", 2, "bob", "Outside the window")],
+            "messages":[fresh_poll],
             "hasMoreBefore":true,"hasMoreAfter":true
         }).to_string()).await;
-        wait_for_messages(&rx, &["m0", "m1", "m2"]).await;
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
+            if !chat.history_ready() || chat.messages.len() != 3 {
+                return false;
+            }
+            assert!(chat.messages.iter().map(|message| message.id.as_str()).eq(["m0", "m1", "m2"]));
+            let poll = chat.messages[2].poll.as_ref().unwrap();
+            assert_eq!(poll.options[0].user_ids, ["alice"]);
+            assert_eq!(poll.options[1].user_ids, ["bob"]);
+            true
+        })).await;
         tx.send(Command::LoadNewerMessages).await.unwrap();
         let interrupted = history_request(&history, "?after=m2").await;
         peer.close(None).await.unwrap();
@@ -376,6 +488,17 @@ fn message(id: &str, created_at: i64, user_id: &str, body: &str) -> Value {
 async fn live(peer: &mut WebSocketStream<TcpStream>, message: &Value, nonce: Option<&str>) {
     peer.send(Message::text(
         value!({"type":"message:new","message":message,"nonce":nonce}).to_string(),
+    ))
+    .await
+    .unwrap();
+}
+
+async fn poll_update(peer: &mut WebSocketStream<TcpStream>, channel: &str, id: &str, poll: &Value) {
+    peer.send(Message::text(
+        value!({
+            "type":"poll:update","channelId":channel,"messageId":id,"poll":poll
+        })
+        .to_string(),
     ))
     .await
     .unwrap();
@@ -789,7 +912,13 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
         let mut alice_peer = accept_async(sockets.accept().await.unwrap().0).await.unwrap();
         let request = private_history(&requests, "session=alice").await;
         let third = value!({"id":"private-3","channelId":"private","userId":"bob","body":"While offline","createdAt":3});
-        let fourth = value!({"id":"private-4","channelId":"private","userId":"bob","body":"Live again","createdAt":4});
+        let fourth = value!({
+            "id":"private-4","channelId":"private","userId":"bob","body":"When should we meet?","createdAt":4,
+            "poll":{"options":[
+                {"id":"now","label":"Now","userIds":[]},
+                {"id":"later","label":"Later","userIds":[]}
+            ]}
+        });
         live(&mut alice_peer, &fourth, None).await;
         let latest = [first, second, third, fourth];
         page(request, &latest, false).await;
@@ -816,6 +945,33 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
                 message.id == "private-2" && message.reply_to.as_ref().is_some_and(|reply| reply.deleted && reply.preview.is_empty())
             })
         })).await;
+
+        live(&mut bob_peer, &latest[3], None).await;
+        wait_for_sidebar(&bob_views, |view| {
+            view.chat.as_ref().unwrap().messages.last()
+                .and_then(|message| message.poll.as_ref())
+                .is_some_and(|poll| poll.total_votes() == 0)
+        }).await;
+        bob.send(Command::MutateChatMessage {
+            channel_id: "private".into(), message_id: "private-4".into(),
+            action: MessageAction::Vote(Some("now".into())),
+        }).await.unwrap();
+        let vote = chat_action_request(&requests, "POST /api/messages/private-4/vote HTTP/1.1", value!({"choiceId":"now"})).await;
+        assert_eq!(vote.header("cookie"), Some("session=bob"));
+        let mut poll = latest[3]["poll"].clone();
+        poll["options"][0]["userIds"] = value!(["bob"]);
+        poll_update(&mut alice_peer, "private", "private-4", &poll).await;
+        poll_update(&mut bob_peer, "private", "private-4", &poll).await;
+        vote.respond(&[], &value!({"channelId":"private","messageId":"private-4","poll":poll}).to_string()).await;
+        for views in [&alice_views, &bob_views] {
+            wait_for_sidebar(views, |view| {
+                let chat = view.chat.as_ref().unwrap();
+                !chat.action_pending && chat.messages.last()
+                    .and_then(|message| message.poll.as_ref())
+                    .is_some_and(|poll| poll.options[0].user_ids == ["bob"])
+            }).await;
+        }
+
         // The server orders Pins by pin time, even when the most recently pinned Message is oldest.
         let older = value!({"id":"older-pin","channelId":"private","userId":"bob","body":"Older pin outside history","createdAt":0,"pinned":true,"pinnedAt":5});
         let recent = value!({"id":"private-2","channelId":"private","userId":"bob","body":body,"createdAt":2,"pinned":true,"pinnedAt":4});

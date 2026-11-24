@@ -220,8 +220,31 @@ pub struct ChatMessage {
     pub reactions: Vec<Reaction>,
     #[serde(default)]
     pub previews: Vec<LinkPreview>,
+    pub poll: Option<Poll>,
     #[serde(default)]
     pub pinned: bool,
+}
+
+#[derive(Clone, Deserialize)]
+pub struct Poll {
+    pub options: Vec<PollOption>,
+}
+
+impl Poll {
+    pub fn total_votes(&self) -> usize {
+        self.options
+            .iter()
+            .map(|option| option.user_ids.len())
+            .sum()
+    }
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PollOption {
+    pub id: String,
+    pub label: String,
+    pub user_ids: Vec<String>,
 }
 
 impl ChatMessage {
@@ -391,6 +414,12 @@ pub enum Frame {
         channel_id: String,
         message_id: String,
         reactions: Vec<Reaction>,
+    },
+    #[serde(rename = "poll:update", rename_all = "camelCase")]
+    PollUpdate {
+        channel_id: String,
+        message_id: String,
+        poll: Poll,
     },
     #[serde(rename = "pin:update", rename_all = "camelCase")]
     PinUpdate {
