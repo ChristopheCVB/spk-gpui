@@ -1,5 +1,6 @@
 mod actions;
 mod attachments;
+mod embed;
 mod gifs;
 mod history;
 mod poll_composer;
@@ -40,6 +41,18 @@ use crate::{
     session::{ChatView, Delivery, Pins},
 };
 
+struct RenderedChatMarkdown {
+    view: TextView,
+    source: SharedString,
+    spoilers: HiddenChatSpoilers,
+}
+
+#[derive(Clone)]
+struct HiddenChatSpoilers {
+    key: (String, u64),
+    offsets: Vec<usize>,
+}
+
 pub(super) const BOLD: (&str, &str) = ("**", "**");
 pub(super) const ITALIC: (&str, &str) = ("_", "_");
 pub(super) const STRIKETHROUGH: (&str, &str) = ("~~", "~~");
@@ -68,12 +81,20 @@ fn reaction_message<'a>(
 }
 
 pub(super) struct ChatDestination<'a> {
-    pub icon: IconName,
+    pub icon: Icon,
     pub name: &'a str,
     placeholder_prefix: Option<char>,
 }
 
 pub(super) fn chat_destination<'a>(sidebar: &'a Sidebar, chat: &ChatView) -> ChatDestination<'a> {
+    if chat.webhook {
+        let feed = sidebar.webhook_feed(&chat.channel_id);
+        return ChatDestination {
+            icon: webhook_icon(feed.and_then(|feed| feed.icon.as_deref())),
+            name: feed.map_or("Webhook feed", super::workspace::channel_name),
+            placeholder_prefix: None,
+        };
+    }
     let (icon, name, fallback, prefix) = if let Some(peer) = &chat.direct_message_peer {
         (
             IconName::MessageCircle,
@@ -95,7 +116,7 @@ pub(super) fn chat_destination<'a>(sidebar: &'a Sidebar, chat: &ChatView) -> Cha
         )
     };
     ChatDestination {
-        icon,
+        icon: Icon::new(icon),
         name: name.unwrap_or(fallback),
         placeholder_prefix: name.map(|_| prefix),
     }
@@ -715,7 +736,15 @@ impl Spk {
                     HistoryRow::Date(date) => {
                         divider(date_label(date, now.date_naive()), theme.border)
                     }
-                    HistoryRow::Unread => divider("New messages".into(), theme.danger),
+                    HistoryRow::Unread => divider(
+                        if chat.webhook {
+                            "New alerts"
+                        } else {
+                            "New messages"
+                        }
+                        .into(),
+                        theme.danger,
+                    ),
                     HistoryRow::Message {
                         message,
                         starts_group,
@@ -735,13 +764,21 @@ impl Spk {
         let status = if chat.jump_failed {
             Some("Message unavailable.")
         } else if chat.unavailable() {
-            Some("Direct message unavailable.")
+            Some(if chat.webhook {
+                "Webhook feed unavailable."
+            } else {
+                "Direct message unavailable."
+            })
         } else if chat.history_failed() {
             Some("Could not load message history.")
         } else if chat.loading() {
             Some("Loading messages…")
         } else if chat.messages.is_empty() {
-            Some("No messages yet.")
+            Some(if chat.webhook {
+                "No alerts yet"
+            } else {
+                "No messages yet."
+            })
         } else {
             None
         };
@@ -868,7 +905,14 @@ impl Spk {
                     ),
                 )
             })
-            .children((!chat.unavailable()).then(|| {
+            .when(chat.webhook && !chat.unavailable(), |area| {
+                area.child(
+                    div().px_4().py_3().child(
+                        Label::new("Read-only feed").text_color(theme.muted_foreground),
+                    ),
+                )
+            })
+            .children((!chat.webhook && !chat.unavailable()).then(|| {
                 div()
                     .id("chat-composer")
                     .px_4()
@@ -1096,27 +1140,22 @@ impl Spk {
             )
     }
 
-    fn chat_message(
+    fn chat_message_markdown(
         &self,
+        id: &'static str,
+        message_id: &str,
+        body: &str,
         sidebar: &Sidebar,
-        chat: &ChatView,
-        message: &ChatMessage,
-        starts_group: bool,
-        now: i64,
-        window: &Window,
         cx: &Context<Self>,
-    ) -> impl IntoElement {
-        let theme = cx.theme();
-        let channel = chat.channel_id.clone();
-        let message_id = message.id.clone();
-        let body = message.body.clone();
+    ) -> RenderedChatMarkdown {
         let mut hasher = DefaultHasher::new();
+        id.hash(&mut hasher);
         body.hash(&mut hasher);
-        let spoiler_key = (message_id.clone(), hasher.finish());
+        let spoiler_key = (message_id.to_owned(), hasher.finish());
         let reveals = self.chat_spoilers.get(&spoiler_key);
         let hidden = RefCell::new(Vec::new());
         let rendered = message_markdown(
-            &body,
+            body,
             |id| sidebar.message_author(id),
             |offset| {
                 let revealed = reveals.is_some_and(|offsets| offsets.contains(&offset));
@@ -1130,14 +1169,11 @@ impl Spk {
         .into_owned();
         let hidden = hidden.into_inner();
         let link_key = spoiler_key.clone();
-        let app = cx.weak_entity();
-        let link_app = app.clone();
+        let link_app = cx.weak_entity();
         let link_filter = self.chat_spoiler_link.clone();
         let link_prefix = self.chat_spoiler_link.clone();
-        let target = MessageTarget::new(&message.channel_id, &message.id);
-        let images = self.message_images(chat, target.clone(), &body, &rendered, cx);
-        let share_text = SharedString::from(rendered);
-        let text = TextView::markdown("message-body", share_text.clone())
+        let source = SharedString::from(rendered);
+        let view = TextView::markdown(id, source.clone())
             .markdown_extensions(
                 MarkdownExtensions::default()
                     .parser_revision(1)
@@ -1163,6 +1199,58 @@ impl Spk {
                     search::activate_chat_link(&link_app, url, cx);
                 }
             });
+        RenderedChatMarkdown {
+            view,
+            source,
+            spoilers: HiddenChatSpoilers {
+                key: spoiler_key,
+                offsets: hidden,
+            },
+        }
+    }
+
+    fn chat_message(
+        &self,
+        sidebar: &Sidebar,
+        chat: &ChatView,
+        message: &ChatMessage,
+        starts_group: bool,
+        now: i64,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        let channel = chat.channel_id.clone();
+        let message_id = message.id.clone();
+        let body = message.body.clone();
+        let RenderedChatMarkdown {
+            view: text,
+            source: share_text,
+            spoilers,
+        } = self.chat_message_markdown("message-body", &message_id, &body, sidebar, cx);
+        let embed = message.embed.as_ref().filter(|_| chat.webhook);
+        let description = embed
+            .and_then(|embed| embed.description.as_deref())
+            .map(|description| {
+                self.chat_message_markdown(
+                    "embed-description",
+                    &message_id,
+                    description,
+                    sidebar,
+                    cx,
+                )
+            });
+        let hidden_spoilers = std::iter::once(spoilers)
+            .chain(
+                description
+                    .as_ref()
+                    .map(|markdown| markdown.spoilers.clone()),
+            )
+            .filter(|spoilers| !spoilers.offsets.is_empty())
+            .collect();
+        let target = MessageTarget::new(&message.channel_id, &message.id);
+        let images = self.message_images(chat, target.clone(), &body, &share_text, cx);
+        let app = cx.weak_entity();
         let row_focus = self
             .chat_row_focus
             .borrow_mut()
@@ -1175,22 +1263,28 @@ impl Spk {
             channel: channel.clone(),
             message: message_id.clone(),
             row_focus: row_focus.clone(),
-            can_edit: sidebar.profile.id.as_deref() == Some(&message.user_id),
+            can_edit: !chat.webhook && sidebar.profile.id.as_deref() == Some(&message.user_id),
             can_delete: sidebar.can_remove_message_content(message),
             pin_to: chat.can_pin(sidebar.is_admin()).then_some(!message.pinned),
-            disabled: chat.action_pending || !chat.can_send(),
+            disabled: chat.action_pending || !chat.can_delete_messages(),
+            read_only: chat.webhook,
             composer_busy,
             body,
             share_text,
             target,
-            spoiler_key,
-            hidden,
+            hidden_spoilers,
         });
+        let reply = message.reply_to.as_ref().filter(|_| !chat.webhook);
         let reply_channel = channel.clone();
         let reply_id = message_id.clone();
         let keyboard_focused = row_focus.is_focused(window) && window.last_input_was_keyboard();
         let row_focused = row_focus.contains_focused(window, cx);
-        let author = sidebar.message_author(&message.user_id);
+        let feed = sidebar.webhook_feed(&chat.channel_id);
+        let author = if chat.webhook {
+            feed.map_or("Webhook feed", super::workspace::channel_name)
+        } else {
+            sidebar.message_author(&message.user_id)
+        };
         let time = DateTime::from_timestamp_millis(message.created_at)
             .map(|time| time.with_timezone(&Local));
         let exact_time = time.map(|time| time.format("%b %-d, %Y, %H:%M:%S").to_string());
@@ -1238,14 +1332,14 @@ impl Spk {
                             )
                         },
                     )
-                    .when(message.pinned, |row| {
+                    .when(message.pinned && !chat.webhook, |row| {
                         row.child(
                             Label::new("Pinned")
                                 .text_xs()
                                 .text_color(theme.muted_foreground),
                         )
                     })
-                    .when(message.edited_at.is_some(), |row| {
+                    .when(message.edited_at.is_some() && !chat.webhook, |row| {
                         row.child(
                             Label::new("(edited)")
                                 .text_xs()
@@ -1253,7 +1347,7 @@ impl Spk {
                         )
                     }),
             )
-            .when_some(message.reply_to.as_ref(), |row, reply| {
+            .when_some(reply, |row, reply| {
                 let icon = Icon::new(IconName::CornerUpRight).text_color(theme.muted_foreground);
                 row.child(if reply.deleted {
                     div()
@@ -1321,6 +1415,14 @@ impl Spk {
                 })
             })
             .when(!message.body.is_empty(), |row| row.child(text))
+            .when_some(embed, |row, embed| {
+                row.child(self.webhook_embed(
+                    embed,
+                    description.map(|markdown| markdown.view),
+                    now,
+                    cx,
+                ))
+            })
             .child(images)
             .when(!message.attachments.is_empty(), |row| {
                 row.child(self.attachment_cards(message, cx))
@@ -1329,16 +1431,19 @@ impl Spk {
             .when(!message.previews.is_empty(), |row| {
                 row.child(self.link_previews(sidebar, chat, message, cx))
             })
-            .when_some(message.poll.as_ref(), |row, poll| {
-                row.child(poll_results::poll_results(
-                    sidebar,
-                    chat,
-                    &message.id,
-                    poll,
-                    cx,
-                ))
-            })
-            .when(!message.reactions.is_empty(), |row| {
+            .when_some(
+                message.poll.as_ref().filter(|_| !chat.webhook),
+                |row, poll| {
+                    row.child(poll_results::poll_results(
+                        sidebar,
+                        chat,
+                        &message.id,
+                        poll,
+                        cx,
+                    ))
+                },
+            )
+            .when(!message.reactions.is_empty() && !chat.webhook, |row| {
                 row.child(self.reactions(sidebar, chat, message, cx))
             });
         let jump_highlight = chat
@@ -1394,7 +1499,7 @@ impl Spk {
                 message_row_background(
                     message,
                     chat.direct_message_peer.is_some(),
-                    sidebar.profile.id.as_deref(),
+                    sidebar.profile.id.as_deref().filter(|_| !chat.webhook),
                     jump_highlight,
                     theme,
                 ),
@@ -1425,13 +1530,29 @@ impl Spk {
                     .flex()
                     .justify_center()
                     .when(starts_group, |lane| {
-                        lane.child(profile_avatar(
-                            Avatar::new().name(author.to_owned()),
-                            sidebar.avatar(Some(&message.user_id)),
-                            32.,
-                            false,
-                            cx,
-                        ))
+                        if chat.webhook {
+                            lane.child(
+                                div()
+                                    .size(px(32.0))
+                                    .rounded_full()
+                                    .bg(theme.secondary)
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(
+                                        webhook_icon(feed.and_then(|feed| feed.icon.as_deref()))
+                                            .size(px(18.0)),
+                                    ),
+                            )
+                        } else {
+                            lane.child(profile_avatar(
+                                Avatar::new().name(author.to_owned()),
+                                sidebar.avatar(Some(&message.user_id)),
+                                32.,
+                                false,
+                                cx,
+                            ))
+                        }
                     })
                     .when_some(
                         time.filter(|_| !starts_group).zip(exact_time.clone()),

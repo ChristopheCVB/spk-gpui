@@ -6,6 +6,7 @@ mod gifs;
 mod public_media;
 mod search;
 mod soundboard_admin;
+mod webhooks;
 
 pub(crate) use account_admin::account_link_token;
 pub use account_admin::{
@@ -16,8 +17,11 @@ pub use channel_admin::{ChannelKind, ChannelMutation};
 pub use chat_actions::{LinkPreview, MessageAction, MessageChange, PollEditOption, Reaction};
 pub use gifs::{GifItem, GifPage, image_message_url};
 pub(crate) use public_media::{PublicDns, public_media_url};
-pub use search::{MessageTarget, SearchHit, SearchPage, SearchScope, conversation_link};
+pub use search::{
+    MessageTarget, SearchHit, SearchPage, SearchScope, conversation_link, conversation_permalink,
+};
 pub use soundboard_admin::MAX_SOUND_BYTES;
+pub use webhooks::{WebhookSettings, WebhookUrl};
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
@@ -38,6 +42,11 @@ use url::{Host, Url};
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_AVATAR_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_AVATAR_UPLOAD: usize = 5 * 1024 * 1024;
+
+pub fn has_icon_name_characters(name: &str) -> bool {
+    name.bytes()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
 
 fn signed_storage_url(url: &Url) -> bool {
     if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
@@ -121,11 +130,21 @@ pub struct Channel {
     pub name: Option<String>,
     pub other_user_id: Option<String>,
     pub last_activity_at: Option<i64>,
+    pub icon: Option<String>,
+    pub owner_id: Option<String>,
+    #[serde(default)]
+    pub private: bool,
 }
 
 impl Channel {
     pub fn is_conversation(&self) -> bool {
-        self.kind == "text" || (self.kind == "dm" && self.other_user_id.is_some())
+        self.kind == "text"
+            || self.is_webhook()
+            || (self.kind == "dm" && self.other_user_id.is_some())
+    }
+
+    pub fn is_webhook(&self) -> bool {
+        self.kind == "webhook"
     }
 }
 
@@ -211,6 +230,7 @@ pub struct ChatMessage {
     pub channel_id: String,
     pub user_id: String,
     pub body: String,
+    pub embed: Option<ChatEmbed>,
     pub created_at: i64,
     pub reply_to: Option<ReplyRef>,
     #[serde(default)]
@@ -223,6 +243,44 @@ pub struct ChatMessage {
     pub poll: Option<Poll>,
     #[serde(default)]
     pub pinned: bool,
+}
+
+#[derive(Clone, Deserialize)]
+pub struct ChatEmbed {
+    pub title: Option<String>,
+    pub description: Option<String>,
+    url: Option<String>,
+    pub color: Option<EmbedColor>,
+    #[serde(default)]
+    pub fields: Vec<EmbedField>,
+    pub footer: Option<String>,
+    pub timestamp: Option<String>,
+}
+
+impl ChatEmbed {
+    pub fn title_link(&self) -> Option<Url> {
+        let url = Url::parse(self.url.as_deref()?).ok()?;
+        matches!(url.scheme(), "http" | "https").then_some(url)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum EmbedColor {
+    Success,
+    Error,
+    Warning,
+    Info,
+    #[serde(other)]
+    Neutral,
+}
+
+#[derive(Clone, Deserialize)]
+pub struct EmbedField {
+    pub name: String,
+    pub value: String,
+    #[serde(default)]
+    pub inline: bool,
 }
 
 #[derive(Clone, Deserialize)]

@@ -42,6 +42,7 @@ pub struct ChatJump {
 pub struct ChatView {
     pub channel_id: String,
     pub direct_message_peer: Option<String>,
+    pub webhook: bool,
     pub messages: Arc<Vec<ChatMessage>>,
     pub has_more_before: bool,
     pub first_unread_id: Option<String>,
@@ -91,7 +92,8 @@ impl ChatView {
     }
 
     pub fn can_send(&self) -> bool {
-        !self.unavailable()
+        !self.webhook
+            && !self.unavailable()
             && (self.direct_message_peer.is_none() || self.history == History::Ready)
     }
 
@@ -233,7 +235,7 @@ impl ChatSession {
 
     pub fn open(&mut self, client: &SpkClient, channel: &Channel) -> bool {
         if !self.select(channel) {
-            if channel.kind == "text"
+            if (channel.kind == "text" || channel.is_webhook())
                 && self.selected.as_ref().is_some_and(|view| {
                     view.history_ready() && (view.has_more_after || view.jump.is_some())
                 })
@@ -274,6 +276,7 @@ impl ChatSession {
         self.message_preview = JoinSet::new();
         self.selected = Some(ChatView {
             channel_id: channel.id.clone(),
+            webhook: channel.is_webhook(),
             direct_message_peer: channel
                 .other_user_id
                 .clone()
@@ -289,7 +292,7 @@ impl ChatSession {
             jump: None,
             jump_failed: false,
             outgoing: None,
-            pins: Some(Pins::Loading),
+            pins: (!channel.is_webhook()).then_some(Pins::Loading),
             preview_images: PreviewImages::default(),
             gifs: None,
             message_send_error: None,
@@ -306,7 +309,14 @@ impl ChatSession {
     pub(super) fn selected_text_channel(&self) -> Option<&str> {
         self.selected
             .as_ref()
-            .filter(|chat| chat.direct_message_peer.is_none())
+            .filter(|chat| !chat.webhook && chat.direct_message_peer.is_none())
+            .map(|chat| chat.channel_id.as_str())
+    }
+
+    pub(super) fn selected_webhook(&self) -> Option<&str> {
+        self.selected
+            .as_ref()
+            .filter(|chat| chat.webhook)
             .map(|chat| chat.channel_id.as_str())
     }
 
@@ -547,7 +557,7 @@ impl ChatSession {
                         self.typers.clear();
                     }
                     view.jump_failed = jump;
-                    if view.direct_message_peer.is_some() || view.jump_failed {
+                    if view.webhook || view.direct_message_peer.is_some() || view.jump_failed {
                         view.history = History::Unavailable;
                         self.buffered.clear();
                         return;
@@ -615,7 +625,7 @@ impl ChatSession {
         let Some(view) = self
             .selected
             .as_ref()
-            .filter(|view| view.channel_id == channel_id && !view.unavailable())
+            .filter(|view| view.channel_id == channel_id && !view.webhook && !view.unavailable())
         else {
             return;
         };
@@ -667,11 +677,9 @@ impl ChatSession {
     }
 
     pub fn receive_typing(&mut self, channel_id: &str, user_id: String) {
-        if self
-            .selected
-            .as_ref()
-            .is_some_and(|view| view.channel_id == channel_id && !view.unavailable())
-        {
+        if self.selected.as_ref().is_some_and(|view| {
+            view.channel_id == channel_id && !view.webhook && !view.unavailable()
+        }) {
             self.typers
                 .insert(user_id, Instant::now() + Duration::from_secs(5));
         }
@@ -822,7 +830,13 @@ impl ChatSession {
         }
     }
 
-    pub fn message(&mut self, message: ChatMessage, nonce: Option<&str>, own_id: Option<&str>) {
+    pub fn message(
+        &mut self,
+        message: ChatMessage,
+        nonce: Option<&str>,
+        own_id: Option<&str>,
+        window_active: bool,
+    ) {
         if own_id == Some(message.user_id.as_str())
             && self
                 .outgoing
@@ -860,6 +874,14 @@ impl ChatSession {
                 }
             }
             if !view.has_more_after {
+                if view.webhook
+                    && !window_active
+                    && view.history_ready()
+                    && view.first_unread_id.is_none()
+                    && view.messages.iter().all(|listed| listed.id != message.id)
+                {
+                    view.first_unread_id = Some(message.id.clone());
+                }
                 view.merge([message]);
             }
         }

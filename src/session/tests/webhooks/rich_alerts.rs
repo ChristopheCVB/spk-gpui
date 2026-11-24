@@ -1,0 +1,115 @@
+use super::*;
+use crate::api::ChatMessage;
+
+#[tokio::test]
+async fn signed_in_reader_receives_plain_and_rich_alerts_in_history_and_live() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let http = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = Url::parse(&format!("http://{}", http.local_addr().unwrap())).unwrap();
+    let alerts = [
+        value!({"id":"plain","channelId":"feed","userId":"alice","createdAt":1,"body":"Build started","embed":null}),
+        value!({"id":"card","channelId":"feed","userId":"alice","createdAt":2,"body":"","embed":{
+            "title":"Build succeeded", "url":"https://ci.example.test/runs/12", "color":"success",
+            "description":"**Tests passed**",
+            "fields":[
+                {"name":"Branch","value":"main","inline":true},
+                {"name":"Summary","value":"No failures"}
+            ],
+            "footer":"Build service", "timestamp":"2026-11-24T09:15:00.000Z"
+        }}),
+        value!({"id":"combined","channelId":"feed","userId":"alice","createdAt":3,"body":"Deployment needs attention","embed":{
+            "title":"Review deployment", "url":"mailto:ci@example.test", "color":"warning"
+        }}),
+    ];
+    let history = alerts.clone();
+    let http = tokio::spawn(async move {
+        loop {
+            let (line, request) = Request::receive(&http).await;
+            assert_eq!(request.header("cookie"), Some("session=bob"));
+            let body = match line.as_str() {
+                "GET /api/channels HTTP/1.1" => value!([
+                    {"id":"feed","type":"webhook","name":"Builds","ownerId":"alice","private":false}
+                ]),
+                "GET /api/users HTTP/1.1" | "GET /api/voice HTTP/1.1" => value!([]),
+                "GET /api/users/presence HTTP/1.1" | "GET /api/unread HTTP/1.1" => value!({}),
+                "GET /api/channels/feed/messages?unread=1 HTTP/1.1" => value!({
+                    "messages":history,"hasMoreBefore":false,"hasMoreAfter":false
+                }),
+                _ => panic!("unexpected request {line}"),
+            };
+            request.respond(&[], &body.to_string()).await;
+        }
+    });
+
+    let assert_alerts = |messages: &[ChatMessage], link: &str| {
+        let [plain, card, combined] = messages else {
+            panic!("expected three alerts");
+        };
+        assert_eq!(plain.body, "Build started");
+        assert!(plain.embed.is_none());
+        assert!(card.body.is_empty());
+        let embed = card.embed.as_ref().unwrap();
+        assert_eq!(embed.title.as_deref(), Some("Build succeeded"));
+        assert_eq!(embed.title_link().unwrap().as_str(), link);
+        assert_eq!(embed.description.as_deref(), Some("**Tests passed**"));
+        assert_eq!(embed.color, Some(crate::api::EmbedColor::Success));
+        assert_eq!(embed.fields.len(), 2);
+        assert_eq!(embed.fields[0].name, "Branch");
+        assert_eq!(embed.fields[0].value, "main");
+        assert!(embed.fields[0].inline);
+        assert_eq!(embed.fields[1].name, "Summary");
+        assert_eq!(embed.fields[1].value, "No failures");
+        assert!(!embed.fields[1].inline);
+        assert_eq!(embed.footer.as_deref(), Some("Build service"));
+        assert_eq!(embed.timestamp.as_deref(), Some("2026-11-24T09:15:00.000Z"));
+        assert_eq!(combined.body, "Deployment needs attention");
+        let embed = combined.embed.as_ref().unwrap();
+        assert_eq!(embed.title.as_deref(), Some("Review deployment"));
+        assert!(embed.title_link().is_none());
+    };
+
+    timeout(Duration::from_secs(10), async {
+        let (commands, views, _, mut peer, session) =
+            chat::direct_message_session(base, "bob").await;
+        commands
+            .send(Command::OpenWebhook("feed".into()))
+            .await
+            .unwrap();
+        let opened = wait_for_sidebar(&views, |view| {
+            view.chat.as_ref().is_some_and(ChatView::history_ready)
+        })
+        .await;
+        assert_alerts(
+            &opened.chat.unwrap().messages,
+            "https://ci.example.test/runs/12",
+        );
+
+        for (index, mut alert) in alerts.into_iter().enumerate() {
+            alert["id"] = value!(format!("live-{index}"));
+            alert["createdAt"] = value!(index + 4);
+            if index == 1 {
+                alert["embed"]["url"] = value!("http://ci.example.test/runs/13");
+            }
+            peer.send(Message::text(
+                value!({"type":"message:new","message":alert}).to_string(),
+            ))
+            .await
+            .unwrap();
+        }
+        let updated = wait_for_sidebar(&views, |view| {
+            view.chat
+                .as_ref()
+                .is_some_and(|chat| chat.messages.len() == 6)
+        })
+        .await;
+        assert_alerts(
+            &updated.chat.unwrap().messages[3..],
+            "http://ci.example.test/runs/13",
+        );
+        commands.close();
+        assert!(matches!(session.await.unwrap(), SessionEnd::Closed));
+    })
+    .await
+    .expect("rich webhook alerts timed out");
+    http.abort();
+}

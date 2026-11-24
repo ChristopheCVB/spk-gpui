@@ -364,11 +364,7 @@ fn sound_name(name: &str, icon: &str) -> Result<String, WorkError> {
     if !(1..=32).contains(&name.encode_utf16().count()) {
         return Err(WorkError::Invalid("Sound names must be 1–32 characters."));
     }
-    if !(1..=64).contains(&icon.len())
-        || !icon
-            .bytes()
-            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == b'-')
-    {
+    if !(1..=64).contains(&icon.len()) || !crate::api::has_icon_name_characters(icon) {
         return Err(WorkError::Invalid("Choose a valid sound icon."));
     }
     Ok(name.to_owned())

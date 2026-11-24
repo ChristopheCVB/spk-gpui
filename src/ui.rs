@@ -1,5 +1,6 @@
 mod accounts;
 mod chat;
+mod icon_picker;
 mod notifications;
 mod profile;
 mod radio;
@@ -202,6 +203,8 @@ impl Spk {
         let (commands, requests) = async_channel::bounded(8);
         let (updates, views) = async_channel::bounded(16);
         let shortcuts = Shortcuts::new(window);
+        let (window_activation, window_active) =
+            tokio::sync::watch::channel(window.is_window_active());
         let (activity, presence_activity) = tokio::sync::watch::channel(window.is_window_active());
         let (sound_settings, sounds) = tokio::sync::watch::channel(shortcuts.sound_settings());
         let (alert_activation, targets) = tokio::sync::watch::channel(None);
@@ -250,8 +253,10 @@ impl Spk {
             }
         })
         .detach();
-        cx.observe_window_activation(window, |this, window, cx| {
-            if window.is_window_active() {
+        cx.observe_window_activation(window, move |this, window, cx| {
+            let active = window.is_window_active();
+            window_activation.send_replace(active);
+            if active {
                 this.record_activity(window);
                 this.read_visible_chat(window);
             } else {
@@ -329,6 +334,7 @@ impl Spk {
                     updates,
                     session_cues,
                     presence_activity,
+                    window_active,
                     targets,
                 ));
             }
@@ -822,4 +828,24 @@ fn action_icon(button: Button, icon: impl Into<Icon>) -> Button {
 
 fn themed_icon(icon: IconName, color: Hsla, size: f32) -> Icon {
     Icon::new(icon).size(px(size)).text_color(color)
+}
+
+fn bundled_icon(name: &str, fallback: Icon) -> Icon {
+    let path = format!("icons/{name}.svg");
+    if crate::api::has_icon_name_characters(name)
+        && assets::AllAssets
+            .load(&path)
+            .is_ok_and(|data| data.is_some())
+    {
+        fallback.path(path)
+    } else {
+        fallback
+    }
+}
+
+fn webhook_icon(name: Option<&str>) -> Icon {
+    bundled_icon(
+        name.unwrap_or("webhook"),
+        Icon::new(IconName::Bell).path("icons/webhook.svg"),
+    )
 }

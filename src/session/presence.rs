@@ -181,6 +181,7 @@ pub(super) struct Refresh {
     in_flight: HashSet<Resource>,
     pub(super) dirty: HashSet<Resource>,
     failed: HashSet<Resource>,
+    discard_channel_snapshot: bool,
     pub(super) presence_updates: Option<HashMap<String, Option<VoiceMembership>>>,
     pub(super) presence_ready: bool,
     user_presence_updates: Option<HashMap<String, UserPresence>>,
@@ -207,6 +208,15 @@ impl Refresh {
             };
             (resource, data)
         });
+    }
+
+    pub(super) fn webhook_changed(&mut self, client: &SpkClient) {
+        self.discard_channel_snapshot = self.channels_loading();
+        self.fetch(client, Resource::Channels);
+    }
+
+    pub(super) fn channels_loading(&self) -> bool {
+        self.in_flight.contains(&Resource::Channels)
     }
 
     pub(super) fn fetch_all(&mut self, client: &SpkClient) {
@@ -290,13 +300,33 @@ impl Refresh {
         sidebar: &mut Sidebar,
         resource: Resource,
         data: Result<Data, Failure>,
-    ) {
+    ) -> bool {
+        let mut webhook_membership_changed = false;
         self.in_flight.remove(&resource);
+        let discard =
+            resource == Resource::Channels && std::mem::take(&mut self.discard_channel_snapshot);
         match data {
             Ok(data) => {
                 self.failed.remove(&resource);
                 match data {
-                    Data::Channels(channels) => sidebar.channels = Some(channels),
+                    // A snapshot started before a mutation may contain obsolete access.
+                    Data::Channels(_) if discard => {}
+                    Data::Channels(mut channels) => {
+                        channels.retain(|channel| {
+                            !channel.is_webhook() || sidebar.can_view_webhook(channel)
+                        });
+                        let previous: HashSet<_> = sidebar
+                            .webhook_feeds()
+                            .map(|feed| feed.id.as_str())
+                            .collect();
+                        let current: HashSet<_> = channels
+                            .iter()
+                            .filter(|channel| channel.is_webhook())
+                            .map(|feed| feed.id.as_str())
+                            .collect();
+                        webhook_membership_changed = previous != current;
+                        sidebar.channels = Some(channels);
+                    }
                     Data::Users(users) => {
                         // A snapshot queued before a completed edit can contain the old Profile.
                         if !self.dirty.contains(&resource)
@@ -357,6 +387,7 @@ impl Refresh {
             }
         }
         sidebar.load_failed = !self.failed.is_empty();
+        webhook_membership_changed
     }
 }
 

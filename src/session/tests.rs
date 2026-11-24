@@ -16,6 +16,7 @@ mod soundboard;
 mod soundboard_admin;
 mod unread;
 mod user_presence;
+mod webhooks;
 
 use std::{collections::HashSet, time::Duration};
 
@@ -552,6 +553,7 @@ fn fixture_settings(
             notice: None,
         },
         sounds: VoiceSounds::new(watch::channel(sounds).1),
+        window_active: watch::channel(false).1,
         alert_activation: watch::channel(None).1,
         presence: PresenceSettings {
             path: None,
@@ -1078,6 +1080,9 @@ fn live_membership_and_flags_win_over_an_in_flight_snapshot() {
                     name: None,
                     other_user_id: None,
                     last_activity_at: None,
+                    icon: None,
+                    owner_id: None,
+                    private: false,
                 })
                 .collect(),
         )),
@@ -1798,6 +1803,9 @@ fn terminal_media_failure_offers_the_affected_voice_channel_for_rejoin() {
         name: None,
         other_user_id: None,
         last_activity_at: None,
+        icon: None,
+        owner_id: None,
+        private: false,
     }]);
     sidebar.voice = Some(VoiceView::joining("room".into()));
     sidebar.voice.as_mut().unwrap().status = VoiceStatus::Reconnecting;

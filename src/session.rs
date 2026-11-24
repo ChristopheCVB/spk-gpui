@@ -12,6 +12,7 @@ mod soundboard;
 mod soundboard_admin;
 mod unread;
 mod voice_session;
+mod webhooks;
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
@@ -69,6 +70,7 @@ pub use {
     radio::RadioPlayback,
     soundboard_admin::{SoundboardAdminAction, SoundboardCrop},
     voice_session::VoiceView,
+    webhooks::{WebhookAction, WebhookReply},
 };
 
 #[cfg(test)]
@@ -92,7 +94,12 @@ pub enum Command {
     SetUserStatus(UserStatus),
     Refresh,
     ManageChannel(ChannelAction),
+    MutateWebhook {
+        action: WebhookAction,
+        reply: WebhookReply,
+    },
     OpenTextChannel(String),
+    OpenWebhook(String),
     OpenDirectMessage(String),
     StartDirectMessage(String),
     CloseChat,
@@ -346,8 +353,23 @@ impl Sidebar {
         }
     }
 
+    pub fn webhook_feeds(&self) -> impl Iterator<Item = &Channel> {
+        self.channels
+            .iter()
+            .flatten()
+            .filter(|channel| channel.is_webhook())
+    }
+
+    pub fn webhook_feed(&self, id: &str) -> Option<&Channel> {
+        self.webhook_feeds().find(|channel| channel.id == id)
+    }
+
     pub fn unread(&self, channel_id: &str) -> UnreadState {
-        self.unread.get(channel_id).copied().unwrap_or_default()
+        let mut state = self.unread.get(channel_id).copied().unwrap_or_default();
+        if self.webhook_feed(channel_id).is_some() {
+            state.mentions = 0;
+        }
+        state
     }
 
     pub fn user_presence(&self, id: &str) -> UserPresence {
@@ -445,6 +467,7 @@ struct SessionSettings {
     devices: DeviceSettings,
     sounds: VoiceSounds,
     presence: PresenceSettings,
+    window_active: watch::Receiver<bool>,
     alert_activation: watch::Receiver<Option<MessageTarget>>,
 }
 
@@ -453,6 +476,7 @@ pub async fn run(
     views: Sender<View>,
     sounds: VoiceSounds,
     activity: watch::Receiver<bool>,
+    window_active: watch::Receiver<bool>,
     alert_activation: watch::Receiver<Option<MessageTarget>>,
 ) {
     let base = Url::parse(env!("SPK_URL")).expect("validated SPK URL");
@@ -464,6 +488,7 @@ pub async fn run(
         devices: DeviceSettings::load(),
         sounds,
         presence: PresenceSettings::load(activity),
+        window_active,
         alert_activation,
     };
     run_session(base, saved, settings, commands, views).await;
@@ -631,6 +656,7 @@ async fn watch_session(
     let mut camera_previews = JoinSet::new();
     let mut voice_moderation = JoinSet::new();
     let mut channel_mutations = JoinSet::new();
+    let mut webhook_mutations = JoinSet::<webhooks::WebhookCompletion>::new();
     let mut channel_mutation_result = None;
     let mut profiles = JoinSet::new();
     let mut account_admin = AccountAdmin::default();
@@ -754,6 +780,21 @@ async fn watch_session(
                 }
             }
             Ok(event) = chat.attachments.events.recv() => chat.attachment_event(client, event),
+            Some(Ok((result, reply, creating))) = webhook_mutations.join_next() => {
+                if result.as_ref().is_err_and(Failure::unauthorized) {
+                    break SessionEnd::Invalidated(SESSION_EXPIRED);
+                }
+                let result = webhooks::MutationContext {
+                    sidebar: &mut sidebar,
+                    chat: &mut chat,
+                    navigation: &mut chat_navigation,
+                    direct_message_opens: &mut direct_message_opens,
+                    refresh: &mut refresh,
+                    unread: &mut unread,
+                    search: &mut search,
+                }.complete(client, result, creating);
+                let _ = reply.send(result);
+            }
             Some(result) = direct_message_opens.join_next() => {
                 match result.unwrap_or(Err(Failure::Connection)) {
                     Ok(channel) => {
@@ -813,11 +854,35 @@ async fn watch_session(
                         }
                     }
                 }
+                Ok(Command::MutateWebhook { action, reply }) => {
+                    if !webhook_mutations.is_empty() {
+                        let _ = reply.send(Err("A webhook change is already in progress."));
+                    } else {
+                        match action.validated(&sidebar) {
+                            Ok(action) => {
+                                let client = client.clone();
+                                webhook_mutations.spawn(async move { action.send(&client, reply).await });
+                            }
+                            Err(message) => {
+                                let _ = reply.send(Err(message));
+                            }
+                        }
+                    }
+                }
                 Ok(Command::OpenTextChannel(id)) => {
                     if let Some(channel) = sidebar.channels.iter().flatten().find(|channel| channel.id == id && channel.kind == "text") {
                         direct_message_opens = JoinSet::new();
                         sidebar.chat_notice = None;
                         ChatNavigation::open_chat(&mut chat_navigation, &mut chat, client, channel);
+                    }
+                }
+                Ok(Command::OpenWebhook(id)) => {
+                    if let Some(channel) = sidebar.webhook_feed(&id) {
+                        direct_message_opens = JoinSet::new();
+                        ChatNavigation::open_chat(&mut chat_navigation, &mut chat, client, channel);
+                        sidebar.chat_notice = None;
+                    } else {
+                        sidebar.chat_notice = Some("Webhook feed unavailable.");
                     }
                 }
                 Ok(Command::OpenDirectMessage(id)) => {
@@ -1071,7 +1136,12 @@ async fn watch_session(
                             refresh.fetch(client, Resource::Channels);
                         }
                         alerts.receive(&sidebar, &message);
-                        chat.message(*message, nonce.as_deref(), sidebar.profile.id.as_deref());
+                        chat.message(
+                            *message,
+                            nonce.as_deref(),
+                            sidebar.profile.id.as_deref(),
+                            *settings.window_active.borrow(),
+                        );
                     }
                     Frame::UnreadUpdate { channel_id, state } => {
                         unread.update(&mut sidebar, channel_id, state);
@@ -1201,7 +1271,7 @@ async fn watch_session(
                 if result.as_ref().is_err_and(Failure::unauthorized) {
                     break SessionEnd::Invalidated(SESSION_EXPIRED);
                 }
-                SearchSession::complete(&mut sidebar.search, result);
+                search.complete(&mut sidebar, &mut refresh, client, result);
             }
             () = RadioSession::playback_changed(&mut radio.player) => {}
             Some(Ok((id, result))) = radio.tasks.join_next_with_id() => {
@@ -1278,7 +1348,16 @@ async fn watch_session(
                 let refresh_avatars = data.is_ok() && matches!(resource, Resource::Users | Resource::Presence);
                 let listed_voice_channel = matches!(resource, Resource::Channels)
                     && sidebar.voice.as_ref().is_some_and(|voice| sidebar.has_voice_channel(&voice.channel_id));
-                refresh.complete(&mut sidebar, resource, data);
+                if refresh.complete(&mut sidebar, resource, data) {
+                    unread.refresh(client);
+                }
+                if resource == Resource::Channels && presence_loaded {
+                    webhooks::reconcile_access(&mut sidebar, &mut chat, &mut chat_navigation);
+                    search.reconcile_channels(&mut sidebar);
+                }
+                if resource == Resource::Channels && !refresh.dirty.contains(&resource) {
+                    search.channels_refreshed(&mut sidebar, presence_loaded);
+                }
                 account_admin.clear_if_demoted(&mut sidebar);
                 if resource == Resource::Channels
                     && !refresh.dirty.contains(&resource)
@@ -1353,6 +1432,7 @@ async fn watch_session(
     {
         settings.alert_activation.mark_changed();
     }
+    drop(webhook_mutations);
     drop(chat);
     camera_previews.shutdown().await;
     drop(soundboard);

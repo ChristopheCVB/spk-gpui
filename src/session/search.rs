@@ -2,8 +2,12 @@ use std::sync::Arc;
 
 use tokio::task::JoinSet;
 
-use super::{Sidebar, chat::ChatSession};
-use crate::api::{Failure, SearchHit, SearchPage, SearchScope, SpkClient};
+use super::{
+    Sidebar,
+    chat::ChatSession,
+    presence::{Refresh, Resource},
+};
+use crate::api::{Channel, Failure, SearchHit, SearchPage, SearchScope, SpkClient};
 
 #[derive(Clone, Default)]
 pub struct SearchView {
@@ -18,6 +22,7 @@ pub struct SearchView {
 #[derive(Default)]
 pub(super) struct SearchSession {
     query: Option<(String, SearchScope)>,
+    pending_page: Option<SearchPage>,
     pub tasks: JoinSet<Result<SearchPage, Failure>>,
 }
 
@@ -48,6 +53,14 @@ impl SearchSession {
         }
     }
 
+    pub fn reconcile_channels(&self, sidebar: &mut Sidebar) {
+        let channels = sidebar.channels.as_deref().unwrap_or_default();
+        let visible = |hit: &SearchHit| conversation(channels, hit.target.channel_id()).is_some();
+        if sidebar.search.results.iter().any(|hit| !visible(hit)) {
+            Arc::make_mut(&mut sidebar.search.results).retain(visible);
+        }
+    }
+
     pub fn more(&mut self, view: &mut SearchView, client: &SpkClient) {
         if !view.loading && view.next_cursor.is_some() {
             self.load(view, client);
@@ -69,17 +82,65 @@ impl SearchSession {
         });
     }
 
-    pub fn complete(view: &mut SearchView, result: Result<SearchPage, Failure>) {
-        view.loading = false;
-        match result {
-            Ok(page) => {
-                view.searched = true;
-                Arc::make_mut(&mut view.results).extend(page.results);
-                view.next_cursor = page.next_cursor;
+    pub fn complete(
+        &mut self,
+        sidebar: &mut Sidebar,
+        refresh: &mut Refresh,
+        client: &SpkClient,
+        result: Result<SearchPage, Failure>,
+    ) {
+        let page = match result {
+            Ok(page) => page,
+            Err(_) => {
+                sidebar.search.loading = false;
+                sidebar.search.failed = true;
+                return;
             }
-            Err(_) => view.failed = true,
+        };
+        let channels = sidebar.channels.as_deref().unwrap_or_default();
+        let mut unlisted = false;
+        let mut includes_webhook = false;
+        for hit in &page.results {
+            match conversation(channels, hit.target.channel_id()) {
+                Some(channel) => includes_webhook |= channel.is_webhook(),
+                None => unlisted = true,
+            }
+        }
+        // Search hits carry no channel type, so an unlisted hit needs a fresh access check.
+        if unlisted {
+            refresh.fetch(client, Resource::Channels);
+        }
+        self.pending_page = Some(page);
+        if !(unlisted || includes_webhook && refresh.channels_loading()) {
+            self.channels_refreshed(sidebar, true);
         }
     }
+
+    pub fn channels_refreshed(&mut self, sidebar: &mut Sidebar, loaded: bool) {
+        let Some(mut page) = self.pending_page.take() else {
+            return;
+        };
+        let view = &mut sidebar.search;
+        view.loading = false;
+        let channels = sidebar.channels.as_deref().unwrap_or_default();
+        page.results.retain(|hit| {
+            conversation(channels, hit.target.channel_id())
+                .is_some_and(|channel| loaded || !channel.is_webhook())
+        });
+        if !loaded && page.results.is_empty() {
+            view.failed = true;
+            return;
+        }
+        view.searched = true;
+        Arc::make_mut(&mut view.results).extend(page.results);
+        view.next_cursor = page.next_cursor;
+    }
+}
+
+fn conversation<'a>(channels: &'a [Channel], id: &str) -> Option<&'a Channel> {
+    channels
+        .iter()
+        .find(|channel| channel.id == id && channel.is_conversation())
 }
 
 pub(super) fn open_chat_target(
@@ -89,12 +150,8 @@ pub(super) fn open_chat_target(
     channel_id: &str,
     message_id: Option<&str>,
 ) -> bool {
-    let Some(channel) = sidebar
-        .channels
-        .iter()
-        .flatten()
-        .find(|channel| channel.id == channel_id && channel.is_conversation())
-    else {
+    let channels = sidebar.channels.as_deref().unwrap_or_default();
+    let Some(channel) = conversation(channels, channel_id) else {
         return false;
     };
     if let Some(message_id) = message_id {
