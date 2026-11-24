@@ -1,4 +1,4 @@
-use std::{cell::RefCell, ops::Range};
+use std::{cell::RefCell, ops::Range, path::PathBuf};
 
 use gpui_kit::gpui::App;
 use html5ever::tendril::TendrilSink;
@@ -30,6 +30,11 @@ fn with_clipboard<T>(cx: &App, action: impl FnOnce(&mut RichClipboard) -> Option
         }
         action(state.as_mut()?)
     })
+}
+
+pub(in crate::ui::chat) fn file_paths(cx: &App) -> Option<Vec<PathBuf>> {
+    with_clipboard(cx, |state| state.clipboard.get().file_list().ok())
+        .filter(|paths| !paths.is_empty())
 }
 
 pub(super) fn write(

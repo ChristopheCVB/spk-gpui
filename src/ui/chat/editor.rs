@@ -1,6 +1,7 @@
 mod clipboard_html;
 mod markdown;
 
+pub(super) use clipboard_html::file_paths as clipboard_file_paths;
 pub(in crate::ui) use markdown::Format;
 
 use std::ops::Range;

@@ -1084,6 +1084,7 @@ impl Spk {
                     .on_paste(move |item, window, cx| {
                         app.update(cx, |app, cx| {
                             app.paste_attachments(item, cx)
+                                || app.paste_attachment_paths(cx)
                                 || editor::paste(&app.chat_input, item, false, window, cx)
                         })
                         .unwrap_or(false)
