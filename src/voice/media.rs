@@ -279,6 +279,7 @@ impl Media {
                         || next.preferred.speakers != intent.preferred.speakers
                         || next.preferred.media_output != intent.preferred.media_output
                         || next.retry_mic != intent.retry_mic || next.retry_speakers != intent.retry_speakers
+                        || (intent.mute.effective_muted() && !next.mute.effective_muted())
                     {
                         devices = Arc::new(backend.devices().await?);
                     }
