@@ -113,6 +113,14 @@ impl Spk {
         if composer && count == 0 && self.chat_slash_key(key_name, window, cx) {
             return true;
         }
+        if editor && count == 0 && key_name == "escape" {
+            return self
+                .message_action_input
+                .read(cx)
+                .marked_text_range(window, cx)
+                .is_none()
+                && self.dismiss_message_action(window, cx);
+        }
         if composer || editor {
             let input = if editor {
                 &self.message_action_input

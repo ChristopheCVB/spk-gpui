@@ -47,6 +47,7 @@ pub(in crate::session) type VoteResult = (String, String, Result<MessageChange, 
 pub(in crate::session) struct PendingAction {
     message_id: String,
     saw_change: bool,
+    editing: bool,
     poll_edit_reply: Option<PollEditReply>,
 }
 
@@ -130,10 +131,15 @@ impl ChatSession {
                 });
             }
         } else if !allowed {
-            view.action_outcome = Some(ActionOutcome {
+            view.action_outcome = Some(Arc::new(ActionOutcome {
                 message_id,
                 error: Some(CHANGE_DENIED),
-            });
+            }));
+        } else if matches!(&action, MessageAction::Edit(body) if *body == message.body) {
+            view.action_outcome = Some(Arc::new(ActionOutcome {
+                message_id,
+                error: None,
+            }));
         } else {
             self.start_message_action(client, channel_id, message_id, action, None);
         }
@@ -224,6 +230,10 @@ impl ChatSession {
         self.pending_action = Some(PendingAction {
             message_id: message_id.clone(),
             saw_change: false,
+            editing: matches!(
+                action,
+                MessageAction::Edit(_) | MessageAction::EditPoll { .. }
+            ),
             poll_edit_reply,
         });
         view.action_pending = true;
@@ -255,10 +265,10 @@ impl ChatSession {
             };
             message_action_error(error, bad_request, fallback)
         });
-        view.action_outcome = Some(ActionOutcome {
+        view.action_outcome = Some(Arc::new(ActionOutcome {
             message_id: pending.message_id.clone(),
             error,
-        });
+        }));
         if let Ok(change) = result
             && !pending.saw_change
         {
@@ -283,7 +293,7 @@ impl ChatSession {
             .is_some_and(|view| view.channel_id == channel_id)
             && let Some(pending) = &mut self.pending_action
             && pending.message_id == message_id
-            && if pending.poll_edit_reply.is_some() {
+            && if pending.editing {
                 matches!(change, MessageChange::Edit(_) | MessageChange::Delete)
             } else {
                 !matches!(change, MessageChange::Poll(_))

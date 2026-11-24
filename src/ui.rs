@@ -188,7 +188,7 @@ impl Spk {
                     secondary,
                     shift: false,
                 } if *secondary || !chat::editor::enter(&input, window, cx) => {
-                    this.submit_message_action(cx);
+                    this.submit_message_action(window, cx);
                 }
                 _ => {}
             },

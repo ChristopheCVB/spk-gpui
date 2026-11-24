@@ -331,6 +331,14 @@ pub(in crate::ui) fn enter(
 }
 
 pub(in crate::ui) fn wire(input: &TextareaState) -> String {
+    message_wire(input, "")
+}
+
+pub(super) fn edit_wire(input: &TextareaState, original: &str) -> String {
+    message_wire(input, original)
+}
+
+fn message_wire(input: &TextareaState, original: &str) -> String {
     let source = input.value();
     let projection = Projection::parse(&source);
     let mut omissions = Vec::new();
@@ -353,7 +361,10 @@ pub(in crate::ui) fn wire(input: &TextareaState) -> String {
         if matches!(mark.format, Format::Quote | Format::CodeBlock)
             && source[mark.range.clone()].trim().is_empty()
         {
-            omissions.push(mark.open.start..mark.range.end.max(mark.close.end));
+            let range = mark.open.start..mark.range.end.max(mark.close.end);
+            if !original.contains(&source[range.clone()]) {
+                omissions.push(range);
+            }
         }
     }
     omissions.sort_by_key(|range| range.start);
