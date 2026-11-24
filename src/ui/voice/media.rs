@@ -119,9 +119,7 @@ impl RenderOnce for MediaButton {
                 .accessibility_label(label.clone())
                 .tooltip(label)
                 .track_focus(&primary_focus)
-                .when_some(action, |button, _| {
-                    button.toggled(playing).selected(playing)
-                })
+                .when_some(action, |button, _| button.toggled(playing))
                 .on_click({
                     let app = self.app.clone();
                     let state = state.clone();
@@ -174,13 +172,17 @@ impl RenderOnce for MediaButton {
             popover.track_focus(&search).child(panel)
         });
         div().id((id, self.location as usize)).child(match primary {
-            Some(primary) => {
-                VoiceButtonGroup::new("radio-controls", primary, "Radio options", popover)
-                    .controlled(open, move |open, window, cx| {
-                        open_panel(open, window, cx);
-                    })
-                    .into_any_element()
-            }
+            Some(primary) => VoiceButtonGroup::new(
+                "radio-controls",
+                primary,
+                "Radio options",
+                popover,
+                playing.then_some(cx.theme().primary),
+            )
+            .controlled(open, move |open, window, cx| {
+                open_panel(open, window, cx);
+            })
+            .into_any_element(),
             None => popover
                 .open(open)
                 .on_open_change(move |open, window, cx| {

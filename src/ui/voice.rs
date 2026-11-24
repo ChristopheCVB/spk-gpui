@@ -9,6 +9,7 @@ use crate::{
 use gpui_kit::base::{LayoutDirection, LogicalStyledExt};
 use gpui_kit::component::{
     IndexPath,
+    button::ButtonCustomVariant,
     popover::Popover,
     select::{SearchableVec, SelectEvent},
     slider::{Slider, SliderEvent, SliderState, SliderValue},
@@ -116,6 +117,7 @@ pub(super) struct VoiceButtonGroup {
     primary: Button,
     label: SharedString,
     popover: Popover,
+    active_color: Option<Hsla>,
     controlled: Option<(bool, OptionsChange)>,
 }
 
@@ -125,12 +127,14 @@ impl VoiceButtonGroup {
         primary: Button,
         label: impl Into<SharedString>,
         popover: Popover,
+        active_color: Option<Hsla>,
     ) -> Self {
         Self {
             id,
             primary,
             label: label.into(),
             popover,
+            active_color,
             controlled: None,
         }
     }
@@ -170,8 +174,24 @@ impl RenderOnce for VoiceButtonGroup {
                 on_change(!open, window, cx);
             }
         };
-        let options = voice_options_button(self.label, open)
-            .open(open)
+        let active_style = self.active_color.map(|color| {
+            let highlight = color.opacity(0.15);
+            (
+                ButtonCustomVariant::new(cx)
+                    .foreground(color)
+                    .hover(highlight)
+                    .active(highlight),
+                color.opacity(0.10),
+            )
+        });
+        let style_button = |button: Button| {
+            button.when_some(active_style, |button, (variant, tint)| {
+                button.custom(variant).bg(tint)
+            })
+        };
+        let primary = style_button(self.primary);
+        let options = style_button(voice_options_button(self.label, open))
+            .open(open && active_style.is_none())
             .track_focus(&focus)
             // An open popover dismisses on mouse-down outside its contents.
             .on_mouse_down(MouseButton::Left, {
@@ -198,7 +218,7 @@ impl RenderOnce for VoiceButtonGroup {
             .flex_row_dir(cx)
             .items_center()
             // ButtonGroup assigns toggle semantics to every child, including momentary actions.
-            .child(square_button_edge(self.primary, rtl))
+            .child(square_button_edge(primary, rtl))
             .child(square_button_edge(options, !rtl))
             // The independent anchor keeps popover input handlers off the primary button.
             .child(
@@ -398,22 +418,12 @@ impl Spk {
                     let picker_label = format!("Choose {}", device_label(kind).to_lowercase());
                     let binding = self.shortcuts.binding(action);
                     let open = self.device_picker == Some((location, kind));
-                    let button = voice_button(
-                        "toggle",
-                        themed_icon(
-                            icon,
-                            if off { theme.danger } else { theme.foreground },
-                            16.0,
-                        ),
-                        label,
-                        location,
-                    )
-                    .selected(off)
-                    .when(
-                        action != Action::Mute || !mic_needs_retry(sidebar),
-                        |button| button.toggled(off),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| this.voice_action(action, cx)));
+                    let button = voice_button("toggle", icon, label, location)
+                        .when(
+                            action != Action::Mute || !mic_needs_retry(sidebar),
+                            |button| button.toggled(off),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| this.voice_action(action, cx)));
                     let button = if let Some(binding) = binding {
                         let chord = binding.chord.to_string();
                         let keys = chord.split(" + ").map(str::to_owned).collect();
@@ -473,6 +483,7 @@ impl Spk {
                                     .child(extra)
                             },
                         ),
+                        off.then_some(theme.danger),
                     )
                     .controlled(open, move |open, _, cx| {
                         let _ = app.update(cx, |app, cx| {
