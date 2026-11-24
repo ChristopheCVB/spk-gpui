@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.5.1](https://github.com/ChristopheCVB/spk-gpui/compare/v0.5.0...v0.5.1) (2026-11-24)
+
+
+### Bug Fixes
+
+* **ui:** use fading overlay scrollbars ([c00c020](https://github.com/ChristopheCVB/spk-gpui/commit/c00c020d834f1a9fbfb0565bac1e3ea36fe3a0ab))
+* **voice:** align sidebar controls and screen share overlays ([86a9114](https://github.com/ChristopheCVB/spk-gpui/commit/86a9114916a3eab100cff836cbc91d1c4c0cb853))
+* **voice:** draw speaking rings outside participant tiles ([b9f0930](https://github.com/ChristopheCVB/spk-gpui/commit/b9f0930725aa052e01a29a55d71046c3d810b86d))
+
 ## [0.5.0](https://github.com/ChristopheCVB/spk-gpui/compare/v0.4.0...v0.5.0) (2026-11-23)
 
 
