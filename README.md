@@ -88,6 +88,22 @@ On Windows, **System default** uses the default communications device for input 
 
 Run `mise exec -- cargo fmt --all --check` and `mise exec -- cargo test --locked` with the endpoints configured. The tests use a local SPK protocol fixture and run without test accounts or a desktop credential store.
 
+### Run the desktop smoke test on Linux or WSL
+
+Install the Linux build prerequisites above and the fixture's desktop tools.
+
+```sh
+sudo apt-get install -y at-spi2-core gir1.2-atspi-2.0 imagemagick mesa-vulkan-drivers python3-gi \
+  dbus-daemon tesseract-ocr x11-xserver-utils xauth xdotool xvfb
+smoke_work="$(mktemp -d /tmp/spk-desktop-smoke.XXXXXXXX)"
+smoke_evidence="$(mktemp -d /tmp/spk-desktop-smoke-evidence.XXXXXXXX)"
+mise run desktop-smoke -- "$smoke_work" "$smoke_evidence"
+```
+
+The test starts a pinned SPK Web instance on loopback and drives the desktop under Xvfb with silent audio and browser launches intercepted. It builds a separate loopback executable while reusing Cargo's intermediate cache. The fixture logs the paths it uses and saves an accessibility tree and screenshot if the UI check fails. Linux PR CI runs the same command.
+
+Reuse both paths for retries and related checks. Each attempt stops its processes and preserves its files, and the work directory keeps the upstream checkout and dependencies for the next attempt. Remove only the recorded temporary paths after all local checks and screenshot captures are done. For PR work, attach the evidence and verify the merge first. [Desktop smoke test decision](docs/adr/0001-use-spk-web-for-desktop-smoke-tests.md)
+
 ### Run the LiveKit media tests locally
 
 The regular Cargo suite runs without a LiveKit server. A separate suite exercises audio, camera, and screen-share media between two peers connected to a real LiveKit server. With Docker running, set `SPK_TEST_LIVEKIT_COMPOSE=1` to start a disposable server. The fixture needs loopback ports 17880 and 17881 (TCP) and 17882 (UDP), generates temporary room tokens, and removes the container and network when the tests finish. Keep the build endpoints configured as above.

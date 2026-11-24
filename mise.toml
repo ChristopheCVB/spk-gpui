@@ -9,3 +9,15 @@ xcode_version = "26.2"
 _.file = ".env"
 SPK_CLANG_MAJOR = "{{ vars.clang_major }}"
 SPK_XCODE_VERSION = "{{ vars.xcode_version }}"
+
+[tasks.desktop-smoke]
+description = "Run the Linux desktop smoke test with a private display and SPK Web instance"
+run = '''
+#!/usr/bin/env bash
+set -eu
+work="$(realpath -m "${1:?Pass a work directory and an evidence directory}")"
+mkdir -p "$work"
+export XDG_RUNTIME_DIR="$(mktemp -d "$work/session.XXXXXXXX")"
+unset AT_SPI_BUS_ADDRESS WAYLAND_DISPLAY
+exec mise exec node@26.13.1 -- xvfb-run -a -s "-screen 0 1440x1000x24" dbus-run-session -- /usr/bin/python3 tests/fixtures/desktop-smoke.py "$@"
+'''

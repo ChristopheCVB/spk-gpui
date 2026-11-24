@@ -167,3 +167,18 @@ jobs:
           archive: false
           if-no-files-found: error
           overwrite: true
+      - name: Test the Linux desktop against SPK Web
+        if: runner.os == 'Linux' && github.event_name == 'pull_request'
+        id: desktop-smoke
+        timeout-minutes: 15
+        run: |
+          sudo apt-get install -y at-spi2-core gir1.2-atspi-2.0 imagemagick libvulkan1 mesa-vulkan-drivers \
+            tesseract-ocr x11-xserver-utils xdotool
+          work="$(mktemp -d "$RUNNER_TEMP/spk-desktop-smoke.XXXXXXXX")"
+          mise run desktop-smoke -- "$work" "$RUNNER_TEMP/spk-desktop-smoke-evidence"
+      - name: Upload desktop smoke test evidence
+        if: failure() && steps.desktop-smoke.outcome == 'failure'
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: desktop-smoke-evidence
+          path: ${{ runner.temp }}/spk-desktop-smoke-evidence
