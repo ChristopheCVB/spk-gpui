@@ -5,6 +5,22 @@ use crate::api::{MessageAction, MessageChange, PollEditOption};
 
 const CHANGE_DENIED: &str = "You don’t have permission to change this message.";
 
+fn message_action_error(
+    error: &Failure,
+    bad_request: &'static str,
+    fallback: &'static str,
+) -> &'static str {
+    match error {
+        Failure::Http(reqwest::StatusCode::FORBIDDEN) => CHANGE_DENIED,
+        Failure::Http(reqwest::StatusCode::NOT_FOUND) => "This message is unavailable.",
+        Failure::Http(reqwest::StatusCode::TOO_MANY_REQUESTS) => {
+            "Too many changes. Try again shortly."
+        }
+        Failure::Http(reqwest::StatusCode::BAD_REQUEST) => bad_request,
+        _ => fallback,
+    }
+}
+
 #[derive(Clone)]
 pub enum Pins {
     Loading,
@@ -91,7 +107,7 @@ impl ChatSession {
             MessageAction::Vote(_) => message.poll.is_some(),
         };
         if voting {
-            view.vote_error = (!allowed).then_some(CHANGE_DENIED);
+            self.vote_error = (!allowed).then_some(CHANGE_DENIED);
             if allowed {
                 let client = client.clone();
                 let channel_id = channel_id.to_owned();
@@ -119,30 +135,16 @@ impl ChatSession {
         message_id: &str,
         result: Result<MessageChange, Failure>,
     ) {
-        let Some(view) = self
-            .selected
-            .as_mut()
-            .filter(|view| view.channel_id == channel_id && !view.unavailable())
-        else {
-            return;
-        };
-        view.vote_error = match result {
-            Ok(_) => None,
-            Err(Failure::Http(reqwest::StatusCode::FORBIDDEN)) => Some(CHANGE_DENIED),
-            Err(Failure::Http(reqwest::StatusCode::NOT_FOUND)) => {
-                Some("This message is unavailable.")
-            }
-            Err(Failure::Http(reqwest::StatusCode::BAD_REQUEST)) => {
-                Some("SPK rejected the vote. Try again.")
-            }
-            Err(Failure::Http(reqwest::StatusCode::TOO_MANY_REQUESTS)) => {
-                Some("Too many changes. Try again shortly.")
-            }
-            Err(_) => Some("Could not vote. Try again."),
-        };
         // The web client applies both HTTP and socket results as they arrive.
-        if let Ok(change) = result {
-            self.apply_message_change(client, channel_id, message_id, change);
+        match result {
+            Ok(change) => self.apply_message_change(client, channel_id, message_id, change),
+            Err(error) => {
+                self.vote_error = Some(message_action_error(
+                    &error,
+                    "SPK rejected the vote. Try again.",
+                    "Could not vote. Try again.",
+                ));
+            }
         }
     }
 
@@ -228,25 +230,20 @@ impl ChatSession {
             return;
         };
         view.action_pending = false;
-        let editing_poll = pending.poll_edit_reply.is_some();
-        let error = match result {
-            Ok(_) => None,
-            Err(Failure::Http(reqwest::StatusCode::FORBIDDEN)) => Some(CHANGE_DENIED),
-            Err(Failure::Http(reqwest::StatusCode::NOT_FOUND)) => {
-                Some("This message is unavailable.")
-            }
-            Err(Failure::Http(reqwest::StatusCode::BAD_REQUEST)) if editing_poll => {
-                Some("SPK rejected the poll edit. Check the question and options.")
-            }
-            Err(Failure::Http(reqwest::StatusCode::BAD_REQUEST)) => {
-                Some("SPK rejected the change. Check the message or emoji.")
-            }
-            Err(Failure::Http(reqwest::StatusCode::TOO_MANY_REQUESTS)) => {
-                Some("Too many changes. Try again shortly.")
-            }
-            Err(_) if editing_poll => Some("Could not save the poll. Try again."),
-            Err(_) => Some("Could not change the message. Try again."),
-        };
+        let error = result.as_ref().err().map(|error| {
+            let (bad_request, fallback) = if pending.poll_edit_reply.is_some() {
+                (
+                    "SPK rejected the poll edit. Check the question and options.",
+                    "Could not save the poll. Try again.",
+                )
+            } else {
+                (
+                    "SPK rejected the change. Check the message or emoji.",
+                    "Could not change the message. Try again.",
+                )
+            };
+            message_action_error(error, bad_request, fallback)
+        });
         view.action_outcome = Some(ActionOutcome {
             message_id: pending.message_id.clone(),
             error,

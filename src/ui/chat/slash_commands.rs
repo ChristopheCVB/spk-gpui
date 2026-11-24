@@ -9,6 +9,8 @@ enum SlashCommand {
 }
 
 impl SlashCommand {
+    const ALL: [Self; 2] = [Self::Gif, Self::Poll];
+
     fn name(self) -> &'static str {
         match self {
             Self::Gif => "gif",
@@ -27,11 +29,14 @@ impl SlashCommand {
 impl Spk {
     pub(in crate::ui) fn on_chat_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let value = self.chat_input.read(cx).value();
-        let command = match value.as_ref() {
-            "/gif " => Some(SlashCommand::Gif),
-            "/poll " => Some(SlashCommand::Poll),
-            _ => None,
-        };
+        let command = value
+            .strip_prefix('/')
+            .and_then(|text| text.strip_suffix(' '))
+            .and_then(|name| {
+                SlashCommand::ALL
+                    .into_iter()
+                    .find(|command| command.name() == name)
+            });
         self.slash_choice = Some(0);
         if let Some(command) = command
             && !window.has_active_dialog(cx)
@@ -57,7 +62,7 @@ impl Spk {
         let prefix = value.get(..caret.end)?;
         let start = prefix.rfind('\n').map_or(0, |newline| newline + 1);
         let query = prefix[start..].strip_prefix('/')?;
-        let matches: Vec<_> = [SlashCommand::Gif, SlashCommand::Poll]
+        let matches: Vec<_> = SlashCommand::ALL
             .into_iter()
             .filter(|command| command.name().starts_with(query))
             .collect();

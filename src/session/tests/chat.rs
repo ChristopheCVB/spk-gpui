@@ -438,7 +438,9 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
             chat.latest_ready() && chat.jump.as_ref().is_some_and(|jump| jump.message_id == "m6")
         })).await;
         tx.send(Command::OpenTextChannel("general".into())).await.unwrap();
-        page(history_request(&history, "?unread=1").await, &[message("m6", 6, "bob", "After history was read")], true).await;
+        let mut poll_to_vote = message("m6", 6, "bob", "After history was read");
+        poll_to_vote["poll"] = poll(&[], &[]);
+        page(history_request(&history, "?unread=1").await, &[poll_to_vote], true).await;
         wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
             chat.latest_ready() && chat.jump.is_none()
         })).await;
@@ -466,6 +468,14 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         let completed = send_poll(&tx, "general", "Rejected after switching?", &["Yes", "No"]).await;
         assert_eq!(completed.await.unwrap(), Ok(()));
         let rejected = receive_chat_send(&mut peer, "general", "Rejected after switching?").await;
+        tx.send(Command::MutateChatMessage {
+            channel_id: "general".into(),
+            message_id: "m6".into(),
+            action: MessageAction::Vote(Some("tea".into())),
+        }).await.unwrap();
+        let rejected_vote = chat_action_request(
+            &history, "POST /api/messages/m6/vote HTTP/1.1", value!({"choiceId":"tea"}),
+        ).await;
 
         tx.send(Command::OpenTextChannel("quiet".into()))
             .await
@@ -482,6 +492,13 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
             })
         })
         .await;
+
+        rejected_vote.respond_raw("429 Too Many Requests", &[], b"").await;
+        timeout(Duration::from_secs(2), wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
+            chat.channel_id == "quiet"
+                && chat.vote_error == Some("Too many changes. Try again shortly.")
+                && chat.messages.is_empty()
+        }))).await.expect("vote rejection should reach the selected conversation");
 
         peer.send(Message::text(value!({
             "type":"message:error","nonce":rejected["nonce"],"error":"Poll rejected after switching"

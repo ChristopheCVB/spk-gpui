@@ -172,6 +172,7 @@ pub(super) struct ChatSession {
     selected: Option<ChatView>,
     outgoing: HashMap<String, Outgoing>,
     message_send_error: Option<String>,
+    vote_error: Option<&'static str>,
     drafts: HashMap<String, Draft>,
     typers: HashMap<String, Instant>,
     last_typing: Option<Instant>,
@@ -196,6 +197,7 @@ impl ChatSession {
     pub fn view(&self) -> Option<ChatView> {
         let mut view = self.selected.clone()?;
         view.message_send_error.clone_from(&self.message_send_error);
+        view.vote_error = self.vote_error;
         // Hide cached DM content until SPK confirms access to the conversation.
         if view.direct_message_peer.is_some()
             && view.history != History::Ready
