@@ -27,8 +27,8 @@ use tokio::{
 use url::Url;
 
 use crate::api::{
-    Channel, Connection, Failure, Frame, MessageChange, MessageTarget, Profile, SocketEvent,
-    SpkClient, UnreadState, User, UserPresence, VoiceModeration,
+    BOT_USER_ID, Channel, Connection, Failure, Frame, MessageChange, MessageTarget, Profile,
+    SocketEvent, SpkClient, UnreadState, User, UserPresence, VoiceModeration,
 };
 use crate::notifications::{Alert, LiveAlerts};
 use crate::sounds::{Sound, VoiceSounds};
@@ -401,13 +401,13 @@ impl Sidebar {
     }
 
     pub fn people(&self) -> Vec<(&str, &str)> {
-        let Some(me) = self.profile.id.as_deref() else {
+        if self.profile.id.is_none() {
             return Vec::new();
-        };
+        }
         let mut people = self
             .users
             .values()
-            .filter(|user| user.id != me && !user.banned)
+            .filter(|user| !user.banned && self.can_start_direct_message(&user.id))
             .filter_map(|user| Some((user.id.as_str(), user.name()?)))
             .collect::<Vec<_>>();
         let activity: HashMap<_, _> = self
@@ -443,9 +443,15 @@ impl Sidebar {
         Arc::ptr_eq(&self.users, &previous.users)
     }
 
+    pub fn can_start_direct_message(&self, user_id: &str) -> bool {
+        !user_id.is_empty() && user_id != BOT_USER_ID && self.profile.id.as_deref() != Some(user_id)
+    }
+
     pub fn direct_message(&self, user_id: &str) -> Option<&Channel> {
         self.channels.iter().flatten().find(|channel| {
-            channel.kind == "dm" && channel.other_user_id.as_deref() == Some(user_id)
+            channel.kind == "dm"
+                && channel.is_conversation()
+                && channel.other_user_id.as_deref() == Some(user_id)
         })
     }
 
@@ -976,7 +982,7 @@ async fn watch_session(
                         chat_navigation = None;
                     }
                     direct_message_opens = JoinSet::new();
-                    if user_id.is_empty() || sidebar.profile.id.as_deref() == Some(&user_id) {
+                    if !sidebar.can_start_direct_message(&user_id) {
                         sidebar.chat_notice = Some("Direct message unavailable.");
                     } else if let Some(channel) = sidebar.direct_message(&user_id) {
                         ChatNavigation::open_chat(&mut chat_navigation, &mut chat, client, channel);

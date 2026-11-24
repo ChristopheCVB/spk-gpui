@@ -182,7 +182,7 @@ impl Settings {
                             .gap_2()
                             .items_center()
                             .child(
-                                Input::new(&self.invite_note)
+                                surface_input(&self.invite_note, cx.theme().popover, cx)
                                     .w_full()
                                     .aria_label("Invite note")
                                     .disabled(view.busy),
@@ -451,7 +451,7 @@ impl Settings {
             div().flex().flex_col().gap_2()
                 .child(Label::new(format!("Ban {name}? They’ll be signed out and disconnected from voice. Their messages stay.")).whitespace_normal())
                 .child(Label::new("Reason (optional)"))
-                .child(Input::new(&self.ban_reason).aria_label("Ban reason").disabled(busy))
+                .child(surface_input(&self.ban_reason, cx.theme().popover, cx).aria_label("Ban reason").disabled(busy))
                 .child(div().flex().gap_2()
                     .child(admin_button("cancel-ban", "Cancel").on_click(cx.listener(|this, _, _, cx| {
                         this.ban_target = None;

@@ -189,6 +189,7 @@ impl Spk {
             .aria_label("Add reaction")
             .occlude()
             .popover_style(cx)
+            .shadow(floating_shadow(cx))
             .flex()
             .flex_col()
             .gap_1()
@@ -198,7 +199,10 @@ impl Spk {
                     cx.stop_propagation();
                 }
             }))
-            .child(Input::new(&self.reaction_input).aria_label("Search emoji"))
+            .child(
+                surface_input(&self.reaction_input, cx.theme().background, cx)
+                    .aria_label("Search emoji"),
+            )
             .when(empty, |panel| {
                 panel.child(
                     div()

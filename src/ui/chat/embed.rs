@@ -95,7 +95,7 @@ impl Spk {
                                 .format("%b %-d, %Y, %H:%M:%S")
                                 .to_string();
                             line.tooltip(move |window, cx| {
-                                Tooltip::new(exact.clone()).build(window, cx)
+                                floating_tooltip(Tooltip::new(exact.clone()), cx).build(window, cx)
                             })
                         })
                         .child(

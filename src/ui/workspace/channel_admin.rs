@@ -137,6 +137,8 @@ impl Spk {
             }
             dialog
                 .centered()
+                .border_0()
+                .bg(cx.theme().popover)
                 .width(px(440.0))
                 .title(title)
                 .on_ok(|_, _, _| false)
@@ -349,7 +351,7 @@ impl Render for ChannelEditor {
                 (Label::new(message).into_any_element(), "Delete", true)
             }
             form => (
-                Input::new(&self.name)
+                surface_input(&self.name, cx.theme().background, cx)
                     .aria_label("Channel name")
                     .w_full()
                     .disabled(pending)

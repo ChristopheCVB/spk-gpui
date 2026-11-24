@@ -340,9 +340,11 @@ impl Spk {
             }
             PersonProfile { app, id, email: cached_email }
         });
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, _, cx| {
             dialog
                 .centered()
+                .border_0()
+                .bg(cx.theme().popover)
                 .width(px(380.0))
                 .title("Profile")
                 .child(profile.clone())
@@ -404,7 +406,7 @@ impl Render for PersonProfile {
                             }),
                     )
                     .when(
-                        !person.banned && sidebar.profile.id.as_deref() != Some(self.id.as_str()),
+                        !person.banned && sidebar.can_start_direct_message(&self.id),
                         |profile| {
                             profile.child(
                                 control_button("send-profile-dm")

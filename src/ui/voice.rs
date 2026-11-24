@@ -66,7 +66,7 @@ pub(super) fn voice_shortcut_tooltip(
 ) -> Button {
     button.interactivity().tooltip(move |window, cx| {
         let keys = keys.clone();
-        Tooltip::element(move |_, cx| {
+        let tooltip = Tooltip::element(move |_, cx| {
             let theme = cx.theme();
             div()
                 .flex()
@@ -83,15 +83,13 @@ pub(super) fn voice_shortcut_tooltip(
                     div()
                         .px_1()
                         .rounded_sm()
-                        .border_1()
-                        .border_color(theme.border)
-                        .bg(theme.muted)
+                        .bg(theme.background)
                         .text_color(theme.muted_foreground)
                         .text_xs()
                         .child(key)
                 }))
-        })
-        .build(window, cx)
+        });
+        floating_tooltip(tooltip, cx).build(window, cx)
     });
     button
 }
@@ -261,9 +259,10 @@ impl RenderOnce for VoiceOptionsAnchor {
 pub(super) fn voice_popover(
     id: &'static str,
     width: Pixels,
+    cx: &App,
     button: impl FnOnce(bool) -> Button + 'static,
 ) -> Popover {
-    Popover::new(id)
+    floating_popover(id, cx)
         .anchor(Anchor::BottomRight)
         .w(width)
         .trigger(VoicePopoverTrigger {
@@ -432,9 +431,8 @@ impl Spk {
                         device_label(kind),
                         button,
                         picker_label,
-                        Popover::new("device-picker")
-                            .w(px(300.0))
-                            .content(move |_, window, cx| {
+                        floating_popover("device-picker", cx).w(px(300.0)).content(
+                            move |_, window, cx| {
                                 let Some(app) = popup_app.upgrade() else {
                                     return div();
                                 };
@@ -473,7 +471,8 @@ impl Spk {
                                     .child(Label::new(label).font_semibold())
                                     .child(picker)
                                     .child(extra)
-                            }),
+                            },
+                        ),
                     )
                     .controlled(open, move |open, _, cx| {
                         let _ = app.update(cx, |app, cx| {
@@ -566,6 +565,8 @@ fn microphone_controls(
         .child(Label::new("Noise suppression").font_semibold())
         .child(
             control_select(&noise)
+                .border_color(cx.theme().transparent)
+                .bg(cx.theme().background)
                 .small()
                 .w_full()
                 .accessibility_label("Noise suppression"),
@@ -801,6 +802,8 @@ impl RenderOnce for DevicePicker {
             })
             .child(
                 control_select(&select)
+                    .border_color(cx.theme().transparent)
+                    .bg(cx.theme().background)
                     .small()
                     .accessibility_label(label)
                     .w_full(),
@@ -905,7 +908,7 @@ pub(super) fn connection_diagnostics_with_status(
 
 fn connection_diagnostics_popover(trigger: Button, cx: &Context<Spk>) -> Popover {
     let app = cx.weak_entity();
-    voice_popover("voice-connection", px(320.0), |_| trigger).content(move |_, _, cx| {
+    voice_popover("voice-connection", px(320.0), cx, |_| trigger).content(move |_, _, cx| {
         let Some(app) = app.upgrade() else {
             return div();
         };
@@ -1040,9 +1043,11 @@ impl Spk {
             }
         });
         let title = format!("Volume for {name}");
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, _, cx| {
             dialog
                 .centered()
+                .border_0()
+                .bg(cx.theme().popover)
                 .width(px(380.0))
                 .title(title.clone())
                 .child(content.clone())

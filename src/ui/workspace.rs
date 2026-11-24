@@ -1996,7 +1996,9 @@ fn soundboard_badge(sidebar: &Sidebar, user_id: &str, cx: &App) -> Option<impl I
             .flex_shrink_0()
             .role(Role::Image)
             .aria_label(label.clone())
-            .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
+            .tooltip(move |window, cx| {
+                floating_tooltip(Tooltip::new(label.clone()), cx).build(window, cx)
+            })
             .child(icon.size(px(12.)).text_color(cx.theme().primary)),
     )
 }

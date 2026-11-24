@@ -33,12 +33,17 @@ impl Metadata {
         )
     }
 
-    fn render(&self, disabled: bool) -> impl IntoElement {
+    fn render(&self, disabled: bool, cx: &App) -> impl IntoElement {
         div()
             .flex()
             .gap_3()
-            .child(field("Name", &self.name, disabled))
-            .child(icon_picker_field(&self.icon, disabled))
+            .child(field("Name", &self.name, disabled, cx))
+            .child(icon_picker_field(
+                &self.icon,
+                disabled,
+                cx.theme().popover,
+                cx,
+            ))
     }
 }
 
@@ -205,10 +210,10 @@ impl Settings {
                     div().w_full().flex().flex_col().gap_3()
                         .child(Label::new(format!("Source duration {:.3} s. Select up to 10 seconds. Leave End empty for the longest selection.", duration)))
                         .child(div().flex().gap_3()
-                            .child(field("Start (seconds)", &form.start, disabled))
-                            .child(field("End (seconds)", &form.end, disabled))
-                            .child(field("Upload gain (%)", &form.gain, disabled)))
-                        .child(form.upload.render(disabled))
+                            .child(field("Start (seconds)", &form.start, disabled, cx))
+                            .child(field("End (seconds)", &form.end, disabled, cx))
+                            .child(field("Upload gain (%)", &form.gain, disabled, cx)))
+                        .child(form.upload.render(disabled, cx))
                         .child(div().flex().gap_2()
                             .child(control_button("preview-crop").label("Play selection").tab_stop(true).disabled(disabled)
                                 .on_click(cx.listener(move |settings, _, _, cx| {
@@ -298,7 +303,7 @@ impl Settings {
                 let original_icon = clip.icon.clone();
                 (
                     format!("Edit {}", clip.name),
-                    Some(self.soundboard.edit.render(disabled)),
+                    Some(self.soundboard.edit.render(disabled, cx)),
                     control_button("apply-sound-edit")
                         .primary()
                         .label("Save")
@@ -359,7 +364,12 @@ impl Settings {
     }
 }
 
-fn field(label: &'static str, state: &Entity<InputState>, disabled: bool) -> impl IntoElement {
+fn field(
+    label: &'static str,
+    state: &Entity<InputState>,
+    disabled: bool,
+    cx: &App,
+) -> impl IntoElement {
     div()
         .id(label)
         .flex()
@@ -369,7 +379,7 @@ fn field(label: &'static str, state: &Entity<InputState>, disabled: bool) -> imp
         .gap_1()
         .child(Label::new(label))
         .child(
-            Input::new(state)
+            surface_input(state, cx.theme().popover, cx)
                 .w_full()
                 .aria_label(label)
                 .disabled(disabled),

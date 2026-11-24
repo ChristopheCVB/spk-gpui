@@ -114,6 +114,8 @@ impl Spk {
             }
             dialog
                 .centered()
+                .border_0()
+                .bg(cx.theme().popover)
                 .width((window.viewport_size().width * 0.9).min(px(440.)))
                 .title(title)
                 .on_cancel({
@@ -298,6 +300,8 @@ impl PollComposer {
             };
             dialog
                 .centered()
+                .border_0()
+                .bg(cx.theme().popover)
                 .width((window.viewport_size().width * 0.9).min(px(440.)))
                 .title("Change poll options")
                 .on_ok(|_, _, _| false)
@@ -371,7 +375,7 @@ impl Render for PollComposer {
                     .gap_1()
                     .child(Label::new("Question"))
                     .child(
-                        Input::new(&self.question.input)
+                        surface_input(&self.question.input, cx.theme().background, cx)
                             .aria_label("Question")
                             .disabled(self.sending),
                     ),
@@ -401,7 +405,9 @@ impl Render for PollComposer {
                                     .flex_1()
                                     .child(Label::new(label.clone()))
                                     .child(
-                                        Input::new(input).aria_label(label).disabled(self.sending),
+                                        surface_input(input, cx.theme().background, cx)
+                                            .aria_label(label)
+                                            .disabled(self.sending),
                                     ),
                             )
                             .child(

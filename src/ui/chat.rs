@@ -25,7 +25,7 @@ use gpui_kit::component::{
     Disableable,
     menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
     separator::Separator,
-    text::{MarkdownExtensions, TextView},
+    text::{MarkdownExtensions, TextView, TextViewStyle},
     tooltip::Tooltip,
 };
 
@@ -38,7 +38,7 @@ use history::{
 use super::*;
 
 use crate::{
-    api::{ChatMessage, MessageTarget, UnreadState},
+    api::{BOT_USER_ID, ChatMessage, MessageTarget, UnreadState},
     chat_markdown::{message_markdown, reply_preview, safe_link},
     reaction_artwork::reaction_artwork_path,
     session::{ChatView, Delivery, Pins},
@@ -1200,7 +1200,16 @@ impl Spk {
         let link_filter = self.chat_spoiler_link.clone();
         let link_prefix = self.chat_spoiler_link.clone();
         let source = SharedString::from(rendered);
+        let base = cx.theme().popover;
         let view = TextView::markdown(id, source.clone())
+            .style(
+                TextViewStyle::default()
+                    .code_block(StyleRefinement::default().bg(base))
+                    .inline_code(HighlightStyle {
+                        background_color: Some(base),
+                        ..Default::default()
+                    }),
+            )
             .markdown_extensions(
                 MarkdownExtensions::default()
                     .parser_revision(1)
@@ -1314,6 +1323,7 @@ impl Spk {
         } else {
             sidebar.message_author(&message.user_id)
         };
+        let show_bot_badge = starts_group && !chat.webhook && message.user_id == BOT_USER_ID;
         let time = DateTime::from_timestamp_millis(message.created_at)
             .map(|time| time.with_timezone(&Local));
         let exact_time = time.map(|time| time.format("%b %-d, %Y, %H:%M:%S").to_string());
@@ -1357,6 +1367,17 @@ impl Spk {
                             None => label.into_any_element(),
                         })
                     })
+                    .when(show_bot_badge, |header| {
+                        header.child(
+                            Label::new("BOT")
+                                .text_xs()
+                                .font_semibold()
+                                .px_1()
+                                .rounded_md()
+                                .bg(theme.primary.opacity(0.16))
+                                .text_color(theme.primary),
+                        )
+                    })
                     .when_some(
                         exact_time.clone().filter(|_| starts_group),
                         |header, exact| {
@@ -1364,7 +1385,8 @@ impl Spk {
                                 div()
                                     .id("sent-at")
                                     .tooltip(move |window, cx| {
-                                        Tooltip::new(exact.clone()).build(window, cx)
+                                        floating_tooltip(Tooltip::new(exact.clone()), cx)
+                                            .build(window, cx)
                                     })
                                     .child(
                                         Label::new(relative_time(message.created_at, now))
@@ -1519,7 +1541,11 @@ impl Spk {
             .group("message-row")
             .track_focus(&row_focus)
             .when_some(exact_time.clone(), |row, time| {
-                row.aria_description(format!("{author}, {time}"))
+                if show_bot_badge {
+                    row.aria_description(format!("{author}, bot, {time}"))
+                } else {
+                    row.aria_description(format!("{author}, {time}"))
+                }
             })
             .border_l_2()
             .border_color(theme.transparent)
@@ -1613,7 +1639,8 @@ impl Spk {
                                     .opacity(if row_focused { 1. } else { 0. })
                                     .group_hover("message-row", |clock| clock.opacity(1.))
                                     .tooltip(move |window, cx| {
-                                        Tooltip::new(exact.clone()).build(window, cx)
+                                        floating_tooltip(Tooltip::new(exact.clone()), cx)
+                                            .build(window, cx)
                                     })
                                     .child(
                                         Label::new(time.format("%H:%M").to_string())

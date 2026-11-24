@@ -344,7 +344,7 @@ impl Spk {
                     .to_vec(),
             ),
             "Camera options",
-            Popover::new("camera-options")
+            floating_popover("camera-options", cx)
                 .w(px(280.0))
                 .content(move |_, _, cx| {
                     let Some(app) = app.upgrade() else {
@@ -402,7 +402,7 @@ impl Spk {
                     .to_vec(),
             ),
             "Screen Share options",
-            Popover::new("screen-options")
+            floating_popover("screen-options", cx)
                 .w(px(280.0))
                 .content(move |_, _, cx| {
                     let Some(app) = app.upgrade() else {
@@ -801,7 +801,9 @@ fn screen_viewers(viewers: &[Participant<'_>], compact: bool, sidebar: &Sidebar,
                         .role(Role::Image)
                         .aria_label(name.clone())
                         .when(index > 0, |avatar| avatar.ml(px(-6.0)))
-                        .tooltip(move |window, cx| Tooltip::new(name.clone()).build(window, cx))
+                        .tooltip(move |window, cx| {
+                            floating_tooltip(Tooltip::new(name.clone()), cx).build(window, cx)
+                        })
                         .child(profile_avatar(
                             Avatar::new().name(viewer.name.to_owned()),
                             sidebar.avatar(Some(viewer.id)),
@@ -832,7 +834,9 @@ fn screen_viewers(viewers: &[Participant<'_>], compact: bool, sidebar: &Sidebar,
                     .bg(cx.theme().secondary)
                     .text_xs()
                     .aria_label(format!("More viewers: {names}"))
-                    .tooltip(move |window, cx| Tooltip::new(names.clone()).build(window, cx))
+                    .tooltip(move |window, cx| {
+                        floating_tooltip(Tooltip::new(names.clone()), cx).build(window, cx)
+                    })
                     .child(format!("+{}", hidden.len())),
             )
         })
@@ -842,7 +846,7 @@ fn screen_volume(id: &str, cx: &Context<Spk>) -> Popover {
     let id = id.to_owned();
     let open_id = id.clone();
     let app = cx.weak_entity();
-    Popover::new("screen-volume")
+    floating_popover("screen-volume", cx)
         .anchor(Anchor::BottomRight)
         .w(px(192.0))
         .trigger(
@@ -1083,6 +1087,8 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for VoiceSelect<T> {
             });
         }
         control_select(&select)
+            .border_color(cx.theme().transparent)
+            .bg(cx.theme().background)
             .small()
             .w_full()
             .accessibility_label(self.label)
