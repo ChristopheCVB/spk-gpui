@@ -297,7 +297,6 @@ impl Spk {
             Settings {
                 spk,
                 tab: Tab::Profile,
-                changelog: Default::default(),
                 nickname,
                 invite_note,
                 ban_reason,
@@ -361,7 +360,6 @@ impl Spk {
 struct Settings {
     spk: Entity<Spk>,
     tab: Tab,
-    changelog: changelog::History,
     nickname: Entity<InputState>,
     invite_note: Entity<InputState>,
     ban_reason: Entity<InputState>,
@@ -599,9 +597,6 @@ impl Settings {
             }
         }
         self.tab = tab;
-        if tab == Tab::Changelog && self.changelog.initial() {
-            self.load_changelog(cx);
-        }
         self.sync_mic_test(cx);
         self.sync_camera_preview(cx);
         if tab == Tab::Voice {

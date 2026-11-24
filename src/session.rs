@@ -212,11 +212,6 @@ pub enum Command {
         completed: PollEditReply,
     },
     RetryChatPins(String),
-    LoadChangelog {
-        page: u32,
-        head: Option<String>,
-        reply: oneshot::Sender<Result<crate::api::ChangelogPage, Failure>>,
-    },
     SaveNickname(String),
     UploadAvatar(PathBuf),
     InspectProfileEmail(String, oneshot::Sender<Option<String>>),
@@ -712,7 +707,6 @@ async fn watch_session(
     let mut unread = UnreadSession::default();
     unread.refresh(client);
     let mut direct_message_opens = JoinSet::new();
-    let mut changelog_pages = JoinSet::new();
     let mut voice = VoiceSession::default();
     let mut radio = RadioSession::default();
     let mut search = SearchSession::default();
@@ -1090,15 +1084,6 @@ async fn watch_session(
                         refresh.fetch(client, Resource::Channels);
                     }
                 }
-                Ok(Command::LoadChangelog { page, head, reply }) => {
-                    let client = client.clone();
-                    changelog_pages.spawn(async move {
-                        let result = client.changelog(page, head.as_deref()).await;
-                        let expired = result.as_ref().is_err_and(Failure::unauthorized);
-                        let _ = reply.send(result);
-                        expired
-                    });
-                }
                 Ok(Command::RetryChatSend(nonce)) => {
                     let _ = chat.retry_send(&nonce, None);
                 }
@@ -1152,11 +1137,6 @@ async fn watch_session(
                     voice.apply_controls(&mut sidebar, settings, command).await;
                 }
             },
-            Some(result) = changelog_pages.join_next() => {
-                if matches!(result, Ok(true)) {
-                    break SessionEnd::Invalidated(SESSION_EXPIRED);
-                }
-            }
             Some(_) = camera_previews.join_next() => {}
             Some(result) = channel_mutations.join_next() => {
                 let result = result.unwrap_or(Err(Failure::Connection));

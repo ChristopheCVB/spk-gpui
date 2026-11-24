@@ -105,25 +105,6 @@ impl Profile {
     }
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ChangelogPage {
-    pub commits: Vec<ChangelogEntry>,
-    pub head: Option<String>,
-    pub next_page: Option<u32>,
-}
-
-#[derive(Deserialize)]
-pub struct ChangelogEntry {
-    pub sha: String,
-    pub message: String,
-    pub date: String,
-}
-
-fn commit_sha(value: &str) -> bool {
-    value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Channel {
@@ -967,28 +948,6 @@ impl SpkClient {
             .into_iter()
             .find(|entry| entry.id == id)
             .map(|entry| entry.email))
-    }
-
-    pub async fn changelog(&self, page: u32, head: Option<&str>) -> Result<ChangelogPage, Failure> {
-        let mut url = self.base.join("/api/changelog").expect("fixed SPK path");
-        url.query_pairs_mut().append_pair("page", &page.to_string());
-        if let Some(head) = head {
-            url.query_pairs_mut().append_pair("head", head);
-        }
-        let response = Self::send(self.http.get(url).header(header::ORIGIN, &self.origin)).await?;
-        let result: ChangelogPage = response
-            .json()
-            .await
-            .map_err(|_| Failure::InvalidResponse)?;
-        if result.head.as_deref().is_some_and(|head| !commit_sha(head))
-            || result
-                .next_page
-                .is_some_and(|next| next <= page || result.head.is_none())
-            || result.commits.iter().any(|entry| !commit_sha(&entry.sha))
-        {
-            return Err(Failure::InvalidResponse);
-        }
-        Ok(result)
     }
 
     pub async fn channels(&self) -> Result<Vec<Channel>, Failure> {
