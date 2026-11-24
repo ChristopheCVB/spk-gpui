@@ -93,13 +93,13 @@ pub(in crate::ui) fn refresh(
             );
             tokens = attach(tokens, range.clone(), syntax_token(kind, text, &label));
         }
-        for syntax in projection.syntax {
+        for syntax in &projection.syntax {
             if splits_selection(&syntax.range) {
                 continue;
             }
             let text = &source[syntax.range.clone()];
             let token = syntax_token(SYNTAX, text, &syntax.label);
-            tokens = attach(tokens, syntax.range, token);
+            tokens = attach(tokens, syntax.range.clone(), token);
         }
         for (start, emoji) in source.grapheme_indices(true) {
             let range = start..start + emoji.len();
@@ -572,7 +572,7 @@ pub(in crate::ui) fn clipboard_key(
             plain.push_str(&projection.plain(&source, offset..span.range().start));
             if !matches!(span.token().id().as_ref(), PENDING | PENDING_OFF) {
                 plain.push_str(span.token().label());
-                if span.token().text().starts_with("<@") {
+                if is_mention(span.token()) {
                     let range = span.range();
                     let base = start.len();
                     mentions.push((

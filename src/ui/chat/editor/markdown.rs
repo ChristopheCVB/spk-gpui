@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use ::markdown::{ParseOptions, mdast::Node};
 
-use crate::chat_markdown::{mask_mention_ids, mention_at};
+use crate::chat_markdown::mention_at;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(in crate::ui) enum Format {
@@ -54,7 +54,7 @@ impl Projection {
         options.constructs.html_flow = false;
         options.constructs.html_text = false;
         options.constructs.gfm_autolink_literal = false;
-        let Ok(document) = ::markdown::to_mdast(&mask_mention_ids(source), &options) else {
+        let Ok(document) = ::markdown::to_mdast(source, &options) else {
             return Self::default();
         };
         let mut result = Self::default();
@@ -210,7 +210,7 @@ impl Projection {
                 while let Some((index, ch)) = chars.next() {
                     let offset = range.start + index;
                     if ch == '<'
-                        && let Some(id) = mention_at(&source[offset..range.end])
+                        && let Some(id) = mention_at(&source[offset..])
                     {
                         self.mentions.push(offset..offset + id.len() + 3);
                     }
@@ -492,6 +492,31 @@ mod tests {
         assert_eq!(mentions.collect::<Vec<_>>(), ["<@__unknown__>", "<@known>"]);
         let spoiler = projection.mentions.first().unwrap();
         assert!(projection.active(Format::Spoiler, spoiler));
+    }
+
+    #[test]
+    fn selecting_mentions_preserves_the_suffix_and_adjacent_formatting() {
+        for (before, query, after, expected, expected_caret) in [
+            ("a ", "@bo", "tail", "a <@bob>tail", 8),
+            ("prev**", "@bo", "**", "prev<@bob>", 10),
+            (
+                "before **bar ",
+                "@bo",
+                " quux**",
+                "before **bar** <@bob> **quux**",
+                21,
+            ),
+            ("prev `", "@bo", "`", "prev <@bob>", 11),
+            ("> ||", "@bo", "||", "> ||<@bob>||", 10),
+            ("```\n", "@bo", "\n```", "```\n\n```\n\n<@bob>", 16),
+        ] {
+            let mut source = format!("{before}{query}{after}");
+            let range = before.len()..before.len() + query.len();
+            let (range, text, caret) = mention_change(&source, range, "<@bob>");
+            source.replace_range(range, &text);
+            assert_eq!(source, expected, "{before}{query}{after}");
+            assert_eq!(caret, expected_caret, "{source}");
+        }
     }
 
     #[test]

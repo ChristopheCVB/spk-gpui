@@ -22,21 +22,6 @@ pub(crate) fn mention_at(source: &str) -> Option<&str> {
     (len > 0 && rest.as_bytes().get(len) == Some(&b'>')).then(|| &rest[..len])
 }
 
-pub(crate) fn mask_mention_ids(source: &str) -> Cow<'_, str> {
-    let mut masked = Cow::Borrowed(source);
-    for (offset, _) in source.match_indices("<@") {
-        if let Some(id) = mention_at(&source[offset..])
-            && id.contains('_')
-        {
-            // Keep byte offsets while preventing Markdown emphasis from splitting the token.
-            masked
-                .to_mut()
-                .replace_range(offset + 2..offset + 2 + id.len(), &id.replace('_', "x"));
-        }
-    }
-    masked
-}
-
 pub(crate) fn message_markdown<'a, 'b>(
     source: &'a str,
     name_of: impl Fn(&str) -> &'b str,
@@ -54,7 +39,7 @@ pub(crate) fn message_markdown<'a, 'b>(
     let mut options = parse_options();
     // Scan spoiler delimiters before bare URLs can absorb adjacent pipes.
     options.constructs.gfm_autolink_literal = false;
-    let Ok(document) = ::markdown::to_mdast(&mask_mention_ids(source), &options) else {
+    let Ok(document) = ::markdown::to_mdast(source, &options) else {
         return Cow::Borrowed("Message preview unavailable.");
     };
     let mut edits = Vec::new();
@@ -192,7 +177,7 @@ fn find_edits<'a>(
                                 source.as_bytes().get(start.wrapping_sub(1)) == Some(&b'\r'),
                             );
                         edits.push((offset..offset, "  ".into()));
-                    } else if let Some(id) = mention_at(&text[i..]) {
+                    } else if let Some(id) = mention_at(&source[start..]) {
                         end = i + id.len() + 3;
                         let name = name_of(id);
                         let name = if preview {

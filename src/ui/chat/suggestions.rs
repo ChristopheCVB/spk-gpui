@@ -567,6 +567,26 @@ mod tests {
     }
 
     #[test]
+    fn mention_trigger_observes_the_text_segment_and_keeps_the_caret_suffix() {
+        for (source, end, range) in [
+            ("@botail", 3, 0..3),
+            ("x @bo", 5, 2..5),
+            ("x @a @bo", 8, 5..8),
+        ] {
+            let matched = match_prefix(source, 0..end, false).unwrap();
+            assert_eq!(matched.trigger, Trigger::Mention);
+            assert_eq!(matched.range, range);
+            assert_eq!(matched.query, "bo");
+        }
+        for source in ["@@bo", "email@bo", "x.@bo", "x\t@bo", "@bo "] {
+            assert!(
+                match_prefix(source, 0..source.len(), true).is_none(),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
     fn slash_matches_the_text_segment_before_the_caret() {
         assert_eq!(
             match_prefix("/pOll tail", 0..3, true),

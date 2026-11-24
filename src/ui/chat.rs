@@ -23,7 +23,7 @@ use std::{
 use chrono::{DateTime, Local};
 use gpui_kit::component::{
     Disableable,
-    menu::{ContextMenuExt, PopupMenuItem},
+    menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
     separator::Separator,
     text::{MarkdownExtensions, TextView},
     tooltip::Tooltip,
@@ -455,7 +455,7 @@ impl Spk {
             &self.chat_input
         };
         let directory = match &self.view {
-            View::SignedIn(sidebar) => Some(sidebar),
+            View::SignedIn(sidebar) => Some(sidebar.as_ref()),
             _ => None,
         };
         editor::refresh(input, directory, cx);
@@ -489,7 +489,7 @@ impl Spk {
         }
         let previous = chat(&self.view);
         let directory = match next {
-            View::SignedIn(sidebar) => Some(sidebar),
+            View::SignedIn(sidebar) => Some(sidebar.as_ref()),
             _ => None,
         };
         let signed_in = directory.is_some();
@@ -1065,13 +1065,12 @@ impl Spk {
                                     .map(|outgoing| self.chat_send_recovery(sidebar, outgoing, cx)),
                             ),
                     )
-                    .child(self.message_composer(sidebar, chat, window, cx))
+                    .child(self.message_composer(chat, window, cx))
             }))
     }
 
     fn message_composer(
         &self,
-        sidebar: &Sidebar,
         chat: &ChatView,
         window: &Window,
         cx: &Context<Self>,
@@ -1320,19 +1319,17 @@ impl Spk {
                     .items_center()
                     .gap_2()
                     .when(starts_group, |header| {
-                        header.child(
-                            div()
-                                .id("message-author")
-                                .child(Label::new(author.to_owned()).font_semibold())
-                                .when_some(user_menu, |author, (id, app)| {
-                                    author.context_menu(move |menu, _, _| {
-                                        menu.item(profile::mention_user_item(
-                                            id.clone(),
-                                            app.clone(),
-                                        ))
-                                    })
-                                }),
-                        )
+                        let label = div()
+                            .id("message-author")
+                            .child(Label::new(author.to_owned()).font_semibold());
+                        header.child(match user_menu {
+                            Some((id, app)) => label
+                                .context_menu(move |menu, _, _| {
+                                    menu.item(profile::mention_user_item(id.clone(), app.clone()))
+                                })
+                                .into_any_element(),
+                            None => label.into_any_element(),
+                        })
                     })
                     .when_some(
                         exact_time.clone().filter(|_| starts_group),
