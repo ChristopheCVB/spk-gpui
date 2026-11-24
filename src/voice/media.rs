@@ -167,6 +167,7 @@ impl Media {
         let mut stats_job = JoinSet::new();
         let mut microphones = MicrophoneWatchdog::default();
         let mut microphone_job = JoinSet::new();
+        let mut watchdog_requested = false;
 
         loop {
             if reconnecting
@@ -290,6 +291,8 @@ impl Media {
                     MediaEvent::Speaking(active) if !reconnecting => speaking.update(active, Instant::now()),
                     MediaEvent::ParticipantLeft(id) => {
                         speaking.remove(&id);
+                        microphones.participant_left(&id);
+                        microphone_job = JoinSet::new();
                         check_routes = true;
                     }
                     MediaEvent::Reconnecting => {
@@ -300,6 +303,7 @@ impl Media {
                         stats_job = JoinSet::new();
                         microphones = MicrophoneWatchdog::default();
                         microphone_job = JoinSet::new();
+                        watchdog_requested = false;
                         backend.silence_microphone();
                         backend.set_playout(false);
                         backend.suspend_remote_audio();
@@ -336,10 +340,18 @@ impl Media {
                     }
                 }
                 Some(Ok(samples)) = microphone_job.join_next() => {
-                    let repairs = microphones.observe(&intent, samples, Instant::now());
+                    let now = Instant::now();
+                    let repairs = microphones.observe(&intent, samples, now);
                     if !repairs.is_empty() {
                         backend.repair_microphones(repairs).await;
                         check_routes = true;
+                    } else if !watchdog_requested
+                        && intent.watchdog_rejoin_after.is_none_or(|deadline| now >= deadline)
+                        && let Some(output_since) = backend.voice_output_healthy_since()
+                        && microphones.widespread_stall(&intent, now, output_since)
+                    {
+                        watchdog_requested = true;
+                        worker.update(Update::RemoteAudioStalled);
                     }
                 }
                 Some(result) = stats_job.join_next() => {
@@ -370,6 +382,7 @@ trait RoomAudio {
         speakers: Option<&Device>,
     ) -> bool;
     fn suspend_remote_audio(&mut self) {}
+    fn voice_output_healthy_since(&self) -> Option<Instant>;
     fn playout_format(&self, device: &Device) -> Option<Self::PlayoutFormat>;
     fn macos_recording_initialized(&self) -> bool;
     fn selected_microphone(&self) -> Option<&Device>;

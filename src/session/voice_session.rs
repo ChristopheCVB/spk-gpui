@@ -287,6 +287,7 @@ pub(super) struct VoiceSession {
     call: Option<Call>,
     reclaim: Option<VoiceReclaim>,
     rejoin: Option<VoiceRejoin>,
+    watchdog_rejoin_after: Option<Instant>,
 }
 
 struct VoiceRejoin {
@@ -332,6 +333,7 @@ impl VoiceSession {
         {
             sidebar.voice_intent.remote_microphone_mutes =
                 sidebar.remote_microphone_mutes(&channel_id);
+            sidebar.voice_intent.watchdog_rejoin_after = self.watchdog_rejoin_after;
             if let Some(rejoin) = &mut self.rejoin {
                 rejoin.attempted += 1;
             }
@@ -598,6 +600,26 @@ impl VoiceSession {
                     .is_none_or(|rejoin| rejoin.attempted > 0)
             {
                 return update;
+            }
+        }
+    }
+
+    pub(super) fn recover_stalled_audio(&mut self, sidebar: &mut Sidebar) {
+        let now = Instant::now();
+        if self
+            .watchdog_rejoin_after
+            .is_none_or(|deadline| now >= deadline)
+            && sidebar.voice.as_ref().is_some_and(|voice| {
+                matches!(
+                    voice.status,
+                    VoiceStatus::Connected | VoiceStatus::ListenOnly
+                )
+            })
+            && self.rejoin.is_none()
+        {
+            self.recover(sidebar);
+            if self.rejoin.is_some() {
+                self.watchdog_rejoin_after = Some(now + Duration::from_secs(60));
             }
         }
     }

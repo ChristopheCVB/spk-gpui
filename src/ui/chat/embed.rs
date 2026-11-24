@@ -33,7 +33,7 @@ impl Spk {
         div()
             .mt_1()
             .w_full()
-            .max_w(px(512.))
+            .max_w(rems(48.))
             .flex()
             .flex_col()
             .gap_1()
@@ -67,12 +67,22 @@ impl Spk {
             })
             .children(description)
             .when(!embed.fields.is_empty(), |card| {
-                card.child(div().grid().grid_cols(3).gap_x_4().gap_y_1().children(
+                let app = cx.weak_entity();
+                card.child(div().flex().flex_wrap().gap_x_4().gap_y_1().children(
                     embed.fields.iter().enumerate().map(|(index, field)| {
-                        div()
+                        let link = field.link();
+                        let full_row = !field.inline
+                            || field.value.encode_utf16().count() > 40
+                            || link.is_some();
+                        let element = div()
                             .id(("embed-field", index))
                             .min_w_0()
-                            .col_span(if field.inline { 1 } else { 3 })
+                            .flex_basis(if full_row {
+                                relative(1.).into()
+                            } else {
+                                Length::from(rems(11.))
+                            })
+                            .flex_grow_1()
                             .flex()
                             .flex_col()
                             .child(
@@ -80,8 +90,30 @@ impl Spk {
                                     .text_xs()
                                     .font_semibold()
                                     .text_color(theme.muted_foreground),
+                            );
+                        if let Some(link) = link {
+                            let app = app.clone();
+                            element.child(
+                                Button::new("embed-field-link")
+                                    .link()
+                                    .w_full()
+                                    .h_auto()
+                                    .tab_stop(true)
+                                    .accessibility_label(field.value.clone())
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .min_w_0()
+                                            .whitespace_normal()
+                                            .child(field.value.clone()),
+                                    )
+                                    .on_click(move |_, _, cx| {
+                                        search::activate_chat_link(&app, link.clone(), cx);
+                                    }),
                             )
-                            .child(Label::new(field.value.clone()))
+                        } else {
+                            element.child(Label::new(field.value.clone()))
+                        }
                     }),
                 ))
             })

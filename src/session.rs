@@ -243,6 +243,7 @@ pub enum Command {
     PauseRadio,
     ListenToRadio,
     SetRadioVolume(u8),
+    OpenSoundboard,
     LoadSoundboard,
     AdminSoundboard(SoundboardAdminAction),
     PlaySound(String),
@@ -1134,7 +1135,7 @@ async fn watch_session(
                     | Command::PauseRadio | Command::ListenToRadio)) => {
                     radio.command(&mut sidebar, &voice, client, command);
                 }
-                Ok(command @ (Command::LoadSoundboard | Command::PlaySound(_) | Command::PreviewSound(_))) => {
+                Ok(command @ (Command::OpenSoundboard | Command::LoadSoundboard | Command::PlaySound(_) | Command::PreviewSound(_))) => {
                     soundboard.command(&mut sidebar, &voice, client, command);
                 }
                 Ok(Command::AdminSoundboard(action)) => admin_soundboard.command(&mut sidebar, client, action),
@@ -1318,6 +1319,7 @@ async fn watch_session(
                         }) => {
                         sidebar.radio.command_error = Some(error);
                     }
+                    Frame::SoundNew => sidebar.soundboard.has_new_clip = true,
                     Frame::VoiceSound { user_id, sound_id } => {
                         soundboard.relay(&mut sidebar, client, user_id, sound_id);
                     }
@@ -1348,6 +1350,7 @@ async fn watch_session(
                 VoiceUpdate::VideoParticipantLeft(id) => {
                     voice.video_participant_left(&mut sidebar, &id);
                 }
+                VoiceUpdate::RemoteAudioStalled => voice.recover_stalled_audio(&mut sidebar),
                 VoiceUpdate::Screen(report) => {
                     voice.screen_report(&mut sidebar, settings, report);
                 }

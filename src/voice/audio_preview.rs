@@ -29,9 +29,12 @@ pub(crate) fn cpal_device(kind: DeviceKind, selected: Option<&Device>) -> Option
         DeviceKind::Microphone => host.input_devices().ok()?.collect(),
         _ => host.output_devices().ok()?.collect(),
     };
+    let selected_cpal_id = selected.id.parse().ok();
     if let Some(device) = devices.iter().find(|device| {
         device.id().is_ok_and(|id| {
-            id.id() == selected.id || (cfg!(windows) && id.id().eq_ignore_ascii_case(&selected.id))
+            selected_cpal_id.as_ref() == Some(&id)
+                || id.id() == selected.id
+                || (cfg!(windows) && id.id().eq_ignore_ascii_case(&selected.id))
         })
     }) {
         return Some(device.clone());
