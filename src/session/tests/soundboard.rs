@@ -272,9 +272,9 @@ async fn soundboard_previews_privately_and_plays_only_the_channels_relay() {
                 .unwrap();
             let awaiting_relay =
                 wait_for_sidebar(&views, |s| s.soundboard.playback_error.is_none()).await;
-            assert!(!awaiting_relay.soundboard.cooling);
+            assert!(!awaiting_relay.soundboard.playback_blocked);
             checked.send(()).await.unwrap();
-            let playing = wait_for_sidebar(&views, |s| s.soundboard.cooling).await;
+            let playing = wait_for_sidebar(&views, |s| s.soundboard.playback_blocked).await;
             assert_eq!(
                 playing.soundboard.active_clips["alice"]
                     .as_ref()
@@ -300,7 +300,7 @@ async fn soundboard_previews_privately_and_plays_only_the_channels_relay() {
             assert!(left.soundboard.clips.is_none());
             assert!(left.soundboard.playback_error.is_none());
             assert!(left.soundboard.active_clips.is_empty());
-            assert!(!left.soundboard.cooling);
+            assert!(!left.soundboard.playback_blocked);
         },
     )
     .await;
@@ -386,7 +386,7 @@ async fn soundboard_turn_ends_after_the_clip_and_releases_everyone_but_its_playe
             commands.send(Command::PlaySound(CLIP.into())).await.unwrap();
 
             wait_for_sidebar(&views, |s| s.soundboard.active_clips.contains_key("alice")).await;
-            wait_for_sidebar(&views, |s| s.soundboard.cooling && s.soundboard.active_clips.is_empty())
+            wait_for_sidebar(&views, |s| s.soundboard.playback_blocked && s.soundboard.active_clips.is_empty())
                 .await;
             commands.send(Command::PlaySound(CLIP.into())).await.unwrap();
             checked.send(()).await.unwrap();
@@ -403,7 +403,7 @@ async fn soundboard_turn_ends_after_the_clip_and_releases_everyone_but_its_playe
                     .is_some_and(|clip| clip.name == "New chime")
             })
             .await;
-            wait_for_sidebar(&views, |s| !s.soundboard.cooling).await;
+            wait_for_sidebar(&views, |s| !s.soundboard.playback_blocked).await;
             commands.send(Command::PlaySound(NEW_CLIP.into())).await.unwrap();
             step.recv().await.unwrap();
         },

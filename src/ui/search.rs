@@ -183,22 +183,25 @@ impl Spk {
             cx,
         );
 
-        self.search_motion.toggle(false, cx);
+        self.search_motion.start_transition_from(false, cx);
         self.closing_search_panel = None;
         self.search_panel = Some(panel);
         query_focus.focus(window, cx);
         cx.notify();
     }
 
-    pub(super) fn sync_search_conversation(&self, sidebar: &Sidebar, cx: &mut Context<Self>) {
+    pub(super) fn sync_search_conversation(&mut self, sidebar: &Sidebar, cx: &mut Context<Self>) {
         if let Some(panel) = &self.search_panel
             && matches!(panel.read(cx).scope, SearchScope::Conversation(_))
         {
             let scope =
                 conversation_scope(sidebar).map_or(SearchScope::TextChannels, |(scope, _)| scope);
-            panel.update(cx, |panel, cx| {
-                panel.set_scope(scope, cx);
+            let command = panel.update(cx, |panel, cx| {
+                panel.set_scope(scope, cx).then(|| panel.search_command(cx))
             });
+            if let Some(command) = command {
+                self.send(command, None, cx);
+            }
         }
     }
 
@@ -222,7 +225,7 @@ impl Spk {
                     .clone();
                 return_focus.focus(window, cx);
             }
-            self.search_motion.toggle(true, cx);
+            self.search_motion.start_transition_from(true, cx);
             if !cx.reduce_motion() {
                 panel.update(cx, |search, _| search.keyboard = None);
                 let closing_id = panel.entity_id();
@@ -444,7 +447,9 @@ impl SearchPanel {
         let spk = self.spk.clone();
         window.defer(cx, move |window, cx| {
             let _ = spk.update(cx, |spk, cx| {
-                spk.close_message_search(window, cx);
+                if !workspace::wide_workspace(window) {
+                    spk.close_message_search(window, cx);
+                }
                 spk.send(Command::OpenMessageTarget(target), None, cx);
             });
         });

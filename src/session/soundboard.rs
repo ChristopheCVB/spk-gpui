@@ -22,7 +22,7 @@ pub struct SoundboardView {
     pub has_new_clip: bool,
     pub clips: Option<Arc<[SoundboardClip]>>,
     pub loading: bool,
-    pub cooling: bool,
+    pub playback_blocked: bool,
     pub active_clips: HashMap<String, Option<SoundboardClip>>,
     pub directory_error: Option<&'static str>,
     pub playback_error: Option<&'static str>,
@@ -133,7 +133,7 @@ impl SoundboardSession {
                 Some(self.next_transition.map_or(deadline, |at| at.min(deadline)));
             true
         });
-        board.cooling = !self.accepted.is_empty();
+        board.playback_blocked = !self.accepted.is_empty();
     }
 
     pub fn relay(
@@ -244,7 +244,7 @@ impl SoundboardSession {
                     self.play(client, sound_id, true);
                     return;
                 }
-                if board.cooling || !sidebar.voice_intent.preferred.soundboard_enabled {
+                if board.playback_blocked || !sidebar.voice_intent.preferred.soundboard_enabled {
                     return;
                 }
                 let Some((socket, sid)) = voice.active_socket(sidebar) else {

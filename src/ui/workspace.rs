@@ -35,9 +35,9 @@ pub(super) const PANEL_DURATION: Duration = Duration::from_millis(200);
 pub(super) struct PanelMotion(Option<(Instant, f32)>);
 
 impl PanelMotion {
-    pub(super) fn toggle(&mut self, open: bool, cx: &App) {
+    pub(super) fn start_transition_from(&mut self, currently_open: bool, cx: &App) {
         let now = Instant::now();
-        self.0 = (!cx.reduce_motion()).then(|| (now, self.sample(open, now).0));
+        self.0 = (!cx.reduce_motion()).then(|| (now, self.sample(currently_open, now).0));
     }
 
     fn sample(&self, open: bool, now: Instant) -> (f32, bool) {
@@ -245,11 +245,12 @@ impl Spk {
         }
         self.device_picker = None;
         if wide_workspace(window) {
-            self.sidebar_motion.toggle(self.sidebar_open, cx);
+            self.sidebar_motion
+                .start_transition_from(self.sidebar_open, cx);
             self.sidebar_open = !self.sidebar_open;
         } else {
             self.close_message_search(window, cx);
-            self.sidebar_drawer_motion.toggle(false, cx);
+            self.sidebar_drawer_motion.start_transition_from(false, cx);
             self.sidebar_drawer_open = true;
             self.sidebar_close_focus.focus(window, cx);
         }
@@ -267,7 +268,7 @@ impl Spk {
         if wide_workspace(window) {
             self.sidebar_drawer_motion = PanelMotion::default();
         } else {
-            self.sidebar_drawer_motion.toggle(true, cx);
+            self.sidebar_drawer_motion.start_transition_from(true, cx);
         }
         self.sidebar_drawer_open = false;
         self.device_picker = None;

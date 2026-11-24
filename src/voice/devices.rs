@@ -219,7 +219,7 @@ impl Devices {
     pub fn enumerate() -> Self {
         PlatformAudio::new().map_or_else(
             |_| Self {
-                media_outputs: cpal_routes().1,
+                media_outputs: cpal_routes().media_outputs,
                 ..Self::default()
             },
             |audio| Self::read(&audio),
@@ -235,7 +235,11 @@ impl Devices {
     }
 
     fn read(audio: &PlatformAudio) -> Self {
-        let (mut microphones, media_outputs) = cpal_routes();
+        let CpalRoutes {
+            mut microphones,
+            media_outputs,
+            ..
+        } = cpal_routes();
         if cfg!(windows) {
             microphones = list(
                 DeviceKind::Microphone,
@@ -276,29 +280,36 @@ fn describe_cpal_device(device: cpal::Device) -> Option<Device> {
     })
 }
 
-fn cpal_routes() -> (DeviceList, DeviceList) {
-    fn read(host: &cpal::Host) -> ((DeviceList, DeviceList), bool) {
-        let mut microphones = DeviceList::default();
-        let mut outputs = DeviceList::default();
+#[derive(Default)]
+struct CpalRoutes {
+    microphones: DeviceList,
+    media_outputs: DeviceList,
+    enumerated: bool,
+}
+
+fn cpal_routes() -> CpalRoutes {
+    fn read(host: &cpal::Host) -> CpalRoutes {
+        let mut routes = CpalRoutes::default();
         if !cfg!(windows) {
             // shortcut: ALSA exposes its configured PCM alias, revisit when it exposes the routed endpoint.
-            microphones.default = host.default_input_device().and_then(describe_cpal_device);
+            routes.microphones.default = host.default_input_device().and_then(describe_cpal_device);
         }
-        outputs.default = host.default_output_device().and_then(describe_cpal_device);
+        routes.media_outputs.default = host.default_output_device().and_then(describe_cpal_device);
         let Ok(devices) = host.devices() else {
-            return ((microphones, outputs), false);
+            return routes;
         };
+        routes.enumerated = true;
         for device in devices {
             if let Some(description) = describe_cpal_device(device.clone()) {
                 if device.supports_output() {
-                    outputs.choices.push(description.clone());
+                    routes.media_outputs.choices.push(description.clone());
                 }
                 if !cfg!(windows) && device.supports_input() {
-                    microphones.choices.push(description);
+                    routes.microphones.choices.push(description);
                 }
             }
         }
-        ((microphones, outputs), true)
+        routes
     }
 
     #[cfg(target_os = "linux")]
@@ -308,23 +319,29 @@ fn cpal_routes() -> (DeviceList, DeviceList) {
         let mut cached = PULSE_HOST.lock().unwrap();
         let mut previous = None;
         if let Some(host) = cached.as_ref() {
-            let (routes, listed) = read(host);
-            if listed {
+            let routes = read(host);
+            if routes.enumerated {
                 return routes;
             }
             previous = Some(routes);
         }
         let host = cpal::default_host();
-        let (mut routes, listed) = read(&host);
-        *cached = (listed && host.id() == cpal::HostId::PulseAudio).then_some(host);
-        if !listed && let Some((microphones, outputs)) = previous {
-            routes.0.default = routes.0.default.or(microphones.default);
-            routes.1.default = routes.1.default.or(outputs.default);
+        let mut routes = read(&host);
+        *cached = (routes.enumerated && host.id() == cpal::HostId::PulseAudio).then_some(host);
+        if !routes.enumerated
+            && let Some(previous) = previous
+        {
+            routes.microphones.default =
+                routes.microphones.default.or(previous.microphones.default);
+            routes.media_outputs.default = routes
+                .media_outputs
+                .default
+                .or(previous.media_outputs.default);
         }
         routes
     }
     #[cfg(not(target_os = "linux"))]
-    read(&cpal::default_host()).0
+    read(&cpal::default_host())
 }
 
 #[derive(Clone, PartialEq)]

@@ -21,6 +21,7 @@ enum Progress {
     Stalled,
     Advancing,
     Unknown,
+    Unmeasured,
 }
 
 impl MicrophoneSample {
@@ -29,6 +30,7 @@ impl MicrophoneSample {
             (Self::ParticipantMissing | Self::PublicationMissing | Self::Unsubscribed(_), _) => {
                 Progress::Stalled
             }
+            (Self::Subscribed { packets: None, .. }, _) => Progress::Unmeasured,
             (
                 Self::Subscribed {
                     sid,
@@ -97,7 +99,7 @@ impl MicrophoneWatchdog {
             let progress = sample.progress(previous.as_deref().map(|(sample, _)| sample));
             let mut episode = previous.and_then(|(_, episode)| episode.take());
             match progress {
-                Progress::Advancing => episode = None,
+                Progress::Advancing | Progress::Unmeasured => episode = None,
                 Progress::Unknown => {
                     if let Some(episode) = &mut episode {
                         episode.confirmed_since = None;
@@ -171,5 +173,37 @@ impl MicrophoneWatchdog {
             })
             .map(|(id, _)| id.clone())
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_reattached_microphone_without_stats_clears_connecting() {
+        let mut watchdog = MicrophoneWatchdog::default();
+        let mut intent = Intent::default();
+        intent.remote_microphone_mutes.insert("alice".into(), false);
+        let start = Instant::now();
+        let missing = || [("alice".into(), MicrophoneSample::PublicationMissing)].into();
+        watchdog.observe(&intent, missing(), start);
+        assert!(
+            watchdog
+                .connecting(start + CONNECTING_AFTER)
+                .contains("alice")
+        );
+
+        let attached = MicrophoneSample::Subscribed {
+            sid: "TR_alice".to_owned().try_into().unwrap(),
+            packets: None,
+        };
+        let now = start + REJOIN_AFTER;
+        assert!(
+            watchdog
+                .observe(&intent, [("alice".into(), attached)].into(), now)
+                .is_empty()
+        );
+        assert!(watchdog.connecting(now).is_empty());
     }
 }

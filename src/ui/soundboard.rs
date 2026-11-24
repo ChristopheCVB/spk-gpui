@@ -125,7 +125,7 @@ impl Render for SoundboardPanel {
         let board = &sidebar.soundboard;
         let enabled = sidebar.voice_intent.preferred.soundboard_enabled;
         let can_play =
-            enabled && !board.cooling && matches!(sidebar.connection, Connection::Online);
+            enabled && !board.playback_blocked && matches!(sidebar.connection, Connection::Online);
         let query = self.query.read(cx).value().trim().to_lowercase();
         let shown = board
             .clips
@@ -136,7 +136,7 @@ impl Render for SoundboardPanel {
         let theme = cx.theme();
         let turn = if !board.active_clips.is_empty() {
             Some("A clip is playing.")
-        } else if board.cooling {
+        } else if board.playback_blocked {
             Some("Wait a moment to play again.")
         } else {
             None
