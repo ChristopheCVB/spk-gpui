@@ -23,7 +23,7 @@ use std::{
 use chrono::{DateTime, Local};
 use gpui_kit::component::{
     Disableable,
-    menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
+    menu::{ContextMenuExt, PopupMenuItem},
     separator::Separator,
     text::{MarkdownExtensions, TextView},
     tooltip::Tooltip,
@@ -1114,6 +1114,7 @@ impl Spk {
                     .on_paste(move |item, window, cx| {
                         app.update(cx, |app, cx| {
                             app.paste_attachments(item, cx)
+                                || app.paste_attachment_paths(cx)
                                 || editor::paste(&app.chat_input, item, false, window, cx)
                         })
                         .unwrap_or(false)
@@ -1664,7 +1665,6 @@ impl Spk {
         disabled: bool,
         cx: &Context<Self>,
     ) -> impl IntoElement {
-        let app = cx.weak_entity();
         let active = editor::active_formats(self.chat_input.read(cx));
         div()
             .flex()
@@ -1692,55 +1692,8 @@ impl Spk {
                         }))
                 }),
             )
-            .child(
-                tool_button("emoji-menu", IconName::FaceSlightlySmiling, "Emoji")
-                    .disabled(disabled)
-                    .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
-                        [
-                            ("👍", "Thumbs up"),
-                            ("❤️", "Heart"),
-                            ("😂", "Laugh"),
-                            ("😊", "Smile"),
-                            ("👋", "Wave"),
-                            ("🎉", "Celebrate"),
-                        ]
-                        .into_iter()
-                        .fold(menu, |menu, (emoji, name)| {
-                            let app = app.clone();
-                            menu.item(PopupMenuItem::new(format!("{emoji} {name}")).on_click(
-                                move |_, window, cx| {
-                                    let _ = app.update(cx, |this, cx| {
-                                        this.insert_chat_text("", emoji, window, cx)
-                                    });
-                                },
-                            ))
-                        })
-                    }),
-            )
             .child(self.attachment_picker(chat, cx))
             .child(self.gif_toggle(chat, cx))
-    }
-
-    fn insert_chat_text(
-        &mut self,
-        before: &str,
-        after: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !chat(&self.view).is_some_and(|chat| chat.can_send()) {
-            return;
-        }
-        self.chat_input.update(cx, |input, cx| {
-            let selected = input.selected_value();
-            let start = input.selected_range().start + before.len();
-            input.replace(format!("{before}{selected}{after}"), window, cx);
-            if !before.is_empty() {
-                input.set_selected_range(start..start + selected.len(), cx);
-            }
-            input.focus(window, cx);
-        });
-        self.update_chat_draft(cx);
     }
 }
 
