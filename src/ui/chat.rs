@@ -22,7 +22,8 @@ use std::{
 
 use chrono::{DateTime, Local};
 use gpui_kit::base::text::{
-    MarkdownExtensions, MarkdownNode, MarkdownParseContext, MarkdownPlugin, TextView, TextViewStyle,
+    InlineElement, InlineRenderContext, MarkdownExtensions, MarkdownNode, MarkdownParseContext,
+    MarkdownPlugin, TextView, TextViewStyle,
 };
 use gpui_kit::component::{
     Disableable,
@@ -56,6 +57,7 @@ struct RenderedChatMarkdown {
 struct HiddenChatSpoilers {
     key: (String, u64),
     offsets: Vec<usize>,
+    revealed: bool,
 }
 
 fn chat(view: &View) -> Option<&ChatView> {
@@ -1201,7 +1203,7 @@ impl Spk {
         )
         .into_owned()
         .into();
-        let display = if body.contains("<@") {
+        let display = if body.contains("<@") || body.contains('|') {
             styled_message_markdown(
                 body,
                 name_of,
@@ -1215,10 +1217,7 @@ impl Spk {
             source.clone()
         };
         let hidden = hidden.into_inner();
-        let link_key = spoiler_key.clone();
         let link_app = cx.weak_entity();
-        let link_filter = self.chat_spoiler_link.clone();
-        let link_prefix = self.chat_spoiler_link.clone();
         let theme = cx.theme();
         let base = theme.popover;
         let view = TextView::markdown(id, display)
@@ -1240,26 +1239,17 @@ impl Spk {
             .markdown_extensions(
                 MarkdownExtensions::default()
                     .plugin(MessageMention)
-                    .parser_revision(2)
+                    .plugin(MessageSpoiler {
+                        app: cx.weak_entity(),
+                        key: spoiler_key.clone(),
+                        link_prefix: self.chat_spoiler_link.clone(),
+                    })
+                    .parser_revision(3)
                     .raw_html(false),
             )
-            .link(move |link, _| {
-                (link.url.starts_with(&link_filter) || safe_link(&link.url).is_some())
-                    .then(|| link.clone())
-            })
+            .link(|link, _| safe_link(&link.url).map(|_| link.clone()))
             .on_link_click(move |href, _, _, cx| {
-                if let Some(offset) = href.strip_prefix(&link_prefix) {
-                    if let Ok(offset) = offset.parse::<usize>() {
-                        let _ = link_app.update(cx, |this, cx| {
-                            this.preserve_chat_position();
-                            this.chat_spoilers
-                                .entry(link_key.clone())
-                                .or_default()
-                                .insert(offset);
-                            cx.notify();
-                        });
-                    }
-                } else if let Some(url) = safe_link(href) {
+                if let Some(url) = safe_link(href) {
                     search::activate_chat_link(&link_app, url, cx);
                 }
             });
@@ -1269,6 +1259,7 @@ impl Spk {
             spoilers: HiddenChatSpoilers {
                 key: spoiler_key,
                 offsets: hidden,
+                revealed: reveals.is_some_and(|offsets| !offsets.is_empty()),
             },
         }
     }
@@ -1311,7 +1302,7 @@ impl Spk {
                     .as_ref()
                     .map(|markdown| markdown.spoilers.clone()),
             )
-            .filter(|spoilers| !spoilers.offsets.is_empty())
+            .filter(|spoilers| spoilers.revealed || !spoilers.offsets.is_empty())
             .collect();
         let target = MessageTarget::new(&message.channel_id, &message.id);
         let images = self.message_images(chat, target.clone(), &body, &share_text, cx);
@@ -1816,6 +1807,122 @@ impl MarkdownPlugin for MessageMention {
             .text_color(theme.primary)
             .font_medium()
             .child(node.as_text().to_owned())
+    }
+}
+
+struct MessageSpoiler {
+    app: WeakEntity<Spk>,
+    key: (String, u64),
+    link_prefix: String,
+}
+
+impl MarkdownPlugin for MessageSpoiler {
+    fn name(&self) -> &str {
+        "spk-spoiler"
+    }
+
+    fn parse(
+        &self,
+        node: &markdown::mdast::Node,
+        _: &MarkdownParseContext<'_>,
+    ) -> Option<MarkdownNode> {
+        let markdown::mdast::Node::Image(image) = node else {
+            return None;
+        };
+        let offset: usize = image.url.strip_prefix(&self.link_prefix)?.parse().ok()?;
+        let columns: usize = image.alt.parse().ok()?;
+        Some(
+            MarkdownNode::new(self.name().to_owned(), (offset, columns))
+                .text("[spoiler]")
+                .markdown("[spoiler]")
+                .accessibility_label("Spoiler: click to reveal"),
+        )
+    }
+
+    fn render_inline(
+        &self,
+        node: &MarkdownNode,
+        context: &InlineRenderContext,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<InlineElement> {
+        let &(offset, columns) = node.data::<(usize, usize)>()?;
+        let id = SharedString::from(format!("spoiler-{}-{}-{offset}", self.key.0, self.key.1));
+        let focus = window
+            .use_keyed_state(id.clone(), cx, |_, cx| cx.focus_handle())
+            .read(cx)
+            .clone();
+        let width = (context.font_size() * (columns as f32 * 0.5)).clamp(px(24.), px(208.));
+        let theme = cx.theme();
+        let border = if focus.is_focused(window) && window.last_input_was_keyboard() {
+            theme.ring
+        } else {
+            theme.transparent
+        };
+        let label = node.accessibility_name().to_owned();
+        let app = self.app.clone();
+        let key = self.key.clone();
+        Some(InlineElement::new(
+            Button::new(id)
+                .ghost()
+                .track_focus(&focus)
+                .tab_stop(true)
+                .accessibility_label(label.clone())
+                .tooltip(label)
+                .w(width)
+                .h(context.line_height())
+                .p_0()
+                .rounded_sm()
+                .border_1()
+                .border_color(border)
+                .cursor_pointer()
+                .bg(theme.popover)
+                .child(
+                    div()
+                        .size_full()
+                        .relative()
+                        .overflow_hidden()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        // shortcut: blur a text-sized mask, use a text filter if GPUI adds one.
+                        .child(
+                            div()
+                                .absolute()
+                                .left_2()
+                                .right_2()
+                                .h_1()
+                                .rounded_full()
+                                .shadow(vec![BoxShadow {
+                                    offset: point(px(0.), px(0.)),
+                                    blur_radius: px(7.),
+                                    spread_radius: px(2.),
+                                    color: theme.foreground.opacity(0.26),
+                                    inset: false,
+                                }]),
+                        )
+                        .child(
+                            Icon::new(IconName::Eye)
+                                .size(px(14.))
+                                .text_color(theme.foreground),
+                        ),
+                )
+                .on_click(move |event, window, cx| {
+                    let _ = app.update(cx, |app, cx| {
+                        app.preserve_chat_position();
+                        app.chat_spoilers
+                            .entry(key.clone())
+                            .or_default()
+                            .insert(offset);
+                        if event.is_keyboard()
+                            && let Some(focus) = app.chat_row_focus.borrow().get(&key.0)
+                        {
+                            focus.focus(window, cx);
+                        }
+                        cx.notify();
+                    });
+                }),
+        ))
     }
 }
 

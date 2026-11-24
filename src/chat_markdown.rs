@@ -190,6 +190,11 @@ fn find_edits<'a>(
                                 edits.push((marker, String::new()));
                             } else {
                                 let label = match spoiler_link {
+                                    Some(link) if styled_for.is_some() => {
+                                        let text = plain_text(&source[open.end..marker.start]);
+                                        let width = text.chars().count();
+                                        format!("![{width}]({link}{})", open.start)
+                                    }
                                     Some(link) => format!("[Reveal spoiler]({link}{})", open.start),
                                     None => "▒▒▒".into(),
                                 };
@@ -392,7 +397,8 @@ mod tests {
             styled.starts_with("![@Alice](spk-mention:self) ![@Bob](spk-mention:other) `<@alice>`")
         );
         assert_eq!(styled.matches("spk-mention:").count(), 2);
-        assert!(styled.contains("[Reveal spoiler]"));
+        assert!(styled.contains("![6](spk-spoiler:test:"));
+        assert!(!styled.contains("||"));
         assert!(styled.ends_with(" spoof"));
     }
 

@@ -961,6 +961,12 @@ impl MessageActions {
             .join("\n");
         let copy_text = self.share_text.clone();
         let hidden = self.hidden_spoilers.clone();
+        let revealed: Vec<_> = hidden
+            .iter()
+            .filter(|spoilers| spoilers.revealed)
+            .map(|spoilers| spoilers.key.clone())
+            .collect();
+        let hide_app = app.clone();
         let menu = menu
             .max_h(window.viewport_size().height - px(24.))
             .scrollable(true)
@@ -1043,18 +1049,36 @@ impl MessageActions {
                         }),
                 )
             })
-            .when(!hidden.is_empty(), |menu| {
+            .when(
+                hidden.iter().any(|spoilers| !spoilers.offsets.is_empty()),
+                |menu| {
+                    menu.item(
+                        PopupMenuItem::new("Reveal spoilers")
+                            .icon(IconName::Eye)
+                            .on_click(move |_, _, cx| {
+                                let _ = app.update(cx, |this, cx| {
+                                    this.preserve_chat_position();
+                                    for spoilers in &hidden {
+                                        this.chat_spoilers
+                                            .entry(spoilers.key.clone())
+                                            .or_default()
+                                            .extend(&spoilers.offsets);
+                                    }
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                },
+            )
+            .when(!revealed.is_empty(), |menu| {
                 menu.item(
-                    PopupMenuItem::new("Reveal spoilers")
-                        .icon(IconName::Eye)
+                    PopupMenuItem::new("Hide spoilers")
+                        .icon(IconName::EyeOff)
                         .on_click(move |_, _, cx| {
-                            let _ = app.update(cx, |this, cx| {
+                            let _ = hide_app.update(cx, |this, cx| {
                                 this.preserve_chat_position();
-                                for spoilers in &hidden {
-                                    this.chat_spoilers
-                                        .entry(spoilers.key.clone())
-                                        .or_default()
-                                        .extend(&spoilers.offsets);
+                                for key in &revealed {
+                                    this.chat_spoilers.remove(key);
                                 }
                                 cx.notify();
                             });
