@@ -382,8 +382,8 @@ impl Spk {
         if chat.gifs.is_some() {
             self.gif_button_focus.focus(window, cx);
             self.send(Command::ShowGifs(false), None, cx);
-        } else if self.dismiss_message_action(window, cx) {
-            return true;
+        } else if self.message_action_form.is_some() {
+            return self.dismiss_message_action(window, cx);
         } else if chat.draft.reply.is_some() {
             self.send(
                 Command::SetChatReply {
