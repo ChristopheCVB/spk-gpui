@@ -180,6 +180,7 @@ pub(super) struct ChatSession {
     vote_error: Option<&'static str>,
     drafts: HashMap<String, Draft>,
     draft_changes: HashMap<String, String>,
+    pub draft_writes: JoinSet<Result<(), HashMap<String, String>>>,
     typers: HashMap<String, Instant>,
     last_typing: Option<Instant>,
     socket: Option<VoiceSocket>,
@@ -218,14 +219,29 @@ impl ChatSession {
         }
     }
 
-    pub async fn save_drafts(&mut self, store: &DraftStore, notice: &mut Option<&'static str>) {
-        if self.draft_changes.is_empty() {
-            return;
-        }
-        match store.save(self.draft_changes.clone()).await {
-            Ok(()) => {
-                self.draft_changes.clear();
-                *notice = None;
+    pub fn drafts_to_save(&self) -> bool {
+        !self.draft_changes.is_empty() && self.draft_writes.is_empty()
+    }
+
+    pub fn save_drafts(&mut self, store: &DraftStore) {
+        let changes = std::mem::take(&mut self.draft_changes);
+        let store = store.clone();
+        self.draft_writes
+            .spawn(async move { store.save(changes.clone()).await.map_err(|_| changes) });
+    }
+
+    pub fn draft_save_completed(
+        &mut self,
+        result: Result<Result<(), HashMap<String, String>>, tokio::task::JoinError>,
+        notice: &mut Option<&'static str>,
+    ) {
+        match result {
+            Ok(Ok(())) => *notice = None,
+            Ok(Err(changes)) => {
+                for (channel, body) in changes {
+                    self.draft_changes.entry(channel).or_insert(body);
+                }
+                *notice = Some("Could not save Drafts for the next launch.");
             }
             Err(_) => *notice = Some("Could not save Drafts for the next launch."),
         }

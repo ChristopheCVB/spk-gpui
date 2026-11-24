@@ -159,6 +159,14 @@ async fn draft_text_survives_restart_by_conversation_and_account() {
                 .await
                 .unwrap();
                 receive_chat_send(&mut peer, "general", GENERAL).await;
+                for revision in 0..64 {
+                    tx.send(Command::UpdateChatDraft {
+                        channel_id: "general".into(),
+                        body: format!("Newest Draft revision {revision}"),
+                    })
+                    .await
+                    .unwrap();
+                }
                 tx.send(Command::UpdateChatDraft {
                     channel_id: "general".into(),
                     body: GENERAL_AT_QUIT.into(),

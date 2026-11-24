@@ -683,12 +683,13 @@ async fn watch_session(
     let mut channel_mutation_result = None;
     let mut profiles = JoinSet::new();
     let mut account_admin = AccountAdmin::default();
+    let mut draft_save_at = None;
     let end = loop {
         if commands.is_closed() {
             break SessionEnd::Closed;
         }
-        if let Some(store) = &draft_store {
-            chat.save_drafts(store, &mut sidebar.draft_notice).await;
+        if draft_store.is_some() && chat.drafts_to_save() {
+            draft_save_at.get_or_insert_with(|| Instant::now() + Duration::from_millis(250));
         }
         unread.write_next(client);
         chat.fill_previews(client);
@@ -730,6 +731,15 @@ async fn watch_session(
             () = presence.report(sidebar.user_status, active) => {}
             Ok(()) = settings.presence.activity.changed() => {}
             _ = sleep_until(chat_timeout.unwrap_or_else(Instant::now)), if chat_timeout.is_some() => chat.expire(),
+            _ = sleep_until(draft_save_at.unwrap_or_else(Instant::now)), if draft_save_at.is_some() => {
+                draft_save_at = None;
+                if let Some(store) = &draft_store {
+                    chat.save_drafts(store);
+                }
+            }
+            Some(result) = chat.draft_writes.join_next() => {
+                chat.draft_save_completed(result, &mut sidebar.draft_notice);
+            }
             Some(result) = unread.writes.join_next() => {
                 let result = result.unwrap_or(Err(Failure::Connection));
                 if result.as_ref().is_err_and(Failure::unauthorized) {
@@ -1448,15 +1458,23 @@ async fn watch_session(
             }
         }
     };
-    if matches!(end, SessionEnd::Closed)
-        && let Some(store) = &draft_store
-    {
-        while let Ok(command) = commands.try_recv() {
-            if let Command::UpdateChatDraft { channel_id, body } = command {
-                chat.update_draft(channel_id, body);
+    if let Some(store) = &draft_store {
+        if matches!(end, SessionEnd::Closed) {
+            while let Ok(command) = commands.try_recv() {
+                if let Command::UpdateChatDraft { channel_id, body } = command {
+                    chat.update_draft(channel_id, body);
+                }
             }
         }
-        chat.save_drafts(store, &mut sidebar.draft_notice).await;
+        if let Some(result) = chat.draft_writes.join_next().await {
+            chat.draft_save_completed(result, &mut sidebar.draft_notice);
+        }
+        if chat.drafts_to_save() {
+            chat.save_drafts(store);
+            if let Some(result) = chat.draft_writes.join_next().await {
+                chat.draft_save_completed(result, &mut sidebar.draft_notice);
+            }
+        }
     }
     if matches!(end, SessionEnd::Invalidated(SESSION_EXPIRED))
         && matches!(
