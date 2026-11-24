@@ -682,7 +682,7 @@ impl Spk {
         );
         if self.form_error.is_none() {
             self.chat_submitting = true;
-            self.slash_choice = None;
+            self.suggestions[0].dismiss();
             self.chat_input.update(cx, |input, cx| {
                 input.set_value("", window, cx);
                 input.focus(window, cx);
