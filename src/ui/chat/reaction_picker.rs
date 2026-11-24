@@ -82,7 +82,7 @@ impl Spk {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !reaction_message(chat(&self.view), channel_id, message_id)
+        if !active_chat_message(chat(&self.view), channel_id, message_id)
             .is_some_and(|(chat, _)| !chat.action_pending)
         {
             return;
