@@ -213,7 +213,7 @@ impl Devices {
     pub fn enumerate() -> Self {
         PlatformAudio::new().map_or_else(
             |_| Self {
-                media_outputs: media_outputs(),
+                media_outputs: media_outputs(&cpal::default_host()),
                 ..Self::default()
             },
             |audio| Self::read(&audio),
@@ -229,20 +229,29 @@ impl Devices {
     }
 
     fn read(audio: &PlatformAudio) -> Self {
+        let host = cpal::default_host();
+        let microphones = list(
+            DeviceKind::Microphone,
+            audio.recording_devices().map(|device| {
+                (
+                    device.index,
+                    Device {
+                        id: device.id.as_str().into(),
+                        name: device.name,
+                    },
+                )
+            }),
+        );
+        #[cfg(not(windows))]
+        let microphones = DeviceList {
+            // Capture uses CPAL. The LiveKit alias can stay unchanged when the input changes.
+            // shortcut: ALSA exposes its configured PCM alias, revisit when it exposes the routed endpoint.
+            default: host.default_input_device().and_then(describe_cpal_device),
+            ..microphones
+        };
         Self {
-            microphones: list(
-                DeviceKind::Microphone,
-                audio.recording_devices().map(|device| {
-                    (
-                        device.index,
-                        Device {
-                            id: device.id.as_str().into(),
-                            name: device.name,
-                        },
-                    )
-                }),
-            ),
-            media_outputs: media_outputs(),
+            microphones,
+            media_outputs: media_outputs(&host),
             speakers: list(
                 DeviceKind::Speakers,
                 audio.playout_devices().map(|device| {
@@ -259,23 +268,22 @@ impl Devices {
     }
 }
 
-fn media_outputs() -> DeviceList {
-    fn describe(device: cpal::Device) -> Option<Device> {
-        Some(Device {
-            id: device.id().ok()?.to_string(),
-            name: device.description().ok()?.name().to_owned(),
-        })
-    }
+fn describe_cpal_device(device: cpal::Device) -> Option<Device> {
+    Some(Device {
+        id: device.id().ok()?.to_string(),
+        name: device.description().ok()?.name().to_owned(),
+    })
+}
 
-    let host = cpal::default_host();
+fn media_outputs(host: &cpal::Host) -> DeviceList {
     DeviceList {
-        default: host.default_output_device().and_then(describe),
+        default: host.default_output_device().and_then(describe_cpal_device),
         choices: host
             .output_devices()
             .ok()
             .into_iter()
             .flatten()
-            .filter_map(describe)
+            .filter_map(describe_cpal_device)
             .collect(),
     }
 }
@@ -374,6 +382,17 @@ pub(super) fn switch_speakers(audio: &PlatformAudio, device: &Device) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires SPK_TEST_PULSE_SOURCE on a native PulseAudio-compatible server"]
+    fn system_default_microphone_resolves_to_the_pulse_source() {
+        let source = std::env::var("SPK_TEST_PULSE_SOURCE").unwrap();
+        let expected = cpal::DeviceId::new(cpal::HostId::PulseAudio, source).to_string();
+        let devices = Devices::enumerate();
+        let active = devices.microphones.resolve(None).unwrap();
+        assert_eq!(active.id, expected);
+    }
 
     #[cfg(windows)]
     #[test]
