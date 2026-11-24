@@ -454,6 +454,7 @@ impl SearchPanel {
         &self,
         hit: &SearchHit,
         sidebar: &Sidebar,
+        compact: bool,
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let target = hit.target.clone();
@@ -504,7 +505,8 @@ impl SearchPanel {
             let snippet = hit.snippet.replace(['\u{1}', '\u{2}'], "");
             message_markdown(&snippet, |id| sidebar.message_author(id), |_| false, None)
                 .into_owned()
-        };
+        }
+        .replace(['\r', '\n'], " ");
         let copy_target = target.clone();
         let selected = self.selected_result.as_ref() == Some(&target);
         div()
@@ -516,6 +518,15 @@ impl SearchPanel {
             .child(
                 Button::new("open-result")
                     .ghost()
+                    .h_auto()
+                    .px_3()
+                    .map(|button| {
+                        if compact {
+                            button.py_1()
+                        } else {
+                            button.py_2()
+                        }
+                    })
                     .flex_1()
                     .min_w_0()
                     .tab_stop(true)
@@ -531,6 +542,7 @@ impl SearchPanel {
                             .min_w_0()
                             .flex()
                             .flex_col()
+                            .gap_1()
                             .child(
                                 Label::new(context)
                                     .truncate()
@@ -692,7 +704,7 @@ impl Render for SearchPanel {
                         search
                             .results
                             .iter()
-                            .map(|hit| self.result_row(hit, sidebar, cx)),
+                            .map(|hit| self.result_row(hit, sidebar, spk.compact(), cx)),
                     )
                     .when(search.next_cursor.is_some(), |list| {
                         list.child(
