@@ -146,6 +146,7 @@ impl Settings {
                                     "profile-status",
                                     sidebar.user_status,
                                     spk.clone(),
+                                    cx,
                                 )),
                         )
                         .children(sidebar.user_status_notice.map(|notice| {
