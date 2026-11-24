@@ -125,6 +125,10 @@ impl Spk {
             } else {
                 &self.chat_input
             };
+            if count == 0 && key_name == "backspace" && editor::backspace_mention(input, window, cx)
+            {
+                return true;
+            }
             if primary
                 && count == 1
                 && matches!(key_name, "c" | "x")

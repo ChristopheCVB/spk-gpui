@@ -326,6 +326,7 @@ pub struct Sidebar {
     pub device_notice: Option<&'static str>,
     pub avatars: Arc<HashMap<String, Arc<AvatarPhoto>>>,
     users: Arc<HashMap<String, User>>,
+    user_order: Arc<[String]>,
     voice_presence: HashMap<String, VoiceMembership>,
     user_presence: Arc<HashMap<String, UserPresence>>,
 }
@@ -365,6 +366,7 @@ impl Sidebar {
             device_notice: None,
             avatars: Arc::default(),
             users: Arc::default(),
+            user_order: Arc::default(),
             voice_presence: HashMap::new(),
             user_presence: Arc::default(),
         }
@@ -421,6 +423,21 @@ impl Sidebar {
         people
     }
 
+    pub fn mention_directory(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.user_order.iter().filter_map(|id| {
+            let user = self.users.get(id)?;
+            Some((id.as_str(), user.name()?))
+        })
+    }
+
+    pub fn mention_name(&self, id: &str) -> Option<&str> {
+        self.users.get(id).and_then(User::name)
+    }
+
+    pub fn same_user_directory(&self, previous: &Self) -> bool {
+        Arc::ptr_eq(&self.users, &previous.users)
+    }
+
     pub fn direct_message(&self, user_id: &str) -> Option<&Channel> {
         self.channels.iter().flatten().find(|channel| {
             channel.kind == "dm" && channel.other_user_id.as_deref() == Some(user_id)
@@ -471,7 +488,11 @@ impl Sidebar {
         if self.profile.id.as_deref() == Some(id) {
             self.profile.avatar_key.as_deref()
         } else {
-            self.inspect_person(id)?.avatar_key.as_deref()
+            self.users
+                .get(id)
+                .or_else(|| self.inspect_person(id))?
+                .avatar_key
+                .as_deref()
         }
         .filter(|key| !key.is_empty())
     }

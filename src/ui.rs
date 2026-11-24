@@ -149,7 +149,7 @@ impl Spk {
             window,
             |this, _, event, window, cx| match event {
                 InputEvent::Change => {
-                    chat::editor::refresh(&this.chat_input, cx);
+                    this.refresh_chat_editor(false, cx);
                     this.on_chat_input(window, cx);
                 }
                 InputEvent::Focus => cx.notify(),
@@ -192,7 +192,7 @@ impl Spk {
             &message_action_input,
             window,
             |this, input, event, window, cx| match event {
-                InputEvent::Change => chat::editor::refresh(&input, cx),
+                InputEvent::Change => this.refresh_chat_editor(true, cx),
                 InputEvent::Focus => cx.notify(),
                 InputEvent::Blur => {
                     this.suggestions[1].dismiss();

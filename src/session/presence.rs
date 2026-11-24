@@ -342,6 +342,7 @@ impl Refresh {
                                 sidebar.profile.avatar_key.clone_from(&me.avatar_key);
                             }
                         }
+                        sidebar.user_order = users.iter().map(|user| user.id.clone()).collect();
                         sidebar.users = Arc::new(
                             users
                                 .into_iter()

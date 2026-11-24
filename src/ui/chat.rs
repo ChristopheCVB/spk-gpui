@@ -448,6 +448,19 @@ impl Spk {
         true
     }
 
+    pub(super) fn refresh_chat_editor(&self, editing: bool, cx: &mut App) {
+        let input = if editing {
+            &self.message_action_input
+        } else {
+            &self.chat_input
+        };
+        let directory = match &self.view {
+            View::SignedIn(sidebar) => Some(sidebar),
+            _ => None,
+        };
+        editor::refresh(input, directory, cx);
+    }
+
     pub(super) fn format_chat_input(
         &mut self,
         format: Format,
@@ -460,6 +473,7 @@ impl Spk {
         } else if chat(&self.view).is_some_and(|chat| chat.can_send()) {
             editor::toggle(&self.chat_input, format, window, cx);
         }
+        self.refresh_chat_editor(editing, cx);
     }
 
     pub(super) fn update_chat(&mut self, next: &View, window: &mut Window, cx: &mut Context<Self>) {
@@ -474,7 +488,15 @@ impl Spk {
             });
         }
         let previous = chat(&self.view);
-        let signed_in = matches!(next, View::SignedIn(_));
+        let directory = match next {
+            View::SignedIn(sidebar) => Some(sidebar),
+            _ => None,
+        };
+        let signed_in = directory.is_some();
+        let directory_changed = directory.is_some_and(|directory| match &self.view {
+            View::SignedIn(previous) => !directory.same_user_directory(previous),
+            _ => true,
+        });
         let next = chat(next);
         if previous
             .map(|chat| (&chat.channel_id, &chat.messages))
@@ -545,7 +567,7 @@ impl Spk {
                     cx,
                 )
             });
-            editor::refresh(&self.chat_input, cx);
+            editor::refresh(&self.chat_input, directory, cx);
             self.chat_spoilers.clear();
             self.chat_scroll_anchor = None;
             self.chat_history_position
@@ -577,7 +599,15 @@ impl Spk {
                 self.chat_input.update(cx, |input, cx| {
                     input.set_value(next.draft.body.clone(), window, cx)
                 });
-                editor::refresh(&self.chat_input, cx);
+                editor::refresh(&self.chat_input, directory, cx);
+            }
+        }
+        if directory_changed {
+            if !reset {
+                editor::refresh(&self.chat_input, directory, cx);
+            }
+            if self.message_action_form.is_some() {
+                editor::refresh(&self.message_action_input, directory, cx);
             }
         }
         let previous_jump = previous
@@ -691,7 +721,7 @@ impl Spk {
                 input.set_value("", window, cx);
                 input.focus(window, cx);
             });
-            editor::refresh(&self.chat_input, cx);
+            self.refresh_chat_editor(false, cx);
             if !reading_older {
                 self.chat_scroll.scroll_to_bottom();
             }
@@ -1096,7 +1126,7 @@ impl Spk {
                     .flex_shrink_0()
                     .items_end()
                     .gap_2()
-                    .child(self.composer_tools(sidebar, chat, disabled, cx))
+                    .child(self.composer_tools(chat, disabled, cx))
                     .child(
                         icon_label_button(
                             control_button("send-chat").primary(),
@@ -1275,6 +1305,9 @@ impl Spk {
             row_focused || menu_focused,
             cx,
         );
+        let user_menu = chat
+            .can_send()
+            .then(|| (message.user_id.clone(), app.clone()));
         let content = div()
             .flex_1()
             .min_w_0()
@@ -1286,7 +1319,19 @@ impl Spk {
                     .items_center()
                     .gap_2()
                     .when(starts_group, |header| {
-                        header.child(Label::new(author.to_owned()).font_semibold())
+                        header.child(
+                            div()
+                                .id("message-author")
+                                .child(Label::new(author.to_owned()).font_semibold())
+                                .when_some(user_menu, |author, (id, app)| {
+                                    author.context_menu(move |menu, _, _| {
+                                        menu.item(profile::mention_user_item(
+                                            id.clone(),
+                                            app.clone(),
+                                        ))
+                                    })
+                                }),
+                        )
                     })
                     .when_some(
                         exact_time.clone().filter(|_| starts_group),
@@ -1588,21 +1633,39 @@ impl Spk {
         });
     }
 
+    pub(super) fn append_chat_mention(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !chat(&self.view).is_some_and(ChatView::can_send)
+            || !crate::chat_markdown::valid_mention_id(id)
+        {
+            return;
+        }
+        self.close_sidebar_drawer(window, cx);
+        self.chat_input.update(cx, |input, cx| {
+            let source = input.value();
+            let empty = editor::wire(input).trim().is_empty();
+            let start = if empty { 0 } else { source.trim_end().len() };
+            let separator = if empty { "" } else { " " };
+            input.set_selected_range(start..source.len(), cx);
+            input.replace(format!("{separator}<@{id}> "), window, cx);
+            input.focus(window, cx);
+        });
+        self.refresh_chat_editor(false, cx);
+        self.update_chat_draft(cx);
+    }
+
     fn composer_tools(
         &self,
-        sidebar: &Sidebar,
         chat: &ChatView,
         disabled: bool,
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let app = cx.weak_entity();
-        let mention_app = app.clone();
         let active = editor::active_formats(self.chat_input.read(cx));
-        let people: Vec<_> = sidebar
-            .people()
-            .into_iter()
-            .map(|(id, name)| (name.to_owned(), id.to_owned()))
-            .collect();
         div()
             .flex()
             .flex_1()
@@ -1628,23 +1691,6 @@ impl Spk {
                             this.format_chat_input(format, false, window, cx);
                         }))
                 }),
-            )
-            .child(
-                tool_button("mention-menu", IconName::AtSign, "Mention")
-                    .disabled(disabled || people.is_empty())
-                    .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
-                        people.iter().fold(menu, |menu, (name, id)| {
-                            let app = mention_app.clone();
-                            let mention = format!("<@{id}> ");
-                            menu.item(PopupMenuItem::new(name.clone()).on_click(
-                                move |_, window, cx| {
-                                    let _ = app.update(cx, |this, cx| {
-                                        this.insert_chat_text("", &mention, window, cx)
-                                    });
-                                },
-                            ))
-                        })
-                    }),
             )
             .child(
                 tool_button("emoji-menu", IconName::FaceSlightlySmiling, "Emoji")

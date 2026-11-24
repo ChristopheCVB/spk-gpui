@@ -2,6 +2,8 @@ use std::ops::Range;
 
 use ::markdown::{ParseOptions, mdast::Node};
 
+use crate::chat_markdown::{mask_mention_ids, mention_at};
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(in crate::ui) enum Format {
     Bold,
@@ -43,6 +45,7 @@ pub(super) struct Mark {
 pub(super) struct Projection {
     pub marks: Vec<Mark>,
     pub syntax: Vec<Syntax>,
+    pub mentions: Vec<Range<usize>>,
 }
 
 impl Projection {
@@ -51,7 +54,7 @@ impl Projection {
         options.constructs.html_flow = false;
         options.constructs.html_text = false;
         options.constructs.gfm_autolink_literal = false;
-        let Ok(document) = ::markdown::to_mdast(source, &options) else {
+        let Ok(document) = ::markdown::to_mdast(&mask_mention_ids(source), &options) else {
             return Self::default();
         };
         let mut result = Self::default();
@@ -206,6 +209,11 @@ impl Projection {
                 let mut chars = text.char_indices().peekable();
                 while let Some((index, ch)) = chars.next() {
                     let offset = range.start + index;
+                    if ch == '<'
+                        && let Some(id) = mention_at(&source[offset..range.end])
+                    {
+                        self.mentions.push(offset..offset + id.len() + 3);
+                    }
                     if ch == '\n' {
                         *spoiler = None;
                     } else if ch == '\\'
@@ -333,6 +341,80 @@ pub(super) fn current_line(source: &str, selection: &Range<usize>) -> Range<usiz
     start..end
 }
 
+pub(super) fn mention_change(
+    source: &str,
+    mut range: Range<usize>,
+    token: &str,
+) -> (Range<usize>, String, usize) {
+    let projection = Projection::parse(source);
+    if let Some(block) = projection.covering(Format::CodeBlock, &range) {
+        let end = block.close.end;
+        let fence = if block.close.is_empty() {
+            let opening = &source[block.open.clone()];
+            let marker = opening.trim_start().chars().next().unwrap_or('`');
+            let width = opening
+                .trim_start()
+                .chars()
+                .take_while(|ch| *ch == marker)
+                .count();
+            let newline = if source[..range.start].ends_with('\n') && end == range.end {
+                ""
+            } else {
+                "\n"
+            };
+            format!("{newline}{}", marker.to_string().repeat(width))
+        } else {
+            String::new()
+        };
+        let text = format!("{}{fence}\n\n{token}", &source[range.end..end]);
+        let caret = range.start + text.len();
+        return (range.start..end, text, caret);
+    }
+    let mut marks: Vec<_> = projection
+        .marks
+        .iter()
+        .filter(|mark| {
+            matches!(
+                mark.format,
+                Format::Bold | Format::Italic | Format::Strike | Format::Code | Format::Link
+            ) && mark.range.start <= range.start
+                && range.end <= mark.range.end
+        })
+        .collect();
+    marks.sort_by_key(|mark| mark.open.start);
+    let mut closes = String::new();
+    let mut opens = String::new();
+    for mark in marks.into_iter().rev() {
+        if mark.range.start == range.start {
+            range.start = mark.open.start;
+        } else {
+            closes.push_str(&source[mark.close.clone()]);
+        }
+        if mark.range.end == range.end {
+            range.end = mark.close.end;
+        } else {
+            opens.insert_str(0, &source[mark.open.clone()]);
+        }
+    }
+    let left_space = source[..range.start].trim_end_matches([' ', '\t']).len();
+    let right_space = range.end + source[range.end..].len()
+        - source[range.end..].trim_start_matches([' ', '\t']).len();
+    let mut text = String::new();
+    if !closes.is_empty() {
+        text.push_str(&closes);
+        text.push_str(&source[left_space..range.start]);
+        range.start = left_space;
+    }
+    text.push_str(token);
+    let caret = range.start + text.len();
+    if !opens.is_empty() {
+        text.push_str(&source[range.end..right_space]);
+        text.push_str(&opens);
+        range.end = right_space;
+    }
+    (range, text, caret)
+}
+
 pub(super) fn enter_change(
     source: &str,
     selection: Range<usize>,
@@ -397,6 +479,19 @@ mod tests {
             assert!(draft.active(format, &(start..start + word.len())), "{word}");
         }
         assert!(draft.syntax.iter().any(|syntax| syntax.label == "rust"));
+    }
+
+    #[test]
+    fn restored_mentions_keep_identity_in_quotes_and_spoilers_but_leave_code_literal() {
+        let source = "> ||<@__unknown__>|| @literal ` <@inline> `\n\n```\n<@fenced>\n```\n\n<@known> \\<@escaped>";
+        let projection = Projection::parse(source);
+        let mentions = projection
+            .mentions
+            .iter()
+            .map(|range| &source[range.clone()]);
+        assert_eq!(mentions.collect::<Vec<_>>(), ["<@__unknown__>", "<@known>"]);
+        let spoiler = projection.mentions.first().unwrap();
+        assert!(projection.active(Format::Spoiler, spoiler));
     }
 
     #[test]

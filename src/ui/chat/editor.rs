@@ -15,6 +15,8 @@ use markdown::{Projection, current_line, enter_change, quote_prefix};
 const SYNTAX: &str = "spk:markdown";
 const PENDING: &str = "spk:pending-format";
 const PENDING_OFF: &str = "spk:pending-unformatted";
+const MENTION: &str = "spk:mention";
+const SPOILER_MENTION: &str = "spk:spoiler-mention";
 const CLIPBOARD: &str = "spk-message-markdown-v1";
 
 pub(in crate::ui) fn textarea(input: &Entity<TextareaState>) -> Textarea {
@@ -26,11 +28,23 @@ pub(in crate::ui) fn textarea(input: &Entity<TextareaState>) -> Textarea {
                 element.pr_1()
             })
             .into_any_element(),
+        MENTION => InputToken::new(context)
+            .bg(cx.theme().accent)
+            .text_color(cx.theme().link)
+            .into_any_element(),
+        SPOILER_MENTION => InputToken::new(context)
+            .bg(cx.theme().muted_foreground)
+            .text_color(cx.theme().muted_foreground)
+            .into_any_element(),
         _ => InputToken::new(context).into_any_element(),
     })
 }
 
-pub(in crate::ui) fn refresh(input: &Entity<TextareaState>, cx: &mut App) {
+pub(in crate::ui) fn refresh(
+    input: &Entity<TextareaState>,
+    directory: Option<&Sidebar>,
+    cx: &mut App,
+) {
     let theme = cx.theme();
     let muted = theme.muted;
     let muted_text = theme.muted_foreground;
@@ -42,16 +56,41 @@ pub(in crate::ui) fn refresh(input: &Entity<TextareaState>, cx: &mut App) {
         for span in input
             .tokens()
             .iter()
-            .filter(|span| span.token().id() != SYNTAX)
+            .filter(|span| span.token().id() != SYNTAX && !is_mention(span.token()))
         {
             tokens = attach(tokens, span.range(), span.token().clone());
         }
         let selection = input.selected_range();
-        for syntax in projection.syntax {
-            if [selection.start, selection.end]
+        let splits_selection = |range: &Range<usize>| {
+            [selection.start, selection.end]
                 .iter()
-                .any(|offset| syntax.range.start < *offset && *offset < syntax.range.end)
-            {
+                .any(|offset| range.start < *offset && *offset < range.end)
+        };
+        for range in &projection.mentions {
+            if splits_selection(range) {
+                continue;
+            }
+            let text = &source[range.clone()];
+            let id = &text[2..text.len() - 1];
+            let name = directory
+                .and_then(|directory| directory.mention_name(id))
+                .unwrap_or(id);
+            let kind = if projection.active(Format::Spoiler, range) {
+                SPOILER_MENTION
+            } else {
+                MENTION
+            };
+            let label = format!(
+                "@{}",
+                name.replace(
+                    |ch: char| ch.is_control() || matches!(ch, '\u{2028}' | '\u{2029}'),
+                    " "
+                )
+            );
+            tokens = attach(tokens, range.clone(), syntax_token(kind, text, &label));
+        }
+        for syntax in projection.syntax {
+            if splits_selection(&syntax.range) {
                 continue;
             }
             let text = &source[syntax.range.clone()];
@@ -92,6 +131,48 @@ pub(in crate::ui) fn refresh(input: &Entity<TextareaState>, cx: &mut App) {
             .collect();
         input.set_decorations(decorations, cx);
     });
+}
+
+pub(super) fn is_mention(token: &InlineToken) -> bool {
+    matches!(token.id().as_ref(), MENTION | SPOILER_MENTION)
+}
+
+pub(super) fn replace_with_mention(
+    input: &mut TextareaState,
+    range: Range<usize>,
+    id: &str,
+    window: &mut Window,
+    cx: &mut Context<TextareaState>,
+) {
+    let (range, text, caret) = markdown::mention_change(&input.value(), range, &format!("<@{id}>"));
+    replace(input, range, text, caret..caret, window, cx);
+    input.focus(window, cx);
+}
+
+pub(in crate::ui) fn backspace_mention(
+    entity: &Entity<TextareaState>,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    entity.update(cx, |input, cx| {
+        let caret = input.selected_range();
+        if !caret.is_empty()
+            || !input.is_editable()
+            || input.marked_text_range(window, cx).is_some()
+        {
+            return false;
+        }
+        let Some(span) = input
+            .tokens()
+            .iter()
+            .find(|span| span.range().end == caret.end && is_mention(span.token()))
+        else {
+            return false;
+        };
+        input.set_selected_range(span.range(), cx);
+        input.replace("@", window, cx);
+        true
+    })
 }
 
 fn syntax_token(id: &'static str, source: &str, label: &str) -> InlineToken {
@@ -309,7 +390,6 @@ pub(in crate::ui) fn toggle(
         }
         input.focus(window, cx);
     });
-    refresh(entity, cx);
 }
 
 pub(in crate::ui) fn enter(

@@ -122,6 +122,18 @@ fn user_presence_label(status: UserPresence, cx: &App) -> Label {
         .text_color(user_presence_color(status, cx))
 }
 
+pub(super) fn mention_user_item(id: String, app: WeakEntity<Spk>) -> PopupMenuItem {
+    PopupMenuItem::new("Mention")
+        .icon(IconName::AtSign)
+        .on_click(move |_, window, cx| {
+            let id = id.clone();
+            let app = app.clone();
+            window.defer(cx, move |window, cx| {
+                let _ = app.update(cx, |app, cx| app.append_chat_mention(&id, window, cx));
+            });
+        })
+}
+
 impl Spk {
     pub(super) fn person_row(
         &self,
@@ -133,6 +145,7 @@ impl Spk {
         let profile_id = id.to_owned();
         let message_id = id.to_owned();
         let menu_id = id.to_owned();
+        let can_mention = sidebar.chat.as_ref().is_some_and(|chat| chat.can_send());
         let conversation = sidebar.direct_message(id).map(|channel| channel.id.clone());
         let counts = conversation
             .as_deref()
@@ -222,6 +235,9 @@ impl Spk {
                 let copy_id = id.clone();
                 let read_app = app.clone();
                 let mut menu = menu
+                    .when(can_mention, |menu| {
+                        menu.item(mention_user_item(id.clone(), app.clone()))
+                    })
                     .item(
                         PopupMenuItem::new("Profile").on_click(move |_, window, cx| {
                             let _ = app.update(cx, |app, cx| {

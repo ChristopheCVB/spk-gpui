@@ -150,27 +150,37 @@ impl SlashCommand {
 #[derive(Clone, PartialEq, Eq)]
 enum Item {
     Command(SlashCommand),
+    Mention { id: String, nickname: String },
 }
 
 impl Item {
     fn label(&self) -> String {
         match self {
             Self::Command(command) => format!("/{}", command.name()),
+            Self::Mention { nickname, .. } => nickname.clone(),
         }
     }
 
     fn description(&self) -> Option<&str> {
         match self {
             Self::Command(command) => Some(command.description()),
+            Self::Mention { .. } => None,
         }
     }
 
-    fn leading(&self, cx: &App) -> AnyElement {
+    fn leading(&self, app: &Spk, cx: &App) -> AnyElement {
         match self {
             Self::Command(command) => Icon::new(command.icon())
                 .size(px(16.))
                 .text_color(cx.theme().muted_foreground)
                 .into_any_element(),
+            Self::Mention { id, nickname } => {
+                let photo = match &app.view {
+                    View::SignedIn(sidebar) => sidebar.avatar(Some(id)),
+                    _ => None,
+                };
+                profile_avatar(Avatar::new().name(nickname.clone()), photo, 20., false, cx)
+            }
         }
     }
 }
@@ -248,7 +258,21 @@ impl Spk {
             .into_iter()
             .map(Item::Command)
             .collect(),
-            Trigger::Mention | Trigger::Emoji => Vec::new(),
+            Trigger::Mention => match &self.view {
+                View::SignedIn(sidebar) => filter(
+                    &matched.query,
+                    sidebar.mention_directory(),
+                    |(_, nickname)| vec![*nickname],
+                )
+                .into_iter()
+                .map(|(id, nickname)| Item::Mention {
+                    id: id.to_owned(),
+                    nickname: nickname.to_owned(),
+                })
+                .collect(),
+                _ => Vec::new(),
+            },
+            Trigger::Emoji => Vec::new(),
         }
     }
 
@@ -324,6 +348,12 @@ impl Spk {
                     SlashCommand::Gif => self.send(Command::ShowGifs(true), None, cx),
                     SlashCommand::Poll => self.open_poll_composer(window, cx),
                 }
+            }
+            Item::Mention { id, .. } => {
+                self.suggestion_input(editing).update(cx, |input, cx| {
+                    editor::replace_with_mention(input, range, &id, window, cx);
+                });
+                self.refresh_chat_editor(editing, cx);
             }
         }
     }
@@ -414,7 +444,7 @@ impl Spk {
                         .flex_shrink_0()
                         .rounded_md()
                         .when(index == selected, |row| row.bg(theme.accent))
-                        .child(item.leading(cx))
+                        .child(item.leading(self, cx))
                         .child(Label::new(label).font_semibold().truncate())
                         .when_some(description, |row, description| {
                             row.child(

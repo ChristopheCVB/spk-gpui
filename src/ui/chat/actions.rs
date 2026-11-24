@@ -166,7 +166,7 @@ impl Spk {
                 input.set_selected_range(initial.len()..initial.len(), cx);
                 input.focus(window, cx);
             });
-            editor::refresh(&self.message_action_input, cx);
+            self.refresh_chat_editor(true, cx);
         }
         cx.notify();
     }
