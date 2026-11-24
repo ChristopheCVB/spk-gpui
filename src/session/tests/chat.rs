@@ -1079,6 +1079,128 @@ pub(super) async fn signed_in_chat_session(
     (tx, rx, sockets, peer, session)
 }
 
+#[tokio::test]
+async fn bot_can_be_mentioned_and_replied_to_but_only_the_human_can_open_a_dm() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+    let bot_history = message("bot-history", 1, "spk-bot", "Earlier bot message");
+    let http = tokio::spawn(async move {
+        loop {
+            let (line, request) = Request::receive(&listener).await;
+            let body = match line.as_str() {
+                "GET /api/channels HTTP/1.1" => {
+                    r#"[{"id":"general","type":"text","name":"general"}]"#
+                }
+                "GET /api/users HTTP/1.1" => {
+                    r#"[{"id":"bob","displayName":"spk"},{"id":"spk-bot","displayName":"spk"}]"#
+                }
+                "GET /api/unread HTTP/1.1" | "GET /api/users/presence HTTP/1.1" => "{}",
+                "GET /api/voice HTTP/1.1"
+                | "GET /api/channels/general/pins HTTP/1.1"
+                | "GET /api/channels/private/pins HTTP/1.1" => "[]",
+                "GET /api/channels/general/messages?unread=1 HTTP/1.1" => {
+                    page(request, std::slice::from_ref(&bot_history), false).await;
+                    continue;
+                }
+                "GET /api/channels/private/messages?unread=1 HTTP/1.1" => {
+                    page(request, &[], false).await;
+                    continue;
+                }
+                "POST /api/dms HTTP/1.1" => {
+                    assert_eq!(
+                        serde_json::from_slice::<Value>(&request.body).unwrap(),
+                        value!({"userId":"bob"})
+                    );
+                    r#"{"id":"private","type":"dm","otherUserId":"bob"}"#
+                }
+                _ => panic!("unexpected request: {line}"),
+            };
+            request.respond(&[], body).await;
+        }
+    });
+
+    timeout(Duration::from_secs(10), async {
+        let (commands, views, _, mut peer, session) = direct_message_session(base, "alice").await;
+        let sidebar = wait_for_sidebar(&views, |view| view.mention_name("spk-bot").is_some()).await;
+        assert_eq!(sidebar.people(), [("bob", "spk")]);
+        assert!(
+            sidebar
+                .mention_directory()
+                .any(|entry| entry == ("spk-bot", "spk"))
+        );
+
+        commands
+            .send(Command::StartDirectMessage("spk-bot".into()))
+            .await
+            .unwrap();
+        let sidebar = wait_for_sidebar(&views, |view| view.chat_notice.is_some()).await;
+        assert_eq!(sidebar.chat_notice, Some("Direct message unavailable."));
+
+        commands
+            .send(Command::OpenTextChannel("general".into()))
+            .await
+            .unwrap();
+        wait_for_messages(&views, &["bot-history"]).await;
+
+        const MENTION: &str = "Hello <@spk-bot>";
+        commands
+            .send(Command::SendChatMessage {
+                channel_id: "general".into(),
+                body: MENTION.into(),
+            })
+            .await
+            .unwrap();
+        let mention = receive_chat_send(&mut peer, "general", MENTION).await;
+        live(
+            &mut peer,
+            &message("mention", 2, "alice", MENTION),
+            mention["nonce"].as_str(),
+        )
+        .await;
+        live(
+            &mut peer,
+            &message("bot-live", 3, "spk-bot", "Live bot message"),
+            None,
+        )
+        .await;
+        wait_for_messages(&views, &["bot-history", "mention", "bot-live"]).await;
+
+        commands
+            .send(Command::SetChatReply {
+                channel_id: "general".into(),
+                message_id: Some("bot-live".into()),
+            })
+            .await
+            .unwrap();
+        commands
+            .send(Command::SendChatMessage {
+                channel_id: "general".into(),
+                body: "Follow-up".into(),
+            })
+            .await
+            .unwrap();
+        let reply = receive_chat_send(&mut peer, "general", "Follow-up").await;
+        assert_eq!(reply["replyToId"], "bot-live");
+
+        commands
+            .send(Command::StartDirectMessage("bob".into()))
+            .await
+            .unwrap();
+        wait_for_sidebar(&views, |view| {
+            view.chat
+                .as_ref()
+                .is_some_and(|chat| chat.channel_id == "private" && chat.history_ready())
+        })
+        .await;
+        commands.close();
+        assert!(matches!(session.await.unwrap(), SessionEnd::Closed));
+    })
+    .await
+    .expect("bot conversation and DM routing timed out");
+    http.abort();
+}
+
 struct DirectMessageHttp {
     base: Url,
     requests: Receiver<(String, Request)>,

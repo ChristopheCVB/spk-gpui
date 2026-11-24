@@ -44,6 +44,7 @@ use url::{Host, Url};
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_AVATAR_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_AVATAR_UPLOAD: usize = 5 * 1024 * 1024;
+pub const BOT_USER_ID: &str = "spk-bot";
 
 pub fn has_icon_name_characters(name: &str) -> bool {
     name.bytes()
@@ -142,7 +143,11 @@ impl Channel {
     pub fn is_conversation(&self) -> bool {
         self.kind == "text"
             || self.is_webhook()
-            || (self.kind == "dm" && self.other_user_id.is_some())
+            || (self.kind == "dm"
+                && self
+                    .other_user_id
+                    .as_deref()
+                    .is_some_and(|id| id != BOT_USER_ID))
     }
 
     pub fn is_webhook(&self) -> bool {

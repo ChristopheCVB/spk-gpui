@@ -38,7 +38,7 @@ use history::{
 use super::*;
 
 use crate::{
-    api::{ChatMessage, MessageTarget, UnreadState},
+    api::{BOT_USER_ID, ChatMessage, MessageTarget, UnreadState},
     chat_markdown::{message_markdown, reply_preview, safe_link},
     reaction_artwork::reaction_artwork_path,
     session::{ChatView, Delivery, Pins},
@@ -1314,6 +1314,7 @@ impl Spk {
         } else {
             sidebar.message_author(&message.user_id)
         };
+        let show_bot_badge = starts_group && !chat.webhook && message.user_id == BOT_USER_ID;
         let time = DateTime::from_timestamp_millis(message.created_at)
             .map(|time| time.with_timezone(&Local));
         let exact_time = time.map(|time| time.format("%b %-d, %Y, %H:%M:%S").to_string());
@@ -1356,6 +1357,17 @@ impl Spk {
                                 .into_any_element(),
                             None => label.into_any_element(),
                         })
+                    })
+                    .when(show_bot_badge, |header| {
+                        header.child(
+                            Label::new("BOT")
+                                .text_xs()
+                                .font_semibold()
+                                .px_1()
+                                .rounded_md()
+                                .bg(theme.primary.opacity(0.16))
+                                .text_color(theme.primary),
+                        )
                     })
                     .when_some(
                         exact_time.clone().filter(|_| starts_group),
@@ -1519,7 +1531,11 @@ impl Spk {
             .group("message-row")
             .track_focus(&row_focus)
             .when_some(exact_time.clone(), |row, time| {
-                row.aria_description(format!("{author}, {time}"))
+                if show_bot_badge {
+                    row.aria_description(format!("{author}, bot, {time}"))
+                } else {
+                    row.aria_description(format!("{author}, {time}"))
+                }
             })
             .border_l_2()
             .border_color(theme.transparent)

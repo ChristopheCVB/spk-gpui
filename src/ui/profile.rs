@@ -404,7 +404,7 @@ impl Render for PersonProfile {
                             }),
                     )
                     .when(
-                        !person.banned && sidebar.profile.id.as_deref() != Some(self.id.as_str()),
+                        !person.banned && sidebar.can_start_direct_message(&self.id),
                         |profile| {
                             profile.child(
                                 control_button("send-profile-dm")
