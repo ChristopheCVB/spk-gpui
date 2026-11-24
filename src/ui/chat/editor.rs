@@ -53,6 +53,17 @@ pub(in crate::ui) fn refresh(input: &Entity<TextareaState>, cx: &mut App) {
             tokens = attach(tokens, span.range(), span.token().clone());
         }
         let selection = input.selected_range();
+        for syntax in projection.syntax {
+            if [selection.start, selection.end]
+                .iter()
+                .any(|offset| syntax.range.start < *offset && *offset < syntax.range.end)
+            {
+                continue;
+            }
+            let text = &source[syntax.range.clone()];
+            let token = syntax_token(SYNTAX, text, &syntax.label);
+            tokens = attach(tokens, syntax.range, token);
+        }
         for (start, emoji) in source.grapheme_indices(true) {
             let range = start..start + emoji.len();
             if emoji.is_ascii()
@@ -67,17 +78,6 @@ pub(in crate::ui) fn refresh(input: &Entity<TextareaState>, cx: &mut App) {
                 continue;
             }
             tokens = attach(tokens, range, InlineToken::new(EMOJI, emoji.to_owned()));
-        }
-        for syntax in projection.syntax {
-            if [selection.start, selection.end]
-                .iter()
-                .any(|offset| syntax.range.start < *offset && *offset < syntax.range.end)
-            {
-                continue;
-            }
-            let text = &source[syntax.range.clone()];
-            let token = syntax_token(SYNTAX, text, &syntax.label);
-            tokens = attach(tokens, syntax.range, token);
         }
         let _ = input.set_tokens(tokens, cx);
         let decorations = projection
