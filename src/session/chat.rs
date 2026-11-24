@@ -56,6 +56,7 @@ pub struct ChatView {
     pub pins: Option<Pins>,
     pub preview_images: PreviewImages,
     pub gifs: Option<GifPickerView>,
+    pub poll_send_error: Option<String>,
     pub action_pending: bool,
     pub action_outcome: Option<ActionOutcome>,
     pub paging_forward: bool,
@@ -169,6 +170,8 @@ enum HistoryRequest {
 pub(super) struct ChatSession {
     selected: Option<ChatView>,
     outgoing: HashMap<String, Outgoing>,
+    pending_polls: HashMap<String, (String, Instant)>,
+    poll_send_error: Option<String>,
     drafts: HashMap<String, Draft>,
     typers: HashMap<String, Instant>,
     last_typing: Option<Instant>,
@@ -191,6 +194,7 @@ pub(super) struct ChatSession {
 impl ChatSession {
     pub fn view(&self) -> Option<ChatView> {
         let mut view = self.selected.clone()?;
+        view.poll_send_error.clone_from(&self.poll_send_error);
         // Hide cached DM content until SPK confirms access to the conversation.
         if view.direct_message_peer.is_some()
             && view.history != History::Ready
@@ -285,6 +289,7 @@ impl ChatSession {
             pins: Some(Pins::Loading),
             preview_images: PreviewImages::default(),
             gifs: None,
+            poll_send_error: None,
             action_pending: false,
             action_outcome: None,
             paging_forward: false,
@@ -328,6 +333,7 @@ impl ChatSession {
 
     pub fn disconnected(&mut self) {
         self.socket = None;
+        self.pending_polls.clear();
         self.typers.clear();
         self.last_typing = None;
         for outgoing in self.outgoing.values_mut() {
@@ -689,6 +695,34 @@ impl ChatSession {
         self.send_draft(channel_id, body, gif_url, reply, attachments);
     }
 
+    pub fn send_poll(
+        &mut self,
+        channel_id: String,
+        question: &str,
+        options: &[String],
+    ) -> Result<(), &'static str> {
+        let Some(view) = self
+            .selected
+            .as_mut()
+            .filter(|view| view.channel_id == channel_id && !view.unavailable())
+        else {
+            return Err("This conversation is unavailable.");
+        };
+        let (question, options) = validate_poll(question, options.iter().map(String::as_str))?;
+        let nonce = uuid::Uuid::new_v4().to_string();
+        if !self.socket.as_ref().is_some_and(|socket| {
+            view.can_send() && socket.send_poll(&channel_id, question, &nonce, &options)
+        }) {
+            return Err("Could not reach SPK. Try again.");
+        }
+        self.poll_send_error = None;
+        self.pending_polls.insert(
+            nonce,
+            (channel_id, Instant::now() + Duration::from_secs(12)),
+        );
+        Ok(())
+    }
+
     fn send_draft(
         &mut self,
         channel_id: String,
@@ -791,6 +825,15 @@ impl ChatSession {
 
     pub fn message(&mut self, message: ChatMessage, nonce: Option<&str>, own_id: Option<&str>) {
         if own_id == Some(message.user_id.as_str())
+            && let Some(nonce) = nonce
+            && self
+                .pending_polls
+                .get(nonce)
+                .is_some_and(|(channel, _)| *channel == message.channel_id)
+        {
+            self.pending_polls.remove(nonce);
+        }
+        if own_id == Some(message.user_id.as_str())
             && self
                 .outgoing
                 .get(&message.channel_id)
@@ -859,6 +902,8 @@ impl ChatSession {
             .find(|outgoing| outgoing.nonce == nonce)
         {
             outgoing.status = Delivery::Failed(error);
+        } else if self.pending_polls.remove(nonce).is_some() {
+            self.poll_send_error = Some(error);
         }
     }
 
@@ -869,6 +914,7 @@ impl ChatSession {
                 Delivery::Sending(deadline) => Some(deadline),
                 _ => None,
             })
+            .chain(self.pending_polls.values().map(|(_, deadline)| *deadline))
             .chain(self.typers.values().copied())
             .min()
     }
@@ -876,12 +922,50 @@ impl ChatSession {
     pub fn expire(&mut self) {
         let now = Instant::now();
         self.typers.retain(|_, until| *until > now);
+        self.pending_polls.retain(|_, (_, until)| *until > now);
         for outgoing in self.outgoing.values_mut() {
             if matches!(outgoing.status, Delivery::Sending(deadline) if deadline <= now) {
                 outgoing.status = Delivery::Unconfirmed;
             }
         }
     }
+}
+
+pub fn validate_poll<'a>(
+    question: &'a str,
+    options: impl IntoIterator<Item = &'a str>,
+) -> Result<(&'a str, Vec<&'a str>), &'static str> {
+    fn trim(text: &str) -> &str {
+        // JavaScript trim includes BOM and excludes NEL.
+        text.trim_matches(|ch: char| ch == '\u{feff}' || ch != '\u{85}' && ch.is_whitespace())
+    }
+
+    if question.encode_utf16().count() > 300 {
+        return Err("The question can be up to 300 characters.");
+    }
+    let question = trim(question);
+    if question.is_empty() {
+        return Err("Enter a question.");
+    }
+    let mut seen = HashSet::new();
+    let mut labels = Vec::new();
+    for option in options {
+        if option.encode_utf16().count() > 100 {
+            return Err("An option can be up to 100 characters.");
+        }
+        let option = trim(option);
+        if option.is_empty() {
+            return Err("Fill in every option.");
+        }
+        if !seen.insert(option.to_lowercase()) {
+            return Err("Poll options must be different.");
+        }
+        labels.push(option);
+    }
+    if !(2..=10).contains(&labels.len()) {
+        return Err("Enter between 2 and 10 options.");
+    }
+    Ok((question, labels))
 }
 
 fn remove_message(messages: &mut Vec<ChatMessage>, id: &str) {

@@ -59,7 +59,10 @@ pub use {
     accounts::AccountLinkForm,
     avatars::AvatarPhoto,
     channel_admin::{ChannelAction, ChannelAdmin, ChannelKind},
-    chat::{AttachmentInput, ChatView, Delivery, GifPickerView, Pins, UploadStatus, image_preview},
+    chat::{
+        AttachmentInput, ChatView, Delivery, GifPickerView, Pins, UploadStatus, image_preview,
+        validate_poll,
+    },
     presence::Participant,
     profiles::ProfileEdit,
     radio::RadioPlayback,
@@ -117,6 +120,12 @@ pub enum Command {
     SendChatMessage {
         channel_id: String,
         body: String,
+    },
+    SendChatPoll {
+        channel_id: String,
+        question: String,
+        options: Vec<String>,
+        completed: oneshot::Sender<Result<(), &'static str>>,
     },
     ShowGifs(bool),
     SearchGifs(String),
@@ -861,6 +870,9 @@ async fn watch_session(
                 Ok(Command::UpdateChatDraft { channel_id, body }) => chat.update_draft(channel_id, body),
                 Ok(Command::SetChatReply { channel_id, message_id }) => chat.set_reply(&channel_id, message_id.as_deref()),
                 Ok(Command::SendChatMessage { channel_id, body }) => chat.send(channel_id, body),
+                Ok(Command::SendChatPoll { channel_id, question, options, completed }) => {
+                    let _ = completed.send(chat.send_poll(channel_id, &question, &options));
+                }
                 Ok(Command::ShowGifs(true)) => chat.open_gifs(client),
                 Ok(Command::ShowGifs(false)) => chat.gifs.close(),
                 Ok(Command::SearchGifs(query)) => chat.gifs.search(client, query),

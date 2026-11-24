@@ -196,6 +196,23 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
             true
         }).await;
 
+        let options = [" Tea ", "Coffee"];
+        let completed = send_poll(&tx, "general", "  Tea or coffee?  ", &options).await;
+        assert_eq!(completed.await.unwrap(), Ok(()));
+        let sent_poll = receive_chat_send(&mut peer, "general", "Tea or coffee?").await;
+        assert_eq!(
+            sent_poll,
+            value!({"type":"message:send","channelId":"general","body":"Tea or coffee?",
+                "poll":[{"label":"Tea"},{"label":"Coffee"}],"nonce":sent_poll["nonce"]})
+        );
+        peer.send(Message::text(value!({
+            "type":"message:error","nonce":sent_poll["nonce"],"error":"Poll rejected"
+        }).to_string())).await.unwrap();
+        wait_for_sidebar(&rx, |view| {
+            view.chat.as_ref().is_some_and(|chat| chat.poll_send_error.as_deref() == Some("Poll rejected")
+                && chat.outgoing.is_none() && chat.messages.len() == 2)
+        }).await;
+
         tx.send(Command::SendChatMessage {
             channel_id: "general".into(),
             body: "Hi from desktop".into(),
@@ -285,6 +302,8 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         receive_chat_send(&mut peer, "general", "Closed before confirmation").await;
         peer.close(None).await.unwrap();
         wait_for_delivery(&rx, |delivery| matches!(delivery, Delivery::Unconfirmed)).await;
+        let completed = send_poll(&tx, "general", "Offline poll?", &["Yes", "No"]).await;
+        assert!(completed.await.unwrap().is_err());
         let mut peer = accept_async(sockets.accept().await.unwrap().0)
             .await
             .unwrap();
@@ -432,6 +451,19 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         .unwrap();
         receive_chat_send(&mut peer, "general", "Still here").await;
 
+        let completed = send_poll(&tx, "general", "Which day?", &["Monday", "Friday"]).await;
+        assert_eq!(completed.await.unwrap(), Ok(()));
+        let old_server = receive_chat_send(&mut peer, "general", "Which day?").await;
+        live(&mut peer, &message("legacy-poll", 8, "alice", "Which day?"), old_server["nonce"].as_str()).await;
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
+            chat.messages.iter().any(|message| message.id == "legacy-poll" && message.poll.is_none())
+                && chat.outgoing.is_some() && chat.draft.body == "Still here"
+        })).await;
+
+        let completed = send_poll(&tx, "general", "Rejected after switching?", &["Yes", "No"]).await;
+        assert_eq!(completed.await.unwrap(), Ok(()));
+        let rejected = receive_chat_send(&mut peer, "general", "Rejected after switching?").await;
+
         tx.send(Command::OpenTextChannel("quiet".into()))
             .await
             .unwrap();
@@ -447,6 +479,13 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
             })
         })
         .await;
+
+        peer.send(Message::text(value!({
+            "type":"message:error","nonce":rejected["nonce"],"error":"Poll rejected after switching"
+        }).to_string())).await.unwrap();
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
+            chat.channel_id == "quiet" && chat.poll_send_error.as_deref() == Some("Poll rejected after switching")
+        })).await;
 
         live(&mut peer, &latest, None).await;
         peer.send(Message::text(value!({
@@ -972,6 +1011,56 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
             }).await;
         }
 
+        bob.send(Command::UpdateChatDraft { channel_id: "private".into(), body: "Unsent draft".into() }).await.unwrap();
+        receive_typing(&mut bob_peer, "private").await;
+        bob.send(Command::SetChatReply { channel_id: "private".into(), message_id: Some("private-2".into()) }).await.unwrap();
+
+        let long = "😀".repeat(51);
+        let maximum_question = "😀".repeat(150);
+        let too_long = format!("{maximum_question}a");
+        for (question, options) in [
+            ("Question?", ["", "Yes"]),
+            ("Question?", [" ΟΣ ", "ος"]),
+            ("Question?", ["No", &long]),
+            (too_long.as_str(), ["Yes", "No"]),
+        ] {
+            let completed = send_poll(&bob, "private", question, &options).await;
+            assert!(completed.await.unwrap().is_err());
+        }
+
+        let maximum_option = "😀".repeat(50);
+        let completed = send_poll(&bob, "private", &maximum_question, &[&maximum_option, "No"]).await;
+        assert_eq!(completed.await.unwrap(), Ok(()));
+        let sent = receive_chat_send(&mut bob_peer, "private", &maximum_question).await;
+        assert_eq!(sent["poll"], value!([{"label":maximum_option},{"label":"No"}]));
+        assert!(sent.get("replyToId").is_none());
+        assert!(sent.get("attachments").is_none());
+
+        let fifth = value!({
+            "id":"private-5","channelId":"private","userId":"bob","body":maximum_question,"createdAt":5,
+            "poll":{"options":[
+                {"id":"emoji","label":maximum_option,"userIds":[]},
+                {"id":"no","label":"No","userIds":[]}
+            ]}
+        });
+        live(&mut bob_peer, &fifth, sent["nonce"].as_str()).await;
+        live(&mut alice_peer, &fifth, sent["nonce"].as_str()).await;
+        for views in [&alice_views, &bob_views] {
+            let received = wait_for_sidebar(views, |view| view.chat.as_ref().is_some_and(|chat| {
+                chat.messages.last().is_some_and(|message| {
+                    message.id == "private-5" && message.poll.as_ref().is_some_and(|poll| {
+                        poll.options[0].id == "emoji" && poll.options[0].label == maximum_option
+                    })
+                })
+            })).await;
+            if received.profile.id.as_deref() == Some("bob") {
+                let chat = received.chat.unwrap();
+                assert!(chat.outgoing.is_none());
+                assert_eq!(chat.draft.body, "Unsent draft");
+                assert_eq!(chat.draft.reply.unwrap().id, "private-2");
+            }
+        }
+
         // The server orders Pins by pin time, even when the most recently pinned Message is oldest.
         let older = value!({"id":"older-pin","channelId":"private","userId":"bob","body":"Older pin outside history","createdAt":0,"pinned":true,"pinnedAt":5});
         let recent = value!({"id":"private-2","channelId":"private","userId":"bob","body":body,"createdAt":2,"pinned":true,"pinnedAt":4});
@@ -1131,4 +1220,23 @@ async fn chat_action_request(
         body
     );
     request
+}
+
+async fn send_poll(
+    commands: &async_channel::Sender<Command>,
+    channel: &str,
+    question: &str,
+    options: &[&str],
+) -> tokio::sync::oneshot::Receiver<Result<(), &'static str>> {
+    let (completed, result) = tokio::sync::oneshot::channel();
+    commands
+        .send(Command::SendChatPoll {
+            channel_id: channel.to_owned(),
+            question: question.to_owned(),
+            options: options.iter().map(|option| (*option).to_owned()).collect(),
+            completed,
+        })
+        .await
+        .unwrap();
+    result
 }

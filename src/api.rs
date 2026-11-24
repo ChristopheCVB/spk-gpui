@@ -595,6 +595,21 @@ impl VoiceSocket {
         self.0.try_send((frame.to_string(), None)).is_ok()
     }
 
+    pub fn send_poll(&self, channel_id: &str, body: &str, nonce: &str, options: &[&str]) -> bool {
+        let poll: Vec<_> = options
+            .iter()
+            .map(|label| serde_json::json!({ "label": label }))
+            .collect();
+        let frame = serde_json::json!({
+            "type": "message:send",
+            "channelId": channel_id,
+            "body": body,
+            "nonce": nonce,
+            "poll": poll,
+        });
+        self.0.try_send((frame.to_string(), None)).is_ok()
+    }
+
     pub fn typing(&self, channel_id: &str) -> bool {
         let frame = serde_json::json!({"type": "typing", "channelId": channel_id});
         self.0.try_send((frame.to_string(), None)).is_ok()

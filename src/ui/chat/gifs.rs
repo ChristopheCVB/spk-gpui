@@ -13,17 +13,6 @@ fn gif_button(id: &'static str, label: &'static str) -> Button {
 }
 
 impl Spk {
-    pub(in crate::ui) fn on_chat_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.chat_input.read(cx).value().as_ref() == "/gif "
-            && chat(&self.view).is_some_and(|chat| chat.can_send() && chat.outgoing.is_none())
-        {
-            self.chat_input
-                .update(cx, |input, cx| input.set_value("", window, cx));
-            self.send(Command::ShowGifs(true), None, cx);
-        }
-        self.update_chat_draft(cx);
-    }
-
     pub(super) fn update_gif_input(
         &self,
         previous: Option<&ChatView>,

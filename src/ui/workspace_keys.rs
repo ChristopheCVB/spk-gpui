@@ -110,6 +110,9 @@ impl Spk {
                 .message_action_input
                 .focus_handle(cx)
                 .is_focused(window);
+        if composer && count == 0 && self.chat_slash_key(key_name, window, cx) {
+            return true;
+        }
         if composer || editor {
             let formatting = match (primary, modifiers.alt, modifiers.shift, count, key_name) {
                 (true, false, false, 1, "b") => Some(BOLD),
