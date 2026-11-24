@@ -22,6 +22,14 @@ pub(crate) fn mention_at(source: &str) -> Option<&str> {
     (len > 0 && rest.as_bytes().get(len) == Some(&b'>')).then(|| &rest[..len])
 }
 
+pub(crate) fn spoiler_marker_width(source: &str) -> Option<usize> {
+    match source.as_bytes() {
+        [b'|', b'|', ..] => Some(2),
+        [b'|', b'\\', b'|', ..] => Some(3),
+        _ => None,
+    }
+}
+
 pub(crate) fn message_markdown<'a, 'b>(
     source: &'a str,
     name_of: impl Fn(&str) -> &'b str,
@@ -139,11 +147,7 @@ fn find_edits<'a>(
                         != 0;
                     let start = range.start + i;
                     if ch == "|" {
-                        let width = if text[i..].starts_with("||") {
-                            2
-                        } else if text[i..].starts_with("|\\|") {
-                            3
-                        } else {
+                        let Some(width) = spoiler_marker_width(&text[i..]) else {
                             continue;
                         };
                         end = i + width;

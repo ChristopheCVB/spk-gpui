@@ -7,7 +7,10 @@ use uuid::Uuid;
 
 use crate::chat_markdown::valid_mention_id;
 
-use super::{Format, Projection};
+use super::{
+    Format, Projection,
+    markdown::{delimiter_width, inline_code_markup, list_prefix},
+};
 
 struct RichClipboard {
     clipboard: arboard::Clipboard,
@@ -144,38 +147,62 @@ fn rich_markdown(html: &str) -> Option<String> {
     (!markdown.is_empty()).then(|| markdown.to_owned())
 }
 
+fn escape_text(text: &str, escape: impl Fn(usize, char) -> bool) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for (offset, ch) in text.char_indices() {
+        if escape(offset, ch) {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
+}
+
+pub(super) fn plain_text_markup(text: &str) -> String {
+    text.split_inclusive('\n')
+        .map(|line| {
+            let body = line.trim_start_matches([' ', '\t']);
+            let indent = line.len() - body.len();
+            let first = body.chars().next().unwrap_or_default();
+            let content = body.trim_end_matches('\n');
+            let rule = matches!(first, '-' | '*' | '_' | '=')
+                && content.chars().all(|ch| ch == first || ch.is_whitespace());
+            let fence = body.starts_with("```") || body.starts_with("~~~");
+            let bullet = list_prefix(body).is_some_and(|(_, number)| number.is_none())
+                || matches!(content, "-" | "*" | "+");
+            escape_text(line, |offset, ch| {
+                matches!(ch, '\\' | '[' | ']' | '|' | '>' | '<')
+                    || offset == indent && (ch == '#' || rule || bullet)
+                    || fence && ch == first && offset >= indent
+            })
+        })
+        .collect()
+}
+
 fn markdown_node(node: &Handle, depth: usize) -> Option<String> {
     if depth > 64 {
         return None;
     }
     if let NodeData::Text { contents } = &node.data {
-        let text = contents.borrow();
-        return Some(
-            text.chars()
-                .flat_map(|ch| {
-                    matches!(
-                        ch,
-                        '\\' | '*'
-                            | '_'
-                            | '~'
-                            | '`'
-                            | '['
-                            | ']'
-                            | '|'
-                            | '>'
-                            | '<'
-                            | '#'
-                            | '+'
-                            | '-'
-                            | '!'
-                            | '.'
-                    )
-                    .then_some('\\')
-                    .into_iter()
-                    .chain(std::iter::once(ch))
-                })
-                .collect(),
-        );
+        return Some(escape_text(&contents.borrow(), |_, ch| {
+            matches!(
+                ch,
+                '\\' | '*'
+                    | '_'
+                    | '~'
+                    | '`'
+                    | '['
+                    | ']'
+                    | '|'
+                    | '>'
+                    | '<'
+                    | '#'
+                    | '+'
+                    | '-'
+                    | '!'
+                    | '.'
+            )
+        }));
     }
     let children = node.children.borrow();
     let content = || {
@@ -207,7 +234,7 @@ fn markdown_node(node: &Handle, depth: usize) -> Option<String> {
         }
         "span" if attr("data-spoiler").is_some() => format!("||{}||", content()?),
         "strong" | "b" => format!("**{}**", content()?),
-        "em" | "i" => format!("_{}_", content()?),
+        "em" | "i" => format!("*{}*", content()?),
         "s" | "del" | "strike" => format!("~~{}~~", content()?),
         "p" | "div" => format!("{}\n\n", content()?),
         "br" => "\n".into(),
@@ -222,16 +249,7 @@ fn markdown_node(node: &Handle, depth: usize) -> Option<String> {
             quote.push('\n');
             quote
         }
-        "code" => {
-            let text = literal_text(node, depth)?;
-            let fence = backticks(&text, 1);
-            let pad = if text.starts_with('`') || text.ends_with('`') {
-                " "
-            } else {
-                ""
-            };
-            format!("{fence}{pad}{text}{pad}{fence}")
-        }
+        "code" => inline_code_markup(&literal_text(node, depth)?).0,
         "pre" => {
             let lang = children
                 .iter()
@@ -254,7 +272,7 @@ fn markdown_node(node: &Handle, depth: usize) -> Option<String> {
                 })
                 .unwrap_or_default();
             let text = literal_text(node, depth)?;
-            let fence = backticks(&text, 3);
+            let fence = "`".repeat(delimiter_width(&text, '`', 3));
             let text = text.strip_suffix('\n').unwrap_or(&text);
             format!("{fence}{lang}\n{text}\n{fence}\n\n")
         }
@@ -294,11 +312,6 @@ fn markdown_node(node: &Handle, depth: usize) -> Option<String> {
     Some(render)
 }
 
-fn backticks(text: &str, minimum: usize) -> String {
-    let longest = text.split(|ch| ch != '`').map(str::len).max().unwrap_or(0);
-    "`".repeat(minimum.max(longest + 1))
-}
-
 fn literal_text(node: &Handle, depth: usize) -> Option<String> {
     if depth > 64 {
         return None;
@@ -325,7 +338,7 @@ mod tests {
         let html = r#"<p data-pm-slice="1 1 []"><strong>Hi</strong> <span data-spoiler><span data-type="mention" class="mention" data-id="bob_1" data-label="Bób Fixture" data-mention-suggestion-char="@">@Bób Fixture</span></span> 👋 <em>there</em> <code>&lt;@literal&gt;</code></p>"#;
         assert_eq!(
             rich_markdown(html).as_deref(),
-            Some("**Hi** ||<@bob_1>|| 👋 _there_ `<@literal>`"),
+            Some("**Hi** ||<@bob_1>|| 👋 *there* `<@literal>`"),
         );
     }
     #[test]
@@ -334,6 +347,56 @@ mod tests {
         let html = rich_html(source, vec![(7..15, "Bób & <friends>".to_owned())]).unwrap();
         assert!(html.contains(r#"<span data-spoiler><strong><span data-type="mention" class="mention" data-id="bob_1" data-label="Bób &amp; &lt;friends&gt;" data-mention-suggestion-char="@">@Bób &amp; &lt;friends&gt;</span></strong></span>"#));
         assert!(html.contains("<code>&lt;@literal&gt;</code>"));
+        assert_eq!(rich_markdown(&html).as_deref(), Some(source));
+    }
+
+    #[test]
+    fn plain_clipboard_preserves_web_paste_rules_and_literal_block_markers() {
+        let options = ::markdown::Options::gfm();
+        for text in [
+            "# heading",
+            "- item",
+            "+ item",
+            "* item",
+            "> quote",
+            "---",
+            "<@id>",
+            "||secret||",
+        ] {
+            let markup = plain_text_markup(text);
+            let html = ::markdown::to_html_with_options(&markup, &options).unwrap();
+            assert_eq!(html, format!("<p>{}</p>", escape_html(text)));
+            let projection = Projection::parse(&markup);
+            assert!(projection.mentions.is_empty());
+            assert_eq!(projection.plain(&markup, 0..markup.len()), text);
+        }
+        for (text, html) in [
+            ("**example**", "<p><strong>example</strong></p>"),
+            ("*italic*", "<p><em>italic</em></p>"),
+            ("~~strike~~", "<p><del>strike</del></p>"),
+            ("`code`", "<p><code>code</code></p>"),
+            ("1. item", "<ol>\n<li>item</li>\n</ol>"),
+        ] {
+            assert_eq!(
+                ::markdown::to_html_with_options(&plain_text_markup(text), &options).unwrap(),
+                html
+            );
+        }
+        let markup = plain_text_markup("# Heading as text\n- Item as text\n**Bold**");
+        assert_eq!(
+            Projection::parse(&markup).plain(&markup, 0..markup.len()),
+            "# Heading as text\n- Item as text\nBold"
+        );
+    }
+
+    #[test]
+    fn multiline_spoiler_retains_its_mark_through_rich_copy_and_paste() {
+        let source = "||first\nsecond||";
+        let html = rich_html(source, Vec::new()).unwrap();
+        assert!(
+            html.contains("<span data-spoiler>first\nsecond</span>"),
+            "{html}"
+        );
         assert_eq!(rich_markdown(&html).as_deref(), Some(source));
     }
 }

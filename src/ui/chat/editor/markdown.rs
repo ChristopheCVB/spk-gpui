@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use ::markdown::{ParseOptions, mdast::Node};
 
-use crate::chat_markdown::mention_at;
+use crate::chat_markdown::{mention_at, spoiler_marker_width};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(in crate::ui) enum Format {
@@ -77,6 +77,62 @@ impl Projection {
         self.covering(format, selection).is_some()
     }
 
+    pub fn code_paste(
+        &self,
+        source: &str,
+        selection: Range<usize>,
+        text: &str,
+    ) -> Option<(Range<usize>, String, usize)> {
+        if let Some(mark) = self.covering(Format::CodeBlock, &selection) {
+            let opening = &source[mark.open.clone()];
+            let (marker, width) = fence_marker(opening)?;
+            let line = current_line(source, &(mark.open.start..mark.open.start));
+            let prefix: String = source[line.start..mark.open.start]
+                .chars()
+                .map(|ch| if ch == '>' { ch } else { ' ' })
+                .collect();
+            let text = text.replace('\n', &format!("\n{prefix}"));
+            let before = &source[mark.range.start..selection.start];
+            let after = &source[selection.end..mark.range.end];
+            let body = format!("{before}{text}{after}");
+            let marker = char::from(marker);
+            let needed = delimiter_width(&body, marker, width);
+            if needed == width {
+                let caret = selection.start + text.len();
+                return Some((selection, text, caret));
+            }
+
+            let indent = opening.len() - opening.trim_start_matches(' ').len();
+            let fence = marker.to_string().repeat(needed);
+            let header = format!(
+                "{}{fence}{}\n",
+                &opening[..indent],
+                &opening[indent + width..]
+            );
+            let caret = mark.open.start + header.len() + before.len() + text.len();
+            let closing = &source[mark.close.clone()];
+            let closing_width = closing
+                .bytes()
+                .take_while(|byte| *byte == marker as u8)
+                .count();
+            let replacement = if mark.close.is_empty() {
+                format!("{header}{body}")
+            } else {
+                format!("{header}{body}{fence}{}", &closing[closing_width..])
+            };
+            return Some((mark.open.start..mark.close.end, replacement, caret));
+        }
+
+        let mark = self.covering(Format::Code, &selection)?;
+        let before = &source[mark.range.start..selection.start];
+        let after = &source[selection.end..mark.range.end];
+        let text = text.replace('\n', " ");
+        let body = format!("{before}{text}{after}");
+        let (replacement, offset) = inline_code_markup(&body);
+        let caret = mark.open.start + offset + before.len() + text.len();
+        Some((mark.open.start..mark.close.end, replacement, caret))
+    }
+
     fn add_syntax(&mut self, range: Range<usize>, label: impl Into<String>) {
         if !range.is_empty() {
             self.syntax.push(Syntax {
@@ -104,12 +160,12 @@ impl Projection {
     }
 
     fn visit(&mut self, node: &Node, source: &str, spoiler: &mut Option<Range<usize>>) {
-        let Some(range) = node_range(node) else {
+        let Some(range) = node_range(node, source) else {
             return;
         };
         match node {
             Node::Strong(_) | Node::Emphasis(_) | Node::Delete(_) => {
-                if let Some(body) = children_range(node) {
+                if let Some(body) = children_range(node, source) {
                     let format = match node {
                         Node::Strong(_) => Format::Bold,
                         Node::Emphasis(_) => Format::Italic,
@@ -149,11 +205,19 @@ impl Projection {
                 {
                     let open = range.start..range.start + fence.trim_end_matches('\r').len();
                     let start = range.start + fence.len() + 1;
+                    let line = current_line(source, &(range.start..range.start));
+                    let quote_depth = source[line.start..range.start].matches('>').count();
                     let close = body
                         .rsplit('\n')
                         .next()
+                        .and_then(|mut line| {
+                            for _ in 0..quote_depth {
+                                line = line.trim_start_matches([' ', '\t']).strip_prefix('>')?;
+                            }
+                            Some(line.trim_start_matches([' ', '\t']))
+                        })
                         .filter(|line| {
-                            let line = line.trim();
+                            let line = line.trim_end();
                             line.len() >= count && line.bytes().all(|byte| byte == marker)
                         })
                         .map_or(range.end..range.end, |line| {
@@ -199,7 +263,7 @@ impl Projection {
                 }
             }
             Node::Link(_) => {
-                if let Some(body) = children_range(node) {
+                if let Some(body) = children_range(node, source) {
                     self.mark(
                         Format::Link,
                         body.clone(),
@@ -218,25 +282,23 @@ impl Projection {
                     {
                         self.mentions.push(offset..offset + id.len() + 3);
                     }
-                    if ch == '\n' {
-                        *spoiler = None;
-                    } else if ch == '\\'
+                    if ch == '\\'
                         && chars
                             .peek()
                             .is_some_and(|(_, next)| next.is_ascii_punctuation())
                     {
                         self.add_syntax(offset..offset + 1, "");
                         chars.next();
-                    } else if ch == '|' && chars.peek().is_some_and(|(_, next)| *next == '|') {
+                    } else if spoiler_marker_width(&text[index..]) == Some(2) {
                         chars.next();
                         let marker = offset..offset + 2;
-                        let opening = spoiler.take();
-                        if let Some(open) = opening.filter(|open| {
+                        if let Some(open) = spoiler.as_ref() {
                             let body = &source[open.end..marker.start];
-                            !body.is_empty() && body.trim() == body
-                        }) {
-                            self.mark(Format::Spoiler, open.end..marker.start, open, marker);
-                        } else {
+                            if !body.is_empty() && body.trim_end() == body {
+                                let open = spoiler.take().unwrap();
+                                self.mark(Format::Spoiler, open.end..marker.start, open, marker);
+                            }
+                        } else if source[marker.end..].starts_with(|ch: char| !ch.is_whitespace()) {
                             *spoiler = Some(marker);
                         }
                     }
@@ -301,14 +363,26 @@ impl Projection {
     }
 }
 
-fn node_range(node: &Node) -> Option<Range<usize>> {
+fn node_range(node: &Node, source: &str) -> Option<Range<usize>> {
     let position = node.position()?;
-    Some(position.start.offset..position.end.offset)
+    let mut start = position.start.offset;
+    // The Markdown parser starts a text node at the escaped character, past its backslash.
+    if matches!(node, Node::Text(_))
+        && start > 0
+        && source.as_bytes()[start - 1] == b'\\'
+        && source
+            .as_bytes()
+            .get(start)
+            .is_some_and(u8::is_ascii_punctuation)
+    {
+        start -= 1;
+    }
+    Some(start..position.end.offset)
 }
 
-fn children_range(node: &Node) -> Option<Range<usize>> {
+fn children_range(node: &Node, source: &str) -> Option<Range<usize>> {
     let children = node.children()?;
-    Some(node_range(children.first()?)?.start..node_range(children.last()?)?.end)
+    Some(node_range(children.first()?, source)?.start..node_range(children.last()?, source)?.end)
 }
 
 pub(super) fn fence_language(line: &str) -> Option<&str> {
@@ -324,6 +398,31 @@ fn fence_marker(line: &str) -> Option<(u8, usize)> {
     let marker = *line.as_bytes().first()?;
     let count = line.bytes().take_while(|byte| *byte == marker).count();
     (matches!(marker, b'`' | b'~') && count >= 3).then_some((marker, count))
+}
+
+pub(super) fn delimiter_width(text: &str, marker: char, minimum: usize) -> usize {
+    let longest = text
+        .split(|ch| ch != marker)
+        .map(str::len)
+        .max()
+        .unwrap_or(0);
+    minimum.max(longest + 1)
+}
+
+pub(super) fn inline_code_markup(text: &str) -> (String, usize) {
+    let fence = "`".repeat(delimiter_width(text, '`', 1));
+    let pad = if text.starts_with('`')
+        || text.ends_with('`')
+        || text.starts_with(' ') && text.ends_with(' ') && !text.trim().is_empty()
+    {
+        " "
+    } else {
+        ""
+    };
+    (
+        format!("{fence}{pad}{text}{pad}{fence}"),
+        fence.len() + pad.len(),
+    )
 }
 
 pub(super) fn quote_prefix(line: &str) -> Option<(usize, usize)> {
@@ -503,6 +602,56 @@ pub(super) fn enter_change(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spoilers_span_lines_within_a_paragraph_and_follow_web_whitespace_rules() {
+        for text in ["first\nsecond", "first  \nsecond", "two || middle"] {
+            let source = format!("||{text}||");
+            let projection = Projection::parse(&source);
+            assert!(projection.active(Format::Spoiler, &(2..source.len() - 2)));
+            assert_eq!(projection.plain(&source, 0..source.len()), text);
+        }
+        for source in ["|| text ||", "||first\n\nsecond||", r"\|\|escaped\|\|"] {
+            assert!(
+                !Projection::parse(source)
+                    .marks
+                    .iter()
+                    .any(|mark| mark.format == Format::Spoiler)
+            );
+        }
+    }
+
+    #[test]
+    fn code_paste_keeps_pasted_fences_and_markup_inside_code() {
+        for (source, text, expected) in [
+            (
+                "```rust\nbefore\n```",
+                "\n```\n<@literal>",
+                "````rust\nbefore\n```\n<@literal>\n````",
+            ),
+            (
+                "> ~~~rust\n> before\n> ~~~",
+                "\n~~~\n<@literal>",
+                "> ~~~~rust\n> before\n> ~~~\n> <@literal>\n> ~~~~",
+            ),
+            (
+                "```rust\nbefore\n> ```",
+                "\n```\n<@literal>",
+                "````rust\nbefore\n```\n<@literal>\n> ```",
+            ),
+            ("`before`", "`<@literal>", "``before`<@literal>``"),
+        ] {
+            let start = source.find("before").unwrap() + "before".len();
+            let (range, replacement, caret) = Projection::parse(source)
+                .code_paste(source, start..start, text)
+                .unwrap();
+            let mut source = source.to_owned();
+            source.replace_range(range, &replacement);
+            assert_eq!(source, expected);
+            assert!(source[..caret].ends_with("<@literal>"));
+            assert!(Projection::parse(&source).mentions.is_empty());
+        }
+    }
 
     #[test]
     fn restored_markdown_shows_formatting_without_delimiters() {

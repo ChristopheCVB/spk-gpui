@@ -594,7 +594,8 @@ pub(in crate::ui) fn paste(
         if !input.is_editable() || input.marked_text_range(window, cx).is_some() {
             return false;
         }
-        let projection = Projection::parse(&input.value());
+        let source = input.value();
+        let projection = Projection::parse(&source);
         let selection = input.selected_range();
         let code = projection.active(Format::Code, &selection)
             || projection.active(Format::CodeBlock, &selection);
@@ -618,27 +619,13 @@ pub(in crate::ui) fn paste(
         let Some(text) = text else {
             return false;
         };
-        let mut text = text.replace("\r\n", "\n").replace('\r', "\n");
-        if !code {
-            if plain {
-                text = text
-                    .chars()
-                    .flat_map(|ch| {
-                        let escape = matches!(
-                            ch,
-                            '\\' | '*' | '_' | '~' | '`' | '[' | ']' | '|' | '>' | '<'
-                        );
-                        escape
-                            .then_some('\\')
-                            .into_iter()
-                            .chain(std::iter::once(ch))
-                    })
-                    .collect();
-            } else {
-                text = text.replace("||", "\\|\\|").replace("](", "\\](");
-            }
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        if let Some((range, replacement, caret)) = projection.code_paste(&source, selection, &text)
+        {
+            replace(input, range, replacement, caret..caret, window, cx);
+        } else {
+            input.replace(clipboard_html::plain_text_markup(&text), window, cx);
         }
-        input.replace(text, window, cx);
         true
     })
 }
