@@ -21,11 +21,13 @@ use std::{
 };
 
 use chrono::{DateTime, Local};
+use gpui_kit::base::text::{
+    MarkdownExtensions, MarkdownNode, MarkdownParseContext, MarkdownPlugin, TextView, TextViewStyle,
+};
 use gpui_kit::component::{
     Disableable,
     menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
     separator::Separator,
-    text::{MarkdownExtensions, TextView, TextViewStyle},
     tooltip::Tooltip,
 };
 
@@ -39,7 +41,7 @@ use super::*;
 
 use crate::{
     api::{BOT_USER_ID, ChatMessage, MessageTarget, UnreadState},
-    chat_markdown::{message_markdown, reply_preview, safe_link},
+    chat_markdown::{message_markdown, reply_preview, safe_link, styled_message_markdown},
     reaction_artwork::reaction_artwork_path,
     session::{ChatView, Delivery, Pins},
 };
@@ -1183,38 +1185,62 @@ impl Spk {
         let spoiler_key = (message_id.to_owned(), hasher.finish());
         let reveals = self.chat_spoilers.get(&spoiler_key);
         let hidden = RefCell::new(Vec::new());
-        let rendered = message_markdown(
+        let name_of = |id: &str| sidebar.message_author(id);
+        let revealed = |offset| reveals.is_some_and(|offsets| offsets.contains(&offset));
+        let source: SharedString = message_markdown(
             body,
-            |id| sidebar.message_author(id),
+            name_of,
             |offset| {
-                let revealed = reveals.is_some_and(|offsets| offsets.contains(&offset));
-                if !revealed {
+                let visible = revealed(offset);
+                if !visible {
                     hidden.borrow_mut().push(offset);
                 }
-                revealed
+                visible
             },
             Some(&self.chat_spoiler_link),
         )
-        .into_owned();
+        .into_owned()
+        .into();
+        let display = if body.contains("<@") {
+            styled_message_markdown(
+                body,
+                name_of,
+                revealed,
+                &self.chat_spoiler_link,
+                sidebar.profile.id.as_deref(),
+            )
+            .into_owned()
+            .into()
+        } else {
+            source.clone()
+        };
         let hidden = hidden.into_inner();
         let link_key = spoiler_key.clone();
         let link_app = cx.weak_entity();
         let link_filter = self.chat_spoiler_link.clone();
         let link_prefix = self.chat_spoiler_link.clone();
-        let source = SharedString::from(rendered);
-        let base = cx.theme().popover;
-        let view = TextView::markdown(id, source.clone())
+        let theme = cx.theme();
+        let base = theme.popover;
+        let view = TextView::markdown(id, display)
             .style(
-                TextViewStyle::default()
-                    .code_block(StyleRefinement::default().bg(base))
-                    .inline_code(HighlightStyle {
+                TextViewStyle::from_theme(&gpui_kit::base::Theme::global(cx))
+                    .with_link(theme.primary)
+                    .with_code_block(StyleRefinement::default().rounded_md().bg(base))
+                    .with_table_head(
+                        StyleRefinement::default()
+                            .bg(theme.table_head)
+                            .text_color(theme.table_head_foreground),
+                    )
+                    .with_table_row_hover(theme.table_hover)
+                    .with_inline_code(HighlightStyle {
                         background_color: Some(base),
                         ..Default::default()
                     }),
             )
             .markdown_extensions(
                 MarkdownExtensions::default()
-                    .parser_revision(1)
+                    .plugin(MessageMention)
+                    .parser_revision(2)
                     .raw_html(false),
             )
             .link(move |link, _| {
@@ -1746,6 +1772,50 @@ impl Spk {
             )
             .child(self.attachment_picker(chat, cx))
             .child(self.gif_toggle(chat, cx))
+    }
+}
+
+struct MessageMention;
+
+impl MarkdownPlugin for MessageMention {
+    fn name(&self) -> &str {
+        "spk-mention"
+    }
+
+    fn parse(
+        &self,
+        node: &markdown::mdast::Node,
+        _: &MarkdownParseContext<'_>,
+    ) -> Option<MarkdownNode> {
+        let markdown::mdast::Node::Image(image) = node else {
+            return None;
+        };
+        let own = match image.url.as_str() {
+            "spk-mention:self" => true,
+            "spk-mention:other" => false,
+            _ => return None,
+        };
+        Some(
+            MarkdownNode::new(self.name().to_owned(), own)
+                .text(image.alt.clone())
+                .markdown(image.alt.clone()),
+        )
+    }
+
+    fn render(&self, node: &MarkdownNode, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = cx.theme();
+        let background = if node.data::<bool>() == Some(&true) {
+            theme.primary.opacity(0.2)
+        } else {
+            theme.popover
+        };
+        div()
+            .px_1()
+            .rounded_sm()
+            .bg(background)
+            .text_color(theme.primary)
+            .font_medium()
+            .child(node.as_text().to_owned())
     }
 }
 

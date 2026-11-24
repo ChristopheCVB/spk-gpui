@@ -409,68 +409,102 @@ impl Spk {
                 Some(
                     div()
                         .id(SharedString::from(format!("link-preview-{preview_url}")))
-                        .max_w(px(480.))
-                        .border_l_2()
-                        .border_color(theme.primary)
+                        .relative()
+                        .mt_1()
+                        .w_full()
+                        .max_w(rems(28.))
                         .rounded_md()
                         .bg(theme.popover)
-                        .p_2()
                         .flex()
                         .flex_col()
-                        .gap_1()
                         .child(
-                            div()
-                                .flex()
-                                .gap_2()
-                                .justify_between()
-                                .items_center()
+                            Button::new("open-preview")
+                                .ghost()
+                                .w_full()
+                                .h_auto()
+                                .p_2()
+                                .tab_stop(true)
+                                .accessibility_label(format!("Open link to {site}"))
                                 .child(
-                                    control_button("open-preview")
-                                        .small()
-                                        .ghost()
-                                        .tab_stop(true)
-                                        .label(site.to_owned())
-                                        .accessibility_label(format!("Open link to {site}"))
-                                        .on_click(move |_, _, cx| {
-                                            search::activate_chat_link(&app, url.clone(), cx)
-                                        }),
-                                )
-                                .when(can_remove, |row| {
-                                    row.child(
-                                        control_button("remove-preview")
-                                            .small()
-                                            .ghost()
-                                            .tab_stop(true)
-                                            .disabled(chat.action_pending)
-                                            .label("Remove preview")
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.send(
-                                                    Command::MutateChatMessage {
-                                                        channel_id: channel_id.clone(),
-                                                        message_id: message_id.clone(),
-                                                        action: MessageAction::RemovePreview(
-                                                            preview_url.clone(),
-                                                        ),
-                                                    },
-                                                    None,
-                                                    cx,
+                                    div()
+                                        .w_full()
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_0p5()
+                                        .when(can_remove, |text| text.pr_6())
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground)
+                                                .truncate()
+                                                .child(site.to_owned()),
+                                        )
+                                        .when_some(preview.title.clone(), |text, title| {
+                                            text.child(
+                                                div()
+                                                    .text_sm()
+                                                    .font_bold()
+                                                    .text_color(theme.primary)
+                                                    .whitespace_normal()
+                                                    .line_clamp(2)
+                                                    .child(title),
+                                            )
+                                        })
+                                        .when_some(
+                                            preview.description.clone(),
+                                            |text, description| {
+                                                text.child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(theme.foreground)
+                                                        .whitespace_normal()
+                                                        .line_clamp(3)
+                                                        .child(description),
                                                 )
-                                            })),
-                                    )
+                                            },
+                                        ),
+                                )
+                                .on_click(move |_, _, cx| {
+                                    search::activate_chat_link(&app, url.clone(), cx)
                                 }),
                         )
-                        .when_some(preview.title.clone(), |card, title| {
-                            card.child(Label::new(title).font_semibold())
-                        })
-                        .when_some(preview.description.clone(), |card, description| {
-                            card.child(Label::new(description).text_sm())
+                        .when(can_remove, |card| {
+                            card.child(
+                                div().absolute().top_1().right_1().child(
+                                    control_button("remove-preview")
+                                        .small()
+                                        .ghost()
+                                        .icon(IconName::X)
+                                        .tab_stop(true)
+                                        .disabled(chat.action_pending)
+                                        .tooltip("Remove preview")
+                                        .accessibility_label("Remove preview")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.send(
+                                                Command::MutateChatMessage {
+                                                    channel_id: channel_id.clone(),
+                                                    message_id: message_id.clone(),
+                                                    action: MessageAction::RemovePreview(
+                                                        preview_url.clone(),
+                                                    ),
+                                                },
+                                                None,
+                                                cx,
+                                            )
+                                        })),
+                                ),
+                            )
                         })
                         .when_some(image, |card, image| {
                             card.child(
-                                img(image)
-                                    .w_full()
-                                    .max_h(px(192.))
-                                    .object_fit(ObjectFit::Contain),
+                                div().px_2().pb_2().child(
+                                    img(image)
+                                        .max_w_full()
+                                        .max_h(rems(12.))
+                                        .rounded_md()
+                                        .object_fit(ObjectFit::Contain),
+                                ),
                             )
                         }),
                 )

@@ -40,7 +40,7 @@ impl Spk {
             .rounded_md()
             .border_l_4()
             .border_color(color)
-            .bg(theme.secondary)
+            .bg(theme.popover)
             .px_3()
             .py_2()
             .text_sm()
@@ -55,7 +55,8 @@ impl Spk {
                             .h_auto()
                             .font_semibold()
                             .tab_stop(true)
-                            .label(title.to_owned())
+                            .accessibility_label(title.to_owned())
+                            .child(Label::new(title.to_owned()).text_color(theme.primary))
                             .tooltip(title.to_owned())
                             .on_click(move |_, _, cx| {
                                 search::activate_chat_link(&app, link.clone(), cx);
@@ -105,6 +106,7 @@ impl Spk {
                                             .w_full()
                                             .min_w_0()
                                             .whitespace_normal()
+                                            .text_color(theme.primary)
                                             .child(field.value.clone()),
                                     )
                                     .on_click(move |_, _, cx| {

@@ -36,6 +36,32 @@ pub(crate) fn message_markdown<'a, 'b>(
     revealed: impl Fn(usize) -> bool,
     spoiler_link: Option<&str>,
 ) -> Cow<'a, str> {
+    render_message(source, name_of, revealed, spoiler_link, None)
+}
+
+pub(crate) fn styled_message_markdown<'a, 'b>(
+    source: &'a str,
+    name_of: impl Fn(&str) -> &'b str,
+    revealed: impl Fn(usize) -> bool,
+    spoiler_link: &str,
+    own_id: Option<&str>,
+) -> Cow<'a, str> {
+    render_message(
+        source,
+        name_of,
+        revealed,
+        Some(spoiler_link),
+        Some(own_id.unwrap_or_default()),
+    )
+}
+
+fn render_message<'a, 'b>(
+    source: &'a str,
+    name_of: impl Fn(&str) -> &'b str,
+    revealed: impl Fn(usize) -> bool,
+    spoiler_link: Option<&str>,
+    styled_for: Option<&str>,
+) -> Cow<'a, str> {
     if !source.contains("<@")
         && !source.contains("||")
         && !source.contains("\\|")
@@ -57,6 +83,7 @@ pub(crate) fn message_markdown<'a, 'b>(
         &name_of,
         &revealed,
         spoiler_link,
+        styled_for,
         &mut edits,
     );
     edits.sort_by_key(|(range, _)| (range.start, Reverse(range.end)));
@@ -118,6 +145,7 @@ fn find_edits<'a>(
     name_of: &impl Fn(&str) -> &'a str,
     revealed: &impl Fn(usize) -> bool,
     spoiler_link: Option<&str>,
+    styled_for: Option<&str>,
     edits: &mut Vec<(Range<usize>, String)>,
 ) {
     let Some(children) = parent.children() else {
@@ -186,7 +214,13 @@ fn find_edits<'a>(
                         } else {
                             escape_markdown(name)
                         };
-                        edits.push((start..range.start + end, format!("@{name}")));
+                        let label = if let Some(own_id) = styled_for {
+                            let kind = if own_id == id { "self" } else { "other" };
+                            format!("![@{name}](spk-mention:{kind})")
+                        } else {
+                            format!("@{name}")
+                        };
+                        edits.push((start..range.start + end, label));
                     }
                 }
             }
@@ -204,7 +238,15 @@ fn find_edits<'a>(
             Node::ImageReference(image) => {
                 edits.push((range, escape_markdown(&image.alt)));
             }
-            _ => find_edits(child, source, name_of, revealed, spoiler_link, edits),
+            _ => find_edits(
+                child,
+                source,
+                name_of,
+                revealed,
+                spoiler_link,
+                styled_for,
+                edits,
+            ),
         }
     }
     if preview && let Some(open) = spoiler {
@@ -335,6 +377,24 @@ fn node_text(node: &Node, hide_code: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn styled_mentions_use_distinct_markers_and_respect_code_and_spoilers() {
+        let source = "<@alice> <@bob> `<@alice>` ||<@bob>|| ![spoof](spk-mention:self)";
+        let styled = styled_message_markdown(
+            source,
+            |id| if id == "alice" { "Alice" } else { "Bob" },
+            |_| false,
+            "spk-spoiler:test:",
+            Some("alice"),
+        );
+        assert!(
+            styled.starts_with("![@Alice](spk-mention:self) ![@Bob](spk-mention:other) `<@alice>`")
+        );
+        assert_eq!(styled.matches("spk-mention:").count(), 2);
+        assert!(styled.contains("[Reveal spoiler]"));
+        assert!(styled.ends_with(" spoof"));
+    }
 
     #[test]
     fn image_previews_follow_visible_markdown_and_respect_autolink_opt_out() {
