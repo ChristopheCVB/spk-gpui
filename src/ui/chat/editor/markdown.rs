@@ -20,7 +20,7 @@ impl Format {
     pub(super) fn delimiter(self) -> Option<&'static str> {
         match self {
             Self::Bold => Some("**"),
-            Self::Italic => Some("_"),
+            Self::Italic => Some("*"),
             Self::Strike => Some("~~"),
             Self::Code => Some("`"),
             Self::Spoiler => Some("||"),
@@ -46,6 +46,8 @@ pub(super) struct Projection {
     pub marks: Vec<Mark>,
     pub syntax: Vec<Syntax>,
     pub mentions: Vec<Range<usize>>,
+    code_blocks: Vec<Range<usize>>,
+    list_items: Vec<Range<usize>>,
 }
 
 impl Projection {
@@ -140,6 +142,7 @@ impl Projection {
                 );
             }
             Node::Code(code) => {
+                self.code_blocks.push(range.clone());
                 let text = &source[range.clone()];
                 if let Some((fence, body)) = text.split_once('\n')
                     && let Some((marker, count)) = fence_marker(fence)
@@ -186,6 +189,7 @@ impl Projection {
                 });
             }
             Node::ListItem(_) => {
+                self.list_items.push(range.clone());
                 let line = source[range.clone()].lines().next().unwrap_or_default();
                 if let Some((end, ordinal)) = list_prefix(line) {
                     self.add_syntax(
@@ -250,6 +254,25 @@ impl Projection {
                 self.visit(child, source, spoiler);
             }
         }
+    }
+
+    pub fn clipboard_wrappers(&self, source: &str, selection: &Range<usize>) -> (String, String) {
+        let mut start = String::new();
+        let mut end = String::new();
+        for mark in self.marks.iter().filter(|mark| {
+            (mark.format.delimiter().is_some()
+                || (mark.format == Format::Link && &source[mark.open.clone()] == "["))
+                && mark.range.start < selection.end
+                && selection.start < mark.range.end
+        }) {
+            if selection.start >= mark.range.start {
+                start.push_str(&source[mark.open.clone()]);
+            }
+            if selection.end <= mark.range.end {
+                end.insert_str(0, &source[mark.close.clone()]);
+            }
+        }
+        (start, end)
     }
 
     pub fn plain(&self, source: &str, selection: Range<usize>) -> String {
@@ -423,35 +446,56 @@ pub(super) fn enter_change(
     selection: Range<usize>,
 ) -> Option<(Range<usize>, String, usize)> {
     let start = selection.start;
-    let line = current_line(source, &selection);
+    let line = current_line(source, &(start..start));
     let text = &source[line.clone()];
     let projection = Projection::parse(source);
-    if projection.active(Format::CodeBlock, &selection) {
-        return Some((selection, "\n".to_owned(), start + 1));
-    }
-    if selection.is_empty() && fence_language(text).is_some() {
+    let overlaps =
+        |block: &Range<usize>| block.start <= selection.end && selection.start <= block.end;
+    if selection.is_empty()
+        && projection.code_blocks.contains(&line)
+        && fence_language(text).is_some()
+    {
         return Some((line.end..line.end, "\n\n```".to_owned(), line.end + 1));
     }
-    let (end, ordinal) = list_prefix(text)?;
-    if !selection.is_empty() || start < line.start + end {
-        return None;
+    if projection.code_blocks.iter().any(overlaps) {
+        return Some((selection, "\n".to_owned(), start + 1));
     }
-    if text[end..].trim().is_empty() {
-        return Some((line.clone(), String::new(), line.start));
+
+    let marker_start = projection
+        .list_items
+        .iter()
+        .rev()
+        .find(|item| item.start <= start && start <= item.end)
+        .map_or(line.start, |item| item.start);
+    let marker_line = current_line(source, &(marker_start..marker_start));
+    let list_text = &source[marker_start..marker_line.end];
+    let Some((end, ordinal)) = list_prefix(list_text) else {
+        return projection.list_items.iter().any(overlaps).then_some((
+            selection,
+            "\n".to_owned(),
+            start + 1,
+        ));
+    };
+    if start < marker_start + end {
+        return Some((selection, "\n".to_owned(), start + 1));
+    }
+    if selection.is_empty() && marker_line == line && list_text[end..].trim().is_empty() {
+        return Some((marker_start..line.end, String::new(), marker_start));
     }
     let marker = match ordinal {
         Some(number) => {
-            let indent = text.len() - text.trim_start_matches(' ').len();
-            let delimiter = text.as_bytes()[end - 2] as char;
+            let indent = list_text.len() - list_text.trim_start_matches(' ').len();
+            let delimiter = list_text.as_bytes()[end - 2] as char;
             format!(
                 "{}{number}{delimiter} ",
-                &text[..indent],
+                &list_text[..indent],
                 number = number + 1
             )
         }
-        None => text[..end].to_owned(),
+        None => list_text[..end].to_owned(),
     };
-    let newline = format!("\n{marker}");
+    let prefix = &source[marker_line.start..marker_start];
+    let newline = format!("\n{prefix}{marker}");
     let caret = start + newline.len();
     Some((selection, newline, caret))
 }
@@ -482,6 +526,24 @@ mod tests {
             assert!(draft.active(format, &(start..start + word.len())), "{word}");
         }
         assert!(draft.syntax.iter().any(|syntax| syntax.label == "rust"));
+    }
+
+    #[test]
+    fn italic_markup_is_valid_inside_a_word() {
+        let delimiter = Format::Italic.delimiter().unwrap();
+        let source = format!("a{delimiter}b{delimiter}c");
+        assert!(Projection::parse(&source).active(Format::Italic, &(2..3)));
+    }
+
+    #[test]
+    fn copying_part_of_a_link_label_preserves_the_target_and_plain_label() {
+        let source = "before [example link](https://example.org/path) after";
+        let selection = 11..15;
+        let projection = Projection::parse(source);
+        let (open, close) = projection.clipboard_wrappers(source, &selection);
+        let markdown = format!("{open}{}{close}", &source[selection.clone()]);
+        assert_eq!(markdown, "[mple](https://example.org/path)");
+        assert_eq!(projection.plain(source, selection), "mple");
     }
 
     #[test]
@@ -535,6 +597,22 @@ mod tests {
         assert_eq!(
             enter_change("3. item\n4. ", 11..11),
             Some((8..11, String::new(), 8))
+        );
+        assert_eq!(
+            enter_change("- first\n  continuation", 22..22),
+            Some((22..22, "\n- ".to_owned(), 25))
+        );
+        assert_eq!(
+            enter_change("- first", 3..7),
+            Some((3..7, "\n- ".to_owned(), 6))
+        );
+        assert_eq!(
+            enter_change("```\nbody\n```", 4..8),
+            Some((4..8, "\n".to_owned(), 5))
+        );
+        assert_eq!(
+            enter_change("> - first\n>   continuation", 26..26),
+            Some((26..26, "\n> - ".to_owned(), 31))
         );
         assert!(enter_change("normal text", 11..11).is_none());
     }

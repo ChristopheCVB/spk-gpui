@@ -55,6 +55,7 @@ pub(super) struct Spk {
     nickname: Entity<InputState>,
     chat_input: Entity<TextareaState>,
     chat_submitting: bool,
+    chat_draft_edited: bool,
     suggestions: [chat::suggestions::MenuState; 2],
     gif_input: Entity<InputState>,
     gif_button_focus: FocusHandle,
@@ -149,6 +150,7 @@ impl Spk {
             window,
             |this, _, event, window, cx| match event {
                 InputEvent::Change => {
+                    this.chat_draft_edited = true;
                     this.refresh_chat_editor(false, cx);
                     this.on_chat_input(window, cx);
                 }
@@ -433,6 +435,7 @@ impl Spk {
             nickname,
             chat_input,
             chat_submitting: false,
+            chat_draft_edited: false,
             suggestions: Default::default(),
             gif_input,
             gif_button_focus: cx.focus_handle(),
@@ -576,9 +579,18 @@ impl Spk {
     fn send(&mut self, command: Command, busy: Option<&'static str>, cx: &mut Context<Self>) {
         self.form_error = None;
         let signing_out = matches!(command, Command::SignOut);
+        let edits_draft = matches!(
+            command,
+            Command::SetChatReply { .. }
+                | Command::PickGif(_)
+                | Command::RemoveDraftGif(_)
+                | Command::AddChatAttachments { .. }
+                | Command::RetryChatAttachment { .. }
+        );
         if self.commands.try_send(command).is_err() {
             self.form_error = Some("Could not reach the SPK connection. Try again.");
         } else {
+            self.chat_draft_edited |= edits_draft;
             if signing_out {
                 self.signing_out = true;
                 self.shortcuts.signed_in(false);

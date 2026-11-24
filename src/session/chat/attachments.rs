@@ -209,6 +209,7 @@ impl ChatSession {
         if files.is_empty() || !self.can_change_attachments(&channel_id) {
             return;
         }
+        self.shelve_draft_restoration(&channel_id);
         let draft = self.drafts.entry(channel_id.clone()).or_default();
         draft.upload_notice = None;
         for input in files {
@@ -241,6 +242,7 @@ impl ChatSession {
             && matches!(upload.status, UploadStatus::Failed(_))
         {
             upload.status = UploadStatus::Uploading(0);
+            self.shelve_draft_restoration(channel_id);
             self.attachments.start(client, channel_id, key);
         }
     }

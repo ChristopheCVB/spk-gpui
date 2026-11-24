@@ -121,6 +121,11 @@ pub enum Command {
         channel_id: String,
         body: String,
     },
+    ResolveChatDraftRestoration {
+        channel_id: String,
+        nonce: String,
+        accept: bool,
+    },
     SetChatReply {
         channel_id: String,
         message_id: Option<String>,
@@ -1016,6 +1021,9 @@ async fn watch_session(
                     chat.latest(client);
                 }
                 Ok(Command::UpdateChatDraft { channel_id, body }) => chat.update_draft(channel_id, body),
+                Ok(Command::ResolveChatDraftRestoration { channel_id, nonce, accept }) => {
+                    chat.resolve_draft_restoration(&channel_id, &nonce, accept);
+                }
                 Ok(Command::SetChatReply { channel_id, message_id }) => chat.set_reply(&channel_id, message_id.as_deref()),
                 Ok(Command::SendChatMessage { channel_id, body }) => chat.send(channel_id, body),
                 Ok(Command::SendChatPoll { channel_id, question, options, completed }) => {
@@ -1497,8 +1505,18 @@ async fn watch_session(
     if let Some(store) = &draft_store {
         if matches!(end, SessionEnd::Closed) {
             while let Ok(command) = commands.try_recv() {
-                if let Command::UpdateChatDraft { channel_id, body } = command {
-                    chat.update_draft(channel_id, body);
+                match command {
+                    Command::UpdateChatDraft { channel_id, body } => {
+                        chat.update_draft(channel_id, body)
+                    }
+                    Command::ResolveChatDraftRestoration {
+                        channel_id,
+                        nonce,
+                        accept,
+                    } => {
+                        chat.resolve_draft_restoration(&channel_id, &nonce, accept);
+                    }
+                    _ => {}
                 }
             }
         }

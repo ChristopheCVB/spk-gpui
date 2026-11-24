@@ -131,10 +131,7 @@ pub(in crate::ui) fn refresh(
                     }
                     Format::Code | Format::CodeBlock => style.background_color = Some(muted),
                     Format::Quote => style.color = Some(muted_text),
-                    Format::Spoiler => {
-                        style.background_color = Some(muted_text);
-                        style.color = Some(muted);
-                    }
+                    Format::Spoiler => style.background_color = Some(muted),
                     Format::Link => {
                         style.color = Some(link);
                         style.underline = Some(UnderlineStyle {
@@ -221,23 +218,18 @@ fn pending_range(
     delimiter: &str,
 ) -> Option<(Range<usize>, bool)> {
     [PENDING, PENDING_OFF].into_iter().find_map(|id| {
-        let matches = |span: &gpui_kit::component::input::InlineTokenSpan| {
-            span.token().id() == id && span.token().text() == delimiter
-        };
-        let left = input
-            .tokens()
-            .iter()
-            .any(|span| matches(span) && span.range().end == caret);
-        let right = input
-            .tokens()
-            .iter()
-            .any(|span| matches(span) && span.range().start == caret);
-        (left && right).then(|| {
-            (
-                caret - delimiter.len()..caret + delimiter.len(),
-                id == PENDING,
-            )
-        })
+        let left = input.tokens().iter().find(|span| {
+            span.range().end == caret
+                && span.token().id() == id
+                && (span.token().text() == delimiter
+                    || (delimiter == "*" && span.token().text() == "_"))
+        })?;
+        let right = input.tokens().iter().find(|span| {
+            span.range().start == caret
+                && span.token().id() == id
+                && span.token().text() == left.token().text()
+        })?;
+        Some((left.range().start..right.range().end, id == PENDING))
     })
 }
 
@@ -306,8 +298,12 @@ pub(in crate::ui) fn toggle(
                         window,
                         cx,
                     );
-                    if selection.is_empty() && open == close && open == delimiter {
-                        pending = Some((middle, delimiter, PENDING_OFF));
+                    if selection.is_empty()
+                        && open == close
+                        && (open == delimiter || (format == Format::Italic && open == "_"))
+                    {
+                        let marker = if open == "_" { "_" } else { delimiter };
+                        pending = Some((middle, marker, PENDING_OFF));
                     }
                 }
             } else if !projection.active(Format::CodeBlock, &selection)
@@ -546,20 +542,7 @@ pub(in crate::ui) fn clipboard_key(
         }
         let source = input.value();
         let projection = Projection::parse(&source);
-        let mut start = String::new();
-        let mut end = String::new();
-        for mark in projection.marks.iter().filter(|mark| {
-            mark.format.delimiter().is_some()
-                && mark.range.start < selection.end
-                && selection.start < mark.range.end
-        }) {
-            if selection.start >= mark.range.start {
-                start.push_str(&source[mark.open.clone()]);
-            }
-            if selection.end <= mark.range.end {
-                end.insert_str(0, &source[mark.close.clone()]);
-            }
-        }
+        let (start, end) = projection.clipboard_wrappers(&source, &selection);
         let markdown = format!("{start}{}{end}", &source[selection.clone()]);
         let mut plain = String::new();
         let mut mentions = Vec::new();

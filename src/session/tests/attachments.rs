@@ -432,6 +432,31 @@ async fn attachment_queue_cancels_in_flight_uploads_and_sends_only_ready_files()
 
         tx.send(set_reply(Some("target"))).await.unwrap();
         wait_for_sidebar(&rx, replying).await;
+        let typing = crate::session::tests::receive_non_presence_message(&mut peer).await.unwrap().unwrap();
+        assert_eq!(serde_json::from_str::<Value>(typing.to_text().unwrap()).unwrap()["type"], "typing");
+        tx.send(Command::SendChatMessage { channel_id: "private".into(), body: body.into() }).await.unwrap();
+        let rejected = super::chat::receive_chat_send(&mut peer, "private", body).await;
+        assert_eq!(rejected["replyToId"], "target");
+        assert_eq!(rejected["attachments"], value!([{"id":"ready","spoiler":true}]));
+        peer.send(Message::text(value!({
+            "type":"message:error","nonce":rejected["nonce"],"error":"Try again later"
+        }).to_string())).await.unwrap();
+        wait_for_sidebar(&rx, |s| s.chat.as_ref().is_some_and(|chat| {
+            if chat.message_send_error.as_deref() != Some("Try again later") {
+                return false;
+            }
+            assert!(replying(s));
+            assert_eq!(chat.draft.body, body);
+            assert_eq!(chat.draft.uploads.len(), 2);
+            assert!(chat.draft.uploads.iter().any(|upload| upload.key == key && upload.spoiler));
+            assert!(chat.outgoing.is_empty());
+            true
+        })).await;
+        tx.send(Command::ResolveChatDraftRestoration {
+            channel_id: "private".into(),
+            nonce: rejected["nonce"].as_str().unwrap().into(),
+            accept: true,
+        }).await.unwrap();
         peer.send(Message::text(value!({
             "type":"message:delete","channelId":"private","id":"target"
         }).to_string())).await.unwrap();

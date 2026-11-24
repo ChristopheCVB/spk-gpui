@@ -83,10 +83,7 @@ pub(crate) fn reply_preview<'a>(source: &str, name_of: impl Fn(&str) -> &'a str)
         preview.push_str(parts.next().unwrap_or_default());
         for token in parts {
             if let Some((id, tail)) = token.split_once('>')
-                && !id.is_empty()
-                && id
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+                && valid_mention_id(id)
             {
                 preview.push('@');
                 preview.push_str(name_of(id));

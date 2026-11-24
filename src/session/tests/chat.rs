@@ -540,12 +540,21 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         let completed = send_poll(&tx, "general", "Offline poll?", &["Yes", "No"]).await;
         assert!(completed.await.unwrap().is_err());
         tx.send(Command::SendChatMessage { channel_id: "general".into(), body: "Offline message".into() }).await.unwrap();
-        let offline = wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat|
-            chat.draft.body.is_empty() && chat.outgoing.iter().any(|outgoing|
-                outgoing.draft.body == "Offline message" && matches!(outgoing.status, Delivery::Failed(_)))
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
+            if chat.message_send_error.as_deref() != Some("Could not reach SPK. Try again.") {
+                return false;
+            }
+            assert_eq!(chat.draft.body, "Offline message");
+            assert!(chat.outgoing.iter().all(|outgoing| matches!(outgoing.status, Delivery::Unconfirmed)));
+            true
+        })).await;
+        tx.send(Command::UpdateChatDraft { channel_id: "general".into(), body: "Newer work before restoration was displayed".into() }).await.unwrap();
+        let updated = wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat|
+            chat.draft.body == "Newer work before restoration was displayed" && chat.draft_restoration.is_none()
         )).await;
-        let offline_nonce = offline.chat.unwrap().outgoing.into_iter()
-            .find(|outgoing| outgoing.draft.body == "Offline message").unwrap().nonce;
+        let offline = updated.chat.unwrap().outgoing.into_iter()
+            .find(|outgoing| outgoing.draft.body == "Offline message").unwrap();
+        assert!(matches!(offline.status, Delivery::Failed(_)));
         let mut peer = accept_async(sockets.accept().await.unwrap().0)
             .await
             .unwrap();
@@ -686,7 +695,7 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
 
         tx.send(Command::RetryChatSend(interrupted_nonce.into())).await.unwrap();
         tx.send(Command::MarkChatSendDelivered(interrupted_nonce.into())).await.unwrap();
-        tx.send(Command::RetryChatSend(offline_nonce)).await.unwrap();
+        tx.send(Command::RetryChatSend(offline.nonce)).await.unwrap();
         receive_chat_send(&mut peer, "general", "Offline message").await;
         tx.send(Command::UpdateChatDraft { channel_id: "general".into(), body: "Still here".into() }).await.unwrap();
         receive_typing(&mut peer, "general").await;
@@ -880,7 +889,7 @@ async fn wait_for_delivery(views: &Receiver<View>, predicate: impl Fn(&Delivery)
     .await;
 }
 
-async fn receive_chat_send(
+pub(super) async fn receive_chat_send(
     peer: &mut WebSocketStream<TcpStream>,
     conversation: &str,
     body: &str,

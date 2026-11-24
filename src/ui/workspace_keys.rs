@@ -114,7 +114,14 @@ impl Spk {
         if composer && primary && count == 1 && key_name == "v" && self.paste_attachment_paths(cx) {
             return true;
         }
-        if (composer || editor) && self.chat_suggestion_key(key_name, editor, window, cx) {
+        let navigating_chat = matches!(
+            (primary, modifiers.alt, count, key_name),
+            (false, true, 1 | 2, "up" | "down")
+        );
+        if (composer || editor)
+            && !navigating_chat
+            && self.chat_suggestion_key(key_name, editor, window, cx)
+        {
             return true;
         }
         if editor && count == 0 && key_name == "escape" {

@@ -342,6 +342,8 @@ impl ChatSession {
         } else {
             None
         };
-        self.drafts.entry(view.channel_id.clone()).or_default().gif = gif;
+        let channel = view.channel_id.clone();
+        self.shelve_draft_restoration(&channel);
+        self.drafts.entry(channel).or_default().gif = gif;
     }
 }

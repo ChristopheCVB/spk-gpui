@@ -557,8 +557,29 @@ impl Spk {
         {
             self.chat_pins = None;
         }
+        let mut restore_body = false;
+        if let Some(next) = next
+            && let Some(nonce) = &next.draft_restoration
+            && (reset || previous.and_then(|chat| chat.draft_restoration.as_ref()) != Some(nonce))
+        {
+            let accept = reset
+                || !self.chat_draft_edited
+                    && self.chat_input.update(cx, |input, cx| {
+                        input.value().is_empty() && input.marked_text_range(window, cx).is_none()
+                    });
+            restore_body = self
+                .commands
+                .try_send(Command::ResolveChatDraftRestoration {
+                    channel_id: next.channel_id.clone(),
+                    nonce: nonce.clone(),
+                    accept,
+                })
+                .is_ok()
+                && accept;
+        }
         if reset {
             self.chat_submitting = false;
+            self.chat_draft_edited = false;
             self.suggestions = Default::default();
             self.chat_input.update(cx, |input, cx| {
                 input.set_value(
@@ -590,14 +611,20 @@ impl Spk {
             if previous.draft_generation != next.draft_generation {
                 self.chat_submitting = false;
             }
-            let restored = !self.chat_submitting
-                && previous.loading()
-                && !next.loading()
+            let failed_send =
+                restore_body || previous.draft_restore_generation != next.draft_restore_generation;
+            let restored = (next.draft_restoration.is_none() || restore_body)
+                && !self.chat_submitting
+                && (failed_send || previous.loading() && !next.loading())
                 && !next.draft.body.is_empty()
-                && editor::wire(self.chat_input.read(cx)).is_empty();
+                && self.chat_input.read(cx).value().is_empty();
             if restored {
                 self.chat_input.update(cx, |input, cx| {
-                    input.set_value(next.draft.body.clone(), window, cx)
+                    input.set_value(next.draft.body.clone(), window, cx);
+                    if failed_send {
+                        let end = next.draft.body.len();
+                        input.set_selected_range(end..end, cx);
+                    }
                 });
                 editor::refresh(&self.chat_input, directory, cx);
             }
@@ -716,6 +743,7 @@ impl Spk {
         );
         if self.form_error.is_none() {
             self.chat_submitting = true;
+            self.chat_draft_edited = false;
             self.suggestions[0].dismiss();
             self.chat_input.update(cx, |input, cx| {
                 input.set_value("", window, cx);

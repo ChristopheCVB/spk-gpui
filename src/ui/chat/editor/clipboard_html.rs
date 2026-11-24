@@ -5,6 +5,8 @@ use html5ever::tendril::TendrilSink;
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
 use uuid::Uuid;
 
+use crate::chat_markdown::valid_mention_id;
+
 use super::{Format, Projection};
 
 struct RichClipboard {
@@ -120,16 +122,16 @@ fn escape_html(text: &str) -> String {
         .replace('"', "&quot;")
 }
 
-fn valid_id(id: &str) -> bool {
-    !id.is_empty()
-        && id
+fn valid_code_language(language: &str) -> bool {
+    !language.is_empty()
+        && language
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
 fn mention_id(text: &str) -> Option<&str> {
     let id = text.strip_prefix("<@")?.strip_suffix('>')?;
-    valid_id(id).then_some(id)
+    valid_mention_id(id).then_some(id)
 }
 
 fn rich_markdown(html: &str) -> Option<String> {
@@ -197,7 +199,7 @@ fn markdown_node(node: &Handle, depth: usize) -> Option<String> {
         "head" | "script" | "style" | "template" | "noscript" | "svg" | "iframe" | "object"
         | "img" => String::new(),
         "span" if attr("data-type") == Some("mention") => {
-            if let Some(id) = attr("data-id").filter(|id| valid_id(id)) {
+            if let Some(id) = attr("data-id").filter(|id| valid_mention_id(id)) {
                 format!("<@{id}>")
             } else {
                 content()?
@@ -247,7 +249,7 @@ fn markdown_node(node: &Handle, depth: usize) -> Option<String> {
                         .value
                         .split_ascii_whitespace()
                         .find_map(|class| class.strip_prefix("language-"))
-                        .filter(|lang| valid_id(lang))
+                        .filter(|lang| valid_code_language(lang))
                         .map(str::to_owned)
                 })
                 .unwrap_or_default();
