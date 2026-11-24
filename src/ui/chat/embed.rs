@@ -31,20 +31,13 @@ impl Spk {
             (footer, None) => footer.map(str::to_owned),
         };
 
-        div()
-            .mt_1()
-            .w_full()
-            .max_w(rems(48.))
+        let content = div()
+            .relative()
             .flex()
             .flex_col()
+            .min_w_0()
             .gap_1()
-            .rounded_md()
-            .border_l_4()
-            .border_color(color)
-            .bg(theme.popover)
-            .px_3()
-            .py_2()
-            .text_sm()
+            .child(measure_content_width(self.webhook_content_width.clone()))
             .when_some(embed.title.as_deref(), |card, title| {
                 if let Some(link) = embed.title_link() {
                     let app = cx.weak_entity();
@@ -70,32 +63,16 @@ impl Spk {
             .children(description)
             .when(!embed.fields.is_empty(), |card| {
                 let app = cx.weak_entity();
-                let columns = self.webhook_field_columns.clone();
                 let gap = window.rem_size();
                 let minimum = gap * 11.;
+                let width = self.webhook_content_width.get();
+                let columns = f32::from((width + gap) / (minimum + gap)).floor().max(1.) as u16;
                 card.child(
                     div()
-                        .relative()
                         .grid()
-                        .grid_cols(columns.get())
+                        .grid_cols(columns)
                         .gap_x(gap)
                         .gap_y_1()
-                        .child(
-                            canvas(
-                                move |bounds, window, _| {
-                                    let count =
-                                        (f32::from((bounds.size.width + gap) / (minimum + gap)))
-                                            .floor()
-                                            .max(1.) as u16;
-                                    if columns.replace(count) != count {
-                                        window.request_animation_frame();
-                                    }
-                                },
-                                |_, (), _, _| {},
-                            )
-                            .absolute()
-                            .inset_0(),
-                        )
                         .children(embed.fields.iter().enumerate().map(|(index, field)| {
                             let link = field.link();
                             let full_row = !field.inline
@@ -159,6 +136,19 @@ impl Spk {
                                 .text_color(theme.muted_foreground),
                         ),
                 )
-            })
+            });
+
+        div()
+            .mt_1()
+            .w_full()
+            .max_w(rems(48.))
+            .rounded_md()
+            .border_l_4()
+            .border_color(color)
+            .bg(theme.popover)
+            .px_3()
+            .py_2()
+            .text_sm()
+            .child(content)
     }
 }

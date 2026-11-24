@@ -1295,6 +1295,7 @@ impl Spk {
                             .flex_shrink_0()
                             .gap_1()
                             .children(self.sidebar_watch_buttons(
+                                sidebar,
                                 &person,
                                 &channel.id,
                                 can_join
@@ -1332,22 +1333,21 @@ impl Spk {
 
     fn sidebar_watch_buttons(
         &self,
+        sidebar: &Sidebar,
         person: &Participant<'_>,
         channel_id: &str,
         enabled: bool,
         cx: &Context<Self>,
     ) -> impl IntoIterator<Item = Button> {
-        let Some(video) = person.video else {
-            return Vec::new();
-        };
+        let feeds = sidebar.video_feeds(channel_id, person.id);
         [
             (
-                video.screen,
+                feeds.screen,
                 "screen-share",
                 "screen share",
                 bundled_icon("screen-share", Icon::new(IconName::Monitor)),
             ),
-            (video.cam, "camera", "camera", Icon::new(IconName::Video)),
+            (feeds.camera, "camera", "camera", Icon::new(IconName::Video)),
         ]
         .into_iter()
         .filter(|(active, ..)| *active)

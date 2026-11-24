@@ -175,7 +175,6 @@ fn chat_history_viewport(
             })
         },
     );
-    let previous_width = scroll.bounds().size.width;
     div()
         .relative()
         .flex()
@@ -193,19 +192,20 @@ fn chat_history_viewport(
                 .track_scroll(scroll)
                 .children(rows),
         )
-        .child(
-            canvas(
-                move |bounds, window, _| {
-                    if bounds.size.width != previous_width {
-                        window.request_animation_frame();
-                    }
-                },
-                |_, (), _, _| {},
-            )
-            .absolute()
-            .inset_0(),
-        )
         .child(overlay_scrollbar(scroll))
+}
+
+fn measure_content_width(width: Rc<Cell<Pixels>>) -> impl IntoElement {
+    canvas(
+        move |bounds, window, _| {
+            if width.replace(bounds.size.width) != bounds.size.width {
+                window.request_animation_frame();
+            }
+        },
+        |_, (), _, _| {},
+    )
+    .absolute()
+    .inset_0()
 }
 
 fn history_anchor<'a>(chat: &'a ChatView, scroll: &ScrollHandle) -> Option<(&'a str, Pixels)> {
@@ -1192,7 +1192,7 @@ impl Spk {
         message_id: &str,
         body: &str,
         sidebar: &Sidebar,
-        window: &Window,
+        max_width: Pixels,
         cx: &Context<Self>,
     ) -> RenderedChatMarkdown {
         let mut hasher = DefaultHasher::new();
@@ -1227,22 +1227,13 @@ impl Spk {
         };
         let mut extensions = MarkdownExtensions::default().plugin(MessageMention);
         if !spoilers.is_empty() {
-            let max_width = self.chat_scroll.bounds().size.width;
-            let max_width = if max_width > px(0.) {
-                max_width
-            } else {
-                window.viewport_size().width
-            };
-            let max_width = if id == "embed-description" {
-                (max_width - px(102.)).min(rems(48.).to_pixels(window.rem_size()) - px(28.))
-            } else {
-                max_width - px(74.)
-            };
+            let definitions = crate::chat_markdown::spoiler_link_definitions(body);
             let contents = spoilers
                 .into_iter()
                 .map(|range| {
+                    let fragment = format!("{}{definitions}", &body[range.body]);
                     let (formatted, _) = styled_message_markdown(
-                        &body[range.body],
+                        &fragment,
                         name_of,
                         |_| false,
                         &self.chat_spoiler_link,
@@ -1303,11 +1294,25 @@ impl Spk {
         let message_id = message.id.clone();
         let body = message.body.clone();
         let editing = self.is_editing_message(&message_id);
+        let measured_or_viewport_width = |width: Pixels| {
+            if width > px(0.) {
+                width
+            } else {
+                window.viewport_size().width
+            }
+        };
         let RenderedChatMarkdown {
             view: text,
             source: share_text,
             spoilers,
-        } = self.chat_message_markdown("message-body", &message_id, &body, sidebar, window, cx);
+        } = self.chat_message_markdown(
+            "message-body",
+            &message_id,
+            &body,
+            sidebar,
+            measured_or_viewport_width(self.chat_content_width.get()),
+            cx,
+        );
         let embed = message.embed.as_ref().filter(|_| chat.webhook);
         let description = embed
             .and_then(|embed| embed.description.as_deref())
@@ -1317,7 +1322,7 @@ impl Spk {
                     &message_id,
                     description,
                     sidebar,
-                    window,
+                    measured_or_viewport_width(self.webhook_content_width.get()),
                     cx,
                 )
             });
@@ -1389,10 +1394,12 @@ impl Spk {
             .can_send()
             .then(|| (message.user_id.clone(), app.clone()));
         let content = div()
+            .relative()
             .flex_1()
             .min_w_0()
             .flex()
             .flex_col()
+            .child(measure_content_width(self.chat_content_width.clone()))
             .child(
                 div()
                     .flex()

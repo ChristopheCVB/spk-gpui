@@ -1,4 +1,6 @@
-use std::{collections::HashMap, fmt::Write};
+mod blur;
+
+use std::collections::HashMap;
 
 use gpui_kit::base::text::{InlineElement, InlineRenderContext};
 
@@ -101,11 +103,7 @@ impl MarkdownPlugin for MessageSpoiler {
         Some(InlineElement::new(
             container
                 .child(LayoutOnly(rich_text.into_any_element()))
-                .child(blurred_text(
-                    content.plain.clone(),
-                    context,
-                    theme.foreground,
-                ))
+                .child(blur::formatted_spoiler(&content.formatted, context, cx))
                 .child(
                     Button::new(id)
                         .ghost()
@@ -144,56 +142,6 @@ impl MarkdownPlugin for MessageSpoiler {
                 ),
         ))
     }
-}
-
-fn blurred_text(
-    text: SharedString,
-    context: &InlineRenderContext,
-    color: Hsla,
-) -> impl IntoElement {
-    let run = context.text_style().to_run(text.len());
-    let font_size = context.font_size();
-    let line_height = context.line_height();
-    canvas(
-        move |bounds, window, _| {
-            let lines = window.text_system().shape_text(
-                text,
-                font_size,
-                &[run],
-                Some((bounds.size.width - px(4.)).max(px(1.))),
-                None,
-            ).ok()?;
-            let width = f32::from(bounds.size.width).max(1.);
-            let height = f32::from(bounds.size.height).max(1.);
-            let font_size = f32::from(font_size);
-            let mut svg = format!(
-                r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}"><defs><filter id="blur" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="8"/></filter></defs><g filter="url(#blur)" fill="white" font-family="sans-serif" font-size="{font_size}">"#
-            );
-            let mut y = font_size;
-            for line in lines {
-                let mut start = 0;
-                for end in line.wrap_boundaries().iter().map(|boundary| {
-                    line.unwrapped_layout.runs[boundary.run_ix].glyphs[boundary.glyph_ix].index
-                }).chain([line.text.len()]) {
-                    if let Some(text) = line.text.get(start..end) {
-                        let text = text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
-                        write!(svg, r#"<text x="2" y="{y}">{text}</text>"#).ok()?;
-                    }
-                    y += f32::from(line_height);
-                    start = end;
-                }
-            }
-            svg.push_str("</g></svg>");
-            let mut hash = DefaultHasher::new();
-            svg.hash(&mut hash);
-            Some((SharedString::from(format!("spoiler-blur-{}", hash.finish())), svg))
-        },
-        move |bounds, image, window, cx| {
-            if let Some((path, svg)) = image {
-                let _ = window.paint_svg(bounds, path, Some(svg.as_bytes()), Default::default(), color.opacity(0.24), cx);
-            }
-        },
-    ).absolute().inset_0()
 }
 
 // Match the revealed Markdown's layout without painting or exposing its content to input or accessibility.

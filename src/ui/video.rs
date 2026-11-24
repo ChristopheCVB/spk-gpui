@@ -99,22 +99,20 @@ impl TileActions {
                 .screen
                 .as_ref()
                 .is_some_and(|screen| screen.state.active());
-        let sharing_screen = local_screen
-            || participant.video.is_some_and(|video| video.screen)
-            || video.is_some_and(|video| video.live.contains(&VideoSource::Screen));
-        let live = local_screen
-            || participant_video(video)
-            || participant
-                .video
-                .is_some_and(|media| !is_me && (media.cam || media.screen));
+        let feeds = sidebar.video_feeds(&call.channel_id, participant.id);
+        let sharing_screen = if is_me { local_screen } else { feeds.screen };
+        let live = if is_me {
+            local_screen || participant_video(video)
+        } else {
+            feeds.is_live()
+        };
         let watching = sidebar.voice_intent.watching.contains(participant.id);
         let watched_screen = watching && sharing_screen;
         Self {
             live,
             can_watch: !is_me
                 && live
-                && (watching
-                    || report.is_none_or(|report| !report.reconnecting && video.is_some())),
+                && (watching || sidebar.can_watch_video(&call.channel_id, participant.id)),
             watching,
             show: live && (is_me || watching),
             theater: app.video_stage.theater.as_deref() == Some(participant.id),
@@ -144,8 +142,10 @@ impl Spk {
         let Some(watch) = self.video_stage.sidebar_watch.as_ref() else {
             return;
         };
-        let can_watch = sidebar.is_sharing_video(&watch.channel_id, &watch.participant_id);
-        if !can_watch || self.selected_voice_channel.as_deref() != Some(&watch.channel_id) {
+        let feeds = sidebar.video_feeds(&watch.channel_id, &watch.participant_id);
+        if (!feeds.is_live() && !sidebar.advertises_video(&watch.channel_id, &watch.participant_id))
+            || self.selected_voice_channel.as_deref() != Some(&watch.channel_id)
+        {
             self.video_stage.sidebar_watch = None;
             return;
         }
@@ -158,11 +158,8 @@ impl Spk {
             voice.channel_id == watch.channel_id
                 && voice.is_participating()
                 && (local
-                    || watching
-                    || voice.video.as_ref().is_none_or(|video| {
-                        !video.reconnecting
-                            && video.participants.contains_key(&watch.participant_id)
-                    }))
+                    || (watching && feeds.is_live())
+                    || sidebar.can_watch_video(&watch.channel_id, &watch.participant_id))
         }) {
             return;
         }

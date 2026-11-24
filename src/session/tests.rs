@@ -1544,6 +1544,51 @@ fn voice_cues_follow_live_membership_of_other_users() {
 }
 
 #[test]
+fn last_video_track_ends_watch_even_if_spk_still_advertises_it() {
+    use crate::voice::video::{ParticipantVideo, VideoReport, VideoSource};
+
+    let profile = serde_json::from_str(r#"{"id":"me","email":"me@example.test"}"#).unwrap();
+    let mut sidebar = Sidebar::new(profile, None);
+    let mut call = VoiceView::joining("here".into());
+    call.status = VoiceStatus::ListenOnly;
+    sidebar.voice = Some(call);
+    Refresh::default().update_presence(
+        &mut sidebar,
+        "bob".into(),
+        Some("here".into()),
+        VoiceFlags::default(),
+        VideoPresence {
+            cam: true,
+            screen: true,
+            ..Default::default()
+        },
+    );
+    let session = VoiceSession::default();
+    sidebar.voice_intent.watching.insert("bob".into());
+    for (live, expected) in [
+        ([VideoSource::Camera].into_iter().collect(), true),
+        (HashSet::new(), false),
+    ] {
+        sidebar.voice.as_mut().unwrap().video = Some(Arc::new(VideoReport {
+            participants: [(
+                "bob".into(),
+                ParticipantVideo {
+                    live,
+                    ..Default::default()
+                },
+            )]
+            .into(),
+            ..Default::default()
+        }));
+        session.prune_watching(&mut sidebar);
+        assert_eq!(sidebar.video_feeds("here", "bob").is_live(), expected);
+        assert!(!sidebar.video_feeds("here", "bob").screen);
+        assert_eq!(sidebar.can_watch_video("here", "bob"), expected);
+        assert_eq!(sidebar.voice_intent.watching.contains("bob"), expected);
+    }
+}
+
+#[test]
 fn local_cues_follow_first_ready_report_and_explicit_leave() {
     let report = |status| {
         Arc::new(VoiceReport {

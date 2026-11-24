@@ -285,6 +285,40 @@ fn escape_markdown(text: &str) -> String {
     result
 }
 
+pub(crate) fn spoiler_link_definitions(source: &str) -> String {
+    fn append(node: &Node, definitions: &mut String) {
+        use std::fmt::Write as _;
+
+        if let Node::Definition(definition) = node {
+            let _ = write!(
+                definitions,
+                "\n\n[{}]: <{}>",
+                definition.identifier,
+                escape_markdown(&definition.url),
+            );
+            if let Some(title) = &definition.title {
+                let _ = write!(
+                    definitions,
+                    " \"{}\"",
+                    escape_markdown(&title.replace(['\r', '\n'], " ")),
+                );
+            }
+        } else if let Some(children) = node.children() {
+            for child in children {
+                append(child, definitions);
+            }
+        }
+    }
+
+    let mut definitions = String::new();
+    if source.contains("]:")
+        && let Ok(document) = ::markdown::to_mdast(source, &parse_options())
+    {
+        append(&document, &mut definitions);
+    }
+    definitions
+}
+
 pub(crate) fn image_preview_links(source: &str) -> Vec<Url> {
     if !source.contains("://") {
         return Vec::new();
@@ -397,6 +431,30 @@ fn node_text(node: &Node, hide_code: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spoiler_fragment_keeps_reference_definitions_from_the_message() {
+        let body = "Before ||[reference][device]|| afterward.\n\n> [Device]: <https://example.com/a?x=1&y=2> \"Open it\"";
+        let (_, spoilers) = styled_message_markdown(body, |_| "", |_| false, "spk-spoiler:", None);
+        let fragment = format!(
+            "{}{}",
+            &body[spoilers[0].body.clone()],
+            spoiler_link_definitions(body)
+        );
+        let document = ::markdown::to_mdast(&fragment, &parse_options()).unwrap();
+        let children = document.children().unwrap();
+        assert!(matches!(
+            children[0].children().unwrap()[0],
+            Node::LinkReference(_)
+        ));
+        assert!(matches!(
+            &children[1],
+            Node::Definition(definition)
+                if definition.identifier == "device"
+                && definition.url == "https://example.com/a?x=1&y=2"
+                && definition.title.as_deref() == Some("Open it")
+        ));
+    }
 
     #[test]
     fn styled_mentions_use_distinct_markers_and_respect_code_and_spoilers() {
