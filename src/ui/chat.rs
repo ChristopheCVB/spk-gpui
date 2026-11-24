@@ -38,7 +38,7 @@ use super::*;
 
 use crate::{
     api::{ChatMessage, MessageTarget, UnreadState},
-    chat_markdown::{message_markdown, safe_link},
+    chat_markdown::{message_markdown, reply_preview, safe_link},
     reaction_artwork::reaction_artwork_path,
     session::{ChatView, Delivery, Pins},
 };
@@ -62,7 +62,7 @@ fn chat(view: &View) -> Option<&ChatView> {
     }
 }
 
-fn reaction_message<'a>(
+fn active_chat_message<'a>(
     chat: Option<&'a ChatView>,
     channel_id: &str,
     message_id: &str,
@@ -504,7 +504,7 @@ impl Spk {
         self.update_gif_input(previous, next, window, cx);
         Self::update_message_actions(&mut self.message_action_form, previous, next);
         if self.reaction_picker.as_ref().is_some_and(|picker| {
-            reaction_message(next, &picker.channel_id, &picker.message_id).is_none()
+            active_chat_message(next, &picker.channel_id, &picker.message_id).is_none()
         }) {
             self.reaction_picker = None;
         }
@@ -944,33 +944,44 @@ impl Spk {
                                 .flex()
                                 .items_center()
                                 .gap_2()
-                                .pb_2()
+                                .mb_2()
+                                .px_2()
+                                .rounded_md()
+                                .bg(theme.muted)
                                 .child(
-                                    Label::new(format!(
-                                        "Replying to {}",
-                                        sidebar.message_author(&reply.user_id)
-                                    ))
-                                    .font_semibold(),
+                                    Icon::new(IconName::Reply)
+                                        .size(ACTION_ICON_SIZE)
+                                        .flex_none(),
                                 )
                                 .child(
-                                    Label::new(
-                                        message_markdown(
-                                            &reply.preview,
-                                            |id| sidebar.message_author(id),
-                                            |_| false,
-                                            None,
+                                    div()
+                                        .flex()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .gap_2()
+                                        .child(
+                                            Label::new(format!(
+                                                "Replying to {}",
+                                                sidebar.message_author(&reply.user_id)
+                                            ))
+                                            .max_w(px(220.))
+                                            .font_semibold()
+                                            .truncate(),
                                         )
-                                        .into_owned(),
-                                    )
-                                    .truncate(),
+                                        .child(
+                                            Label::new(reply_preview(&reply.preview, |id| {
+                                                sidebar.message_author(id)
+                                            }))
+                                            .min_w_0()
+                                            .text_color(theme.muted_foreground)
+                                            .truncate(),
+                                        ),
                                 )
                                 .child(
-                                    control_button("cancel-reply")
-                                        .small()
-                                        .tab_stop(true)
-                                        .label("Cancel reply")
+                                    tool_button("cancel-reply", IconName::X, "Cancel reply")
+                                        .flex_none()
                                         .disabled(chat.outgoing.is_some() || !chat.can_send())
-                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                        .on_click(cx.listener(move |this, _, window, cx| {
                                             this.send(
                                                 Command::SetChatReply {
                                                     channel_id: channel_id.clone(),
@@ -979,6 +990,9 @@ impl Spk {
                                                 None,
                                                 cx,
                                             );
+                                            this.chat_input.update(cx, |input, cx| {
+                                                input.focus(window, cx);
+                                            });
                                         })),
                                 ),
                         )
@@ -1272,6 +1286,7 @@ impl Spk {
         let reply = message.reply_to.as_ref().filter(|_| !chat.webhook);
         let reply_channel = channel.clone();
         let reply_id = message_id.clone();
+        let reply_focus = row_focus.clone();
         let keyboard_focused = row_focus.is_focused(window) && window.last_input_was_keyboard();
         let row_focused = row_focus.contains_focused(window, cx);
         let feed = sidebar.webhook_feed(&chat.channel_id);
@@ -1473,7 +1488,7 @@ impl Spk {
                 if !event.is_held
                     && !event.keystroke.modifiers.modified()
                     && event.keystroke.key == "r"
-                    && !window.has_focused_input(cx)
+                    && reply_focus.is_focused(window)
                     && !composer_busy
                 {
                     app.reply_to_message(reply_channel.clone(), reply_id.clone(), window, cx);
@@ -1581,6 +1596,12 @@ impl Spk {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !active_chat_message(chat(&self.view), &channel_id, &message_id)
+            .is_some_and(|(chat, _)| chat.outgoing.is_none())
+        {
+            return;
+        }
+        self.cancel_inline_message_edit();
         self.send(
             Command::SetChatReply {
                 channel_id,
@@ -1589,8 +1610,11 @@ impl Spk {
             None,
             cx,
         );
-        self.chat_input
-            .update(cx, |input, cx| input.focus(window, cx));
+        self.chat_input.update(cx, |input, cx| {
+            let end = input.value().len();
+            input.set_selected_range(end..end, cx);
+            input.focus(window, cx);
+        });
     }
 
     fn composer_tools(

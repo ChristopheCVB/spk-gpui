@@ -48,6 +48,48 @@ pub(crate) fn message_markdown<'a, 'b>(
     Cow::Owned(result)
 }
 
+pub(crate) fn reply_preview<'a>(source: &str, name_of: impl Fn(&str) -> &'a str) -> String {
+    const LIMIT: usize = 80;
+    let line = source
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default()
+        .replace(r"\|", "|");
+    let mut preview = String::new();
+    for (index, part) in line.split("||").enumerate() {
+        if index % 2 != 0 {
+            // Mask an unclosed span as well, including spoilers spanning lines.
+            preview.push_str("▒▒▒");
+            continue;
+        }
+        let mut parts = part.split("<@");
+        preview.push_str(parts.next().unwrap_or_default());
+        for token in parts {
+            if let Some((id, tail)) = token.split_once('>')
+                && !id.is_empty()
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+            {
+                preview.push('@');
+                preview.push_str(name_of(id));
+                preview.push_str(tail);
+            } else {
+                preview.push_str("<@");
+                preview.push_str(token);
+            }
+        }
+    }
+    let mut units = 0;
+    if let Some((end, _)) = preview.char_indices().find(|(_, ch)| {
+        units += ch.len_utf16();
+        units > LIMIT
+    }) {
+        preview.truncate(end);
+    }
+    preview
+}
+
 fn find_edits<'a>(
     parent: &Node,
     source: &str,
@@ -388,6 +430,33 @@ mod tests {
         assert_eq!(
             notification_preview("`||inline spoiler||`", false, |_| "Alice"),
             "[spoiler]"
+        );
+    }
+
+    #[test]
+    fn composer_reply_preview_masks_spoilers_and_limits_visible_text() {
+        let body = format!(
+            " \n\n<@alice> ||keep **this** private|| {}\nsecond line",
+            "😀".repeat(40)
+        );
+        let preview = reply_preview(&body, |_| "Alice");
+        assert_eq!(preview, format!("@Alice ▒▒▒ {}", "😀".repeat(34)));
+
+        let body = format!("{}😀 tail", "a".repeat(79));
+        assert_eq!(reply_preview(&body, |_| "Alice"), "a".repeat(79));
+
+        let body = format!(" <@lee> ||{}|| visible", "secret".repeat(30));
+        assert_eq!(reply_preview(&body, |_| "Renamed"), " @Renamed ▒▒▒ visible");
+        assert_eq!(
+            reply_preview(
+                r"`<@x_1>` \|\|hidden | secret|\| <@> <@not valid>",
+                |_| "Lee"
+            ),
+            "`@Lee` ▒▒▒ <@> <@not valid>",
+        );
+        assert_eq!(
+            reply_preview("Visible ||first line\nsecond line||", |_| "Alice"),
+            "Visible ▒▒▒",
         );
     }
 
