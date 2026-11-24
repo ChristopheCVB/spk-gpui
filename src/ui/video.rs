@@ -368,7 +368,6 @@ impl Spk {
                     label,
                     location,
                 )
-                .selected(on)
                 .toggled(on)
                 .on_click(cx.listener(move |app, _, _, cx| {
                     if let View::SignedIn(sidebar) = &app.view {
@@ -401,6 +400,7 @@ impl Spk {
                         .map_or(&[][..], |report| report.devices.as_slice());
                     camera_options(sidebar, &app, devices)
                 }),
+            on.then_some(cx.theme().primary),
         )
     }
 
@@ -410,8 +410,11 @@ impl Spk {
         location: VoiceControls,
         cx: &Context<Self>,
     ) -> impl IntoElement {
-        let (label, command) = screen_share_action(call);
-        let active = !matches!(command, Command::OpenScreenShare);
+        let (label, _) = screen_share_action(call);
+        let sharing = call
+            .screen
+            .as_ref()
+            .is_some_and(|report| report.state.active());
         let app = cx.weak_entity();
         let focus = if location == VoiceControls::Session {
             self.screen_sidebar_focus.clone()
@@ -422,7 +425,6 @@ impl Spk {
             "screen-controls",
             voice_shortcut_tooltip(
                 voice_button("screen-share", IconName::Monitor, label, location)
-                    .selected(active)
                     .track_focus(&focus)
                     .on_click(cx.listener(move |app, _, window, cx| {
                         let View::SignedIn(sidebar) = &app.view else {
@@ -455,6 +457,7 @@ impl Spk {
                     let intent = &sidebar.voice_intent;
                     screen_preferences(intent.screen.quality, intent.preferred.screen_audio, &app)
                 }),
+            sharing.then_some(cx.theme().primary),
         )
     }
 
