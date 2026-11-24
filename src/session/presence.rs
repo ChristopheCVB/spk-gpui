@@ -113,6 +113,12 @@ pub(super) struct VoiceMembership {
     video: VideoPresence,
 }
 
+impl VoiceMembership {
+    pub(super) fn has_video(&self) -> bool {
+        self.video.cam || self.video.screen
+    }
+}
+
 pub struct Participant<'a> {
     pub id: &'a str,
     pub name: &'a str,
@@ -122,6 +128,12 @@ pub struct Participant<'a> {
 }
 
 impl Sidebar {
+    pub(crate) fn is_sharing_video(&self, channel: &str, user: &str) -> bool {
+        self.voice_presence
+            .get(user)
+            .is_some_and(|member| member.channel_id == channel && member.has_video())
+    }
+
     pub fn viewers(&self, channel: &str, presenter: &str) -> Vec<Participant<'_>> {
         self.participants(channel)
             .into_iter()

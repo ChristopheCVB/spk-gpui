@@ -4,6 +4,7 @@ import base64
 from hashlib import sha1
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import mmap
 import os
 from pathlib import Path
 import runpy
@@ -17,14 +18,6 @@ import wave
 
 
 PROFILE = {"id": "alice", "email": "alice@example.test", "displayName": "Alice", "role": "admin"}
-COMMITS = [
-    {"sha": digit * 40, "message": message, "date": date}
-    for digit, message, date in (
-        ("1", "First fixture commit", "2026-01-02"),
-        ("2", "Second fixture commit", "2026-01-02"),
-        ("3", "Third fixture commit", "2026-01-01"),
-    )
-]
 FIXTURE = Path(__file__).resolve()
 ROOT = FIXTURE.parents[2]
 
@@ -62,7 +55,6 @@ class SpkFixture(BaseHTTPRequestHandler):
         self.respond({
             "/api/profile/me": PROFILE,
             "/api/channels": [{"id": "voice", "name": "Fixture voice", "type": "voice"}],
-            "/api/changelog": {"commits": COMMITS, "nextPage": None},
             "/api/voice": [],
             "/api/users": [],
             "/api/sounds": [],
@@ -111,13 +103,17 @@ def check():
             }
             target = Path(env.get("CARGO_TARGET_DIR", ROOT / "target")).resolve()
             subprocess.run(["cargo", "build", "--locked"], cwd=ROOT, env=env, check=True)
+            executable = target / "debug/spk-gpui.exe"
+            with executable.open("rb") as file, mmap.mmap(file.fileno(), 0, access=mmap.ACCESS_READ) as binary:
+                if binary.find((ROOT / "CHANGELOG.md").read_bytes()) < 0:
+                    raise RuntimeError("The Windows executable is missing the bundled changelog")
             sound = Path(workspace) / "fixture.wav"
             with wave.open(str(sound), "wb") as output:
                 output.setparams((1, 2, 48000, 0, "NONE", "not compressed"))
                 output.writeframes(bytes(96000))
             subprocess.run([
                 "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
-                str(FIXTURE.with_suffix(".ps1")), "-Executable", str(target / "debug/spk-gpui.exe"),
+                str(FIXTURE.with_suffix(".ps1")), "-Executable", str(executable),
                 "-Sound", str(sound),
             ], check=True)
         finally:

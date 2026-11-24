@@ -2424,7 +2424,7 @@ async fn camera_and_watch_choices_are_scoped_to_the_current_voice_session() {
                 let join = establish_voice(&requests, &mut socket).await;
                 let sid = &join["sid"];
                 socket.send(Message::text(value!({
-                "type":"voice:presence", "userId":"bob", "channelId":"first", "cam":true,
+                "type":"voice:presence", "userId":"bob", "channelId":"first", "cam":true, "screen":true,
                 "watching":["alice"],
             }).to_string())).await.unwrap();
 
@@ -2432,8 +2432,16 @@ async fn camera_and_watch_choices_are_scoped_to_the_current_voice_session() {
                 assert_eq!(watch["sid"], *sid);
                 assert_eq!(watch["watching"], value!(["bob"]));
                 observed.send(()).await.unwrap();
+                for cam in [true, false] {
+                    socket.send(Message::text(value!({
+                        "type":"voice:presence", "userId":"bob", "channelId":"first", "cam":cam,
+                    }).to_string())).await.unwrap();
+                }
                 let stop_watching = receive_voice_frame(&mut socket).await;
                 assert_eq!(stop_watching["watching"], value!([]));
+                socket.send(Message::text(value!({
+                    "type":"voice:presence", "userId":"bob", "channelId":"first", "cam":true,
+                }).to_string())).await.unwrap();
                 observed.send(()).await.unwrap();
                 let watch_again = receive_voice_frame(&mut socket).await;
                 assert_eq!(watch_again["watching"], value!(["bob"]));
@@ -2522,11 +2530,19 @@ async fn camera_and_watch_choices_are_scoped_to_the_current_voice_session() {
                         .muted
                 );
                 observations.recv().await.unwrap();
-                commands
-                    .send(Command::SetWatching("bob".into(), false))
-                    .await
-                    .unwrap();
+                let still_watching = wait_for_sidebar(&views, |sidebar| {
+                    sidebar.participants("first").iter().any(|person| {
+                        person.id == "bob" && person.video.is_some_and(|video| video.cam && !video.screen)
+                    })
+                }).await;
+                assert!(still_watching.voice_intent.watching.contains("bob"));
                 observations.recv().await.unwrap();
+                wait_for_sidebar(&views, |sidebar| {
+                    sidebar.voice_intent.watching.is_empty()
+                        && sidebar.participants("first").iter().any(|person| {
+                            person.id == "bob" && person.video.is_some_and(|video| video.cam)
+                        })
+                }).await;
                 commands
                     .send(Command::SetWatching("bob".into(), true))
                     .await

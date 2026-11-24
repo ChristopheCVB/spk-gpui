@@ -737,14 +737,19 @@ impl VoiceSession {
         let watching = &mut sidebar.voice_intent.watching;
         let count = watching.len();
         watching.retain(|id| {
-            sidebar
-                .voice_presence
-                .get(id)
-                .is_some_and(|member| member.channel_id == voice.channel_id)
+            let Some(member) = sidebar.voice_presence.get(id) else {
+                return false;
+            };
+            let published = voice
+                .video
+                .as_ref()
+                .and_then(|video| video.participants.get(id));
+            member.channel_id == voice.channel_id
+                && (member.has_video() || published.is_some_and(|video| !video.live.is_empty()))
                 && voice
                     .video
                     .as_ref()
-                    .is_none_or(|video| video.reconnecting || video.participants.contains_key(id))
+                    .is_none_or(|video| video.reconnecting || published.is_some())
         });
         if watching.len() != count
             && let Some(call) = &self.call
@@ -1066,14 +1071,20 @@ impl VoiceSession {
                     return;
                 };
                 if enabled {
+                    let published = voice
+                        .video
+                        .as_ref()
+                        .and_then(|video| video.participants.get(&id));
                     if sidebar.profile.id.as_ref() == Some(&id)
-                        || voice.video.as_ref().is_some_and(|video| {
-                            video.reconnecting || !video.participants.contains_key(&id)
+                        || voice
+                            .video
+                            .as_ref()
+                            .is_some_and(|video| video.reconnecting || published.is_none())
+                        || !sidebar.voice_presence.get(&id).is_some_and(|member| {
+                            member.channel_id == voice.channel_id
+                                && (member.has_video()
+                                    || published.is_some_and(|video| !video.live.is_empty()))
                         })
-                        || !sidebar
-                            .voice_presence
-                            .get(&id)
-                            .is_some_and(|member| member.channel_id == voice.channel_id)
                     {
                         return;
                     }

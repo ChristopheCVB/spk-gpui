@@ -40,6 +40,12 @@ pub(super) struct VideoStage {
     pub menu_for: Option<String>,
     pub screen_volume_for: Option<String>,
     pub frames: HashMap<(String, VideoSource), Arc<RenderImage>>,
+    pub sidebar_watch: Option<SidebarWatch>,
+}
+
+pub(super) struct SidebarWatch {
+    pub channel_id: String,
+    pub participant_id: String,
 }
 
 impl VideoStage {
@@ -106,9 +112,9 @@ impl TileActions {
         Self {
             live,
             can_watch: !is_me
+                && live
                 && (watching
-                    || (live
-                        && report.is_none_or(|report| !report.reconnecting && video.is_some()))),
+                    || report.is_none_or(|report| !report.reconnecting && video.is_some())),
             watching,
             show: live && (is_me || watching),
             theater: app.video_stage.theater.as_deref() == Some(participant.id),
@@ -134,6 +140,44 @@ impl TileActions {
 }
 
 impl Spk {
+    pub(super) fn advance_sidebar_watch(&mut self, sidebar: &Sidebar, cx: &mut Context<Self>) {
+        let Some(watch) = self.video_stage.sidebar_watch.as_ref() else {
+            return;
+        };
+        let can_watch = sidebar.is_sharing_video(&watch.channel_id, &watch.participant_id);
+        if !can_watch || self.selected_voice_channel.as_deref() != Some(&watch.channel_id) {
+            self.video_stage.sidebar_watch = None;
+            return;
+        }
+        let local = sidebar.profile.id.as_deref() == Some(&watch.participant_id);
+        let watching = sidebar
+            .voice_intent
+            .watching
+            .contains(&watch.participant_id);
+        if !sidebar.voice.as_ref().is_some_and(|voice| {
+            voice.channel_id == watch.channel_id
+                && voice.is_participating()
+                && (local
+                    || watching
+                    || voice.video.as_ref().is_none_or(|video| {
+                        !video.reconnecting
+                            && video.participants.contains_key(&watch.participant_id)
+                    }))
+        }) {
+            return;
+        }
+        let watch = self
+            .video_stage
+            .sidebar_watch
+            .take()
+            .expect("watch request");
+        self.video_stage.theater = Some(watch.participant_id.clone());
+        self.video_stage.participants_hidden = false;
+        if !local && !watching {
+            self.send(Command::SetWatching(watch.participant_id, true), None, cx);
+        }
+    }
+
     pub(super) fn prepare_video_stage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let focused = window.focused(cx);
         if self.video_stage.focused != focused {

@@ -596,7 +596,9 @@ impl Spk {
                 self.show_alert(alert, sidebar, window, cx);
             }
             self.sync_search_conversation(sidebar, cx);
+            self.advance_sidebar_watch(sidebar, cx);
         } else if matches!(self.view, View::SignedIn(_)) {
+            self.video_stage.sidebar_watch = None;
             window.clear_notifications(cx);
         }
         self.view = view;
@@ -605,6 +607,9 @@ impl Spk {
 
     fn send(&mut self, command: Command, busy: Option<&'static str>, cx: &mut Context<Self>) {
         self.form_error = None;
+        if matches!(command, Command::LeaveVoice | Command::SignOut) {
+            self.video_stage.sidebar_watch = None;
+        }
         let signing_out = matches!(command, Command::SignOut);
         let edits_draft = matches!(
             command,

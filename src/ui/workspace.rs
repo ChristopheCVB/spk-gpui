@@ -15,7 +15,7 @@ use gpui_kit::{
 
 use super::{
     chat::{chat_destination, mark_read_item, unread_badges, unread_label},
-    video::{TileActions, TileControls},
+    video::{SidebarWatch, TileActions, TileControls},
     *,
 };
 use crate::{
@@ -1294,6 +1294,14 @@ impl Spk {
                             .items_center()
                             .flex_shrink_0()
                             .gap_1()
+                            .children(self.sidebar_watch_buttons(
+                                &person,
+                                &channel.id,
+                                can_join
+                                    || switching_here
+                                    || call.is_some_and(|call| call.status != Status::Leaving),
+                                cx,
+                            ))
                             .when(
                                 sidebar.profile.id.as_deref() != Some(person.id)
                                     && call.is_some_and(|call| {
@@ -1310,6 +1318,7 @@ impl Spk {
     }
 
     pub(super) fn select_voice_channel(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.video_stage.sidebar_watch = None;
         self.selected_voice_channel = Some(id.to_owned());
         self.send(Command::CloseChat, None, cx);
         self.device_picker = None;
@@ -1319,6 +1328,58 @@ impl Spk {
     fn join_voice_channel(&mut self, id: &str, cx: &mut Context<Self>) {
         self.select_voice_channel(id, cx);
         self.send(Command::JoinVoice(id.to_owned()), None, cx);
+    }
+
+    fn sidebar_watch_buttons(
+        &self,
+        person: &Participant<'_>,
+        channel_id: &str,
+        enabled: bool,
+        cx: &Context<Self>,
+    ) -> impl IntoIterator<Item = Button> {
+        let Some(video) = person.video else {
+            return Vec::new();
+        };
+        [
+            (
+                video.screen,
+                "screen-share",
+                "screen share",
+                bundled_icon("screen-share", Icon::new(IconName::Monitor)),
+            ),
+            (video.cam, "camera", "camera", Icon::new(IconName::Video)),
+        ]
+        .into_iter()
+        .filter(|(active, ..)| *active)
+        .map(|(_, id, label, icon)| {
+            let channel_id = channel_id.to_owned();
+            let participant_id = person.id.to_owned();
+            tool_button(
+                id,
+                icon.text_color(cx.theme().primary),
+                format!("Watch {}’s {label}", person.name),
+            )
+            .w(px(24.))
+            .px_0()
+            .disabled(!enabled)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                let View::SignedIn(sidebar) = &this.view else {
+                    return;
+                };
+                let join = sidebar.can_join_voice(&channel_id);
+                this.close_sidebar_drawer(window, cx);
+                if join {
+                    this.join_voice_channel(&channel_id, cx);
+                } else {
+                    this.select_voice_channel(&channel_id, cx);
+                }
+                this.video_stage.sidebar_watch = Some(SidebarWatch {
+                    channel_id: channel_id.clone(),
+                    participant_id: participant_id.clone(),
+                });
+            }))
+        })
+        .collect::<Vec<_>>()
     }
 
     fn voice_channel_stage(
