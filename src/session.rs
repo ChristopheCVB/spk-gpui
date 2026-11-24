@@ -45,7 +45,7 @@ use authentication::{
     SESSION_EXPIRED, SavedSession, login, restore, sign_in, sign_in_message, sign_out,
 };
 use avatars::AvatarLoads;
-use chat::ChatSession;
+use chat::{ChatSession, DraftStore};
 use presence::{PresenceReporter, PresenceSettings, Refresh, Resource, VoiceMembership};
 use profiles::Work as ProfileWork;
 use radio::{RadioSession, RadioView};
@@ -292,6 +292,7 @@ pub struct Sidebar {
     pub chat: Option<ChatView>,
     pub search: SearchView,
     pub chat_notice: Option<&'static str>,
+    pub draft_notice: Option<&'static str>,
     pub read_notice: Option<&'static str>,
     pub alerts: Vec<Alert>,
     unread: Arc<HashMap<String, UnreadState>>,
@@ -330,6 +331,7 @@ impl Sidebar {
             chat: None,
             search: SearchView::default(),
             chat_notice: None,
+            draft_notice: None,
             read_notice: None,
             alerts: Vec::new(),
             unread: Arc::default(),
@@ -462,6 +464,7 @@ impl Sidebar {
 
 struct SessionSettings {
     socket_endpoint: String,
+    drafts_path: Option<PathBuf>,
     start_call: Box<StartCall>,
     enumerate_devices: fn() -> Devices,
     devices: DeviceSettings,
@@ -483,6 +486,7 @@ pub async fn run(
     let saved = SavedSession::new(&base);
     let settings = SessionSettings {
         socket_endpoint: env!("SPK_WS_URL").to_owned(),
+        drafts_path: dirs::data_local_dir().map(|dir| dir.join("spk-gpui").join("drafts.json")),
         start_call: Box::new(Call::start),
         enumerate_devices: Devices::enumerate,
         devices: DeviceSettings::load(),
@@ -641,7 +645,22 @@ async fn watch_session(
     sidebar.voice_intent.preferred = settings.devices.preferred.clone();
     sidebar.device_notice = settings.devices.notice;
     sidebar.devices = Arc::new((settings.enumerate_devices)());
-    let mut chat = ChatSession::default();
+    let draft_store = settings
+        .drafts_path
+        .clone()
+        .zip(sidebar.profile.id.clone())
+        .map(|(path, account)| DraftStore::new(path, client.origin().to_owned(), account));
+    let mut chat = if let Some(store) = &draft_store {
+        match store.load().await {
+            Ok(bodies) => ChatSession::with_drafts(bodies),
+            Err(_) => {
+                sidebar.draft_notice = Some("Could not load saved Drafts.");
+                ChatSession::default()
+            }
+        }
+    } else {
+        ChatSession::default()
+    };
     let mut unread = UnreadSession::default();
     unread.refresh(client);
     let mut direct_message_opens = JoinSet::new();
@@ -663,6 +682,9 @@ async fn watch_session(
     let end = loop {
         if commands.is_closed() {
             break SessionEnd::Closed;
+        }
+        if let Some(store) = &draft_store {
+            chat.save_drafts(store, &mut sidebar.draft_notice).await;
         }
         unread.write_next(client);
         chat.fill_previews(client);
@@ -1418,6 +1440,16 @@ async fn watch_session(
             }
         }
     };
+    if matches!(end, SessionEnd::Closed)
+        && let Some(store) = &draft_store
+    {
+        while let Ok(command) = commands.try_recv() {
+            if let Command::UpdateChatDraft { channel_id, body } = command {
+                chat.update_draft(channel_id, body);
+            }
+        }
+        chat.save_drafts(store, &mut sidebar.draft_notice).await;
+    }
     if matches!(end, SessionEnd::Invalidated(SESSION_EXPIRED))
         && matches!(
             chat_navigation,

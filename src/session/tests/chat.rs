@@ -1,6 +1,181 @@
 use super::*;
 
 #[tokio::test]
+async fn draft_text_survives_restart_by_conversation_and_account() {
+    const GENERAL: &str = "**Hello** <@bob>\n\n> Keep the Markdown";
+    const GENERAL_AT_QUIT: &str = "**New Draft** <@bob>";
+    const PRIVATE: &str = "_Unsent_ <@alice> 📝";
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let http = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = Url::parse(&format!("http://{}", http.local_addr().unwrap())).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let server = tokio::spawn(async move {
+        loop {
+            let (line, request) = Request::receive(&http).await;
+            let body = match line.as_str() {
+                "GET /api/channels HTTP/1.1" => {
+                    r#"[
+                    {"id":"general","type":"text","name":"general"},
+                    {"id":"private","type":"dm","otherUserId":"bob"}
+                ]"#
+                }
+                "GET /api/channels/general/messages?unread=1 HTTP/1.1" => {
+                    r#"{"messages":[{"id":"first","channelId":"general","userId":"bob","body":"Existing message","createdAt":1}],"hasMoreBefore":false}"#
+                }
+                "GET /api/channels/private/messages?unread=1 HTTP/1.1" => {
+                    r#"{"messages":[],"hasMoreBefore":false}"#
+                }
+                "GET /api/unread HTTP/1.1" | "GET /api/users/presence HTTP/1.1" => "{}",
+                "GET /api/users HTTP/1.1"
+                | "GET /api/voice HTTP/1.1"
+                | "GET /api/channels/general/pins HTTP/1.1"
+                | "GET /api/channels/private/pins HTTP/1.1" => "[]",
+                _ => panic!("unexpected request: {line}"),
+            };
+            request.respond(&[], body).await;
+        }
+    });
+
+    timeout(Duration::from_secs(10), async {
+        for (account, first_launch) in [("alice", true), ("charlie", false), ("alice", false)] {
+            let client = SpkClient::new(base.clone(), CookieStore::default()).unwrap();
+            let (tx, commands) = async_channel::unbounded();
+            let (views, rx) = async_channel::unbounded();
+            let sockets = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut settings = fixture_settings(
+                format!("ws://{}/_ws", sockets.local_addr().unwrap()),
+                Call::start_for_test,
+            );
+            settings.drafts_path = Some(directory.path().join("drafts.json"));
+            let session = tokio::spawn(async move {
+                let (mut saved, _) = SavedSession::with_test_store(None);
+                let profile =
+                    serde_json::from_value(value!({"id":account,"email":"member@example.test"}))
+                        .unwrap();
+                watch_session(
+                    &client,
+                    profile,
+                    None,
+                    &mut saved,
+                    &mut settings,
+                    &commands,
+                    &views,
+                )
+                .await
+            });
+            let mut peer = accept_async(sockets.accept().await.unwrap().0)
+                .await
+                .unwrap();
+            wait_for_sidebar(&rx, |view| {
+                view.channels.is_some() && matches!(view.connection, Connection::Online)
+            })
+            .await;
+
+            for (conversation, open, body) in [
+                (
+                    "general",
+                    Command::OpenTextChannel("general".into()),
+                    GENERAL,
+                ),
+                (
+                    "private",
+                    Command::OpenDirectMessage("private".into()),
+                    PRIVATE,
+                ),
+            ] {
+                tx.send(open).await.unwrap();
+                let ready = wait_for_sidebar(&rx, |view| {
+                    view.chat
+                        .as_ref()
+                        .is_some_and(|chat| chat.channel_id == conversation && chat.history_ready())
+                })
+                .await;
+                let draft = &ready.chat.as_ref().unwrap().draft;
+                let expected = if !first_launch && account == "alice" {
+                    if conversation == "general" {
+                        GENERAL_AT_QUIT
+                    } else {
+                        body
+                    }
+                } else {
+                    ""
+                };
+                assert_eq!(draft.body, expected);
+                assert!(draft.reply.is_none());
+                assert!(draft.gif.is_none());
+                assert!(draft.uploads.is_empty());
+                assert!(ready.chat.unwrap().outgoing.is_none());
+                if first_launch {
+                    tx.send(Command::UpdateChatDraft {
+                        channel_id: conversation.into(),
+                        body: "In progress".into(),
+                    })
+                    .await
+                    .unwrap();
+                    receive_typing(&mut peer, conversation).await;
+                    tx.send(Command::UpdateChatDraft {
+                        channel_id: conversation.into(),
+                        body: body.into(),
+                    })
+                    .await
+                    .unwrap();
+                    if conversation == "general" {
+                        tx.send(Command::SetChatReply {
+                            channel_id: conversation.into(),
+                            message_id: Some("first".into()),
+                        })
+                        .await
+                        .unwrap();
+                    }
+                } else if account == "charlie" {
+                    tx.send(Command::UpdateChatDraft {
+                        channel_id: conversation.into(),
+                        body: "Another account's Draft".into(),
+                    })
+                    .await
+                    .unwrap();
+                    receive_typing(&mut peer, conversation).await;
+                }
+            }
+
+            if first_launch {
+                tx.send(Command::OpenTextChannel("general".into()))
+                    .await
+                    .unwrap();
+                let returned = wait_for_sidebar(&rx, |view| {
+                    view.chat
+                        .as_ref()
+                        .is_some_and(|chat| chat.channel_id == "general" && chat.history_ready())
+                })
+                .await;
+                let draft = returned.chat.unwrap().draft;
+                assert_eq!(draft.body, GENERAL);
+                assert_eq!(draft.reply.unwrap().id, "first");
+                tx.send(Command::SendChatMessage {
+                    channel_id: "general".into(),
+                    body: GENERAL.into(),
+                })
+                .await
+                .unwrap();
+                receive_chat_send(&mut peer, "general", GENERAL).await;
+                tx.send(Command::UpdateChatDraft {
+                    channel_id: "general".into(),
+                    body: GENERAL_AT_QUIT.into(),
+                })
+                .await
+                .unwrap();
+            }
+            tx.close();
+            assert!(matches!(session.await.unwrap(), SessionEnd::Closed));
+        }
+    })
+    .await
+    .expect("draft restart timed out");
+    server.abort();
+}
+
+#[tokio::test]
 #[allow(
     clippy::result_large_err,
     reason = "Tungstenite defines the handshake callback type"

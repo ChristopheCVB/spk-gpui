@@ -1,5 +1,6 @@
 mod actions;
 mod attachments;
+mod drafts;
 mod gifs;
 mod preview_images;
 
@@ -7,6 +8,7 @@ use actions::{ActionOutcome, PendingAction, VoteResult, change_message};
 pub use actions::{Pins, PollEditOutcome, PollEditReply};
 pub use attachments::{AttachmentInput, UploadStatus, image_preview};
 use attachments::{AttachmentWork, QueuedAttachment};
+pub(super) use drafts::DraftStore;
 pub use gifs::GifPickerView;
 use gifs::{GifPicker, StagedGif};
 use preview_images::{PreviewImages, PreviewResult};
@@ -176,6 +178,7 @@ pub(super) struct ChatSession {
     message_send_error: Option<String>,
     vote_error: Option<&'static str>,
     drafts: HashMap<String, Draft>,
+    draft_changes: HashMap<String, String>,
     typers: HashMap<String, Instant>,
     last_typing: Option<Instant>,
     socket: Option<VoiceSocket>,
@@ -196,6 +199,37 @@ pub(super) struct ChatSession {
 }
 
 impl ChatSession {
+    pub fn with_drafts(bodies: HashMap<String, String>) -> Self {
+        Self {
+            drafts: bodies
+                .into_iter()
+                .map(|(channel, body)| {
+                    (
+                        channel,
+                        Draft {
+                            body,
+                            ..Draft::default()
+                        },
+                    )
+                })
+                .collect(),
+            ..Self::default()
+        }
+    }
+
+    pub async fn save_drafts(&mut self, store: &DraftStore, notice: &mut Option<&'static str>) {
+        if self.draft_changes.is_empty() {
+            return;
+        }
+        match store.save(self.draft_changes.clone()).await {
+            Ok(()) => {
+                self.draft_changes.clear();
+                *notice = None;
+            }
+            Err(_) => *notice = Some("Could not save Drafts for the next launch."),
+        }
+    }
+
     pub fn view(&self) -> Option<ChatView> {
         let mut view = self.selected.clone()?;
         view.message_send_error.clone_from(&self.message_send_error);
@@ -219,11 +253,13 @@ impl ChatSession {
             view.has_more_after = false;
         } else if !view.unavailable() {
             view.outgoing = self.outgoing.get(&view.channel_id).cloned();
-            view.draft = self
-                .drafts
-                .get(&view.channel_id)
-                .cloned()
-                .unwrap_or_default();
+            if !view.webhook {
+                view.draft = self
+                    .drafts
+                    .get(&view.channel_id)
+                    .cloned()
+                    .unwrap_or_default();
+            }
             if view.can_send() {
                 view.gifs = self.gifs.view.clone();
             }
@@ -550,6 +586,10 @@ impl ChatSession {
                     if view.direct_message_peer.is_some() {
                         self.outgoing.remove(&view.channel_id);
                         if let Some(draft) = self.drafts.remove(&view.channel_id) {
+                            if !draft.body.is_empty() {
+                                self.draft_changes
+                                    .insert(view.channel_id.clone(), String::new());
+                            }
                             for upload in draft.uploads {
                                 self.attachments.cancel(client, upload);
                             }
@@ -629,6 +669,10 @@ impl ChatSession {
         else {
             return;
         };
+        let draft = self.drafts.entry(channel_id.clone()).or_default();
+        if draft.body == body {
+            return;
+        }
         if !body.trim().is_empty()
             && view.can_send()
             && self
@@ -641,7 +685,8 @@ impl ChatSession {
         {
             self.last_typing = Some(Instant::now());
         }
-        self.drafts.entry(channel_id).or_default().body = body;
+        draft.body.clone_from(&body);
+        self.draft_changes.insert(channel_id, body);
     }
 
     pub fn set_reply(&mut self, channel_id: &str, message_id: Option<&str>) {
@@ -698,7 +743,10 @@ impl ChatSession {
         if !draft.can_send(&body) {
             return;
         }
-        draft.body.clone_from(&body);
+        if draft.body != body {
+            draft.body.clone_from(&body);
+            self.draft_changes.insert(channel_id.clone(), body.clone());
+        }
         let reply = draft.reply.clone();
         let attachments = draft.attachment_refs();
         let gif_url = draft.gif.as_ref().map(|gif| gif.item.url.clone());
@@ -823,7 +871,11 @@ impl ChatSession {
                 draft.gif = None;
             }
             if draft.body == outgoing.body && draft.reply == outgoing.reply {
-                draft.body.clear();
+                if !draft.body.is_empty() {
+                    draft.body.clear();
+                    self.draft_changes
+                        .insert(channel_id.to_owned(), String::new());
+                }
                 draft.reply = None;
                 draft.upload_notice = None;
             }
