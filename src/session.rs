@@ -60,8 +60,9 @@ pub use {
     avatars::AvatarPhoto,
     channel_admin::{ChannelAction, ChannelAdmin, ChannelKind},
     chat::{
-        AttachmentInput, ChatView, Delivery, GifPickerView, Pins, PollEditOutcome, PollEditReply,
-        UploadStatus, image_preview, validate_poll,
+        AttachmentInput, ChatView, Delivery, GifPickerView, POLL_MAX_OPTIONS, POLL_MIN_OPTIONS,
+        POLL_OPTION_LIMIT, POLL_QUESTION_LIMIT, Pins, PollEditOutcome, PollEditReply, UploadStatus,
+        image_preview, trim_poll_text, validate_poll,
     },
     presence::Participant,
     profiles::ProfileEdit,
@@ -717,6 +718,12 @@ async fn watch_session(
                 }
                 chat.action_complete(client, result);
             }
+            Some(Ok((channel_id, message_id, result))) = chat.vote_tasks.join_next() => {
+                if result.as_ref().is_err_and(Failure::unauthorized) {
+                    break SessionEnd::Invalidated(SESSION_EXPIRED);
+                }
+                chat.vote_complete(client, &channel_id, &message_id, result);
+            }
             Some(Ok(result)) = chat.preview_tasks.join_next() => chat.preview_complete(result),
             Some(result) = chat.gifs.browsing.join_next() => {
                 let result = result.unwrap_or(Err(Failure::Connection));
@@ -1088,7 +1095,7 @@ async fn watch_session(
                     Frame::PinUpdate { channel_id, message_id, pinned } => {
                         chat.message_changed(client, &channel_id, &message_id, MessageChange::Pin(pinned));
                     }
-                    Frame::MessageError { nonce: Some(nonce), error } => chat.error(&nonce, error),
+                    Frame::MessageError { nonce, error } => chat.error(nonce.as_deref(), error),
                     Frame::Typing { channel_id, user_id } if sidebar.profile.id.as_ref() != Some(&user_id) => {
                         chat.receive_typing(&channel_id, user_id);
                     }

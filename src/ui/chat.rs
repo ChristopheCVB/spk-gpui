@@ -754,17 +754,22 @@ impl Spk {
                 area.child(self.pins(sidebar, chat, cx))
             })
             .children(
-                chat.action_outcome
-                    .as_ref()
-                    .and_then(|result| result.error)
-                    .into_iter()
-                    .chain(chat.poll_send_error.as_deref())
-                    .map(|error| {
-                        div()
-                            .px_4()
-                            .py_2()
-                            .child(Label::new(error.to_owned()).text_color(theme.danger))
-                    }),
+                [
+                    (
+                        "chat-action-error",
+                        chat.action_outcome.as_ref().and_then(|result| result.error),
+                    ),
+                    ("chat-send-error", chat.message_send_error.as_deref()),
+                    ("chat-vote-error", chat.vote_error),
+                ]
+                .into_iter()
+                .filter_map(|(id, error)| {
+                    error.map(|error| {
+                        div().px_4().py_2().child(
+                            Label::new(error.to_owned()).id(id).text_color(theme.danger),
+                        )
+                    })
+                }),
             )
             .when_some(status, |area, status| {
                 area.child(

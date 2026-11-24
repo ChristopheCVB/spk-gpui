@@ -30,7 +30,7 @@ pub(super) fn poll_results(
                 .selected(mine)
                 .toggled(mine)
                 .tab_stop(true)
-                .disabled(chat.action_pending || !chat.can_send())
+                .disabled(!chat.can_send())
                 .accessibility_label(format!("{}, {}, {percent}%", option.label, votes(count),))
                 .child(
                     div()

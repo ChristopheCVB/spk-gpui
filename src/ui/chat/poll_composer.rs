@@ -1,15 +1,23 @@
 use super::*;
 use crate::{
     api::PollEditOption,
-    session::{PollEditOutcome, validate_poll},
+    session::{
+        POLL_MAX_OPTIONS, POLL_MIN_OPTIONS, POLL_OPTION_LIMIT, POLL_QUESTION_LIMIT,
+        PollEditOutcome, trim_poll_text, validate_poll,
+    },
 };
 use futures::future::Either;
 
 const CONNECTION_ERROR: &str = "Could not reach SPK. Try again.";
 
+struct PollField {
+    input: Entity<InputState>,
+    original: Option<(SharedString, SharedString)>,
+}
+
 struct OptionField {
     id: Option<String>,
-    input: Entity<InputState>,
+    field: PollField,
 }
 
 struct PollComposer {
@@ -17,7 +25,7 @@ struct PollComposer {
     message_id: Option<String>,
     commands: async_channel::Sender<Command>,
     opener: FocusHandle,
-    question: Entity<InputState>,
+    question: PollField,
     options: Vec<OptionField>,
     scroll: ScrollHandle,
     sending: bool,
@@ -62,7 +70,12 @@ impl Spk {
         cx: &mut Context<Self>,
     ) {
         let form = cx.new(|cx| {
-            let question = PollComposer::input(300, window, cx);
+            let question = PollComposer::input(
+                POLL_QUESTION_LIMIT,
+                message.map_or("", |message| message.body.as_str()),
+                window,
+                cx,
+            );
             let mut form = PollComposer {
                 channel_id: channel_id.to_owned(),
                 message_id: message.map(|message| message.id.clone()),
@@ -74,21 +87,13 @@ impl Spk {
                 sending: false,
                 error: None,
             };
-            if let Some(message) = message
-                && let Some(poll) = &message.poll
-            {
-                form.question.update(cx, |input, cx| {
-                    input.set_value(message.body.clone(), window, cx)
-                });
+            if let Some(poll) = message.and_then(|message| message.poll.as_ref()) {
                 for option in &poll.options {
-                    form.add_option(Some(option.id.clone()), window, cx)
-                        .update(cx, |input, cx| {
-                            input.set_value(option.label.clone(), window, cx)
-                        });
+                    form.add_option(Some(option.id.clone()), &option.label, window, cx);
                 }
             } else {
-                for _ in 0..2 {
-                    form.add_option(None, window, cx);
+                for _ in 0..POLL_MIN_OPTIONS {
+                    form.add_option(None, "", window, cx);
                 }
             }
             form
@@ -101,7 +106,11 @@ impl Spk {
         let initial_focus = Cell::new(true);
         window.open_dialog(cx, move |dialog, window, cx| {
             if initial_focus.replace(false) {
-                form.read(cx).question.focus_handle(cx).focus(window, cx);
+                form.read(cx)
+                    .question
+                    .input
+                    .focus_handle(cx)
+                    .focus(window, cx);
             }
             dialog
                 .centered()
@@ -122,9 +131,21 @@ impl Spk {
 }
 
 impl PollComposer {
-    fn input(limit: usize, window: &mut Window, cx: &mut Context<Self>) -> Entity<InputState> {
+    fn input(
+        limit: usize,
+        initial: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> PollField {
+        let initial = if initial.encode_utf16().count() > limit {
+            trim_poll_text(initial)
+        } else {
+            initial
+        };
+        let display = initial.replace(['\r', '\n'], " ");
         let input = cx.new(|cx| {
             InputState::new(window, cx)
+                .default_value(display.clone())
                 .validate(move |text, _| text.encode_utf16().count() <= limit)
         });
         cx.subscribe_in(&input, window, |form, _, event, window, cx| match event {
@@ -133,22 +154,28 @@ impl PollComposer {
             _ => {}
         })
         .detach();
-        input
+        PollField {
+            input,
+            // The single-line control cannot display line breaks from stored text.
+            original: (display != initial).then(|| (display.into(), initial.to_owned().into())),
+        }
     }
 
     fn add_option(
         &mut self,
         option_id: Option<String>,
+        label: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<InputState> {
-        let input = Self::input(100, window, cx);
+        let field = Self::input(POLL_OPTION_LIMIT, label, window, cx);
+        let input = field.input.clone();
         let id = input.entity_id();
         cx.on_focus(&input.focus_handle(cx), window, move |form, _, _| {
             if let Some(index) = form
                 .options
                 .iter()
-                .position(|option| option.input.entity_id() == id)
+                .position(|option| option.field.input.entity_id() == id)
             {
                 form.scroll.scroll_to_item(index);
             }
@@ -156,7 +183,7 @@ impl PollComposer {
         .detach();
         self.options.push(OptionField {
             id: option_id,
-            input: input.clone(),
+            field,
         });
         input
     }
@@ -167,10 +194,10 @@ impl PollComposer {
 
     fn values(&self, cx: &App) -> (SharedString, Vec<SharedString>) {
         (
-            self.question.read(cx).value(),
+            self.question.value(cx),
             self.options
                 .iter()
-                .map(|option| option.input.read(cx).value())
+                .map(|option| option.field.value(cx))
                 .collect(),
         )
     }
@@ -309,6 +336,18 @@ impl PollComposer {
     }
 }
 
+impl PollField {
+    fn value(&self, cx: &App) -> SharedString {
+        let value = self.input.read(cx).value();
+        if let Some((display, original)) = &self.original
+            && value == *display
+        {
+            return original.clone();
+        }
+        value
+    }
+}
+
 impl Render for PollComposer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
@@ -332,7 +371,7 @@ impl Render for PollComposer {
                     .gap_1()
                     .child(Label::new("Question"))
                     .child(
-                        Input::new(&self.question)
+                        Input::new(&self.question.input)
                             .aria_label("Question")
                             .disabled(self.sending),
                     ),
@@ -347,7 +386,7 @@ impl Render for PollComposer {
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
                     .children(self.options.iter().enumerate().map(|(index, option)| {
-                        let input = &option.input;
+                        let input = &option.field.input;
                         let label = format!("Option {}", index + 1);
                         div()
                             .id(("poll-option", input.entity_id()))
@@ -372,11 +411,12 @@ impl Render for PollComposer {
                                     format!("Remove option {}", index + 1),
                                 )
                                 .tab_stop(true)
-                                .disabled(self.options.len() <= 2 || self.sending)
+                                .disabled(self.options.len() <= POLL_MIN_OPTIONS || self.sending)
                                 .on_click(cx.listener(
                                     move |form, _, window, cx| {
                                         form.options.remove(index);
                                         form.options[index.min(form.options.len() - 1)]
+                                            .field
                                             .input
                                             .focus_handle(cx)
                                             .focus(window, cx);
@@ -392,9 +432,9 @@ impl Render for PollComposer {
                         .ghost()
                         .tab_stop(true)
                         .label("Add option")
-                        .disabled(self.options.len() >= 10 || self.sending)
+                        .disabled(self.options.len() >= POLL_MAX_OPTIONS || self.sending)
                         .on_click(cx.listener(|form, _, window, cx| {
-                            form.add_option(None, window, cx)
+                            form.add_option(None, "", window, cx)
                                 .focus_handle(cx)
                                 .focus(window, cx);
                             cx.notify();

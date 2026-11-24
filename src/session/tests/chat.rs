@@ -144,17 +144,20 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
             "channelId":"general", "messageId":"m2", "poll":poll(tea, coffee)
         });
         tx.send(vote(Some("tea"))).await.unwrap();
-        let request = chat_action_request(&history, vote_path, value!({"choiceId":"tea"})).await;
-        request.respond(&[], &result(&["bob", "alice"], &[]).to_string()).await;
+        let tea = chat_action_request(&history, vote_path, value!({"choiceId":"tea"})).await;
+        tx.send(vote(Some("coffee"))).await.unwrap();
+        let coffee = timeout(
+            Duration::from_secs(2),
+            chat_action_request(&history, vote_path, value!({"choiceId":"coffee"})),
+        ).await.expect("a second choice can be submitted while the first request is in flight");
+        tea.respond(&[], &result(&["bob", "alice"], &[]).to_string()).await;
         wait_for_sidebar(&rx, |view| {
             view.chat.as_ref().is_some_and(|chat| !chat.action_pending
                 && chat.messages[1].poll.as_ref().unwrap().options[0].user_ids == ["bob", "alice"])
         }).await;
 
-        tx.send(vote(Some("coffee"))).await.unwrap();
-        let request = chat_action_request(&history, vote_path, value!({"choiceId":"coffee"})).await;
         let switched = result(&["bob"], &["alice"]);
-        request.respond(&[], &switched.to_string()).await;
+        coffee.respond(&[], &switched.to_string()).await;
         wait_for_sidebar(&rx, |view| {
             view.chat.as_ref().is_some_and(|chat| !chat.action_pending
                 && chat.messages[1].poll.as_ref().unwrap().options[0].user_ids == ["bob"]
@@ -166,7 +169,7 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         request.respond_raw("400 Bad Request", &[], b"").await;
         wait_for_sidebar(&rx, |view| {
             view.chat.as_ref().is_some_and(|chat|
-                chat.action_outcome.as_ref().is_some_and(|outcome| outcome.message_id == "m2" && outcome.error.is_some())
+                chat.vote_error == Some("SPK rejected the vote. Try again.")
                     && chat.messages[1].poll.as_ref().unwrap().options[1].user_ids == ["alice"])
         }).await;
 
@@ -209,7 +212,7 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
             "type":"message:error","nonce":sent_poll["nonce"],"error":"Poll rejected"
         }).to_string())).await.unwrap();
         wait_for_sidebar(&rx, |view| {
-            view.chat.as_ref().is_some_and(|chat| chat.poll_send_error.as_deref() == Some("Poll rejected")
+            view.chat.as_ref().is_some_and(|chat| chat.message_send_error.as_deref() == Some("Poll rejected")
                 && chat.outgoing.is_none() && chat.messages.len() == 2)
         }).await;
 
@@ -484,7 +487,14 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
             "type":"message:error","nonce":rejected["nonce"],"error":"Poll rejected after switching"
         }).to_string())).await.unwrap();
         wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
-            chat.channel_id == "quiet" && chat.poll_send_error.as_deref() == Some("Poll rejected after switching")
+            chat.channel_id == "quiet" && chat.message_send_error.as_deref() == Some("Poll rejected after switching")
+        })).await;
+
+        peer.send(Message::text(value!({
+            "type":"message:error","nonce":"expired-poll-nonce","error":"Late rejection"
+        }).to_string())).await.unwrap();
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
+            chat.channel_id == "quiet" && chat.message_send_error.as_deref() == Some("Late rejection")
         })).await;
 
         live(&mut peer, &latest, None).await;
@@ -761,8 +771,14 @@ pub(super) async fn direct_message_session(
     (tx, rx, sockets, peer, session)
 }
 
-#[tokio::test]
-async fn direct_message_starts_reuses_and_recovers_between_participants() {
+struct DirectMessageHttp {
+    base: Url,
+    requests: Receiver<(String, Request)>,
+    pinned_messages: Arc<std::sync::Mutex<Vec<Value>>>,
+    http: tokio::task::JoinHandle<()>,
+}
+
+async fn direct_message_http(existing: bool) -> DirectMessageHttp {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let http = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = Url::parse(&format!("http://{}", http.local_addr().unwrap())).unwrap();
@@ -770,7 +786,7 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
     let pinned_messages = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
     let served_pins = pinned_messages.clone();
     let http = tokio::spawn(async move {
-        let mut created = false;
+        let mut created = existing;
         loop {
             let (line, request) = Request::receive(&http).await;
             let account = request.header("cookie").unwrap();
@@ -811,6 +827,22 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
             }
         }
     });
+    DirectMessageHttp {
+        base,
+        requests,
+        pinned_messages,
+        http,
+    }
+}
+
+#[tokio::test]
+async fn direct_message_starts_reuses_and_recovers_between_participants() {
+    let DirectMessageHttp {
+        base,
+        requests,
+        pinned_messages,
+        http,
+    } = direct_message_http(false).await;
 
     timeout(Duration::from_secs(10), async {
         let (alice, alice_views, sockets, mut alice_peer, alice_session) =
@@ -951,23 +983,16 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
         let mut alice_peer = accept_async(sockets.accept().await.unwrap().0).await.unwrap();
         let request = private_history(&requests, "session=alice").await;
         let third = value!({"id":"private-3","channelId":"private","userId":"bob","body":"While offline","createdAt":3});
-        let fourth = value!({
-            "id":"private-4","channelId":"private","userId":"bob","body":"When should we meet?","createdAt":4,
-            "poll":{"options":[
-                {"id":"now","label":"Now","userIds":[]},
-                {"id":"later","label":"Later","userIds":[]}
-            ]}
-        });
-        live(&mut alice_peer, &fourth, None).await;
-        let latest = [first, second, third, fourth];
+        live(&mut alice_peer, &third, None).await;
+        let latest = [first, second, third];
         page(request, &latest, false).await;
-        wait_for_messages(&alice_views, &["private-1", "private-2", "private-3", "private-4"]).await;
+        wait_for_messages(&alice_views, &["private-1", "private-2", "private-3"]).await;
 
         alice.send(Command::CloseChat).await.unwrap();
         wait_for_sidebar(&alice_views, |view| view.chat.is_none()).await;
         alice.send(Command::StartDirectMessage("bob".into())).await.unwrap();
         page(private_history(&requests, "session=alice").await, &latest, false).await;
-        wait_for_messages(&alice_views, &["private-1", "private-2", "private-3", "private-4"]).await;
+        wait_for_messages(&alice_views, &["private-1", "private-2", "private-3"]).await;
         alice.send(Command::MutateChatMessage {
             channel_id: "private".into(), message_id: "private-1".into(), action: MessageAction::Delete,
         }).await.unwrap();
@@ -980,12 +1005,52 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
         request.respond(&[], r#"{"ok":true}"#).await;
         wait_for_messages(&bob_views, &["private-2"]).await;
         wait_for_sidebar(&alice_views, |view| view.chat.as_ref().is_some_and(|chat| {
-            chat.messages.len() == 3 && chat.messages.first().is_some_and(|message| {
+            chat.messages.len() == 2 && chat.messages.first().is_some_and(|message| {
                 message.id == "private-2" && message.reply_to.as_ref().is_some_and(|reply| reply.deleted && reply.preview.is_empty())
             })
         })).await;
 
-        live(&mut bob_peer, &latest[3], None).await;
+        alice.close();
+        bob.close();
+        assert!(matches!(alice_session.await.unwrap(), SessionEnd::Closed));
+        assert!(matches!(bob_session.await.unwrap(), SessionEnd::Closed));
+    })
+    .await
+    .expect("loopback private conversation timed out");
+    http.abort();
+}
+
+#[tokio::test]
+async fn direct_message_participants_vote_edit_create_and_reopen_polls() {
+    let DirectMessageHttp {
+        base,
+        requests,
+        pinned_messages,
+        http,
+    } = direct_message_http(true).await;
+
+    timeout(Duration::from_secs(10), async {
+        let (alice, alice_views, _, mut alice_peer, alice_session) =
+            direct_message_session(base.clone(), "alice").await;
+        let (bob, bob_views, _, mut bob_peer, bob_session) =
+            direct_message_session(base, "bob").await;
+        let body = "Planning our meetup";
+        let previous = value!({"id":"private-2","channelId":"private","userId":"bob","body":body,"createdAt":2});
+        let original_poll = value!({
+            "id":"private-4","channelId":"private","userId":"bob","body":"When should we meet?","createdAt":4,
+            "poll":{"options":[
+                {"id":"now","label":"Now","userIds":[]},
+                {"id":"later","label":"Later","userIds":[]}
+            ]}
+        });
+        for (commands, views, cookie) in [
+            (&alice, &alice_views, "session=alice"),
+            (&bob, &bob_views, "session=bob"),
+        ] {
+            commands.send(Command::OpenDirectMessage("private".into())).await.unwrap();
+            page(private_history(&requests, cookie).await, &[previous.clone(), original_poll.clone()], false).await;
+            wait_for_messages(views, &["private-2", "private-4"]).await;
+        }
         wait_for_sidebar(&bob_views, |view| {
             view.chat.as_ref().unwrap().messages.last()
                 .and_then(|message| message.poll.as_ref())
@@ -997,7 +1062,7 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
         }).await.unwrap();
         let vote = chat_action_request(&requests, "POST /api/messages/private-4/vote HTTP/1.1", value!({"choiceId":"now"})).await;
         assert_eq!(vote.header("cookie"), Some("session=bob"));
-        let mut poll = latest[3]["poll"].clone();
+        let mut poll = original_poll["poll"].clone();
         poll["options"][0]["userIds"] = value!(["bob"]);
         poll["options"][1]["userIds"] = value!(["alice"]);
         poll_update(&mut alice_peer, "private", "private-4", &poll).await;
@@ -1055,7 +1120,7 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
         let patch = chat_action_request(&requests, "PATCH /api/messages/private-4 HTTP/1.1", value!({
             "body":"When suits you?","poll":edited_options,"resetVotes":false
         })).await;
-        let mut edited = latest[3].clone();
+        let mut edited = original_poll.clone();
         edited["body"] = value!("When suits you?");
         edited["editedAt"] = value!(5);
         edited["poll"]["options"] = value!([
@@ -1112,7 +1177,7 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
         assert_eq!(line, "DELETE /api/messages/private-4 HTTP/1.1");
         request.respond(&[], r#"{"ok":true}"#).await;
         alice_peer.send(Message::text(value!({"type":"message:delete","channelId":"private","id":"private-4"}).to_string())).await.unwrap();
-        wait_for_messages(&alice_views, &["private-2", "private-3"]).await;
+        wait_for_messages(&alice_views, &["private-2"]).await;
         wait_for_messages(&bob_views, &["private-2"]).await;
 
         bob.send(Command::UpdateChatDraft { channel_id: "private".into(), body: "Unsent draft".into() }).await.unwrap();
@@ -1209,7 +1274,7 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
         assert!(matches!(bob_session.await.unwrap(), SessionEnd::Closed));
     })
     .await
-    .expect("loopback private conversation timed out");
+    .expect("loopback direct message polls timed out");
     http.abort();
 }
 

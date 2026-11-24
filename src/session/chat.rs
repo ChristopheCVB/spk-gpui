@@ -3,7 +3,7 @@ mod attachments;
 mod gifs;
 mod preview_images;
 
-use actions::{ActionOutcome, PendingAction, change_message};
+use actions::{ActionOutcome, PendingAction, VoteResult, change_message};
 pub use actions::{Pins, PollEditOutcome, PollEditReply};
 pub use attachments::{AttachmentInput, UploadStatus, image_preview};
 use attachments::{AttachmentWork, QueuedAttachment};
@@ -56,7 +56,8 @@ pub struct ChatView {
     pub pins: Option<Pins>,
     pub preview_images: PreviewImages,
     pub gifs: Option<GifPickerView>,
-    pub poll_send_error: Option<String>,
+    pub message_send_error: Option<String>,
+    pub vote_error: Option<&'static str>,
     pub action_pending: bool,
     pub action_outcome: Option<ActionOutcome>,
     pub paging_forward: bool,
@@ -170,8 +171,7 @@ enum HistoryRequest {
 pub(super) struct ChatSession {
     selected: Option<ChatView>,
     outgoing: HashMap<String, Outgoing>,
-    pending_polls: HashMap<String, (String, Instant)>,
-    poll_send_error: Option<String>,
+    message_send_error: Option<String>,
     drafts: HashMap<String, Draft>,
     typers: HashMap<String, Instant>,
     last_typing: Option<Instant>,
@@ -182,6 +182,7 @@ pub(super) struct ChatSession {
     buffered_changes: Vec<(String, MessageChange)>,
     pending_action: Option<PendingAction>,
     pub action_tasks: JoinSet<Result<MessageChange, Failure>>,
+    pub vote_tasks: JoinSet<VoteResult>,
     pub pin_tasks: JoinSet<Result<Vec<ChatMessage>, Failure>>,
     pub preview_tasks: JoinSet<PreviewResult>,
     pub message_preview: JoinSet<()>,
@@ -194,7 +195,7 @@ pub(super) struct ChatSession {
 impl ChatSession {
     pub fn view(&self) -> Option<ChatView> {
         let mut view = self.selected.clone()?;
-        view.poll_send_error.clone_from(&self.poll_send_error);
+        view.message_send_error.clone_from(&self.message_send_error);
         // Hide cached DM content until SPK confirms access to the conversation.
         if view.direct_message_peer.is_some()
             && view.history != History::Ready
@@ -289,7 +290,8 @@ impl ChatSession {
             pins: Some(Pins::Loading),
             preview_images: PreviewImages::default(),
             gifs: None,
-            poll_send_error: None,
+            message_send_error: None,
+            vote_error: None,
             action_pending: false,
             action_outcome: None,
             paging_forward: false,
@@ -333,7 +335,6 @@ impl ChatSession {
 
     pub fn disconnected(&mut self) {
         self.socket = None;
-        self.pending_polls.clear();
         self.typers.clear();
         self.last_typing = None;
         for outgoing in self.outgoing.values_mut() {
@@ -715,11 +716,7 @@ impl ChatSession {
         }) {
             return Err("Could not reach SPK. Try again.");
         }
-        self.poll_send_error = None;
-        self.pending_polls.insert(
-            nonce,
-            (channel_id, Instant::now() + Duration::from_secs(12)),
-        );
+        self.message_send_error = None;
         Ok(())
     }
 
@@ -825,15 +822,6 @@ impl ChatSession {
 
     pub fn message(&mut self, message: ChatMessage, nonce: Option<&str>, own_id: Option<&str>) {
         if own_id == Some(message.user_id.as_str())
-            && let Some(nonce) = nonce
-            && self
-                .pending_polls
-                .get(nonce)
-                .is_some_and(|(channel, _)| *channel == message.channel_id)
-        {
-            self.pending_polls.remove(nonce);
-        }
-        if own_id == Some(message.user_id.as_str())
             && self
                 .outgoing
                 .get(&message.channel_id)
@@ -895,15 +883,15 @@ impl ChatSession {
         }
     }
 
-    pub fn error(&mut self, nonce: &str, error: String) {
+    pub fn error(&mut self, nonce: Option<&str>, error: String) {
         if let Some(outgoing) = self
             .outgoing
             .values_mut()
-            .find(|outgoing| outgoing.nonce == nonce)
+            .find(|outgoing| Some(outgoing.nonce.as_str()) == nonce)
         {
             outgoing.status = Delivery::Failed(error);
-        } else if self.pending_polls.remove(nonce).is_some() {
-            self.poll_send_error = Some(error);
+        } else {
+            self.message_send_error = Some(error);
         }
     }
 
@@ -914,7 +902,6 @@ impl ChatSession {
                 Delivery::Sending(deadline) => Some(deadline),
                 _ => None,
             })
-            .chain(self.pending_polls.values().map(|(_, deadline)| *deadline))
             .chain(self.typers.values().copied())
             .min()
     }
@@ -922,7 +909,6 @@ impl ChatSession {
     pub fn expire(&mut self) {
         let now = Instant::now();
         self.typers.retain(|_, until| *until > now);
-        self.pending_polls.retain(|_, (_, until)| *until > now);
         for outgoing in self.outgoing.values_mut() {
             if matches!(outgoing.status, Delivery::Sending(deadline) if deadline <= now) {
                 outgoing.status = Delivery::Unconfirmed;
@@ -931,29 +917,34 @@ impl ChatSession {
     }
 }
 
+pub const POLL_QUESTION_LIMIT: usize = 300;
+pub const POLL_OPTION_LIMIT: usize = 100;
+pub const POLL_MIN_OPTIONS: usize = 2;
+pub const POLL_MAX_OPTIONS: usize = 10;
+
+pub fn trim_poll_text(text: &str) -> &str {
+    // JavaScript trim includes BOM and excludes NEL.
+    text.trim_matches(|ch: char| ch == '\u{feff}' || ch != '\u{85}' && ch.is_whitespace())
+}
+
 pub fn validate_poll<'a>(
     question: &'a str,
     options: impl IntoIterator<Item = &'a str>,
 ) -> Result<(&'a str, Vec<&'a str>), &'static str> {
-    fn trim(text: &str) -> &str {
-        // JavaScript trim includes BOM and excludes NEL.
-        text.trim_matches(|ch: char| ch == '\u{feff}' || ch != '\u{85}' && ch.is_whitespace())
-    }
-
-    if question.encode_utf16().count() > 300 {
+    if question.encode_utf16().count() > POLL_QUESTION_LIMIT {
         return Err("The question can be up to 300 characters.");
     }
-    let question = trim(question);
+    let question = trim_poll_text(question);
     if question.is_empty() {
         return Err("Enter a question.");
     }
     let mut seen = HashSet::new();
     let mut labels = Vec::new();
     for option in options {
-        if option.encode_utf16().count() > 100 {
+        if option.encode_utf16().count() > POLL_OPTION_LIMIT {
             return Err("An option can be up to 100 characters.");
         }
-        let option = trim(option);
+        let option = trim_poll_text(option);
         if option.is_empty() {
             return Err("Fill in every option.");
         }
@@ -962,7 +953,7 @@ pub fn validate_poll<'a>(
         }
         labels.push(option);
     }
-    if !(2..=10).contains(&labels.len()) {
+    if !(POLL_MIN_OPTIONS..=POLL_MAX_OPTIONS).contains(&labels.len()) {
         return Err("Enter between 2 and 10 options.");
     }
     Ok((question, labels))

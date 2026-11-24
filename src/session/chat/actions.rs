@@ -26,10 +26,11 @@ pub enum PollEditOutcome {
 
 pub type PollEditReply = tokio::sync::oneshot::Sender<Result<PollEditOutcome, &'static str>>;
 
+pub(in crate::session) type VoteResult = (String, String, Result<MessageChange, Failure>);
+
 pub(in crate::session) struct PendingAction {
     message_id: String,
     saw_change: bool,
-    voting: bool,
     poll_edit_reply: Option<PollEditReply>,
 }
 
@@ -68,7 +69,11 @@ impl ChatSession {
         let Some(view) = &mut self.selected else {
             return;
         };
-        if self.pending_action.is_some() || view.channel_id != channel_id || !view.can_send() {
+        let voting = matches!(action, MessageAction::Vote(_));
+        if (!voting && self.pending_action.is_some())
+            || view.channel_id != channel_id
+            || !view.can_send()
+        {
             return;
         }
         let Some(message) = view.message(&message_id) else {
@@ -85,14 +90,60 @@ impl ChatSession {
             MessageAction::React { .. } => true,
             MessageAction::Vote(_) => message.poll.is_some(),
         };
-        if !allowed {
+        if voting {
+            view.vote_error = (!allowed).then_some(CHANGE_DENIED);
+            if allowed {
+                let client = client.clone();
+                let channel_id = channel_id.to_owned();
+                self.vote_tasks.spawn(async move {
+                    let result = client
+                        .mutate_message(&channel_id, &message_id, action)
+                        .await;
+                    (channel_id, message_id, result)
+                });
+            }
+        } else if !allowed {
             view.action_outcome = Some(ActionOutcome {
                 message_id,
                 error: Some(CHANGE_DENIED),
             });
-            return;
+        } else {
+            self.start_message_action(client, channel_id, message_id, action, None);
         }
-        self.start_message_action(client, channel_id, message_id, action, None);
+    }
+
+    pub fn vote_complete(
+        &mut self,
+        client: &SpkClient,
+        channel_id: &str,
+        message_id: &str,
+        result: Result<MessageChange, Failure>,
+    ) {
+        let Some(view) = self
+            .selected
+            .as_mut()
+            .filter(|view| view.channel_id == channel_id && !view.unavailable())
+        else {
+            return;
+        };
+        view.vote_error = match result {
+            Ok(_) => None,
+            Err(Failure::Http(reqwest::StatusCode::FORBIDDEN)) => Some(CHANGE_DENIED),
+            Err(Failure::Http(reqwest::StatusCode::NOT_FOUND)) => {
+                Some("This message is unavailable.")
+            }
+            Err(Failure::Http(reqwest::StatusCode::BAD_REQUEST)) => {
+                Some("SPK rejected the vote. Try again.")
+            }
+            Err(Failure::Http(reqwest::StatusCode::TOO_MANY_REQUESTS)) => {
+                Some("Too many changes. Try again shortly.")
+            }
+            Err(_) => Some("Could not vote. Try again."),
+        };
+        // The web client applies both HTTP and socket results as they arrive.
+        if let Ok(change) = result {
+            self.apply_message_change(client, channel_id, message_id, change);
+        }
     }
 
     pub fn prepare_poll_edit(
@@ -160,7 +211,6 @@ impl ChatSession {
         self.pending_action = Some(PendingAction {
             message_id: message_id.clone(),
             saw_change: false,
-            voting: matches!(action, MessageAction::Vote(_)),
             poll_edit_reply,
         });
         view.action_pending = true;
@@ -188,9 +238,6 @@ impl ChatSession {
             Err(Failure::Http(reqwest::StatusCode::BAD_REQUEST)) if editing_poll => {
                 Some("SPK rejected the poll edit. Check the question and options.")
             }
-            Err(Failure::Http(reqwest::StatusCode::BAD_REQUEST)) if pending.voting => {
-                Some("SPK rejected the vote. Try again.")
-            }
             Err(Failure::Http(reqwest::StatusCode::BAD_REQUEST)) => {
                 Some("SPK rejected the change. Check the message or emoji.")
             }
@@ -198,16 +245,14 @@ impl ChatSession {
                 Some("Too many changes. Try again shortly.")
             }
             Err(_) if editing_poll => Some("Could not save the poll. Try again."),
-            Err(_) if pending.voting => Some("Could not vote. Try again."),
             Err(_) => Some("Could not change the message. Try again."),
         };
         view.action_outcome = Some(ActionOutcome {
             message_id: pending.message_id.clone(),
             error,
         });
-        // Poll votes share the web client's last-arriving HTTP and socket update handling.
         if let Ok(change) = result
-            && (!pending.saw_change || pending.voting)
+            && !pending.saw_change
         {
             let channel_id = view.channel_id.clone();
             self.apply_message_change(client, &channel_id, &pending.message_id, change);
