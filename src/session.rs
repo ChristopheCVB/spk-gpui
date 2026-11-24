@@ -1342,6 +1342,7 @@ async fn watch_session(
                 VoiceUpdate::VideoParticipantLeft(id) => {
                     voice.video_participant_left(&mut sidebar, &id);
                 }
+                VoiceUpdate::RemoteAudioStalled => voice.recover_stalled_audio(&mut sidebar),
                 VoiceUpdate::Screen(report) => {
                     voice.screen_report(&mut sidebar, settings, report);
                 }

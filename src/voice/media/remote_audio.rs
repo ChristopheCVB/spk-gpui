@@ -66,6 +66,7 @@ pub(super) struct RemoteAudio {
     media: Output<MixerDeviceSink>,
     render: broadcast::Sender<Arc<RenderBlock>>,
     pub(super) native_playout: bool,
+    voice_output_since: Option<Instant>,
 }
 
 impl Default for RemoteAudio {
@@ -76,6 +77,7 @@ impl Default for RemoteAudio {
             media: Output::default(),
             render: broadcast::channel(16).0,
             native_playout: false,
+            voice_output_since: None,
         }
     }
 }
@@ -86,6 +88,13 @@ impl RemoteAudio {
         self.voice = Output::default();
         self.media = Output::default();
         self.native_playout = false;
+        self.voice_output_since = None;
+    }
+
+    pub(super) fn voice_output_healthy_since(&self) -> Option<Instant> {
+        // shortcut: only the mixer exposes output failures, include the LiveKit fallback when its health is observable.
+        self.voice_output_since
+            .filter(|_| !self.voice.failed.load(Relaxed))
     }
 
     pub(super) fn render_reference(&self) -> broadcast::Receiver<Arc<RenderBlock>> {
@@ -109,6 +118,17 @@ impl RemoteAudio {
                 .values()
                 .any(|(_, route)| matches!(route, Route::Voice(_)))
         });
+        // Establish local output health even if neither stalled microphone has attached.
+        let voice_output = voice.or_else(|| {
+            speakers.filter(|_| {
+                room.remote_participants()
+                    .keys()
+                    .filter(|id| intent.expects_remote_microphone(id.as_str()))
+                    .take(2)
+                    .count()
+                    == 2
+            })
+        });
         let media = routes
             .values()
             .any(|(_, route)| matches!(route, Route::Media(_)));
@@ -120,16 +140,22 @@ impl RemoteAudio {
             && (intent.preferred.speakers.is_none()
                 || devices.speakers.default.as_ref() == speakers);
         let voice_device = if system_speakers {
-            devices.media_outputs.default.as_ref().or(voice)
+            devices.media_outputs.default.as_ref().or(voice_output)
         } else {
-            voice
+            voice_output
         };
-        let voice_changed = self.voice.update(voice.is_some(), voice_device, |failed| {
-            let selected = voice.filter(|_| !system_speakers);
-            let device = cpal_device(DeviceKind::Speakers, selected)?;
-            let reference = VoiceOutput::open(device.clone(), self.render.clone(), failed.clone());
-            VoiceSink::open(device, reference, failed)
-        });
+        let voice_changed = self
+            .voice
+            .update(voice_output.is_some(), voice_device, |failed| {
+                let selected = voice_output.filter(|_| !system_speakers);
+                let device = cpal_device(DeviceKind::Speakers, selected)?;
+                let reference =
+                    VoiceOutput::open(device.clone(), self.render.clone(), failed.clone());
+                VoiceSink::open(device, reference, failed)
+            });
+        if voice_changed {
+            self.voice_output_since = self.voice.sink.as_ref().map(|_| Instant::now());
+        }
         let media_changed = self.media.update(media, media_device, |failed| {
             open_media_output(media_device, move |_| failed.store(true, Relaxed)).ok()
         });
