@@ -265,6 +265,15 @@ async fn owner_alerts_arrive_quietly_and_share_the_feed_read_position() {
         ] {
             commands.send(command).await.unwrap();
         }
+        let (completed, poll) = oneshot::channel();
+        commands.send(Command::SendChatPoll {
+            channel_id: "feed".into(),
+            question: "Create a poll?".into(),
+            options: vec!["Yes".into(), "No".into()],
+            completed,
+        }).await.unwrap();
+        assert!(poll.await.unwrap().is_err());
+
         for action in [
             MessageAction::Edit("blocked".into()),
             MessageAction::React { emoji: "👍".into(), on: true },

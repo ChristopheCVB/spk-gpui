@@ -3,8 +3,8 @@ mod attachments;
 mod gifs;
 mod preview_images;
 
-pub use actions::Pins;
-use actions::{ActionOutcome, PendingAction, change_message};
+use actions::{ActionOutcome, PendingAction, VoteResult, change_message};
+pub use actions::{Pins, PollEditOutcome, PollEditReply};
 pub use attachments::{AttachmentInput, UploadStatus, image_preview};
 use attachments::{AttachmentWork, QueuedAttachment};
 pub use gifs::GifPickerView;
@@ -57,6 +57,8 @@ pub struct ChatView {
     pub pins: Option<Pins>,
     pub preview_images: PreviewImages,
     pub gifs: Option<GifPickerView>,
+    pub message_send_error: Option<String>,
+    pub vote_error: Option<&'static str>,
     pub action_pending: bool,
     pub action_outcome: Option<ActionOutcome>,
     pub paging_forward: bool,
@@ -171,6 +173,8 @@ enum HistoryRequest {
 pub(super) struct ChatSession {
     selected: Option<ChatView>,
     outgoing: HashMap<String, Outgoing>,
+    message_send_error: Option<String>,
+    vote_error: Option<&'static str>,
     drafts: HashMap<String, Draft>,
     typers: HashMap<String, Instant>,
     last_typing: Option<Instant>,
@@ -181,6 +185,7 @@ pub(super) struct ChatSession {
     buffered_changes: Vec<(String, MessageChange)>,
     pending_action: Option<PendingAction>,
     pub action_tasks: JoinSet<Result<MessageChange, Failure>>,
+    pub vote_tasks: JoinSet<VoteResult>,
     pub pin_tasks: JoinSet<Result<Vec<ChatMessage>, Failure>>,
     pub preview_tasks: JoinSet<PreviewResult>,
     pub message_preview: JoinSet<()>,
@@ -193,6 +198,8 @@ pub(super) struct ChatSession {
 impl ChatSession {
     pub fn view(&self) -> Option<ChatView> {
         let mut view = self.selected.clone()?;
+        view.message_send_error.clone_from(&self.message_send_error);
+        view.vote_error = self.vote_error;
         // Hide cached DM content until SPK confirms access to the conversation.
         if view.direct_message_peer.is_some()
             && view.history != History::Ready
@@ -288,6 +295,8 @@ impl ChatSession {
             pins: (!channel.is_webhook()).then_some(Pins::Loading),
             preview_images: PreviewImages::default(),
             gifs: None,
+            message_send_error: None,
+            vote_error: None,
             action_pending: false,
             action_outcome: None,
             paging_forward: false,
@@ -697,6 +706,30 @@ impl ChatSession {
         self.send_draft(channel_id, body, gif_url, reply, attachments);
     }
 
+    pub fn send_poll(
+        &mut self,
+        channel_id: String,
+        question: &str,
+        options: &[String],
+    ) -> Result<(), &'static str> {
+        let Some(view) = self
+            .selected
+            .as_mut()
+            .filter(|view| view.channel_id == channel_id && !view.unavailable())
+        else {
+            return Err("This conversation is unavailable.");
+        };
+        let (question, options) = validate_poll(question, options.iter().map(String::as_str))?;
+        let nonce = uuid::Uuid::new_v4().to_string();
+        if !self.socket.as_ref().is_some_and(|socket| {
+            view.can_send() && socket.send_poll(&channel_id, question, &nonce, &options)
+        }) {
+            return Err("Could not reach SPK. Try again.");
+        }
+        self.message_send_error = None;
+        Ok(())
+    }
+
     fn send_draft(
         &mut self,
         channel_id: String,
@@ -874,13 +907,15 @@ impl ChatSession {
         }
     }
 
-    pub fn error(&mut self, nonce: &str, error: String) {
+    pub fn error(&mut self, nonce: Option<&str>, error: String) {
         if let Some(outgoing) = self
             .outgoing
             .values_mut()
-            .find(|outgoing| outgoing.nonce == nonce)
+            .find(|outgoing| Some(outgoing.nonce.as_str()) == nonce)
         {
             outgoing.status = Delivery::Failed(error);
+        } else {
+            self.message_send_error = Some(error);
         }
     }
 
@@ -904,6 +939,48 @@ impl ChatSession {
             }
         }
     }
+}
+
+pub const POLL_QUESTION_LIMIT: usize = 300;
+pub const POLL_OPTION_LIMIT: usize = 100;
+pub const POLL_MIN_OPTIONS: usize = 2;
+pub const POLL_MAX_OPTIONS: usize = 10;
+
+pub fn trim_poll_text(text: &str) -> &str {
+    // JavaScript trim includes BOM and excludes NEL.
+    text.trim_matches(|ch: char| ch == '\u{feff}' || ch != '\u{85}' && ch.is_whitespace())
+}
+
+pub fn validate_poll<'a>(
+    question: &'a str,
+    options: impl IntoIterator<Item = &'a str>,
+) -> Result<(&'a str, Vec<&'a str>), &'static str> {
+    if question.encode_utf16().count() > POLL_QUESTION_LIMIT {
+        return Err("The question can be up to 300 characters.");
+    }
+    let question = trim_poll_text(question);
+    if question.is_empty() {
+        return Err("Enter a question.");
+    }
+    let mut seen = HashSet::new();
+    let mut labels = Vec::new();
+    for option in options {
+        if option.encode_utf16().count() > POLL_OPTION_LIMIT {
+            return Err("An option can be up to 100 characters.");
+        }
+        let option = trim_poll_text(option);
+        if option.is_empty() {
+            return Err("Fill in every option.");
+        }
+        if !seen.insert(option.to_lowercase()) {
+            return Err("Poll options must be different.");
+        }
+        labels.push(option);
+    }
+    if !(POLL_MIN_OPTIONS..=POLL_MAX_OPTIONS).contains(&labels.len()) {
+        return Err("Enter between 2 and 10 options.");
+    }
+    Ok((question, labels))
 }
 
 fn remove_message(messages: &mut Vec<ChatMessage>, id: &str) {

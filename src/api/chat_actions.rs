@@ -28,10 +28,26 @@ impl LinkPreview {
     }
 }
 
+#[derive(Serialize)]
+pub struct PollEditOption {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub label: String,
+}
+
 pub enum MessageAction {
     Edit(String),
+    EditPoll {
+        body: String,
+        options: Vec<PollEditOption>,
+        reset_votes: bool,
+    },
     Delete,
-    React { emoji: String, on: bool },
+    React {
+        emoji: String,
+        on: bool,
+    },
+    Vote(Option<String>),
     Pin(bool),
     RemovePreview(String),
 }
@@ -41,6 +57,7 @@ pub enum MessageChange {
     Edit(Box<ChatMessage>),
     Delete,
     Reactions(Vec<Reaction>),
+    Poll(Poll),
     Pin(bool),
     Previews(Vec<LinkPreview>),
     RemovePreview(String),
@@ -70,11 +87,25 @@ impl SpkClient {
 
         let (method, route, body) = match &action {
             MessageAction::Edit(body) => (Method::PATCH, None, Some(json!({ "body": body }))),
+            MessageAction::EditPoll {
+                body,
+                options,
+                reset_votes,
+            } => (
+                Method::PATCH,
+                None,
+                Some(json!({ "body": body, "poll": options, "resetVotes": reset_votes })),
+            ),
             MessageAction::Delete => (Method::DELETE, None, None),
             MessageAction::React { emoji, on } => (
                 Method::POST,
                 Some("reactions"),
                 Some(json!({ "emoji": emoji, "on": on })),
+            ),
+            MessageAction::Vote(choice_id) => (
+                Method::POST,
+                Some("vote"),
+                Some(json!({ "choiceId": choice_id })),
             ),
             MessageAction::Pin(on) => (Method::POST, Some("pin"), Some(json!({ "on": on }))),
             MessageAction::RemovePreview(url) => (
@@ -95,7 +126,7 @@ impl SpkClient {
         };
         let response = Self::send(request).await?;
         match action {
-            MessageAction::Edit(_) => {
+            MessageAction::Edit(_) | MessageAction::EditPoll { .. } => {
                 let message: Box<ChatMessage> = response
                     .json()
                     .await
@@ -107,13 +138,14 @@ impl SpkClient {
             }
             MessageAction::Delete => Ok(MessageChange::Delete),
             MessageAction::RemovePreview(url) => Ok(MessageChange::RemovePreview(url)),
-            MessageAction::React { .. } | MessageAction::Pin(_) => {
+            MessageAction::React { .. } | MessageAction::Vote(_) | MessageAction::Pin(_) => {
                 #[derive(Deserialize)]
                 #[serde(rename_all = "camelCase")]
                 struct Updated {
                     channel_id: String,
                     message_id: String,
                     reactions: Option<Vec<Reaction>>,
+                    poll: Option<Poll>,
                     pinned: Option<bool>,
                 }
 
@@ -126,6 +158,7 @@ impl SpkClient {
                 }
                 match action {
                     MessageAction::React { .. } => state.reactions.map(MessageChange::Reactions),
+                    MessageAction::Vote(_) => state.poll.map(MessageChange::Poll),
                     _ => state.pinned.map(MessageChange::Pin),
                 }
                 .ok_or(Failure::InvalidResponse)

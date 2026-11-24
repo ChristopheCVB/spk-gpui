@@ -14,7 +14,7 @@ pub use account_admin::{
 };
 pub use attachments::{Attachment, AttachmentRef, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS};
 pub use channel_admin::{ChannelKind, ChannelMutation};
-pub use chat_actions::{LinkPreview, MessageAction, MessageChange, Reaction};
+pub use chat_actions::{LinkPreview, MessageAction, MessageChange, PollEditOption, Reaction};
 pub use gifs::{GifItem, GifPage, image_message_url};
 pub(crate) use public_media::{PublicDns, public_media_url};
 pub use search::{
@@ -240,6 +240,7 @@ pub struct ChatMessage {
     pub reactions: Vec<Reaction>,
     #[serde(default)]
     pub previews: Vec<LinkPreview>,
+    pub poll: Option<Poll>,
     #[serde(default)]
     pub pinned: bool,
 }
@@ -280,6 +281,28 @@ pub struct EmbedField {
     pub value: String,
     #[serde(default)]
     pub inline: bool,
+}
+
+#[derive(Clone, Deserialize)]
+pub struct Poll {
+    pub options: Vec<PollOption>,
+}
+
+impl Poll {
+    pub fn total_votes(&self) -> usize {
+        self.options
+            .iter()
+            .map(|option| option.user_ids.len())
+            .sum()
+    }
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PollOption {
+    pub id: String,
+    pub label: String,
+    pub user_ids: Vec<String>,
 }
 
 impl ChatMessage {
@@ -449,6 +472,12 @@ pub enum Frame {
         channel_id: String,
         message_id: String,
         reactions: Vec<Reaction>,
+    },
+    #[serde(rename = "poll:update", rename_all = "camelCase")]
+    PollUpdate {
+        channel_id: String,
+        message_id: String,
+        poll: Poll,
     },
     #[serde(rename = "pin:update", rename_all = "camelCase")]
     PinUpdate {
@@ -620,6 +649,21 @@ impl VoiceSocket {
             "nonce": nonce,
             "replyToId": reply_to_id,
             "attachments": attachments,
+        });
+        self.0.try_send((frame.to_string(), None)).is_ok()
+    }
+
+    pub fn send_poll(&self, channel_id: &str, body: &str, nonce: &str, options: &[&str]) -> bool {
+        let poll: Vec<_> = options
+            .iter()
+            .map(|label| serde_json::json!({ "label": label }))
+            .collect();
+        let frame = serde_json::json!({
+            "type": "message:send",
+            "channelId": channel_id,
+            "body": body,
+            "nonce": nonce,
+            "poll": poll,
         });
         self.0.try_send((frame.to_string(), None)).is_ok()
     }

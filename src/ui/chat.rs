@@ -3,7 +3,10 @@ mod attachments;
 mod embed;
 mod gifs;
 mod history;
+mod poll_composer;
+mod poll_results;
 mod reaction_picker;
+mod slash_commands;
 
 pub(super) use actions::{MessageActionForm, PinPanel};
 pub(super) use attachments::AttachmentUi;
@@ -438,7 +441,9 @@ impl Spk {
         self.begin_message_action(
             &channel_id,
             &message_id,
-            actions::ActionForm::Edit,
+            actions::ActionForm::Edit {
+                show_poll_form: false,
+            },
             window,
             cx,
         );
@@ -536,6 +541,7 @@ impl Spk {
             self.chat_pins = None;
         }
         if reset {
+            self.slash_choice = None;
             self.chat_input.update(cx, |input, cx| {
                 input.set_value(
                     next.map_or("", |chat| chat.draft.body.as_str()).to_owned(),
@@ -665,7 +671,7 @@ impl Spk {
         }
     }
 
-    pub(super) fn submit_chat(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn submit_chat(&mut self, cx: &mut Context<Self>) {
         let Some(chat) = chat(&self.view).filter(|chat| chat.can_send() && chat.outgoing.is_none())
         else {
             return;
@@ -784,16 +790,23 @@ impl Spk {
             .when(!chat.unavailable(), |area| {
                 area.child(self.pins(sidebar, chat, cx))
             })
-            .when_some(
-                chat.action_outcome.as_ref().and_then(|result| result.error),
-                |area, error| {
-                    area.child(
-                        div()
-                            .px_4()
-                            .py_2()
-                            .child(Label::new(error).text_color(theme.danger)),
-                    )
-                },
+            .children(
+                [
+                    (
+                        "chat-action-error",
+                        chat.action_outcome.as_ref().and_then(|result| result.error),
+                    ),
+                    ("chat-send-error", chat.message_send_error.as_deref()),
+                    ("chat-vote-error", chat.vote_error),
+                ]
+                .into_iter()
+                .filter_map(|(id, error)| {
+                    error.map(|error| {
+                        div().px_4().py_2().child(
+                            Label::new(error.to_owned()).id(id).text_color(theme.danger),
+                        )
+                    })
+                }),
             )
             .when_some(status, |area, status| {
                 area.child(
@@ -1093,6 +1106,7 @@ impl Spk {
                     .child(self.staged_gif(chat, cx))
                     .child(self.attachment_queue(chat, cx)),
             )
+            .children(self.slash_suggestions(cx))
             .child(
                 Textarea::new(&self.chat_input)
                     .flex_shrink_0()
@@ -1121,7 +1135,7 @@ impl Spk {
                         .tab_stop(true)
                         .flex_shrink_0()
                         .disabled(!can_send)
-                        .on_click(cx.listener(|this, _, window, cx| this.submit_chat(window, cx))),
+                        .on_click(cx.listener(|this, _, _, cx| this.submit_chat(cx))),
                     ),
             )
     }
@@ -1417,6 +1431,18 @@ impl Spk {
             .when(!message.previews.is_empty(), |row| {
                 row.child(self.link_previews(sidebar, chat, message, cx))
             })
+            .when_some(
+                message.poll.as_ref().filter(|_| !chat.webhook),
+                |row, poll| {
+                    row.child(poll_results::poll_results(
+                        sidebar,
+                        chat,
+                        &message.id,
+                        poll,
+                        cx,
+                    ))
+                },
+            )
             .when(!message.reactions.is_empty() && !chat.webhook, |row| {
                 row.child(self.reactions(sidebar, chat, message, cx))
             });

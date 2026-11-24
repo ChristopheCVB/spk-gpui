@@ -21,7 +21,7 @@ pub(in crate::ui) enum PinPanel {
 
 #[derive(Clone, Copy)]
 pub(super) enum ActionForm {
-    Edit,
+    Edit { show_poll_form: bool },
     Delete,
 }
 
@@ -95,8 +95,24 @@ impl Spk {
         {
             return;
         }
+        if matches!(
+            kind,
+            ActionForm::Edit {
+                show_poll_form: true
+            }
+        ) && message.poll.is_some()
+        {
+            if let View::SignedIn(sidebar) = &self.view
+                && sidebar.profile.id.as_deref() == Some(message.user_id.as_str())
+                && view.can_send()
+                && !view.action_pending
+            {
+                self.open_poll_editor(message, window, cx);
+            }
+            return;
+        }
         let initial = match kind {
-            ActionForm::Edit => &message.body,
+            ActionForm::Edit { .. } => &message.body,
             _ => "",
         };
         self.message_action_form = Some(MessageActionForm {
@@ -124,14 +140,14 @@ impl Spk {
             return;
         };
         if !match form.kind {
-            ActionForm::Edit => view.can_send(),
+            ActionForm::Edit { .. } => view.can_send(),
             ActionForm::Delete => view.can_delete_messages(),
         } {
             return;
         }
         let text = self.message_action_input.read(cx).value();
         let action = match form.kind {
-            ActionForm::Edit => MessageAction::Edit(text.to_string()),
+            ActionForm::Edit { .. } => MessageAction::Edit(text.to_string()),
             ActionForm::Delete => MessageAction::Delete,
         };
         form.submitted = true;
@@ -154,7 +170,7 @@ impl Spk {
             .as_ref()
             .filter(|form| form.message_id == message.id)?;
         let (title, action) = match form.kind {
-            ActionForm::Edit => ("Edit message", "Save"),
+            ActionForm::Edit { .. } => ("Edit message", "Save"),
             ActionForm::Delete => ("Delete this message?", "Delete"),
         };
         let button = control_button("submit-message-action")
@@ -770,7 +786,9 @@ impl MessageActions {
                 toolbar.child(
                     tool_button("message-edit", IconName::Pencil, "Edit message")
                         .disabled(self.disabled)
-                        .on_click(self.form_action(ActionForm::Edit)),
+                        .on_click(self.form_action(ActionForm::Edit {
+                            show_poll_form: true,
+                        })),
                 )
             })
             .when(self.has_copyable_body(), |toolbar| {
@@ -939,8 +957,13 @@ impl MessageActions {
         });
         let menu = if self.can_edit {
             menu.item(
-                self.form_item("Edit message", ActionForm::Edit)
-                    .icon(IconName::Pencil),
+                self.form_item(
+                    "Edit message",
+                    ActionForm::Edit {
+                        show_poll_form: true,
+                    },
+                )
+                .icon(IconName::Pencil),
             )
         } else {
             menu
@@ -1008,8 +1031,11 @@ impl MessageActions {
         let (app, channel, message) =
             (self.app.clone(), self.channel.clone(), self.message.clone());
         move |_, window, cx| {
-            let _ = app.update(cx, |this, cx| {
-                this.begin_message_action(&channel, &message, kind, window, cx)
+            let (app, channel, message) = (app.clone(), channel.clone(), message.clone());
+            window.defer(cx, move |window, cx| {
+                let _ = app.update(cx, |this, cx| {
+                    this.begin_message_action(&channel, &message, kind, window, cx)
+                });
             });
         }
     }
