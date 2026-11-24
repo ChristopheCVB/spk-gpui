@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.6.0](https://github.com/ChristopheCVB/spk-gpui/compare/v0.5.1...v0.6.0) (2026-11-24)
+
+
+### Features
+
+* **chat:** add Polls with SPK Web parity ([#158](https://github.com/ChristopheCVB/spk-gpui/issues/158)) ([13be64b](https://github.com/ChristopheCVB/spk-gpui/commit/13be64bfa4094b3b60e24cbb3e3b030c63a42db9))
+* **chat:** add Webhooks to the desktop client ([#159](https://github.com/ChristopheCVB/spk-gpui/issues/159)) ([b90b508](https://github.com/ChristopheCVB/spk-gpui/commit/b90b508bd09633aec8e451518c144c835040e066))
+* **chat:** align desktop message authoring with SPK Web ([#174](https://github.com/ChristopheCVB/spk-gpui/issues/174)) ([03e44d6](https://github.com/ChristopheCVB/spk-gpui/commit/03e44d634cb8e3be12ba409b9df9a08eaf0c4b38))
+
 ## [0.5.1](https://github.com/ChristopheCVB/spk-gpui/compare/v0.5.0...v0.5.1) (2026-11-24)
 
 
