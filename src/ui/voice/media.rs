@@ -4,7 +4,6 @@ use crate::ui::{
     soundboard::soundboard_panel,
     *,
 };
-use gpui_kit::component::popover::Popover;
 
 type MediaPanel = fn(Entity<Spk>, u8, &mut Window, &mut App) -> (AnyView, FocusHandle);
 
@@ -15,6 +14,7 @@ enum MediaControl {
         volume: u8,
     },
     Soundboard {
+        has_new_clip: bool,
         volume: u8,
     },
 }
@@ -46,6 +46,7 @@ impl Spk {
             volume: sidebar.radio.volume,
         };
         let soundboard = MediaControl::Soundboard {
+            has_new_clip: sidebar.soundboard.has_new_clip,
             volume: sidebar.voice_intent.preferred.soundboard_volume.min(100),
         };
         [radio, soundboard].map(|control| MediaButton {
@@ -67,9 +68,9 @@ impl RenderOnce for MediaButton {
                     volume,
                     Some(action),
                 ),
-                MediaControl::Soundboard { volume } => (
+                MediaControl::Soundboard { volume, .. } => (
                     "soundboard",
-                    || Command::LoadSoundboard,
+                    || Command::OpenSoundboard,
                     soundboard_panel,
                     volume,
                     None,
@@ -138,16 +139,35 @@ impl RenderOnce for MediaButton {
                 })
         });
         let width = px(330.0).min(window.viewport_size().width - px(16.0));
+        let has_new_clip = matches!(
+            self.control,
+            MediaControl::Soundboard {
+                has_new_clip: true,
+                ..
+            }
+        );
+        let dot_color = cx.theme().primary;
         let popover = if primary.is_some() {
-            Popover::new(id).w(width)
+            floating_popover(id, cx).w(width)
         } else {
-            voice_popover(id, width, move |_| {
+            voice_popover(id, width, cx, move |_| {
                 voice_action_button(
                     "soundboard-trigger",
                     IconName::Megaphone,
                     "Soundboard",
                     location,
                 )
+                .when(has_new_clip, |button| {
+                    button.accessibility_label("Soundboard (new clip)").child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .right_0()
+                            .size_1p5()
+                            .rounded_full()
+                            .bg(dot_color),
+                    )
+                })
             })
         }
         .when_some(panel, |popover, (panel, search)| {

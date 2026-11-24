@@ -172,7 +172,7 @@ try {
     Write-Host 'Shortcuts accessibility passed.'
 
     Invoke-Button 'Changelog'
-    Assert-Rows @('First fixture commit', 'Second fixture commit', 'Third fixture commit')
+    $null = Get-Control 'Desktop release notes' ([System.Windows.Automation.ControlType]::Group)
     Write-Host 'Changelog accessibility passed.'
 
     Invoke-Button 'Soundboard'

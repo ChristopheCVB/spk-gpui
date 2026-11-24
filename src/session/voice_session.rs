@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
 use tokio::{
     task::{JoinSet, spawn_blocking},
@@ -17,6 +17,11 @@ use crate::voice::{
 
 pub(super) const VOICE_REPLACED: &str = "You joined voice from another tab or device.";
 const CHANNEL_UNAVAILABLE: &str = "This voice channel is no longer available.";
+const REJOIN_DELAYS: [Duration; 3] = [
+    Duration::from_secs(1),
+    Duration::from_secs(3),
+    Duration::from_secs(8),
+];
 
 #[derive(Clone)]
 pub(super) struct VoiceDestination {
@@ -185,20 +190,29 @@ impl Sidebar {
                 .is_none_or(|voice| voice.channel_id != channel_id)
     }
 
+    fn own_voice_presence(&self) -> Option<&super::VoiceMembership> {
+        self.voice_presence.get(self.profile.id.as_ref()?)
+    }
+
+    fn remote_microphone_mutes(&self, channel_id: &str) -> HashMap<String, bool> {
+        self.voice_presence
+            .iter()
+            .filter(|(id, member)| {
+                member.channel_id == channel_id && self.profile.id.as_ref() != Some(id)
+            })
+            .map(|(id, member)| (id.clone(), member.flags.muted || member.flags.deafened))
+            .collect()
+    }
+
     fn voice_replaced(&self) -> bool {
-        self.profile
-            .id
-            .as_ref()
-            .and_then(|id| self.voice_presence.get(id))
+        self.own_voice_presence()
             .zip(self.voice.as_ref())
             .is_some_and(|(member, voice)| member.channel_id != voice.channel_id)
     }
 
     pub(super) fn finish_voice(&mut self, result: Result<(), VoiceIssue>) -> bool {
         let voice = self.voice.take();
-        self.voice_intent.camera.enabled = false;
-        self.voice_intent.watching.clear();
-        self.voice_intent.screen.action = Action::Stop;
+        self.clear_voice_media();
         self.voice_rejoin = voice
             .as_ref()
             .filter(|voice| {
@@ -210,6 +224,13 @@ impl Sidebar {
             self.voice_notice.get_or_insert_with(|| issue.message());
         }
         result.is_ok() && voice.is_some_and(|voice| voice.play_leave)
+    }
+
+    fn clear_voice_media(&mut self) {
+        self.voice_intent.camera.enabled = false;
+        self.voice_intent.watching.clear();
+        self.voice_intent.remote_microphone_mutes.clear();
+        self.voice_intent.screen.action = Action::Stop;
     }
 
     pub fn rejoin_channel(&self) -> Option<&str> {
@@ -265,6 +286,15 @@ pub(super) struct VoiceSession {
     socket: Option<VoiceSocket>,
     call: Option<Call>,
     reclaim: Option<VoiceReclaim>,
+    rejoin: Option<VoiceRejoin>,
+    watchdog_rejoin_after: Option<Instant>,
+}
+
+struct VoiceRejoin {
+    ended_sid: String,
+    attempted: usize,
+    deadline: Instant,
+    departed: bool,
 }
 
 enum VoiceReclaim {
@@ -280,40 +310,67 @@ impl VoiceSession {
         client: &SpkClient,
         start_call: &StartCall,
     ) {
-        if self.call.is_none()
-            && let Some(VoiceDestination {
-                channel_id,
-                server_move,
-            }) = sidebar.switching_to.take()
+        if self.call.is_some() {
+            return;
+        }
+        let destination = sidebar.switching_to.take().or_else(|| {
+            self.rejoin_at()
+                .filter(|&deadline| deadline <= Instant::now())?;
+            Some(VoiceDestination {
+                channel_id: sidebar.voice.as_ref()?.channel_id.clone(),
+                server_move: false,
+            })
+        });
+        let Some(VoiceDestination {
+            channel_id,
+            server_move,
+        }) = destination
+        else {
+            return;
+        };
+        if let Some(socket) = &self.socket
+            && (server_move || sidebar.has_voice_channel(&channel_id))
         {
-            if let Some(socket) = &self.socket
-                && (server_move || sidebar.has_voice_channel(&channel_id))
-            {
-                self.call = Some(start_call(
-                    channel_id.clone(),
-                    client.clone(),
-                    socket.clone(),
-                    sidebar.voice_intent.clone(),
-                ));
-                sidebar.voice = Some(VoiceView::joining(channel_id));
-                sidebar.voice_notice = None;
-                sidebar.voice_rejoin = None;
-            } else {
-                sidebar.voice_notice = Some(if self.socket.is_none() {
+            sidebar.voice_intent.remote_microphone_mutes =
+                sidebar.remote_microphone_mutes(&channel_id);
+            sidebar.voice_intent.watchdog_rejoin_after = self.watchdog_rejoin_after;
+            if let Some(rejoin) = &mut self.rejoin {
+                rejoin.attempted += 1;
+            }
+            self.call = Some(start_call(
+                channel_id.clone(),
+                client.clone(),
+                socket.clone(),
+                sidebar.voice_intent.clone(),
+            ));
+            sidebar.voice = Some(VoiceView::joining(channel_id));
+            sidebar.voice_notice = None;
+            sidebar.voice_rejoin = None;
+        } else {
+            self.cancel(
+                sidebar,
+                Some(if self.socket.is_none() {
                     VoiceIssue::Socket.message()
                 } else {
                     CHANNEL_UNAVAILABLE
-                });
-            }
+                }),
+            );
         }
     }
 
     pub(super) fn connected(&mut self, socket: VoiceSocket) {
-        self.reclaim = self
-            .call
-            .is_some()
+        self.reclaim = (self.call.is_some() || self.rejoin.is_some())
             .then_some(VoiceReclaim::WaitingForPresence);
         self.socket = Some(socket);
+        self.release_ended_presence();
+    }
+
+    fn release_ended_presence(&self) {
+        if let (Some(rejoin), Some(socket)) = (&self.rejoin, &self.socket)
+            && !rejoin.departed
+        {
+            socket.release_voice(&rejoin.ended_sid);
+        }
     }
 
     pub(super) fn disconnected(&mut self) {
@@ -368,12 +425,29 @@ impl VoiceSession {
         }
     }
 
+    pub(super) fn rejoin_at(&self) -> Option<Instant> {
+        let rejoin = self.rejoin.as_ref()?;
+        (self.call.is_none() && self.socket.is_some() && self.reclaim.is_none())
+            .then_some(rejoin.deadline)
+    }
+
     pub(super) fn retry_presence(&mut self) {
         self.reclaim = Some(VoiceReclaim::Retried);
     }
 
     pub(super) fn own_presence_updated(&mut self, sidebar: &mut Sidebar) {
-        if self.reclaim.is_some() && sidebar.voice_replaced() {
+        let retry_replaced = self.rejoin.as_mut().is_some_and(|rejoin| {
+            if sidebar.own_voice_presence().is_none() {
+                rejoin.departed = true;
+                return false;
+            }
+            // An own Presence after departure belongs to another client until SPK acknowledges the retry.
+            rejoin.departed && self.call.as_ref().is_none_or(Call::awaiting_acknowledgment)
+        });
+        if retry_replaced
+            || ((self.reclaim.is_some() || self.rejoin.is_some()) && sidebar.voice_replaced())
+            || (sidebar.voice_rejoin.is_some() && sidebar.own_voice_presence().is_some())
+        {
             self.reclaim = None;
             self.cancel(sidebar, Some(VOICE_REPLACED));
         }
@@ -382,15 +456,32 @@ impl VoiceSession {
     pub(super) fn presence_refreshed(&mut self, sidebar: &mut Sidebar, loaded: bool) {
         if loaded {
             self.prune_watching(sidebar);
+            self.sync_remote_audio_presence(sidebar);
         }
         if self.reclaim.is_some() && loaded {
-            self.reclaim = None;
+            let first_check = matches!(self.reclaim.take(), Some(VoiceReclaim::WaitingForPresence));
             if sidebar.voice_replaced() {
                 self.cancel(sidebar, Some(VOICE_REPLACED));
+            } else if let Some(rejoin) = &mut self.rejoin
+                && (rejoin.attempted == 0
+                    || self.call.as_ref().is_none_or(Call::awaiting_acknowledgment))
+            {
+                if sidebar.own_voice_presence().is_none() {
+                    rejoin.departed = true;
+                } else if first_check && !rejoin.departed {
+                    // A snapshot can race the ended session's Leave on the new socket.
+                    self.reclaim = Some(VoiceReclaim::RetryAt(
+                        Instant::now() + Duration::from_secs(1),
+                    ));
+                } else {
+                    self.cancel(sidebar, Some(VOICE_REPLACED));
+                }
             } else if let Some(call) = &self.call {
                 call.set_socket(self.socket.clone());
             }
-        } else if matches!(self.reclaim, Some(VoiceReclaim::WaitingForPresence)) {
+        } else if matches!(self.reclaim, Some(VoiceReclaim::WaitingForPresence))
+            || (self.rejoin.is_some() && self.reclaim.is_some())
+        {
             self.reclaim = Some(VoiceReclaim::RetryAt(
                 Instant::now() + Duration::from_secs(1),
             ));
@@ -398,9 +489,13 @@ impl VoiceSession {
     }
 
     pub(super) fn join(&mut self, sidebar: &mut Sidebar, channel_id: String) {
-        if sidebar.can_join_voice(&channel_id) {
+        let retrying = self.rejoin.is_some() && sidebar.has_voice_channel(&channel_id);
+        if sidebar.can_join_voice(&channel_id) || (retrying && self.socket.is_some()) {
             self.request_voice(sidebar, channel_id, false);
         } else if self.socket.is_none() {
+            if retrying {
+                self.cancel(sidebar, None);
+            }
             sidebar.voice_notice = Some(VoiceIssue::Socket.message());
         } else if !sidebar.has_voice_channel(&channel_id) {
             sidebar.voice_notice = Some(CHANNEL_UNAVAILABLE);
@@ -414,7 +509,7 @@ impl VoiceSession {
 
     pub(super) fn accepts_move(&self, sidebar: &Sidebar, sid: &str, channel_id: &str) -> bool {
         !channel_id.is_empty()
-            && self.call.as_ref().is_some_and(|call| call.owns(sid))
+            && self.owns(sid)
             && sidebar.can_switch_voice(channel_id)
             && sidebar
                 .voice
@@ -444,15 +539,25 @@ impl VoiceSession {
     }
 
     pub(super) fn kicked(&mut self, sidebar: &mut Sidebar, sid: &str) {
-        if self.call.as_ref().is_some_and(|call| !call.owns(sid)) {
+        if (self.call.is_some() || self.rejoin.is_some() || sidebar.voice_rejoin.is_some())
+            && !self.owns(sid)
+        {
             self.cancel(sidebar, Some(VOICE_REPLACED));
         }
     }
 
     pub(super) fn server_disconnected(&mut self, sidebar: &mut Sidebar, sid: &str) {
-        if self.call.as_ref().is_some_and(|call| call.owns(sid)) {
+        if self.owns(sid) {
             self.cancel(sidebar, Some(VoiceIssue::Disconnected.message()));
         }
+    }
+
+    fn owns(&self, sid: &str) -> bool {
+        self.call.as_ref().is_some_and(|call| call.owns(sid))
+            || self
+                .rejoin
+                .as_ref()
+                .is_some_and(|rejoin| rejoin.ended_sid == sid)
     }
 
     pub(super) fn channel_removed(&mut self, sidebar: &mut Sidebar) {
@@ -468,24 +573,127 @@ impl VoiceSession {
     }
 
     fn cancel(&mut self, sidebar: &mut Sidebar, notice: Option<&'static str>) {
-        if let (Some(call), Some(voice)) = (&mut self.call, &mut sidebar.voice)
-            && voice.begin_leave(notice.is_none())
-        {
-            call.cancel();
-            sidebar.voice_intent.camera.enabled = false;
-            sidebar.voice_intent.watching.clear();
-            sidebar.voice_intent.screen.action = Action::Stop;
+        sidebar.voice_rejoin = None;
+        let retrying = self.rejoin.take().is_some();
+        if let (Some(call), Some(voice)) = (&mut self.call, &mut sidebar.voice) {
+            if voice.begin_leave(notice.is_none()) {
+                call.cancel();
+                sidebar.clear_voice_media();
+                sidebar.voice_notice = notice;
+            }
+        } else if retrying {
+            self.reclaim = None;
+            sidebar.voice = None;
+            sidebar.voice_notice = notice;
+        } else if notice.is_some() {
             sidebar.voice_notice = notice;
         }
     }
 
     pub(super) async fn next_update(&self) -> VoiceUpdate {
-        voice::next_update(self.call.as_ref()).await
+        loop {
+            let update = voice::next_update(self.call.as_ref()).await;
+            if matches!(update, VoiceUpdate::Finished(_))
+                || self
+                    .rejoin
+                    .as_ref()
+                    .is_none_or(|rejoin| rejoin.attempted > 0)
+            {
+                return update;
+            }
+        }
     }
 
-    pub(super) fn finished(&mut self) {
-        self.call = None;
-        self.reclaim = None;
+    pub(super) fn recover_stalled_audio(&mut self, sidebar: &mut Sidebar) {
+        let now = Instant::now();
+        if self
+            .watchdog_rejoin_after
+            .is_none_or(|deadline| now >= deadline)
+            && sidebar.voice.as_ref().is_some_and(|voice| {
+                matches!(
+                    voice.status,
+                    VoiceStatus::Connected | VoiceStatus::ListenOnly
+                )
+            })
+            && self.rejoin.is_none()
+        {
+            self.recover(sidebar);
+            if self.rejoin.is_some() {
+                self.watchdog_rejoin_after = Some(now + Duration::from_secs(60));
+            }
+        }
+    }
+
+    pub(super) fn recover(&mut self, sidebar: &mut Sidebar) {
+        let (Some(call), Some(view)) = (&mut self.call, &sidebar.voice) else {
+            return;
+        };
+        if self.rejoin.is_none() && view.is_participating() {
+            self.rejoin = Some(VoiceRejoin {
+                ended_sid: call.sid().to_owned(),
+                attempted: 0,
+                deadline: Instant::now(),
+                departed: sidebar.own_voice_presence().is_none(),
+            });
+            call.cancel();
+            sidebar.voice = Some(VoiceView::joining(view.channel_id.clone()));
+            sidebar.clear_voice_media();
+            if self.reclaim.is_some() {
+                self.release_ended_presence();
+            }
+        }
+    }
+
+    pub(super) fn media_connected(&mut self) -> bool {
+        self.rejoin.take().is_none()
+    }
+
+    pub(super) fn finished(
+        &mut self,
+        sidebar: &mut Sidebar,
+        result: Result<(), VoiceIssue>,
+    ) -> bool {
+        if matches!(result, Err(VoiceIssue::LiveKitDisconnected)) {
+            self.recover(sidebar);
+        }
+        let ended = self.call.take();
+        let Some(rejoin) = &mut self.rejoin else {
+            self.reclaim = None;
+            return sidebar.finish_voice(result);
+        };
+        if let Some(ended) = ended {
+            rejoin.ended_sid = ended.sid().to_owned();
+        }
+        if matches!(result, Err(VoiceIssue::Socket)) && self.socket.is_none() {
+            rejoin.attempted = rejoin.attempted.saturating_sub(1);
+        }
+        if let Some(delay) = REJOIN_DELAYS.get(rejoin.attempted)
+            && !matches!(
+                result,
+                Err(VoiceIssue::TokenRejected | VoiceIssue::Endpoint | VoiceIssue::Disconnected)
+            )
+        {
+            rejoin.deadline = Instant::now() + *delay;
+            let channel_id = sidebar
+                .voice
+                .as_ref()
+                .expect("voice rejoin has a destination")
+                .channel_id
+                .clone();
+            sidebar.voice = Some(VoiceView::joining(channel_id));
+            sidebar.clear_voice_media();
+            sidebar.voice_notice = None;
+            false
+        } else {
+            self.rejoin = None;
+            self.reclaim = None;
+            let channel_id = sidebar.voice.as_ref().map(|view| view.channel_id.clone());
+            sidebar.finish_voice(result);
+            if !matches!(result, Err(VoiceIssue::Disconnected)) {
+                sidebar.voice_rejoin = channel_id;
+            }
+            false
+        }
     }
 
     pub(super) async fn stop(self) {
@@ -509,6 +717,19 @@ impl VoiceSession {
         }
     }
 
+    pub(super) fn sync_remote_audio_presence(&self, sidebar: &mut Sidebar) {
+        if let Some(call) = &self.call
+            && let Some(voice) = &sidebar.voice
+            && voice.status != VoiceStatus::Leaving
+        {
+            let mutes = sidebar.remote_microphone_mutes(&voice.channel_id);
+            if mutes != sidebar.voice_intent.remote_microphone_mutes {
+                sidebar.voice_intent.remote_microphone_mutes = mutes;
+                call.apply(&sidebar.voice_intent);
+            }
+        }
+    }
+
     pub(super) fn prune_watching(&self, sidebar: &mut Sidebar) {
         let Some(voice) = &sidebar.voice else {
             return;
@@ -516,14 +737,15 @@ impl VoiceSession {
         let watching = &mut sidebar.voice_intent.watching;
         let count = watching.len();
         watching.retain(|id| {
-            sidebar
-                .voice_presence
-                .get(id)
-                .is_some_and(|member| member.channel_id == voice.channel_id)
-                && voice
+            let Some(member) = sidebar.voice_presence.get(id) else {
+                return false;
+            };
+            member.channel_id == voice.channel_id
+                && (voice
                     .video
                     .as_ref()
-                    .is_none_or(|video| video.reconnecting || video.participants.contains_key(id))
+                    .is_some_and(|report| report.reconnecting)
+                    || member.video_feeds(id, Some(voice)).is_live())
         });
         if watching.len() != count
             && let Some(call) = &self.call
@@ -845,15 +1067,7 @@ impl VoiceSession {
                     return;
                 };
                 if enabled {
-                    if sidebar.profile.id.as_ref() == Some(&id)
-                        || voice.video.as_ref().is_some_and(|video| {
-                            video.reconnecting || !video.participants.contains_key(&id)
-                        })
-                        || !sidebar
-                            .voice_presence
-                            .get(&id)
-                            .is_some_and(|member| member.channel_id == voice.channel_id)
-                    {
+                    if !sidebar.can_watch_video(&voice.channel_id, &id) {
                         return;
                     }
                     sidebar.voice_intent.watching.insert(id);

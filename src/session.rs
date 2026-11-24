@@ -27,8 +27,8 @@ use tokio::{
 use url::Url;
 
 use crate::api::{
-    Channel, Connection, Failure, Frame, MessageChange, MessageTarget, Profile, SocketEvent,
-    SpkClient, UnreadState, User, UserPresence, VoiceModeration,
+    BOT_USER_ID, Channel, Connection, Failure, Frame, MessageChange, MessageTarget, Profile,
+    SocketEvent, SpkClient, UnreadState, User, UserPresence, VoiceModeration,
 };
 use crate::notifications::{Alert, LiveAlerts};
 use crate::sounds::{Sound, VoiceSounds};
@@ -212,11 +212,6 @@ pub enum Command {
         completed: PollEditReply,
     },
     RetryChatPins(String),
-    LoadChangelog {
-        page: u32,
-        head: Option<String>,
-        reply: oneshot::Sender<Result<crate::api::ChangelogPage, Failure>>,
-    },
     SaveNickname(String),
     UploadAvatar(PathBuf),
     InspectProfileEmail(String, oneshot::Sender<Option<String>>),
@@ -243,6 +238,7 @@ pub enum Command {
     PauseRadio,
     ListenToRadio,
     SetRadioVolume(u8),
+    OpenSoundboard,
     LoadSoundboard,
     AdminSoundboard(SoundboardAdminAction),
     PlaySound(String),
@@ -401,13 +397,13 @@ impl Sidebar {
     }
 
     pub fn people(&self) -> Vec<(&str, &str)> {
-        let Some(me) = self.profile.id.as_deref() else {
+        if self.profile.id.is_none() {
             return Vec::new();
-        };
+        }
         let mut people = self
             .users
             .values()
-            .filter(|user| user.id != me && !user.banned)
+            .filter(|user| !user.banned && self.can_start_direct_message(&user.id))
             .filter_map(|user| Some((user.id.as_str(), user.name()?)))
             .collect::<Vec<_>>();
         let activity: HashMap<_, _> = self
@@ -443,9 +439,15 @@ impl Sidebar {
         Arc::ptr_eq(&self.users, &previous.users)
     }
 
+    pub fn can_start_direct_message(&self, user_id: &str) -> bool {
+        !user_id.is_empty() && user_id != BOT_USER_ID && self.profile.id.as_deref() != Some(user_id)
+    }
+
     pub fn direct_message(&self, user_id: &str) -> Option<&Channel> {
         self.channels.iter().flatten().find(|channel| {
-            channel.kind == "dm" && channel.other_user_id.as_deref() == Some(user_id)
+            channel.kind == "dm"
+                && channel.is_conversation()
+                && channel.other_user_id.as_deref() == Some(user_id)
         })
     }
 
@@ -705,7 +707,6 @@ async fn watch_session(
     let mut unread = UnreadSession::default();
     unread.refresh(client);
     let mut direct_message_opens = JoinSet::new();
-    let mut changelog_pages = JoinSet::new();
     let mut voice = VoiceSession::default();
     let mut radio = RadioSession::default();
     let mut search = SearchSession::default();
@@ -760,7 +761,9 @@ async fn watch_session(
             break SessionEnd::Closed;
         }
         let retry_at = voice.retry_at();
+        let rejoin_at = voice.rejoin_at();
         let chat_timeout = chat.next_timeout();
+        let soundboard_transition = soundboard.next_transition;
         let active = *settings.presence.activity.borrow_and_update();
         let alert_activation = &mut settings.alert_activation;
         let mut from_alert = false;
@@ -768,6 +771,7 @@ async fn watch_session(
             () = presence.report(sidebar.user_status, active) => {}
             Ok(()) = settings.presence.activity.changed() => {}
             _ = sleep_until(chat_timeout.unwrap_or_else(Instant::now)), if chat_timeout.is_some() => chat.expire(),
+            _ = sleep_until(soundboard_transition.unwrap_or_else(Instant::now)), if soundboard_transition.is_some() => {},
             _ = sleep_until(draft_save_at.unwrap_or_else(Instant::now)), if draft_save_at.is_some() => {
                 draft_save_at = None;
                 if let Some(store) = &draft_store {
@@ -883,6 +887,7 @@ async fn watch_session(
                     Err(_) => sidebar.chat_notice = Some("Could not open the direct message. Try again."),
                 }
             }
+            _ = sleep_until(rejoin_at.unwrap_or_else(Instant::now)), if rejoin_at.is_some() => {}
             _ = sleep_until(retry_at.unwrap_or_else(Instant::now)), if retry_at.is_some() => {
                 voice.retry_presence();
                 refresh.fetch(client, Resource::Presence);
@@ -972,7 +977,7 @@ async fn watch_session(
                         chat_navigation = None;
                     }
                     direct_message_opens = JoinSet::new();
-                    if user_id.is_empty() || sidebar.profile.id.as_deref() == Some(&user_id) {
+                    if !sidebar.can_start_direct_message(&user_id) {
                         sidebar.chat_notice = Some("Direct message unavailable.");
                     } else if let Some(channel) = sidebar.direct_message(&user_id) {
                         ChatNavigation::open_chat(&mut chat_navigation, &mut chat, client, channel);
@@ -1079,15 +1084,6 @@ async fn watch_session(
                         refresh.fetch(client, Resource::Channels);
                     }
                 }
-                Ok(Command::LoadChangelog { page, head, reply }) => {
-                    let client = client.clone();
-                    changelog_pages.spawn(async move {
-                        let result = client.changelog(page, head.as_deref()).await;
-                        let expired = result.as_ref().is_err_and(Failure::unauthorized);
-                        let _ = reply.send(result);
-                        expired
-                    });
-                }
                 Ok(Command::RetryChatSend(nonce)) => {
                     let _ = chat.retry_send(&nonce, None);
                 }
@@ -1124,7 +1120,7 @@ async fn watch_session(
                     | Command::PauseRadio | Command::ListenToRadio)) => {
                     radio.command(&mut sidebar, &voice, client, command);
                 }
-                Ok(command @ (Command::LoadSoundboard | Command::PlaySound(_) | Command::PreviewSound(_))) => {
+                Ok(command @ (Command::OpenSoundboard | Command::LoadSoundboard | Command::PlaySound(_) | Command::PreviewSound(_))) => {
                     soundboard.command(&mut sidebar, &voice, client, command);
                 }
                 Ok(Command::AdminSoundboard(action)) => admin_soundboard.command(&mut sidebar, client, action),
@@ -1141,11 +1137,6 @@ async fn watch_session(
                     voice.apply_controls(&mut sidebar, settings, command).await;
                 }
             },
-            Some(result) = changelog_pages.join_next() => {
-                if matches!(result, Ok(true)) {
-                    break SessionEnd::Invalidated(SESSION_EXPIRED);
-                }
-            }
             Some(_) = camera_previews.join_next() => {}
             Some(result) = channel_mutations.join_next() => {
                 let result = result.unwrap_or(Err(Failure::Connection));
@@ -1268,6 +1259,7 @@ async fn watch_session(
                             settings.sounds.play(cue, rising);
                         }
                         voice.prune_watching(&mut sidebar);
+                        voice.sync_remote_audio_presence(&mut sidebar);
                         if own_update {
                             voice.own_presence_updated(&mut sidebar);
                         }
@@ -1307,8 +1299,9 @@ async fn watch_session(
                         }) => {
                         sidebar.radio.command_error = Some(error);
                     }
+                    Frame::SoundNew => sidebar.soundboard.has_new_clip = true,
                     Frame::VoiceSound { user_id, sound_id } => {
-                        soundboard.relay(&sidebar, client, &user_id, &sound_id);
+                        soundboard.relay(&mut sidebar, client, user_id, sound_id);
                     }
                     Frame::VoiceKicked { sid } => voice.kicked(&mut sidebar, &sid),
                     Frame::VoiceDisconnected { sid } => voice.server_disconnected(&mut sidebar, &sid),
@@ -1317,11 +1310,11 @@ async fn watch_session(
             },
             update = voice.next_update() => match update {
                 VoiceUpdate::Media(report) => {
-                    if let Some(voice) = &mut sidebar.voice
-                        && !matches!(voice.status, VoiceStatus::Leaving)
+                    if let Some(view) = &mut sidebar.voice
+                        && view.status != VoiceStatus::Leaving
                     {
                         sidebar.devices = report.devices.clone();
-                        if voice.update_media(report) {
+                        if view.update_media(report) && voice.media_connected() {
                             settings.sounds.play(Sound::Join, true);
                         }
                     }
@@ -1337,15 +1330,15 @@ async fn watch_session(
                 VoiceUpdate::VideoParticipantLeft(id) => {
                     voice.video_participant_left(&mut sidebar, &id);
                 }
+                VoiceUpdate::RemoteAudioStalled => voice.recover_stalled_audio(&mut sidebar),
                 VoiceUpdate::Screen(report) => {
                     voice.screen_report(&mut sidebar, settings, report);
                 }
                 VoiceUpdate::Finished(result) => {
-                    voice.finished();
                     if matches!(result, Err(VoiceIssue::Unauthorized)) {
                         break SessionEnd::Invalidated(SESSION_EXPIRED);
                     }
-                    if sidebar.finish_voice(result) {
+                    if voice.finished(&mut sidebar, result) {
                         settings.sounds.play(Sound::Leave, false);
                     }
                 }
@@ -1502,6 +1495,7 @@ async fn watch_session(
             }
         }
     };
+    voice.leave(&mut sidebar);
     if let Some(store) = &draft_store {
         if matches!(end, SessionEnd::Closed) {
             while let Ok(command) = commands.try_recv() {

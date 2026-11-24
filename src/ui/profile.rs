@@ -3,7 +3,10 @@ use std::{
     hash::{Hash, Hasher},
 };
 
-use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
+use gpui_kit::component::{
+    Side,
+    menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
+};
 
 use crate::{api::UserPresence, session::UserStatus};
 
@@ -16,6 +19,7 @@ pub(super) fn user_status_picker(
     id: &'static str,
     selected: UserStatus,
     app: WeakEntity<Spk>,
+    cx: &App,
 ) -> impl IntoElement {
     user_status_menu(
         control_button(id)
@@ -24,6 +28,7 @@ pub(super) fn user_status_picker(
             .ghost()
             .child(
                 control_content()
+                    .child(status_dot(selected, cx).size(px(14.)))
                     .child(Label::new(selected.label()))
                     .child(Icon::new(IconName::ChevronDown).size(ACTION_ICON_SIZE)),
             )
@@ -36,13 +41,6 @@ pub(super) fn user_status_picker(
 
 pub(super) fn profile_status_avatar(sidebar: &Sidebar, cx: &Context<Spk>) -> impl IntoElement {
     let name = sidebar.profile.name();
-    let presence = match sidebar.user_status {
-        UserStatus::Online => UserPresence::Online,
-        UserStatus::Away => UserPresence::Idle,
-        UserStatus::Busy => UserPresence::Busy,
-        UserStatus::Invisible => UserPresence::Offline,
-    };
-    let color = user_presence_color(presence, cx);
     let avatar = div()
         .relative()
         .child(profile_avatar(
@@ -61,7 +59,7 @@ pub(super) fn profile_status_avatar(sidebar: &Sidebar, cx: &Context<Spk>) -> imp
                 .rounded_full()
                 .border_1()
                 .border_color(cx.theme().secondary)
-                .bg(color),
+                .bg(status_color(sidebar.user_status, cx)),
         );
     user_status_menu(
         Button::new("sidebar-status")
@@ -84,7 +82,8 @@ fn user_status_menu(
     anchor: Anchor,
     app: WeakEntity<Spk>,
 ) -> impl IntoElement {
-    trigger.dropdown_menu_with_anchor(anchor, move |mut menu, _, _| {
+    trigger.dropdown_menu_with_anchor(anchor, move |menu, _, cx| {
+        let mut menu = menu.check_side(Side::Right);
         for status in [
             UserStatus::Online,
             UserStatus::Away,
@@ -94,6 +93,7 @@ fn user_status_menu(
             let app = app.clone();
             menu = menu.item(
                 PopupMenuItem::new(status.label())
+                    .icon(status_dot(status, cx))
                     .checked(status == selected)
                     .on_click(move |_, _, cx| {
                         let _ = app.update(cx, |app, cx| {
@@ -104,6 +104,22 @@ fn user_status_menu(
         }
         menu
     })
+}
+
+fn status_dot(status: UserStatus, cx: &App) -> Icon {
+    Icon::default()
+        .data(br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5"/></svg>"#)
+        .text_color(status_color(status, cx))
+}
+
+fn status_color(status: UserStatus, cx: &App) -> Hsla {
+    let presence = match status {
+        UserStatus::Online => UserPresence::Online,
+        UserStatus::Away => UserPresence::Idle,
+        UserStatus::Busy => UserPresence::Busy,
+        UserStatus::Invisible => UserPresence::Offline,
+    };
+    user_presence_color(presence, cx)
 }
 
 pub(super) fn user_presence_color(status: UserPresence, cx: &App) -> Hsla {
@@ -340,9 +356,11 @@ impl Spk {
             }
             PersonProfile { app, id, email: cached_email }
         });
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, _, cx| {
             dialog
                 .centered()
+                .border_0()
+                .bg(cx.theme().popover)
                 .width(px(380.0))
                 .title("Profile")
                 .child(profile.clone())
@@ -404,7 +422,7 @@ impl Render for PersonProfile {
                             }),
                     )
                     .when(
-                        !person.banned && sidebar.profile.id.as_deref() != Some(self.id.as_str()),
+                        !person.banned && sidebar.can_start_direct_message(&self.id),
                         |profile| {
                             profile.child(
                                 control_button("send-profile-dm")

@@ -8,6 +8,7 @@ mod poll_composer;
 mod poll_results;
 mod reaction_picker;
 mod recovery;
+mod spoiler;
 pub(super) mod suggestions;
 
 pub(super) use actions::{MessageActionForm, PinPanel};
@@ -21,11 +22,13 @@ use std::{
 };
 
 use chrono::{DateTime, Local};
+use gpui_kit::base::text::{
+    MarkdownExtensions, MarkdownNode, MarkdownParseContext, MarkdownPlugin, TextView, TextViewStyle,
+};
 use gpui_kit::component::{
     Disableable,
     menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
     separator::Separator,
-    text::{MarkdownExtensions, TextView},
     tooltip::Tooltip,
 };
 
@@ -38,8 +41,8 @@ use history::{
 use super::*;
 
 use crate::{
-    api::{ChatMessage, MessageTarget, UnreadState},
-    chat_markdown::{message_markdown, reply_preview, safe_link},
+    api::{BOT_USER_ID, ChatMessage, MessageTarget, UnreadState},
+    chat_markdown::{message_markdown, reply_preview, safe_link, styled_message_markdown},
     reaction_artwork::reaction_artwork_path,
     session::{ChatView, Delivery, Pins},
 };
@@ -54,6 +57,7 @@ struct RenderedChatMarkdown {
 struct HiddenChatSpoilers {
     key: (String, u64),
     offsets: Vec<usize>,
+    revealed: bool,
 }
 
 fn chat(view: &View) -> Option<&ChatView> {
@@ -189,6 +193,19 @@ fn chat_history_viewport(
                 .children(rows),
         )
         .child(overlay_scrollbar(scroll))
+}
+
+fn measure_content_width(width: Rc<Cell<Pixels>>) -> impl IntoElement {
+    canvas(
+        move |bounds, window, _| {
+            if width.replace(bounds.size.width) != bounds.size.width {
+                window.request_animation_frame();
+            }
+        },
+        |_, (), _, _| {},
+    )
+    .absolute()
+    .inset_0()
 }
 
 fn history_anchor<'a>(chat: &'a ChatView, scroll: &ScrollHandle) -> Option<(&'a str, Pixels)> {
@@ -985,8 +1002,8 @@ impl Spk {
             .children((!chat.webhook && !chat.unavailable()).then(|| {
                 div()
                     .id("chat-composer")
-                    .px_4()
-                    .py(if self.compact() { px(6.0) } else { px(12.0) })
+                    .px_2()
+                    .pb_2()
                     .flex()
                     .flex_col()
                     .min_h_0()
@@ -1017,10 +1034,10 @@ impl Spk {
                                     .flex()
                                     .items_center()
                                     .gap_2()
-                                    .mb_2()
+                                    .mb_1()
                                     .px_2()
                                     .rounded_md()
-                                    .bg(theme.muted)
+                                    .bg(theme.popover)
                                     .child(
                                         Icon::new(IconName::Reply)
                                             .size(ACTION_ICON_SIZE)
@@ -1037,6 +1054,7 @@ impl Spk {
                                                     "Replying to {}",
                                                     sidebar.message_author(&reply.user_id)
                                                 ))
+                                                .flex_none()
                                                 .max_w(px(220.))
                                                 .font_semibold()
                                                 .truncate(),
@@ -1097,8 +1115,8 @@ impl Spk {
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
-        let surface = theme.popover;
         let disabled = !chat.can_send();
+        let focused = !disabled && self.chat_input.focus_handle(cx).is_focused(window);
         let can_send = !disabled
             && !self.chat_submitting
             && chat.draft.can_send(&editor::wire(self.chat_input.read(cx)));
@@ -1110,13 +1128,10 @@ impl Spk {
             .min_h_0()
             .p_1()
             .rounded_lg()
-            .bg(surface)
-            .border_1()
-            .border_color(surface)
+            .bg(theme.popover)
             .when(!disabled, |composer| {
-                let accent = theme.primary;
-                composer
-                    .drag_over::<ExternalPaths>(move |style, _, _, _| style.border_color(accent))
+                let tint = theme.primary.opacity(0.05);
+                composer.drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(tint))
             })
             .child(
                 div()
@@ -1133,7 +1148,11 @@ impl Spk {
             .child(
                 editor::textarea(&self.chat_input)
                     .flex_shrink_0()
-                    .bg(surface)
+                    .bg(if focused {
+                        theme.secondary_hover.opacity(0.35)
+                    } else {
+                        transparent_black()
+                    })
                     .bordered(false)
                     .aria_label("Write a message")
                     .on_paste(move |item, window, cx| {
@@ -1173,6 +1192,7 @@ impl Spk {
         message_id: &str,
         body: &str,
         sidebar: &Sidebar,
+        max_width: Pixels,
         cx: &Context<Self>,
     ) -> RenderedChatMarkdown {
         let mut hasher = DefaultHasher::new();
@@ -1181,48 +1201,71 @@ impl Spk {
         let spoiler_key = (message_id.to_owned(), hasher.finish());
         let reveals = self.chat_spoilers.get(&spoiler_key);
         let hidden = RefCell::new(Vec::new());
-        let rendered = message_markdown(
+        let name_of = |id: &str| sidebar.message_author(id);
+        let revealed = |offset| reveals.is_some_and(|offsets| offsets.contains(&offset));
+        let source: SharedString = message_markdown(
             body,
-            |id| sidebar.message_author(id),
+            name_of,
             |offset| {
-                let revealed = reveals.is_some_and(|offsets| offsets.contains(&offset));
-                if !revealed {
+                let visible = revealed(offset);
+                if !visible {
                     hidden.borrow_mut().push(offset);
                 }
-                revealed
+                visible
             },
             Some(&self.chat_spoiler_link),
         )
-        .into_owned();
+        .into_owned()
+        .into();
+        let own_id = sidebar.profile.id.as_deref();
+        let (display, spoilers) = if body.contains("<@") || body.contains('|') {
+            let (display, spoilers) =
+                styled_message_markdown(body, name_of, revealed, &self.chat_spoiler_link, own_id);
+            (SharedString::from(display.into_owned()), spoilers)
+        } else {
+            (source.clone(), Vec::new())
+        };
+        let mut extensions = MarkdownExtensions::default().plugin(MessageMention);
+        if !spoilers.is_empty() {
+            let definitions = crate::chat_markdown::spoiler_link_definitions(body);
+            let contents = spoilers
+                .into_iter()
+                .map(|range| {
+                    let fragment =
+                        crate::chat_markdown::spoiler_markdown(&body[range.body], &definitions);
+                    let (formatted, _) = styled_message_markdown(
+                        &fragment,
+                        name_of,
+                        |_| false,
+                        &self.chat_spoiler_link,
+                        own_id,
+                    );
+                    (
+                        range.offset,
+                        spoiler::Content {
+                            plain: crate::chat_markdown::plain_text(&formatted).into(),
+                            formatted: formatted.into_owned().into(),
+                            revealed: range.revealed,
+                        },
+                    )
+                })
+                .collect();
+            extensions = extensions.plugin(spoiler::MessageSpoiler {
+                app: cx.weak_entity(),
+                key: spoiler_key.clone(),
+                link_prefix: self.chat_spoiler_link.clone(),
+                contents,
+                max_width: max_width.max(px(24.)),
+            });
+        }
         let hidden = hidden.into_inner();
-        let link_key = spoiler_key.clone();
         let link_app = cx.weak_entity();
-        let link_filter = self.chat_spoiler_link.clone();
-        let link_prefix = self.chat_spoiler_link.clone();
-        let source = SharedString::from(rendered);
-        let view = TextView::markdown(id, source.clone())
-            .markdown_extensions(
-                MarkdownExtensions::default()
-                    .parser_revision(1)
-                    .raw_html(false),
-            )
-            .link(move |link, _| {
-                (link.url.starts_with(&link_filter) || safe_link(&link.url).is_some())
-                    .then(|| link.clone())
-            })
+        let view = TextView::markdown(id, display)
+            .style(chat_text_style(cx))
+            .markdown_extensions(extensions.parser_revision(4).raw_html(false))
+            .link(|link, _| safe_link(&link.url).map(|_| link.clone()))
             .on_link_click(move |href, _, _, cx| {
-                if let Some(offset) = href.strip_prefix(&link_prefix) {
-                    if let Ok(offset) = offset.parse::<usize>() {
-                        let _ = link_app.update(cx, |this, cx| {
-                            this.preserve_chat_position();
-                            this.chat_spoilers
-                                .entry(link_key.clone())
-                                .or_default()
-                                .insert(offset);
-                            cx.notify();
-                        });
-                    }
-                } else if let Some(url) = safe_link(href) {
+                if let Some(url) = safe_link(href) {
                     search::activate_chat_link(&link_app, url, cx);
                 }
             });
@@ -1232,6 +1275,7 @@ impl Spk {
             spoilers: HiddenChatSpoilers {
                 key: spoiler_key,
                 offsets: hidden,
+                revealed: reveals.is_some_and(|offsets| !offsets.is_empty()),
             },
         }
     }
@@ -1251,11 +1295,25 @@ impl Spk {
         let message_id = message.id.clone();
         let body = message.body.clone();
         let editing = self.is_editing_message(&message_id);
+        let measured_or_viewport_width = |width: Pixels| {
+            if width > px(0.) {
+                width
+            } else {
+                window.viewport_size().width
+            }
+        };
         let RenderedChatMarkdown {
             view: text,
             source: share_text,
             spoilers,
-        } = self.chat_message_markdown("message-body", &message_id, &body, sidebar, cx);
+        } = self.chat_message_markdown(
+            "message-body",
+            &message_id,
+            &body,
+            sidebar,
+            measured_or_viewport_width(self.chat_content_width.get()),
+            cx,
+        );
         let embed = message.embed.as_ref().filter(|_| chat.webhook);
         let description = embed
             .and_then(|embed| embed.description.as_deref())
@@ -1265,6 +1323,7 @@ impl Spk {
                     &message_id,
                     description,
                     sidebar,
+                    measured_or_viewport_width(self.webhook_content_width.get()),
                     cx,
                 )
             });
@@ -1274,7 +1333,7 @@ impl Spk {
                     .as_ref()
                     .map(|markdown| markdown.spoilers.clone()),
             )
-            .filter(|spoilers| !spoilers.offsets.is_empty())
+            .filter(|spoilers| spoilers.revealed || !spoilers.offsets.is_empty())
             .collect();
         let target = MessageTarget::new(&message.channel_id, &message.id);
         let images = self.message_images(chat, target.clone(), &body, &share_text, cx);
@@ -1314,6 +1373,7 @@ impl Spk {
         } else {
             sidebar.message_author(&message.user_id)
         };
+        let show_bot_badge = starts_group && !chat.webhook && message.user_id == BOT_USER_ID;
         let time = DateTime::from_timestamp_millis(message.created_at)
             .map(|time| time.with_timezone(&Local));
         let exact_time = time.map(|time| time.format("%b %-d, %Y, %H:%M:%S").to_string());
@@ -1335,10 +1395,12 @@ impl Spk {
             .can_send()
             .then(|| (message.user_id.clone(), app.clone()));
         let content = div()
+            .relative()
             .flex_1()
             .min_w_0()
             .flex()
             .flex_col()
+            .child(measure_content_width(self.chat_content_width.clone()))
             .child(
                 div()
                     .flex()
@@ -1357,6 +1419,17 @@ impl Spk {
                             None => label.into_any_element(),
                         })
                     })
+                    .when(show_bot_badge, |header| {
+                        header.child(
+                            Label::new("BOT")
+                                .text_xs()
+                                .font_semibold()
+                                .px_1()
+                                .rounded_md()
+                                .bg(theme.primary.opacity(0.16))
+                                .text_color(theme.primary),
+                        )
+                    })
                     .when_some(
                         exact_time.clone().filter(|_| starts_group),
                         |header, exact| {
@@ -1364,7 +1437,8 @@ impl Spk {
                                 div()
                                     .id("sent-at")
                                     .tooltip(move |window, cx| {
-                                        Tooltip::new(exact.clone()).build(window, cx)
+                                        floating_tooltip(Tooltip::new(exact.clone()), cx)
+                                            .build(window, cx)
                                     })
                                     .child(
                                         Label::new(relative_time(message.created_at, now))
@@ -1468,6 +1542,7 @@ impl Spk {
                     embed,
                     description.map(|markdown| markdown.view),
                     now,
+                    window,
                     cx,
                 ))
             })
@@ -1519,7 +1594,11 @@ impl Spk {
             .group("message-row")
             .track_focus(&row_focus)
             .when_some(exact_time.clone(), |row, time| {
-                row.aria_description(format!("{author}, {time}"))
+                if show_bot_badge {
+                    row.aria_description(format!("{author}, bot, {time}"))
+                } else {
+                    row.aria_description(format!("{author}, {time}"))
+                }
             })
             .border_l_2()
             .border_color(theme.transparent)
@@ -1613,7 +1692,8 @@ impl Spk {
                                     .opacity(if row_focused { 1. } else { 0. })
                                     .group_hover("message-row", |clock| clock.opacity(1.))
                                     .tooltip(move |window, cx| {
-                                        Tooltip::new(exact.clone()).build(window, cx)
+                                        floating_tooltip(Tooltip::new(exact.clone()), cx)
+                                            .build(window, cx)
                                     })
                                     .child(
                                         Label::new(time.format("%H:%M").to_string())
@@ -1718,6 +1798,68 @@ impl Spk {
             .child(self.attachment_picker(chat, cx))
             .child(self.gif_toggle(chat, cx))
     }
+}
+
+struct MessageMention;
+
+impl MarkdownPlugin for MessageMention {
+    fn name(&self) -> &str {
+        "spk-mention"
+    }
+
+    fn parse(
+        &self,
+        node: &markdown::mdast::Node,
+        _: &MarkdownParseContext<'_>,
+    ) -> Option<MarkdownNode> {
+        let markdown::mdast::Node::Image(image) = node else {
+            return None;
+        };
+        let own = match image.url.as_str() {
+            "spk-mention:self" => true,
+            "spk-mention:other" => false,
+            _ => return None,
+        };
+        Some(
+            MarkdownNode::new(self.name().to_owned(), own)
+                .text(image.alt.clone())
+                .markdown(image.alt.clone()),
+        )
+    }
+
+    fn render(&self, node: &MarkdownNode, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = cx.theme();
+        let background = if node.data::<bool>() == Some(&true) {
+            theme.primary.opacity(0.2)
+        } else {
+            theme.popover
+        };
+        div()
+            .px_1()
+            .rounded_sm()
+            .bg(background)
+            .text_color(theme.primary)
+            .font_medium()
+            .child(node.as_text().to_owned())
+    }
+}
+
+fn chat_text_style(cx: &App) -> TextViewStyle {
+    let theme = cx.theme();
+    let base = theme.popover;
+    TextViewStyle::from_theme(&gpui_kit::base::Theme::global(cx))
+        .with_link(theme.primary)
+        .with_code_block(StyleRefinement::default().rounded_md().bg(base))
+        .with_table_head(
+            StyleRefinement::default()
+                .bg(theme.table_head)
+                .text_color(theme.table_head_foreground),
+        )
+        .with_table_row_hover(theme.table_hover)
+        .with_inline_code(HighlightStyle {
+            background_color: Some(base),
+            ..Default::default()
+        })
 }
 
 #[cfg(test)]

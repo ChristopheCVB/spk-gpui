@@ -115,7 +115,7 @@ impl Settings {
                                         .items_center()
                                         .gap_2()
                                         .child(
-                                            Input::new(&self.nickname)
+                                            surface_input(&self.nickname, theme.popover, cx)
                                                 .w_full()
                                                 .aria_label("Nickname")
                                                 .disabled(disabled),
@@ -146,6 +146,7 @@ impl Settings {
                                     "profile-status",
                                     sidebar.user_status,
                                     spk.clone(),
+                                    cx,
                                 )),
                         )
                         .children(sidebar.user_status_notice.map(|notice| {

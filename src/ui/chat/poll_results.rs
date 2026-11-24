@@ -26,6 +26,11 @@ pub(super) fn poll_results(
             let choice_id = (!mine).then(|| option.id.clone());
             control_button(SharedString::from(format!("poll-option-{}", option.id)))
                 .outline()
+                .bg(if mine {
+                    theme.primary.opacity(0.05)
+                } else {
+                    theme.popover
+                })
                 .p_0()
                 .selected(mine)
                 .toggled(mine)
@@ -49,7 +54,7 @@ pub(super) fn poll_results(
                                 .bg(if mine {
                                     theme.primary.opacity(0.2)
                                 } else {
-                                    theme.muted
+                                    theme.background
                                 }),
                         )
                         .child(

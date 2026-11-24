@@ -1,7 +1,8 @@
 use std::cell::Cell;
 
-use gpui_kit::component::command::{
-    Command as CommandPalette, CommandGroup, CommandItem, CommandState,
+use gpui_kit::component::{
+    command::{Command as CommandPalette, CommandGroup, CommandItem, CommandState},
+    kbd::Kbd,
 };
 
 use super::{
@@ -162,10 +163,28 @@ impl Spk {
             let entries_for_confirm = entries.clone();
             let app = app.clone();
             let mut palette = CommandPalette::new(&state)
+                .bordered(false)
                 .searchable(true)
                 .placeholder("Jump to…")
                 .max_h(window.viewport_size().height * 0.48)
                 .empty(|_, _, _| Label::new("No matching destinations.").p_2())
+                .footer(|_, _, cx| {
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .px_2()
+                        .pt_1()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .children(
+                            ["up", "down"].into_iter().map(|key| {
+                                Kbd::new(Keystroke::parse(key).expect("valid arrow key"))
+                                    .bg(cx.theme().background)
+                            }),
+                        )
+                        .child("Navigate")
+                })
                 .on_cancel({
                     let app = app.clone();
                     move |_, cx| {
@@ -208,6 +227,8 @@ impl Spk {
             }
             dialog
                 .centered()
+                .border_0()
+                .bg(cx.theme().popover)
                 .width(px(460.0))
                 .title("Quick Switcher")
                 .child(palette)

@@ -1,4 +1,10 @@
-use std::{borrow::Cow, cmp::Reverse, collections::HashSet, ops::Range};
+use std::{
+    borrow::Cow,
+    cell::RefCell,
+    cmp::Reverse,
+    collections::{HashMap, HashSet},
+    ops::Range,
+};
 
 use ::markdown::{ParseOptions, mdast::Node};
 use url::Url;
@@ -36,6 +42,40 @@ pub(crate) fn message_markdown<'a, 'b>(
     revealed: impl Fn(usize) -> bool,
     spoiler_link: Option<&str>,
 ) -> Cow<'a, str> {
+    render_message(source, name_of, revealed, spoiler_link, None)
+}
+
+pub(crate) struct SpoilerRange {
+    pub offset: usize,
+    pub body: Range<usize>,
+    pub revealed: bool,
+}
+
+pub(crate) fn styled_message_markdown<'a, 'b>(
+    source: &'a str,
+    name_of: impl Fn(&str) -> &'b str,
+    revealed: impl Fn(usize) -> bool,
+    spoiler_link: &str,
+    own_id: Option<&str>,
+) -> (Cow<'a, str>, Vec<SpoilerRange>) {
+    let spoilers = RefCell::new(Vec::new());
+    let markdown = render_message(
+        source,
+        name_of,
+        revealed,
+        Some(spoiler_link),
+        Some((own_id.unwrap_or_default(), &spoilers)),
+    );
+    (markdown, spoilers.into_inner())
+}
+
+fn render_message<'a, 'b>(
+    source: &'a str,
+    name_of: impl Fn(&str) -> &'b str,
+    revealed: impl Fn(usize) -> bool,
+    spoiler_link: Option<&str>,
+    styled_for: Option<(&str, &RefCell<Vec<SpoilerRange>>)>,
+) -> Cow<'a, str> {
     if !source.contains("<@")
         && !source.contains("||")
         && !source.contains("\\|")
@@ -57,6 +97,7 @@ pub(crate) fn message_markdown<'a, 'b>(
         &name_of,
         &revealed,
         spoiler_link,
+        styled_for,
         &mut edits,
     );
     edits.sort_by_key(|(range, _)| (range.start, Reverse(range.end)));
@@ -118,6 +159,7 @@ fn find_edits<'a>(
     name_of: &impl Fn(&str) -> &'a str,
     revealed: &impl Fn(usize) -> bool,
     spoiler_link: Option<&str>,
+    styled_for: Option<(&str, &RefCell<Vec<SpoilerRange>>)>,
     edits: &mut Vec<(Range<usize>, String)>,
 ) {
     let Some(children) = parent.children() else {
@@ -157,7 +199,19 @@ fn find_edits<'a>(
                             if source[open.end..marker.start].trim().is_empty() {
                                 continue;
                             }
-                            if !preview && revealed(open.start) {
+                            if let (Some(link), Some((_, spoilers))) = (spoiler_link, styled_for) {
+                                let shown = revealed(open.start);
+                                spoilers.borrow_mut().push(SpoilerRange {
+                                    offset: open.start,
+                                    body: open.end..marker.start,
+                                    revealed: shown,
+                                });
+                                let kind = if shown { "shown" } else { "hidden" };
+                                edits.push((
+                                    open.start..marker.end,
+                                    format!("![{kind}]({link}{})", open.start),
+                                ));
+                            } else if !preview && revealed(open.start) {
                                 edits.push((open, String::new()));
                                 edits.push((marker, String::new()));
                             } else {
@@ -186,7 +240,13 @@ fn find_edits<'a>(
                         } else {
                             escape_markdown(name)
                         };
-                        edits.push((start..range.start + end, format!("@{name}")));
+                        let label = if let Some((own_id, _)) = styled_for {
+                            let kind = if own_id == id { "self" } else { "other" };
+                            format!("![@{name}](spk-mention:{kind})")
+                        } else {
+                            format!("@{name}")
+                        };
+                        edits.push((start..range.start + end, label));
                     }
                 }
             }
@@ -204,7 +264,15 @@ fn find_edits<'a>(
             Node::ImageReference(image) => {
                 edits.push((range, escape_markdown(&image.alt)));
             }
-            _ => find_edits(child, source, name_of, revealed, spoiler_link, edits),
+            _ => find_edits(
+                child,
+                source,
+                name_of,
+                revealed,
+                spoiler_link,
+                styled_for,
+                edits,
+            ),
         }
     }
     if preview && let Some(open) = spoiler {
@@ -221,6 +289,84 @@ fn escape_markdown(text: &str) -> String {
         result.push(ch);
     }
     result
+}
+
+pub(crate) fn spoiler_link_definitions(source: &str) -> String {
+    fn append(node: &Node, definitions: &mut String) {
+        use std::fmt::Write as _;
+
+        if let Node::Definition(definition) = node {
+            let _ = write!(
+                definitions,
+                "\n\n[{}]: <{}>",
+                definition.identifier,
+                escape_markdown(&definition.url),
+            );
+            if let Some(title) = &definition.title {
+                let _ = write!(
+                    definitions,
+                    " \"{}\"",
+                    escape_markdown(&title.replace(['\r', '\n'], " ")),
+                );
+            }
+        } else if let Some(children) = node.children() {
+            for child in children {
+                append(child, definitions);
+            }
+        }
+    }
+
+    let mut definitions = String::new();
+    if source.contains("]:")
+        && let Ok(document) = ::markdown::to_mdast(source, &parse_options())
+    {
+        append(&document, &mut definitions);
+    }
+    definitions
+}
+
+pub(crate) fn spoiler_markdown(fragment: &str, definitions: &str) -> String {
+    let mut source = format!("{fragment}{definitions}");
+    if definitions.is_empty() {
+        return source;
+    }
+    let Ok(document) = ::markdown::to_mdast(&source, &parse_options()) else {
+        return source;
+    };
+    let mut links = HashMap::new();
+    let mut references = Vec::new();
+    let mut pending = vec![&document];
+    while let Some(node) = pending.pop() {
+        match node {
+            Node::Definition(def) => {
+                links.entry(&def.identifier).or_insert(def);
+            }
+            Node::LinkReference(link) => references.push(link),
+            _ => {}
+        }
+        if let Some(children) = node.children() {
+            pending.extend(children.iter().rev());
+        }
+    }
+    // The nested TextView's link hook needs the destination on the inline mark.
+    for link in references.into_iter().rev() {
+        let (Some(def), Some(position)) = (links.get(&link.identifier), &link.position) else {
+            continue;
+        };
+        let label_end = link
+            .children
+            .last()
+            .and_then(Node::position)
+            .map_or(position.start.offset + 1, |child| child.end.offset);
+        let destination = escape_markdown(&def.url);
+        let mut suffix = format!("](<{destination}>");
+        if let Some(title) = &def.title {
+            suffix.push_str(&format!(" \"{}\"", escape_markdown(title)));
+        }
+        suffix.push(')');
+        source.replace_range(label_end..position.end.offset, &suffix);
+    }
+    source
 }
 
 pub(crate) fn image_preview_links(source: &str) -> Vec<Url> {
@@ -335,6 +481,46 @@ fn node_text(node: &Node, hide_code: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spoiler_fragment_keeps_reference_definitions_from_the_message() {
+        let body = "Before ||[**reference**][device]|| afterward.\n\n> [Device]: <https://example.com/a?x=1&y=2> \"Open it\"";
+        let (_, spoilers) = styled_message_markdown(body, |_| "", |_| false, "spk-spoiler:", None);
+        let fragment = spoiler_markdown(
+            &body[spoilers[0].body.clone()],
+            &spoiler_link_definitions(body),
+        );
+        let document = ::markdown::to_mdast(&fragment, &parse_options()).unwrap();
+        let children = document.children().unwrap();
+        assert!(matches!(
+            &children[0].children().unwrap()[0],
+            Node::Link(link)
+                if link.url == "https://example.com/a?x=1&y=2"
+                && link.title.as_deref() == Some("Open it")
+                && matches!(link.children[0], Node::Strong(_))
+        ));
+    }
+
+    #[test]
+    fn styled_mentions_use_distinct_markers_and_respect_code_and_spoilers() {
+        let source = "<@alice> <@bob> `<@alice>` ||<@bob>|| ![spoof](spk-mention:self)";
+        let (styled, spoilers) = styled_message_markdown(
+            source,
+            |id| if id == "alice" { "Alice" } else { "Bob" },
+            |_| false,
+            "spk-spoiler:test:",
+            Some("alice"),
+        );
+        assert!(
+            styled.starts_with("![@Alice](spk-mention:self) ![@Bob](spk-mention:other) `<@alice>`")
+        );
+        assert_eq!(styled.matches("spk-mention:").count(), 2);
+        assert!(styled.contains("![hidden](spk-spoiler:test:"));
+        assert_eq!(spoilers.len(), 1);
+        assert_eq!(&source[spoilers[0].body.clone()], "<@bob>");
+        assert!(!styled.contains("||"));
+        assert!(styled.ends_with(" spoof"));
+    }
 
     #[test]
     fn image_previews_follow_visible_markdown_and_respect_autolink_opt_out() {

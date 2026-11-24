@@ -187,7 +187,13 @@ impl DeviceList {
     pub fn preferred(&self, saved: Option<&Device>) -> Option<&Device> {
         let saved = saved?;
         if !saved.id.starts_with("index:") {
-            return self.choices.iter().find(|device| device.id == saved.id);
+            return self.choices.iter().find(|device| {
+                device.id == saved.id
+                    || device
+                        .id
+                        .parse::<cpal::DeviceId>()
+                        .is_ok_and(|id| id.id() == saved.id)
+            });
         }
         let mut matches = self
             .choices
@@ -213,7 +219,7 @@ impl Devices {
     pub fn enumerate() -> Self {
         PlatformAudio::new().map_or_else(
             |_| Self {
-                media_outputs: media_outputs(),
+                media_outputs: cpal_routes().media_outputs,
                 ..Self::default()
             },
             |audio| Self::read(&audio),
@@ -229,8 +235,13 @@ impl Devices {
     }
 
     fn read(audio: &PlatformAudio) -> Self {
-        Self {
-            microphones: list(
+        let CpalRoutes {
+            mut microphones,
+            media_outputs,
+            ..
+        } = cpal_routes();
+        if cfg!(windows) {
+            microphones = list(
                 DeviceKind::Microphone,
                 audio.recording_devices().map(|device| {
                     (
@@ -241,8 +252,11 @@ impl Devices {
                         },
                     )
                 }),
-            ),
-            media_outputs: media_outputs(),
+            );
+        }
+        Self {
+            microphones,
+            media_outputs,
             speakers: list(
                 DeviceKind::Speakers,
                 audio.playout_devices().map(|device| {
@@ -259,25 +273,75 @@ impl Devices {
     }
 }
 
-fn media_outputs() -> DeviceList {
-    fn describe(device: cpal::Device) -> Option<Device> {
-        Some(Device {
-            id: device.id().ok()?.to_string(),
-            name: device.description().ok()?.name().to_owned(),
-        })
+fn describe_cpal_device(device: cpal::Device) -> Option<Device> {
+    Some(Device {
+        id: device.id().ok()?.to_string(),
+        name: device.description().ok()?.name().to_owned(),
+    })
+}
+
+#[derive(Default)]
+struct CpalRoutes {
+    microphones: DeviceList,
+    media_outputs: DeviceList,
+    enumerated: bool,
+}
+
+fn cpal_routes() -> CpalRoutes {
+    fn read(host: &cpal::Host) -> CpalRoutes {
+        let mut routes = CpalRoutes::default();
+        if !cfg!(windows) {
+            // shortcut: ALSA exposes its configured PCM alias, revisit when it exposes the routed endpoint.
+            routes.microphones.default = host.default_input_device().and_then(describe_cpal_device);
+        }
+        routes.media_outputs.default = host.default_output_device().and_then(describe_cpal_device);
+        let Ok(devices) = host.devices() else {
+            return routes;
+        };
+        routes.enumerated = true;
+        for device in devices {
+            if let Some(description) = describe_cpal_device(device.clone()) {
+                if device.supports_output() {
+                    routes.media_outputs.choices.push(description.clone());
+                }
+                if !cfg!(windows) && device.supports_input() {
+                    routes.microphones.choices.push(description);
+                }
+            }
+        }
+        routes
     }
 
-    let host = cpal::default_host();
-    DeviceList {
-        default: host.default_output_device().and_then(describe),
-        choices: host
-            .output_devices()
-            .ok()
-            .into_iter()
-            .flatten()
-            .filter_map(describe)
-            .collect(),
+    #[cfg(target_os = "linux")]
+    {
+        // CPAL's PulseAudio client can outlive its host. Reuse it across device scans.
+        static PULSE_HOST: std::sync::Mutex<Option<cpal::Host>> = std::sync::Mutex::new(None);
+        let mut cached = PULSE_HOST.lock().unwrap();
+        let mut previous = None;
+        if let Some(host) = cached.as_ref() {
+            let routes = read(host);
+            if routes.enumerated {
+                return routes;
+            }
+            previous = Some(routes);
+        }
+        let host = cpal::default_host();
+        let mut routes = read(&host);
+        *cached = (routes.enumerated && host.id() == cpal::HostId::PulseAudio).then_some(host);
+        if !routes.enumerated
+            && let Some(previous) = previous
+        {
+            routes.microphones.default =
+                routes.microphones.default.or(previous.microphones.default);
+            routes.media_outputs.default = routes
+                .media_outputs
+                .default
+                .or(previous.media_outputs.default);
+        }
+        routes
     }
+    #[cfg(not(target_os = "linux"))]
+    read(&cpal::default_host())
 }
 
 #[derive(Clone, PartialEq)]
@@ -374,6 +438,21 @@ pub(super) fn switch_speakers(audio: &PlatformAudio, device: &Device) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires SPK_TEST_PULSE_SOURCE on a native PulseAudio-compatible server"]
+    fn system_default_microphone_resolves_to_the_pulse_source() {
+        let source = std::env::var("SPK_TEST_PULSE_SOURCE").unwrap();
+        let expected = cpal::DeviceId::new(cpal::HostId::PulseAudio, source).to_string();
+        // Scan beyond PulseAudio's 64 concurrent client limit.
+        for _ in 0..70 {
+            let devices = Devices::enumerate();
+            let active = devices.microphones.resolve(None).unwrap();
+            assert_eq!(active.id, expected);
+            assert_eq!(devices.microphones.preferred(Some(active)), Some(active));
+        }
+    }
 
     #[cfg(windows)]
     #[test]

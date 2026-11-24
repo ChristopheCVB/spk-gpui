@@ -12,12 +12,13 @@ use tokio::{
     task::{JoinSet, spawn_blocking},
 };
 
-use super::Sidebar;
+use super::{Sidebar, VoiceView};
 use crate::api::{
     Channel, Failure, Member, PresenceReport, SpkClient, User, UserPresence, UserStatus,
     VideoPresence, VoiceFlags, VoiceSocket,
 };
 use crate::sounds::Sound;
+use crate::voice::video::{CameraStatus, VideoSource};
 
 pub(super) struct PresenceSettings {
     pub(super) path: Option<PathBuf>,
@@ -109,18 +110,96 @@ impl PresenceReporter {
 #[derive(Clone)]
 pub(super) struct VoiceMembership {
     pub(super) channel_id: String,
-    flags: VoiceFlags,
+    pub(super) flags: VoiceFlags,
     video: VideoPresence,
+}
+
+impl VoiceMembership {
+    pub(super) fn video_feeds(&self, user: &str, call: Option<&VoiceView>) -> VideoFeeds {
+        if let Some(report) = call
+            .filter(|call| call.channel_id == self.channel_id)
+            .and_then(|call| call.video.as_deref())
+            .filter(|report| !report.reconnecting)
+        {
+            // SPK presence may lag behind an actual LiveKit publication or unpublish.
+            return report
+                .participants
+                .get(user)
+                .map_or_else(VideoFeeds::default, |video| VideoFeeds {
+                    camera: video.live.contains(&VideoSource::Camera),
+                    screen: video.live.contains(&VideoSource::Screen),
+                });
+        }
+        VideoFeeds {
+            camera: self.video.cam,
+            screen: self.video.screen,
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct VideoFeeds {
+    pub camera: bool,
+    pub screen: bool,
+}
+
+impl VideoFeeds {
+    pub(crate) fn is_live(&self) -> bool {
+        self.camera || self.screen
+    }
 }
 
 pub struct Participant<'a> {
     pub id: &'a str,
     pub name: &'a str,
     pub flags: VoiceFlags,
+    pub microphone_connecting: bool,
     pub video: Option<&'a VideoPresence>,
 }
 
 impl Sidebar {
+    pub(crate) fn video_feeds(&self, channel: &str, user: &str) -> VideoFeeds {
+        if self.profile.id.as_deref() == Some(user)
+            && let Some(call) = self
+                .voice
+                .as_ref()
+                .filter(|call| call.channel_id == channel)
+        {
+            return VideoFeeds {
+                camera: matches!(self.camera_status(), CameraStatus::Live(..)),
+                screen: call
+                    .screen
+                    .as_ref()
+                    .is_some_and(|screen| screen.state.active()),
+            };
+        }
+        self.voice_presence
+            .get(user)
+            .filter(|member| member.channel_id == channel)
+            .map_or_else(VideoFeeds::default, |member| {
+                member.video_feeds(user, self.voice.as_ref())
+            })
+    }
+
+    pub(crate) fn advertises_video(&self, channel: &str, user: &str) -> bool {
+        self.voice_presence.get(user).is_some_and(|member| {
+            member.channel_id == channel && (member.video.cam || member.video.screen)
+        })
+    }
+
+    pub(crate) fn can_watch_video(&self, channel: &str, user: &str) -> bool {
+        self.profile.id.as_deref() != Some(user)
+            && self.voice.as_ref().is_some_and(|call| {
+                call.channel_id == channel
+                    && call.is_participating()
+                    && call
+                        .video
+                        .as_ref()
+                        .is_none_or(|report| !report.reconnecting)
+            })
+            && self.video_feeds(channel, user).is_live()
+    }
+
     pub fn viewers(&self, channel: &str, presenter: &str) -> Vec<Participant<'_>> {
         self.participants(channel)
             .into_iter()
@@ -134,6 +213,11 @@ impl Sidebar {
     }
 
     pub fn participants(&self, channel: &str) -> Vec<Participant<'_>> {
+        let media = self
+            .voice
+            .as_ref()
+            .filter(|voice| voice.channel_id == channel)
+            .and_then(|voice| voice.media.as_deref());
         let mut people = self
             .voice_presence
             .iter()
@@ -150,6 +234,10 @@ impl Sidebar {
                 }
                 .unwrap_or("Unknown user"),
                 flags: member.flags,
+                microphone_connecting: self.voice_intent.expects_remote_microphone(user)
+                    && !member.flags.muted
+                    && !member.flags.deafened
+                    && media.is_some_and(|report| report.connecting_microphones.contains(user)),
                 video: Some(&member.video),
             })
             .collect::<Vec<_>>();

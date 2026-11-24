@@ -1,4 +1,9 @@
-use std::{collections::HashSet, future::pending, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    future::pending,
+    sync::Arc,
+    time::Duration,
+};
 
 use async_channel::{Receiver, Sender};
 use tokio::{
@@ -49,6 +54,7 @@ pub enum Status {
 pub enum Issue {
     Unauthorized,
     Token,
+    TokenRejected,
     Endpoint,
     Socket,
     Acknowledgment,
@@ -62,7 +68,9 @@ impl Issue {
     pub fn message(self) -> &'static str {
         match self {
             Self::Unauthorized => "Your session expired. Sign in again.",
-            Self::Token => "SPK could not issue a voice token. Try joining again.",
+            Self::Token | Self::TokenRejected => {
+                "SPK could not issue a voice token. Try joining again."
+            }
             Self::Endpoint => {
                 "SPK returned a different LiveKit URL. Check the app's build configuration."
             }
@@ -80,6 +88,7 @@ pub enum Update {
     Media(Arc<Report>),
     Video(Arc<video::VideoReport>),
     VideoParticipantLeft(String),
+    RemoteAudioStalled,
     Screen(screen::Report),
     Finished(Result<(), Issue>),
 }
@@ -116,6 +125,19 @@ pub struct Intent {
     pub camera: video::CameraIntent,
     pub screen: screen::Request,
     pub watching: HashSet<String>,
+    pub remote_microphone_mutes: HashMap<String, bool>,
+    pub watchdog_rejoin_after: Option<Instant>,
+}
+
+impl Intent {
+    pub(crate) fn expects_remote_microphone(&self, id: &str) -> bool {
+        let volume = self.preferred.participant_volume(id);
+        self.remote_microphone_mutes.get(id) == Some(&false)
+            && !self.mute.deafened
+            && !volume.muted
+            && volume.mic != 0
+            && self.preferred.output_volume != 0
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -125,6 +147,7 @@ pub struct Report {
     pub microphone: Option<Device>,
     pub speakers: Option<Device>,
     pub speaking: HashSet<String>,
+    pub connecting_microphones: HashSet<String>,
     pub diagnostics: Diagnostics,
     pub echo_reference_unavailable: bool,
 }
@@ -205,6 +228,7 @@ impl Call {
                             speakers: None,
                             diagnostics: Diagnostics::default(),
                             echo_reference_unavailable: false,
+                            connecting_microphones: HashSet::new(),
                             speaking: if muted {
                                 HashSet::new()
                             } else {
@@ -281,6 +305,10 @@ impl Call {
         {
             let _ = acknowledgment.send(());
         }
+    }
+
+    pub fn awaiting_acknowledgment(&self) -> bool {
+        self.acknowledgment.is_some()
     }
 
     pub fn sid(&self) -> &str {
@@ -395,6 +423,10 @@ impl Worker {
         let token = client.voice_token(channel_id).await.map_err(|error| {
             if error.unauthorized() {
                 Issue::Unauthorized
+            } else if matches!(error, Failure::Http(status)
+                if status.is_client_error() || status == reqwest::StatusCode::SERVICE_UNAVAILABLE)
+            {
+                Issue::TokenRejected
             } else {
                 Issue::Token
             }

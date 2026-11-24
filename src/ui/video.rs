@@ -40,6 +40,12 @@ pub(super) struct VideoStage {
     pub menu_for: Option<String>,
     pub screen_volume_for: Option<String>,
     pub frames: HashMap<(String, VideoSource), Arc<RenderImage>>,
+    pub sidebar_watch: Option<SidebarWatch>,
+}
+
+pub(super) struct SidebarWatch {
+    pub channel_id: String,
+    pub participant_id: String,
 }
 
 impl VideoStage {
@@ -93,22 +99,20 @@ impl TileActions {
                 .screen
                 .as_ref()
                 .is_some_and(|screen| screen.state.active());
-        let sharing_screen = local_screen
-            || participant.video.is_some_and(|video| video.screen)
-            || video.is_some_and(|video| video.live.contains(&VideoSource::Screen));
-        let live = local_screen
-            || participant_video(video)
-            || participant
-                .video
-                .is_some_and(|media| !is_me && (media.cam || media.screen));
+        let feeds = sidebar.video_feeds(&call.channel_id, participant.id);
+        let sharing_screen = if is_me { local_screen } else { feeds.screen };
+        let live = if is_me {
+            local_screen || participant_video(video)
+        } else {
+            feeds.is_live()
+        };
         let watching = sidebar.voice_intent.watching.contains(participant.id);
         let watched_screen = watching && sharing_screen;
         Self {
             live,
             can_watch: !is_me
-                && (watching
-                    || (live
-                        && report.is_none_or(|report| !report.reconnecting && video.is_some()))),
+                && live
+                && (watching || sidebar.can_watch_video(&call.channel_id, participant.id)),
             watching,
             show: live && (is_me || watching),
             theater: app.video_stage.theater.as_deref() == Some(participant.id),
@@ -134,6 +138,43 @@ impl TileActions {
 }
 
 impl Spk {
+    pub(super) fn advance_sidebar_watch(&mut self, sidebar: &Sidebar, cx: &mut Context<Self>) {
+        let Some(watch) = self.video_stage.sidebar_watch.as_ref() else {
+            return;
+        };
+        let feeds = sidebar.video_feeds(&watch.channel_id, &watch.participant_id);
+        if (!feeds.is_live() && !sidebar.advertises_video(&watch.channel_id, &watch.participant_id))
+            || self.selected_voice_channel.as_deref() != Some(&watch.channel_id)
+        {
+            self.video_stage.sidebar_watch = None;
+            return;
+        }
+        let local = sidebar.profile.id.as_deref() == Some(&watch.participant_id);
+        let watching = sidebar
+            .voice_intent
+            .watching
+            .contains(&watch.participant_id);
+        if !sidebar.voice.as_ref().is_some_and(|voice| {
+            voice.channel_id == watch.channel_id
+                && voice.is_participating()
+                && (local
+                    || (watching && feeds.is_live())
+                    || sidebar.can_watch_video(&watch.channel_id, &watch.participant_id))
+        }) {
+            return;
+        }
+        let watch = self
+            .video_stage
+            .sidebar_watch
+            .take()
+            .expect("watch request");
+        self.video_stage.theater = Some(watch.participant_id.clone());
+        self.video_stage.participants_hidden = false;
+        if !local && !watching {
+            self.send(Command::SetWatching(watch.participant_id, true), None, cx);
+        }
+    }
+
     pub(super) fn prepare_video_stage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let focused = window.focused(cx);
         if self.video_stage.focused != focused {
@@ -344,7 +385,7 @@ impl Spk {
                     .to_vec(),
             ),
             "Camera options",
-            Popover::new("camera-options")
+            floating_popover("camera-options", cx)
                 .w(px(280.0))
                 .content(move |_, _, cx| {
                     let Some(app) = app.upgrade() else {
@@ -402,7 +443,7 @@ impl Spk {
                     .to_vec(),
             ),
             "Screen Share options",
-            Popover::new("screen-options")
+            floating_popover("screen-options", cx)
                 .w(px(280.0))
                 .content(move |_, _, cx| {
                     let Some(app) = app.upgrade() else {
@@ -801,7 +842,9 @@ fn screen_viewers(viewers: &[Participant<'_>], compact: bool, sidebar: &Sidebar,
                         .role(Role::Image)
                         .aria_label(name.clone())
                         .when(index > 0, |avatar| avatar.ml(px(-6.0)))
-                        .tooltip(move |window, cx| Tooltip::new(name.clone()).build(window, cx))
+                        .tooltip(move |window, cx| {
+                            floating_tooltip(Tooltip::new(name.clone()), cx).build(window, cx)
+                        })
                         .child(profile_avatar(
                             Avatar::new().name(viewer.name.to_owned()),
                             sidebar.avatar(Some(viewer.id)),
@@ -832,7 +875,9 @@ fn screen_viewers(viewers: &[Participant<'_>], compact: bool, sidebar: &Sidebar,
                     .bg(cx.theme().secondary)
                     .text_xs()
                     .aria_label(format!("More viewers: {names}"))
-                    .tooltip(move |window, cx| Tooltip::new(names.clone()).build(window, cx))
+                    .tooltip(move |window, cx| {
+                        floating_tooltip(Tooltip::new(names.clone()), cx).build(window, cx)
+                    })
                     .child(format!("+{}", hidden.len())),
             )
         })
@@ -842,7 +887,7 @@ fn screen_volume(id: &str, cx: &Context<Spk>) -> Popover {
     let id = id.to_owned();
     let open_id = id.clone();
     let app = cx.weak_entity();
-    Popover::new("screen-volume")
+    floating_popover("screen-volume", cx)
         .anchor(Anchor::BottomRight)
         .w(px(192.0))
         .trigger(
@@ -990,6 +1035,7 @@ pub(super) fn joined_participants<'a>(
                 id,
                 name: sidebar.profile.name(),
                 flags: Default::default(),
+                microphone_connecting: false,
                 video: None,
             },
         );
@@ -1081,7 +1127,7 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for VoiceSelect<T> {
                 picker.selected = selected;
             });
         }
-        control_select(&select)
+        control_select(&select, cx.theme().background, cx)
             .small()
             .w_full()
             .accessibility_label(self.label)

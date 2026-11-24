@@ -72,6 +72,8 @@ pub(super) struct Spk {
     chat_history_keyboard_focus: Cell<Option<FocusHandle>>,
     chat_row_focus: std::cell::RefCell<std::collections::HashMap<String, FocusHandle>>,
     chat_scroll: ScrollHandle,
+    chat_content_width: Rc<Cell<Pixels>>,
+    webhook_content_width: Rc<Cell<Pixels>>,
     chat_scroll_anchor: Option<(String, Pixels)>,
     chat_jump_started: Option<Instant>,
     chat_history_position: Rc<Cell<Option<chat::HistoryPosition>>>,
@@ -83,13 +85,21 @@ pub(super) struct Spk {
     device_picker: Option<(VoiceControls, DeviceKind)>,
     selected_voice_channel: Option<String>,
     sidebar_open: bool,
+    sidebar_motion: workspace::PanelMotion,
     sidebar_width: Pixels,
     sidebar_drawer_open: bool,
+    sidebar_drawer_motion: workspace::PanelMotion,
+    sidebar_drawer_focus: FocusHandle,
+    sidebar_close_focus: FocusHandle,
     sidebar_toggle_focus: FocusHandle,
     new_text_channel_focus: FocusHandle,
     new_voice_channel_focus: FocusHandle,
     search_button_focus: FocusHandle,
+    search_drawer_focus: FocusHandle,
+    search_query: Entity<InputState>,
     search_panel: Option<Entity<search::SearchPanel>>,
+    closing_search_panel: Option<Entity<search::SearchPanel>>,
+    search_motion: workspace::PanelMotion,
     voice_strip_toggle_focus: FocusHandle,
     quick_switcher: Option<WeakEntity<gpui_kit::component::command::CommandState>>,
     video_stage: video::VideoStage,
@@ -139,6 +149,9 @@ impl Spk {
             input
         });
         let nickname = cx.new(|cx| InputState::new(window, cx));
+        let search_query = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
+        cx.subscribe_in(&search_query, window, Self::search_query_event)
+            .detach();
         let chat_input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(1, 6)
@@ -229,10 +242,10 @@ impl Spk {
         })
         .detach();
         for input in [&email, &password, &nickname] {
-            cx.subscribe_in(input, window, |this, _, event, window, cx| {
-                if matches!(event, InputEvent::PressEnter { .. }) {
-                    this.submit(window, cx);
-                }
+            cx.subscribe_in(input, window, |this, _, event, window, cx| match event {
+                InputEvent::PressEnter { .. } => this.submit(window, cx),
+                InputEvent::Focus | InputEvent::Blur => cx.notify(),
+                _ => {}
             })
             .detach();
         }
@@ -399,7 +412,11 @@ impl Spk {
                             this.selected_voice_channel = None;
                             this.device_picker = None;
                             this.close_sidebar_drawer(window, cx);
+                            this.sidebar_drawer_motion = Default::default();
                             this.search_panel = None;
+                            this.closing_search_panel = None;
+                            this.search_motion = Default::default();
+                            this.clear_search_query(window, cx);
                             this.dismiss_workspace_dialogs(window, cx);
                         }
                         this.focus_account_input(&view, window, cx);
@@ -415,6 +432,8 @@ impl Spk {
                 this.shortcuts.signed_in(false);
                 this.close_sidebar_drawer(window, cx);
                 this.search_panel = None;
+                this.closing_search_panel = None;
+                this.clear_search_query(window, cx);
                 this.dismiss_workspace_dialogs(window, cx);
                 this.set_session_view(
                     View::SignIn {
@@ -452,6 +471,8 @@ impl Spk {
             chat_history_keyboard_focus: Cell::default(),
             chat_row_focus: Default::default(),
             chat_scroll: ScrollHandle::new(),
+            chat_content_width: Rc::new(Cell::new(px(0.))),
+            webhook_content_width: Rc::new(Cell::new(px(0.))),
             chat_scroll_anchor: None,
             chat_jump_started: None,
             chat_history_position: Rc::default(),
@@ -463,13 +484,21 @@ impl Spk {
             device_picker: None,
             selected_voice_channel: None,
             sidebar_open: true,
+            sidebar_motion: Default::default(),
             sidebar_width: workspace::SIDEBAR_WIDTH,
             sidebar_drawer_open: false,
+            sidebar_drawer_motion: Default::default(),
+            sidebar_drawer_focus: cx.focus_handle().tab_stop(false),
+            sidebar_close_focus: cx.focus_handle().tab_stop(true),
             sidebar_toggle_focus: cx.focus_handle(),
             new_text_channel_focus: cx.focus_handle(),
             new_voice_channel_focus: cx.focus_handle(),
             search_button_focus: cx.focus_handle(),
+            search_drawer_focus: cx.focus_handle().tab_stop(false),
+            search_query,
             search_panel: None,
+            closing_search_panel: None,
+            search_motion: Default::default(),
             voice_strip_toggle_focus: cx.focus_handle(),
             quick_switcher: None,
             video_stage: video::VideoStage::default(),
@@ -569,7 +598,9 @@ impl Spk {
                 self.show_alert(alert, sidebar, window, cx);
             }
             self.sync_search_conversation(sidebar, cx);
+            self.advance_sidebar_watch(sidebar, cx);
         } else if matches!(self.view, View::SignedIn(_)) {
+            self.video_stage.sidebar_watch = None;
             window.clear_notifications(cx);
         }
         self.view = view;
@@ -578,6 +609,9 @@ impl Spk {
 
     fn send(&mut self, command: Command, busy: Option<&'static str>, cx: &mut Context<Self>) {
         self.form_error = None;
+        if matches!(command, Command::LeaveVoice | Command::SignOut) {
+            self.video_stage.sidebar_watch = None;
+        }
         let signing_out = matches!(command, Command::SignOut);
         let edits_draft = matches!(
             command,
@@ -672,12 +706,14 @@ impl Render for Spk {
             View::SignIn {
                 message,
                 retry_restore,
-            } => self.login(*message, *retry_restore, cx).into_any_element(),
-            View::AccountLink { form, message } => {
-                self.account_link(*form, *message, cx).into_any_element()
-            }
+            } => self
+                .login(*message, *retry_restore, window, cx)
+                .into_any_element(),
+            View::AccountLink { form, message } => self
+                .account_link(*form, *message, window, cx)
+                .into_any_element(),
             View::ChooseNickname { message, notice } => self
-                .choose_nickname(*message, *notice, cx)
+                .choose_nickname(*message, *notice, window, cx)
                 .into_any_element(),
             View::SignedIn(sidebar) => self.workspace(sidebar, window, cx).into_any_element(),
             View::RetrySignOut => div()
@@ -705,7 +741,7 @@ impl Render for Spk {
             .on_key_down(cx.listener(Self::dismiss_video_fullscreen))
             .on_key_down(cx.listener(Self::hovered_video_key))
             .size_full()
-            .bg(cx.theme().background)
+            .bg(cx.theme().sidebar)
             .text_color(cx.theme().foreground)
             .font_family(cx.theme().font_family.clone())
             .text_sm()
@@ -819,12 +855,45 @@ fn control_button(id: impl Into<ElementId>) -> Button {
     Button::new(id).h(CONTROL_HEIGHT).p(CONTROL_PADDING)
 }
 
-fn control_select<D>(state: &Entity<SelectState<D>>) -> Select<D>
+fn control_select<D>(state: &Entity<SelectState<D>>, fill: Hsla, cx: &App) -> Select<D>
 where
     D: SelectDelegate + 'static,
     <D::Item as SelectItem>::Value: PartialEq + Clone,
 {
-    Select::new(state).h(CONTROL_HEIGHT).p(CONTROL_PADDING)
+    Select::new(state)
+        .h(CONTROL_HEIGHT)
+        .p(CONTROL_PADDING)
+        .border_color(cx.theme().transparent)
+        .bg(fill)
+}
+
+fn surface_input(state: &Entity<InputState>, fill: Hsla, cx: &App) -> Input {
+    Input::new(state)
+        .bg(fill)
+        .border_color(cx.theme().transparent)
+}
+
+fn floating_shadow(cx: &App) -> Vec<BoxShadow> {
+    let ink = gpui_kit::black().alpha(if cx.theme().mode.is_dark() { 0.5 } else { 0.1 });
+    vec![
+        BoxShadow::new(px(0.), px(20.), ink)
+            .blur_radius(px(12.5))
+            .spread_radius(px(-5.)),
+        BoxShadow::new(px(0.), px(8.), ink)
+            .blur_radius(px(5.))
+            .spread_radius(px(-6.)),
+    ]
+}
+
+fn floating_popover(id: impl Into<ElementId>, cx: &App) -> gpui_kit::component::popover::Popover {
+    gpui_kit::component::popover::Popover::new(id).shadow(floating_shadow(cx))
+}
+
+fn floating_tooltip(
+    tooltip: gpui_kit::component::tooltip::Tooltip,
+    cx: &App,
+) -> gpui_kit::component::tooltip::Tooltip {
+    tooltip.border_0().shadow(floating_shadow(cx))
 }
 
 fn control_content() -> Div {

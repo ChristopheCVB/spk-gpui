@@ -7,6 +7,7 @@ impl Spk {
         embed: &ChatEmbed,
         description: Option<TextView>,
         now: i64,
+        window: &Window,
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
@@ -30,20 +31,13 @@ impl Spk {
             (footer, None) => footer.map(str::to_owned),
         };
 
-        div()
-            .mt_1()
-            .w_full()
-            .max_w(px(512.))
+        let content = div()
+            .relative()
             .flex()
             .flex_col()
+            .min_w_0()
             .gap_1()
-            .rounded_md()
-            .border_l_4()
-            .border_color(color)
-            .bg(theme.secondary)
-            .px_3()
-            .py_2()
-            .text_sm()
+            .child(measure_content_width(self.webhook_content_width.clone()))
             .when_some(embed.title.as_deref(), |card, title| {
                 if let Some(link) = embed.title_link() {
                     let app = cx.weak_entity();
@@ -55,7 +49,8 @@ impl Spk {
                             .h_auto()
                             .font_semibold()
                             .tab_stop(true)
-                            .label(title.to_owned())
+                            .accessibility_label(title.to_owned())
+                            .child(Label::new(title.to_owned()).text_color(theme.primary))
                             .tooltip(title.to_owned())
                             .on_click(move |_, _, cx| {
                                 search::activate_chat_link(&app, link.clone(), cx);
@@ -67,23 +62,60 @@ impl Spk {
             })
             .children(description)
             .when(!embed.fields.is_empty(), |card| {
-                card.child(div().grid().grid_cols(3).gap_x_4().gap_y_1().children(
-                    embed.fields.iter().enumerate().map(|(index, field)| {
-                        div()
-                            .id(("embed-field", index))
-                            .min_w_0()
-                            .col_span(if field.inline { 1 } else { 3 })
-                            .flex()
-                            .flex_col()
-                            .child(
-                                Label::new(field.name.clone())
-                                    .text_xs()
-                                    .font_semibold()
-                                    .text_color(theme.muted_foreground),
-                            )
-                            .child(Label::new(field.value.clone()))
-                    }),
-                ))
+                let app = cx.weak_entity();
+                let gap = window.rem_size();
+                let minimum = gap * 11.;
+                let width = self.webhook_content_width.get();
+                let columns = f32::from((width + gap) / (minimum + gap)).floor().max(1.) as u16;
+                card.child(
+                    div()
+                        .grid()
+                        .grid_cols(columns)
+                        .gap_x(gap)
+                        .gap_y_1()
+                        .children(embed.fields.iter().enumerate().map(|(index, field)| {
+                            let link = field.link();
+                            let full_row = !field.inline
+                                || field.value.encode_utf16().count() > 40
+                                || link.is_some();
+                            let element = div()
+                                .id(("embed-field", index))
+                                .min_w_0()
+                                .when(full_row, |field| field.col_span_full())
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    Label::new(field.name.clone())
+                                        .text_xs()
+                                        .font_semibold()
+                                        .text_color(theme.muted_foreground),
+                                );
+                            if let Some(link) = link {
+                                let app = app.clone();
+                                element.child(
+                                    Button::new("embed-field-link")
+                                        .link()
+                                        .w_full()
+                                        .h_auto()
+                                        .tab_stop(true)
+                                        .accessibility_label(field.value.clone())
+                                        .child(
+                                            div()
+                                                .w_full()
+                                                .min_w_0()
+                                                .whitespace_normal()
+                                                .text_color(theme.primary)
+                                                .child(field.value.clone()),
+                                        )
+                                        .on_click(move |_, _, cx| {
+                                            search::activate_chat_link(&app, link.clone(), cx);
+                                        }),
+                                )
+                            } else {
+                                element.child(Label::new(field.value.clone()))
+                            }
+                        })),
+                )
             })
             .when_some(footer, |card, footer| {
                 card.child(
@@ -95,7 +127,7 @@ impl Spk {
                                 .format("%b %-d, %Y, %H:%M:%S")
                                 .to_string();
                             line.tooltip(move |window, cx| {
-                                Tooltip::new(exact.clone()).build(window, cx)
+                                floating_tooltip(Tooltip::new(exact.clone()), cx).build(window, cx)
                             })
                         })
                         .child(
@@ -104,6 +136,19 @@ impl Spk {
                                 .text_color(theme.muted_foreground),
                         ),
                 )
-            })
+            });
+
+        div()
+            .mt_1()
+            .w_full()
+            .max_w(rems(48.))
+            .rounded_md()
+            .border_l_4()
+            .border_color(color)
+            .bg(theme.popover)
+            .px_3()
+            .py_2()
+            .text_sm()
+            .child(content)
     }
 }

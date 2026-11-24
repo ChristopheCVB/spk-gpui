@@ -44,6 +44,7 @@ use url::{Host, Url};
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_AVATAR_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_AVATAR_UPLOAD: usize = 5 * 1024 * 1024;
+pub const BOT_USER_ID: &str = "spk-bot";
 
 pub fn has_icon_name_characters(name: &str) -> bool {
     name.bytes()
@@ -104,25 +105,6 @@ impl Profile {
     }
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ChangelogPage {
-    pub commits: Vec<ChangelogEntry>,
-    pub head: Option<String>,
-    pub next_page: Option<u32>,
-}
-
-#[derive(Deserialize)]
-pub struct ChangelogEntry {
-    pub sha: String,
-    pub message: String,
-    pub date: String,
-}
-
-fn commit_sha(value: &str) -> bool {
-    value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Channel {
@@ -142,7 +124,11 @@ impl Channel {
     pub fn is_conversation(&self) -> bool {
         self.kind == "text"
             || self.is_webhook()
-            || (self.kind == "dm" && self.other_user_id.is_some())
+            || (self.kind == "dm"
+                && self
+                    .other_user_id
+                    .as_deref()
+                    .is_some_and(|id| id != BOT_USER_ID))
     }
 
     pub fn is_webhook(&self) -> bool {
@@ -283,6 +269,22 @@ pub struct EmbedField {
     pub value: String,
     #[serde(default)]
     pub inline: bool,
+}
+
+impl EmbedField {
+    pub fn link(&self) -> Option<Url> {
+        let (scheme, authority) = self.value.split_once("://")?;
+        if !(scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+            || authority.starts_with('/')
+            || self
+                .value
+                .chars()
+                .any(|c| c == '\\' || c.is_whitespace() || c.is_control())
+        {
+            return None;
+        }
+        Url::parse(&self.value).ok()
+    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -529,6 +531,8 @@ pub enum Frame {
     RadioUpdate(RadioSummary),
     #[serde(rename = "voice:sound", rename_all = "camelCase")]
     VoiceSound { user_id: String, sound_id: String },
+    #[serde(rename = "sound:new")]
+    SoundNew,
     #[serde(rename = "voice:radio:state", rename_all = "camelCase")]
     RadioState {
         sid: String,
@@ -693,6 +697,12 @@ impl VoiceSocket {
 
     pub fn same_connection(&self, other: &Self) -> bool {
         self.0.same_channel(&other.0)
+    }
+
+    pub fn release_voice(&self, sid: &str) {
+        let text = serde_json::to_string(&VoiceFrame::Leave { sid })
+            .expect("voice frames are serializable");
+        let _ = self.0.try_send((text, None));
     }
 
     pub async fn send(&self, frame: VoiceFrame<'_>) -> Result<(), Failure> {
@@ -938,28 +948,6 @@ impl SpkClient {
             .into_iter()
             .find(|entry| entry.id == id)
             .map(|entry| entry.email))
-    }
-
-    pub async fn changelog(&self, page: u32, head: Option<&str>) -> Result<ChangelogPage, Failure> {
-        let mut url = self.base.join("/api/changelog").expect("fixed SPK path");
-        url.query_pairs_mut().append_pair("page", &page.to_string());
-        if let Some(head) = head {
-            url.query_pairs_mut().append_pair("head", head);
-        }
-        let response = Self::send(self.http.get(url).header(header::ORIGIN, &self.origin)).await?;
-        let result: ChangelogPage = response
-            .json()
-            .await
-            .map_err(|_| Failure::InvalidResponse)?;
-        if result.head.as_deref().is_some_and(|head| !commit_sha(head))
-            || result
-                .next_page
-                .is_some_and(|next| next <= page || result.head.is_none())
-            || result.commits.iter().any(|entry| !commit_sha(&entry.sha))
-        {
-            return Err(Failure::InvalidResponse);
-        }
-        Ok(result)
     }
 
     pub async fn channels(&self) -> Result<Vec<Channel>, Failure> {

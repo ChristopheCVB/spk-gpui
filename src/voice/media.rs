@@ -30,6 +30,7 @@ pub(crate) mod fixture;
 mod livekit_audio;
 #[cfg(target_os = "macos")]
 mod macos_audio;
+mod microphone_watchdog;
 mod processing;
 mod remote_audio;
 mod voice_output;
@@ -38,6 +39,7 @@ mod voice_output;
 pub(crate) use capture::microphone_permission;
 use capture::{Capture, stop_recording};
 use livekit_audio::LiveKitAudio;
+use microphone_watchdog::{MicrophoneSample, MicrophoneSamples, MicrophoneWatchdog};
 
 type RoomEvents = tokio::sync::mpsc::UnboundedReceiver<RoomEvent>;
 
@@ -155,6 +157,8 @@ impl Media {
         scan.tick().await;
         let mut check_routes = true;
         let mut retry_mic = intent.retry_mic;
+        let mut mic_uses_system_default = false;
+        let mut previous_default_mic = None;
         let mut retry_speakers = intent.retry_speakers;
         let mut reconnecting = false;
         let mut resync = false;
@@ -163,6 +167,9 @@ impl Media {
         let mut echo_reference_unavailable = false;
         let mut stats = Sampler::default();
         let mut stats_job = JoinSet::new();
+        let mut microphones = MicrophoneWatchdog::default();
+        let mut microphone_job = JoinSet::new();
+        let mut watchdog_requested = false;
 
         loop {
             if reconnecting
@@ -173,15 +180,29 @@ impl Media {
             }
             if check_routes && !reconnecting {
                 check_routes = false;
-                let input = devices
+                let preferred_mic = devices
                     .microphones
-                    .resolve(intent.preferred.microphone.as_ref());
+                    .preferred(intent.preferred.microphone.as_ref());
+                let default_mic = devices.microphones.default.as_ref();
+                let use_system_default = !cfg!(windows) && preferred_mic.is_none();
                 let wanted = if intent.mute.effective_muted() {
                     None
                 } else {
-                    input
+                    preferred_mic.or(default_mic)
                 };
-                if backend.selected_microphone() != wanted || retry_mic != intent.retry_mic {
+                // PulseAudio can move a CPAL stream off the device that used to be the default.
+                let restore_preferred_mic = cfg!(target_os = "linux")
+                    && preferred_mic.is_some_and(|device| {
+                        device.id.starts_with("pulseaudio:")
+                            && previous_default_mic.as_ref() == Some(device)
+                            && default_mic != Some(device)
+                    });
+                previous_default_mic.clone_from(&devices.microphones.default);
+                if backend.selected_microphone() != wanted
+                    || retry_mic != intent.retry_mic
+                    || wanted.is_some() && mic_uses_system_default != use_system_default
+                    || restore_preferred_mic
+                {
                     backend.stop_microphone().await;
                     speaking.remove(me.as_str());
                     retry_mic = intent.retry_mic;
@@ -218,9 +239,8 @@ impl Media {
                 if let Some(device) = wanted
                     && backend.can_start_microphone()
                 {
-                    let use_system_default =
-                        !cfg!(windows) && Some(device) == devices.microphones.default.as_ref();
                     backend.start_microphone(device.clone(), processing, use_system_default);
+                    mic_uses_system_default = use_system_default;
                 }
                 backend.sync_microphone_processing(processing).await;
                 if resync
@@ -231,6 +251,7 @@ impl Media {
                 }
             }
 
+            microphones.retain(&intent, output.is_some());
             speaking.expire(Instant::now());
             let muted = reconnecting || backend.active_microphone().is_none();
             if muted {
@@ -255,6 +276,7 @@ impl Media {
                 microphone: backend.active_microphone().cloned(),
                 speakers: output.clone(),
                 speaking: speaking.0.keys().cloned().collect(),
+                connecting_microphones: microphones.connecting(Instant::now()),
                 diagnostics,
                 echo_reference_unavailable,
             };
@@ -273,6 +295,7 @@ impl Media {
                         || next.preferred.speakers != intent.preferred.speakers
                         || next.preferred.media_output != intent.preferred.media_output
                         || next.retry_mic != intent.retry_mic || next.retry_speakers != intent.retry_speakers
+                        || (intent.mute.effective_muted() && !next.mute.effective_muted())
                     {
                         devices = Arc::new(backend.devices().await?);
                     }
@@ -283,6 +306,8 @@ impl Media {
                     MediaEvent::Speaking(active) if !reconnecting => speaking.update(active, Instant::now()),
                     MediaEvent::ParticipantLeft(id) => {
                         speaking.remove(&id);
+                        microphones.participant_left(&id);
+                        microphone_job = JoinSet::new();
                         check_routes = true;
                     }
                     MediaEvent::Reconnecting => {
@@ -291,6 +316,9 @@ impl Media {
                         diagnostics = Diagnostics::default();
                         stats = Sampler::default();
                         stats_job = JoinSet::new();
+                        microphones = MicrophoneWatchdog::default();
+                        microphone_job = JoinSet::new();
+                        watchdog_requested = false;
                         backend.silence_microphone();
                         backend.set_playout(false);
                         backend.suspend_remote_audio();
@@ -315,6 +343,30 @@ impl Media {
                     check_routes = true;
                     if !reconnecting && stats_job.is_empty() {
                         backend.start_stats(&mut stats_job);
+                    }
+                    if !reconnecting && output.is_some() && microphone_job.is_empty() {
+                        let expected = intent.remote_microphone_mutes.keys()
+                            .filter(|id| intent.expects_remote_microphone(id))
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        if !expected.is_empty() {
+                            backend.sample_microphones(expected, &mut microphone_job);
+                        }
+                    }
+                }
+                Some(Ok(samples)) = microphone_job.join_next() => {
+                    let now = Instant::now();
+                    let repairs = microphones.observe(&intent, samples, now);
+                    if !repairs.is_empty() {
+                        backend.repair_microphones(repairs).await;
+                        check_routes = true;
+                    } else if !watchdog_requested
+                        && intent.watchdog_rejoin_after.is_none_or(|deadline| now >= deadline)
+                        && let Some(output_since) = backend.voice_output_healthy_since()
+                        && microphones.widespread_stall(&intent, now, output_since)
+                    {
+                        watchdog_requested = true;
+                        worker.update(Update::RemoteAudioStalled);
                     }
                 }
                 Some(result) = stats_job.join_next() => {
@@ -345,6 +397,7 @@ trait RoomAudio {
         speakers: Option<&Device>,
     ) -> bool;
     fn suspend_remote_audio(&mut self) {}
+    fn voice_output_healthy_since(&self) -> Option<Instant>;
     fn playout_format(&self, device: &Device) -> Option<Self::PlayoutFormat>;
     fn macos_recording_initialized(&self) -> bool;
     fn selected_microphone(&self) -> Option<&Device>;
@@ -362,6 +415,8 @@ trait RoomAudio {
     fn silence_microphone(&self);
     fn resume_microphone(&self);
     async fn reconcile_microphone(&mut self);
+    fn sample_microphones(&self, expected: Vec<String>, jobs: &mut JoinSet<MicrophoneSamples>);
+    async fn repair_microphones(&mut self, repairs: Vec<(String, TrackSid)>);
     fn start_stats(&self, _: &mut JoinSet<Option<SessionStats>>) {}
     async fn next_event(&mut self, reconnecting: bool) -> Self::Event;
     async fn handle_event(&mut self, event: Self::Event) -> MediaEvent;
