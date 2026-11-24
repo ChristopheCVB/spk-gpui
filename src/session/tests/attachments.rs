@@ -1,5 +1,7 @@
 use super::*;
 
+use std::io::{Read, Seek, Write};
+
 #[tokio::test]
 async fn attachment_transfers_use_spk_authorization_without_disclosing_session_cookies() {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -76,7 +78,13 @@ async fn attachment_transfers_use_spk_authorization_without_disclosing_session_c
             .unwrap();
         assert_eq!(upload.id, "file-id");
         alice
-            .put_attachment(&upload, "text/plain", b"hello".to_vec(), |_| {})
+            .put_attachment(
+                &upload,
+                "text/plain",
+                5,
+                std::io::Cursor::new(b"hello"),
+                |_| {},
+            )
             .await
             .unwrap();
         alice.cancel_attachment(&upload.id).await.unwrap();
@@ -91,6 +99,118 @@ async fn attachment_transfers_use_spk_authorization_without_disclosing_session_c
     })
     .await
     .expect("attachment workflow timed out");
+}
+
+#[tokio::test]
+async fn large_attachments_round_trip_between_files() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let http = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = Url::parse(&format!("http://{}", http.local_addr().unwrap())).unwrap();
+    let client = SpkClient::new(base.clone(), CookieStore::default()).unwrap();
+    let file_size: u64 = 128 * 1024 * 1024 + 11;
+    let block_size = 64 * 1024;
+    let mut input = tempfile::tempfile().unwrap();
+    let mut expected = vec![0; block_size];
+    for index in 0..file_size.div_ceil(block_size as u64) {
+        expected.fill(index as u8);
+        let length = (file_size - index * block_size as u64).min(block_size as u64) as usize;
+        input.write_all(&expected[..length]).unwrap();
+    }
+    input.rewind().unwrap();
+
+    let serve =
+        async {
+            Request::read(&http, "POST /api/attachments/presign HTTP/1.1")
+                .await
+                .respond(
+                    &[],
+                    &value!({
+                        "id":"large", "url":base.join("/object").unwrap().as_str(),
+                        "headers":{"content-type":"application/octet-stream"}
+                    })
+                    .to_string(),
+                )
+                .await;
+
+            let (line, mut upload) = Request::receive_headers(&http).await;
+            assert_eq!(line, "PUT /object HTTP/1.1");
+            assert_eq!(
+                upload
+                    .header("content-length")
+                    .unwrap()
+                    .parse::<u64>()
+                    .unwrap(),
+                file_size
+            );
+            let mut actual = vec![0; block_size];
+            for index in 0..file_size.div_ceil(block_size as u64) {
+                let length =
+                    (file_size - index * block_size as u64).min(block_size as u64) as usize;
+                upload
+                    .stream
+                    .read_exact(&mut actual[..length])
+                    .await
+                    .unwrap();
+                assert!(actual[..length].iter().all(|byte| *byte == index as u8));
+            }
+            upload.respond_raw("200 OK", &[], b"").await;
+
+            Request::read(&http, "GET /api/attachments/large?json=1 HTTP/1.1")
+                .await
+                .respond(
+                    &[],
+                    &value!({"url": base.join("/object").unwrap().as_str()}).to_string(),
+                )
+                .await;
+            let mut download = Request::read(&http, "GET /object HTTP/1.1").await;
+            download.stream.write_all(format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {file_size}\r\nConnection: close\r\n\r\n"
+        ).as_bytes()).await.unwrap();
+            for index in 0..file_size.div_ceil(block_size as u64) {
+                expected.fill(index as u8);
+                let length =
+                    (file_size - index * block_size as u64).min(block_size as u64) as usize;
+                download
+                    .stream
+                    .write_all(&expected[..length])
+                    .await
+                    .unwrap();
+            }
+        };
+    let transfer = async {
+        let signed = client
+            .presign_attachment("large.bin", "application/octet-stream", file_size)
+            .await
+            .unwrap();
+        client
+            .put_attachment(
+                &signed,
+                "application/octet-stream",
+                file_size,
+                tokio::fs::File::from_std(input),
+                |_| {},
+            )
+            .await
+            .unwrap();
+        let destination = tempfile::NamedTempFile::new().unwrap();
+        client
+            .download_attachment("large", file_size, &destination)
+            .await
+            .unwrap();
+        let mut downloaded = destination.reopen().unwrap();
+        assert_eq!(downloaded.metadata().unwrap().len(), file_size);
+        let mut actual = vec![0; block_size];
+        for index in 0..file_size.div_ceil(block_size as u64) {
+            let length = (file_size - index * block_size as u64).min(block_size as u64) as usize;
+            downloaded.read_exact(&mut actual[..length]).unwrap();
+            assert!(actual[..length].iter().all(|byte| *byte == index as u8));
+        }
+    };
+    timeout(Duration::from_secs(60), async {
+        tokio::join!(serve, transfer);
+    })
+    .await
+    .expect("file transfer timed out");
 }
 
 #[tokio::test]
@@ -157,7 +277,7 @@ async fn attachment_queue_cancels_in_flight_uploads_and_sends_only_ready_files()
         let queue = |channel: &str, name: &str| Command::AddChatAttachments {
             channel_id: channel.into(),
             files: vec![crate::session::AttachmentInput::Clipboard {
-                filename: name.into(), mime: "text/plain", bytes: b"hello".to_vec()
+                filename: name.into(), mime: "text/plain", bytes: bytes::Bytes::from_static(b"hello")
             }],
         };
         let request = async |method: &str| {
@@ -189,6 +309,58 @@ async fn attachment_queue_cancels_in_flight_uploads_and_sends_only_ready_files()
         request("POST /api/attachments/cancel/cancel").await.respond(&[], "{}").await;
         drop(in_flight);
 
+        let directory = tempfile::tempdir().unwrap();
+        let maximum = directory.path().join("maximum.txt");
+        let oversized = directory.path().join("oversized.txt");
+        for (path, size) in [(&maximum, 1_073_741_824), (&oversized, 1_073_741_825)] {
+            std::fs::File::create(path).unwrap().set_len(size).unwrap();
+        }
+        tx.send(Command::AddChatAttachments {
+            channel_id: "general".into(),
+            files: vec![crate::session::AttachmentInput::Path(maximum)],
+        }).await.unwrap();
+        let maximum_presign = request("POST /api/attachments/presign").await;
+        assert_eq!(serde_json::from_slice::<Value>(&maximum_presign.body).unwrap()["size"], 1_073_741_824);
+        tx.send(Command::AddChatAttachments {
+            channel_id: "general".into(),
+            files: vec![crate::session::AttachmentInput::Path(oversized)],
+        }).await.unwrap();
+        let rejected = wait_for_sidebar(&rx, |s| s.chat.as_ref().is_some_and(|chat|
+            chat.draft.upload_notice == Some("Files can be 1 GiB at most."))).await;
+        let uploads = rejected.chat.unwrap().draft.uploads;
+        assert_eq!(uploads.len(), 1);
+        assert_eq!(uploads[0].filename, "maximum.txt");
+
+        let maximum_key = uploads[0].key;
+
+        let extra = (0..10).map(|index| crate::session::AttachmentInput::Clipboard {
+            filename: format!("extra-{index}.txt"),
+            mime: "text/plain",
+            bytes: bytes::Bytes::from_static(b"hello"),
+        }).collect();
+        tx.send(Command::AddChatAttachments {
+            channel_id: "general".into(), files: extra,
+        }).await.unwrap();
+        let full = wait_for_sidebar(&rx, |s| s.chat.as_ref().is_some_and(|chat|
+            chat.draft.upload_notice == Some("At most 10 files per message."))).await;
+        let uploads = full.chat.unwrap().draft.uploads;
+        assert_eq!(uploads.len(), 10);
+        assert_eq!(uploads[0].key, maximum_key);
+        assert!(!uploads.iter().any(|upload| upload.filename == "extra-9.txt"));
+        let mut presigns = vec![maximum_presign];
+        for _ in 0..9 {
+            presigns.push(request("POST /api/attachments/presign").await);
+        }
+        for upload in uploads {
+            tx.send(Command::CancelChatAttachment { channel_id: "general".into(), key: upload.key }).await.unwrap();
+        }
+        wait_for_sidebar(&rx, |s| s.chat.as_ref().is_some_and(|chat| chat.draft.uploads.is_empty())).await;
+        for (index, presign) in presigns.into_iter().enumerate() {
+            let id = format!("batch-{index}");
+            presign.respond(&[], &signed(&id)).await;
+            request(&format!("POST /api/attachments/{id}/cancel")).await.respond(&[], "{}").await;
+        }
+
         tx.send(Command::OpenDirectMessage("private".into())).await.unwrap();
         let target = value!({
             "id":"target", "channelId":"private", "userId":"bob",
@@ -202,8 +374,24 @@ async fn attachment_queue_cancels_in_flight_uploads_and_sends_only_ready_files()
         request("POST /api/attachments/presign").await.respond(&[], &signed("fail")).await;
         request("PUT /upload").await.respond_raw("401 Unauthorized", &[], b"").await;
         request("POST /api/attachments/fail/cancel").await.respond(&[], "{}").await;
-        wait_for_sidebar(&rx, |s| s.chat.as_ref().is_some_and(|chat|
+        let failed = wait_for_sidebar(&rx, |s| s.chat.as_ref().is_some_and(|chat|
             chat.draft.uploads.iter().any(|upload| matches!(upload.status, crate::session::UploadStatus::Failed(_))))).await;
+        let failed_key = failed.chat.unwrap().draft.uploads[0].key;
+        tx.send(Command::RetryChatAttachment {
+            channel_id: "private".into(), key: failed_key,
+        }).await.unwrap();
+        let retry_presign = request("POST /api/attachments/presign").await;
+        wait_for_sidebar(&rx, |s| s.chat.as_ref().is_some_and(|chat|
+            !chat.draft.can_send("message") && chat.draft.uploads.iter().any(|upload|
+                upload.key == failed_key && matches!(upload.status, crate::session::UploadStatus::Uploading(_))))).await;
+        retry_presign.respond(&[], &signed("retry")).await;
+        let retry = request("PUT /upload").await;
+        assert_eq!(retry.body, b"hello");
+        retry.respond_raw("503 Service Unavailable", &[], b"").await;
+        request("POST /api/attachments/retry/cancel").await.respond(&[], "{}").await;
+        wait_for_sidebar(&rx, |s| s.chat.as_ref().is_some_and(|chat|
+            chat.draft.uploads.iter().any(|upload| upload.key == failed_key
+                && matches!(upload.status, crate::session::UploadStatus::Failed(_))))).await;
 
         let directory = tempfile::tempdir().unwrap();
         let file = directory.path().join("ready.txt");
@@ -277,15 +465,20 @@ async fn attachment_queue_cancels_in_flight_uploads_and_sends_only_ready_files()
         assert!(chat.outgoing.is_empty());
         assert!(chat.messages[0].attachments[0].spoiler);
 
-        let (reply, bytes) = oneshot::channel();
-        tx.send(Command::ReadChatAttachment {
-            channel_id: "private".into(), message_id: "message".into(), attachment_id: "ready".into(), reply,
+        let (reply, saved_file) = oneshot::channel();
+        tx.send(Command::DownloadChatAttachment {
+            channel_id: "private".into(),
+            message_id: "message".into(),
+            attachment_id: "ready".into(),
+            destination: tempfile::NamedTempFile::new().unwrap(),
+            reply,
         }).await.unwrap();
         let access = request("GET /api/attachments/ready?json=1").await;
         assert_eq!(access.header("cookie"), Some("session=alice"));
         access.respond(&[], &value!({"url": base.join("/object").unwrap().as_str()}).to_string()).await;
         request("GET /object").await.respond_raw("200 OK", &[], b"hello").await;
-        assert_eq!(bytes.await.unwrap().unwrap(), b"hello");
+        let file = saved_file.await.unwrap().unwrap();
+        assert_eq!(std::fs::read(file.path()).unwrap(), b"hello");
     }).await.expect("attachment queue workflow timed out");
 
     session.abort();

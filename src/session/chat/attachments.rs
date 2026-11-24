@@ -1,25 +1,33 @@
 use std::{
     fs::File,
-    io::{Cursor, Read},
+    io::{BufRead, BufReader, Cursor, Seek},
     path::PathBuf,
 };
 
+use bytes::Bytes;
 use gpui_kit::RenderImage;
 use image::{Frame, ImageReader, Limits};
-use tokio::sync::oneshot;
+use tempfile::NamedTempFile;
+use tokio::{io::AsyncRead, sync::oneshot};
 use uuid::Uuid;
 
-use crate::api::{AttachmentRef, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS};
+use crate::api::{
+    Attachment, AttachmentRef, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENT_PREVIEW_BYTES, MAX_ATTACHMENTS,
+};
 
 use super::*;
 
+const OVER_SIZE_LIMIT: &str = "Files can be 1 GiB at most.";
+
+#[derive(Clone)]
 pub enum AttachmentInput {
     Path(PathBuf),
     Clipboard {
         filename: String,
         mime: &'static str,
-        bytes: Vec<u8>,
+        bytes: Bytes,
     },
+    Oversized,
 }
 
 impl AttachmentInput {
@@ -30,38 +38,81 @@ impl AttachmentInput {
                 .and_then(|name| name.to_str())
                 .unwrap_or("file"),
             Self::Clipboard { filename, .. } => filename,
+            Self::Oversized => "file",
         }
     }
 
-    fn read(self) -> Result<(String, Vec<u8>), &'static str> {
-        let (mime, bytes) = match self {
+    fn validate(&self) -> Result<(), &'static str> {
+        match self {
             Self::Path(path) => {
                 let metadata = path.metadata().map_err(|_| "Could not read file.")?;
                 if !metadata.is_file() {
                     return Err("Choose a regular file.");
                 }
-                check_size(metadata.len())?;
-                let mut bytes = Vec::with_capacity(metadata.len() as usize);
-                File::open(&path)
-                    .and_then(|file| {
-                        file.take(MAX_ATTACHMENT_BYTES as u64 + 1)
-                            .read_to_end(&mut bytes)
-                    })
-                    .map_err(|_| "Could not read file.")?;
-                let mime = mime_guess::from_path(&path).first_or_octet_stream();
-                (mime.essence_str().to_owned(), bytes)
+                check_size(metadata.len())
             }
-            Self::Clipboard { mime, bytes, .. } => (mime.to_owned(), bytes),
-        };
-        check_size(bytes.len() as u64)?;
-        Ok((mime, bytes))
+            Self::Clipboard { bytes, .. } => check_size(bytes.len() as u64),
+            Self::Oversized => Err(OVER_SIZE_LIMIT),
+        }
     }
+
+    fn prepare(self) -> Result<PreparedUpload, &'static str> {
+        self.validate()?;
+        match self {
+            Self::Path(path) => {
+                let mut file = File::open(&path).map_err(|_| "Could not read file.")?;
+                let metadata = file.metadata().map_err(|_| "Could not read file.")?;
+                if !metadata.is_file() {
+                    return Err("Choose a regular file.");
+                }
+                let size = metadata.len();
+                check_size(size)?;
+                let mime = mime_guess::from_path(&path).first_or_octet_stream();
+                let mime = mime.essence_str().to_owned();
+                let preview =
+                    if mime.starts_with("image/") && size <= MAX_ATTACHMENT_PREVIEW_BYTES as u64 {
+                        let preview = thumbnail(BufReader::new(&mut file), 768, 512);
+                        file.rewind().map_err(|_| "Could not read file.")?;
+                        preview
+                    } else {
+                        None
+                    };
+                Ok(PreparedUpload {
+                    mime,
+                    size,
+                    preview,
+                    input: Box::new(tokio::fs::File::from_std(file)),
+                })
+            }
+            Self::Clipboard { mime, bytes, .. } => {
+                let size = bytes.len() as u64;
+                let preview = (mime.starts_with("image/")
+                    && size <= MAX_ATTACHMENT_PREVIEW_BYTES as u64)
+                    .then(|| image_preview(&bytes))
+                    .flatten();
+                Ok(PreparedUpload {
+                    mime: mime.to_owned(),
+                    size,
+                    preview,
+                    input: Box::new(Cursor::new(bytes)),
+                })
+            }
+            Self::Oversized => Err(OVER_SIZE_LIMIT),
+        }
+    }
+}
+
+struct PreparedUpload {
+    mime: String,
+    size: u64,
+    preview: Option<Arc<RenderImage>>,
+    input: Box<dyn AsyncRead + Unpin + Send>,
 }
 
 fn check_size(size: u64) -> Result<(), &'static str> {
     match size {
         0 => Err("This file is empty."),
-        size if size > MAX_ATTACHMENT_BYTES as u64 => Err("Files can be 25 MB at most."),
+        size if size > MAX_ATTACHMENT_BYTES => Err(OVER_SIZE_LIMIT),
         _ => Ok(()),
     }
 }
@@ -99,6 +150,7 @@ pub(in crate::session) struct AttachmentWork {
     pub events: async_channel::Receiver<UploadEvent>,
     updates: async_channel::Sender<UploadEvent>,
     cancels: HashMap<Uuid, oneshot::Sender<()>>,
+    inputs: HashMap<Uuid, AttachmentInput>,
 }
 
 impl Default for AttachmentWork {
@@ -109,6 +161,7 @@ impl Default for AttachmentWork {
             events,
             updates,
             cancels: HashMap::new(),
+            inputs: HashMap::new(),
         }
     }
 }
@@ -157,33 +210,38 @@ impl ChatSession {
             return;
         }
         let draft = self.drafts.entry(channel_id.clone()).or_default();
-        let slots = MAX_ATTACHMENTS - draft.uploads.len();
-        draft.upload_notice = (files.len() > slots).then_some("At most 10 files per message.");
-        for input in files.into_iter().take(slots) {
+        draft.upload_notice = None;
+        for input in files {
+            if draft.uploads.len() >= MAX_ATTACHMENTS {
+                draft.upload_notice = Some("At most 10 files per message.");
+                break;
+            }
+            if let Err(message) = input.validate() {
+                draft.upload_notice = Some(message);
+                continue;
+            }
             let key = Uuid::new_v4();
             let filename = input.filename().to_owned();
+            self.attachments.inputs.insert(key, input);
             draft.uploads.push(QueuedAttachment {
                 key,
-                filename: filename.clone(),
+                filename,
                 status: UploadStatus::Uploading(0),
                 spoiler: false,
                 preview: None,
             });
-            let (cancel, cancelled) = oneshot::channel();
-            self.attachments.cancels.insert(key, cancel);
-            let updates = self.attachments.updates.clone();
-            let channel_id = channel_id.clone();
-            let client = client.clone();
-            self.attachments.tasks.spawn(async move {
-                let send_update = move |update| {
-                    let _ = updates.try_send(UploadEvent {
-                        channel_id: channel_id.clone(),
-                        key,
-                        update,
-                    });
-                };
-                upload_attachment(client, input, filename, cancelled, send_update).await
-            });
+            self.attachments.start(client, &channel_id, key);
+        }
+    }
+
+    pub fn retry_attachment(&mut self, client: &SpkClient, channel_id: &str, key: Uuid) {
+        if self.can_change_attachments(channel_id)
+            && let Some(draft) = self.drafts.get_mut(channel_id)
+            && let Some(upload) = draft.uploads.iter_mut().find(|upload| upload.key == key)
+            && matches!(upload.status, UploadStatus::Failed(_))
+        {
+            upload.status = UploadStatus::Uploading(0);
+            self.attachments.start(client, channel_id, key);
         }
     }
 
@@ -215,6 +273,9 @@ impl ChatSession {
         } = event;
         if matches!(update, UploadUpdate::Finished(_)) {
             self.attachments.cancels.remove(&key);
+            if matches!(update, UploadUpdate::Finished(Ok(_))) {
+                self.attachments.inputs.remove(&key);
+            }
         }
         let upload = self
             .drafts
@@ -244,17 +305,10 @@ impl ChatSession {
         attachment_id: String,
         reply: oneshot::Sender<Result<Vec<u8>, Failure>>,
     ) {
-        if !self.selected.as_ref().is_some_and(|view| {
-            view.channel_id == channel_id
-                && view.history == History::Ready
-                && view.messages.iter().any(|message| {
-                    message.id == message_id
-                        && message
-                            .attachments
-                            .iter()
-                            .any(|attachment| attachment.id == attachment_id)
-                })
-        }) {
+        if !self
+            .attachment(channel_id, message_id, &attachment_id)
+            .is_some_and(|attachment| attachment.size <= MAX_ATTACHMENT_PREVIEW_BYTES as u64)
+        {
             let _ = reply.send(Err(Failure::InvalidResponse));
             return;
         }
@@ -266,10 +320,72 @@ impl ChatSession {
             expired
         });
     }
+    pub fn download_attachment(
+        &mut self,
+        client: &SpkClient,
+        channel_id: &str,
+        message_id: &str,
+        attachment_id: String,
+        destination: NamedTempFile,
+        reply: oneshot::Sender<Result<NamedTempFile, Failure>>,
+    ) {
+        let Some(attachment) = self.attachment(channel_id, message_id, &attachment_id) else {
+            let _ = reply.send(Err(Failure::InvalidResponse));
+            return;
+        };
+        let size = attachment.size;
+        let client = client.clone();
+        self.attachments.tasks.spawn(async move {
+            let result = client
+                .download_attachment(&attachment_id, size, &destination)
+                .await
+                .map(|()| destination);
+            let expired = result.as_ref().is_err_and(Failure::unauthorized);
+            let _ = reply.send(result);
+            expired
+        });
+    }
+
+    fn attachment(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        attachment_id: &str,
+    ) -> Option<&Attachment> {
+        self.selected
+            .as_ref()
+            .filter(|view| view.channel_id == channel_id && view.history == History::Ready)?
+            .messages
+            .iter()
+            .find(|message| message.id == message_id)?
+            .attachments
+            .iter()
+            .find(|attachment| attachment.id == attachment_id)
+    }
 }
 
 impl AttachmentWork {
+    fn start(&mut self, client: &SpkClient, channel_id: &str, key: Uuid) {
+        let input = self.inputs[&key].clone();
+        let (cancel, cancelled) = oneshot::channel();
+        self.cancels.insert(key, cancel);
+        let updates = self.updates.clone();
+        let channel_id = channel_id.to_owned();
+        let client = client.clone();
+        self.tasks.spawn(async move {
+            let send_update = move |update| {
+                let _ = updates.try_send(UploadEvent {
+                    channel_id: channel_id.clone(),
+                    key,
+                    update,
+                });
+            };
+            upload_attachment(client, input, cancelled, send_update).await
+        });
+    }
+
     pub(super) fn cancel(&mut self, client: &SpkClient, upload: QueuedAttachment) {
+        self.inputs.remove(&upload.key);
         if let Some(cancel) = self.cancels.remove(&upload.key) {
             let _ = cancel.send(());
         }
@@ -293,19 +409,17 @@ impl AttachmentWork {
 async fn upload_attachment(
     client: SpkClient,
     input: AttachmentInput,
-    filename: String,
     mut cancelled: oneshot::Receiver<()>,
     update: impl Fn(UploadUpdate) + Clone + Send + 'static,
 ) -> bool {
-    let prepared = tokio::task::spawn_blocking(move || {
-        let (mime, bytes) = input.read()?;
-        let preview = mime
-            .starts_with("image/")
-            .then(|| image_preview(&bytes))
-            .flatten();
-        Ok::<_, &'static str>((mime, bytes, preview))
-    });
-    let (mime, bytes, preview) = match tokio::select! {
+    let filename = input.filename().to_owned();
+    let prepared = tokio::task::spawn_blocking(move || input.prepare());
+    let PreparedUpload {
+        mime,
+        size,
+        input,
+        preview,
+    } = match tokio::select! {
         result = prepared => result.unwrap_or(Err("Could not read file.")),
         _ = &mut cancelled => return false,
     } {
@@ -319,19 +433,14 @@ async fn upload_attachment(
         update(UploadUpdate::Preview(preview));
     }
     // Let a pending presign finish so a cancelled upload can still release its server row.
-    let upload = match client
-        .presign_attachment(&filename, &mime, bytes.len())
-        .await
-    {
+    let upload = match client.presign_attachment(&filename, &mime, size).await {
         Ok(upload) => upload,
         Err(error) => {
             let message = match &error {
                 Failure::Http(reqwest::StatusCode::TOO_MANY_REQUESTS) => {
                     "Too many uploads. Try again later."
                 }
-                Failure::Http(reqwest::StatusCode::PAYLOAD_TOO_LARGE) => {
-                    "Files can be 25 MB at most."
-                }
+                Failure::Http(reqwest::StatusCode::PAYLOAD_TOO_LARGE) => OVER_SIZE_LIMIT,
                 _ => "Could not start the upload. Check that attachment storage is available.",
             };
             update(UploadUpdate::Finished(Err(message)));
@@ -343,7 +452,7 @@ async fn upload_attachment(
     let result = tokio::select! {
         biased;
         _ = &mut cancelled => None,
-        result = client.put_attachment(&upload, &mime, bytes, move |percent| {
+        result = client.put_attachment(&upload, &mime, size, input, move |percent| {
             let percent = percent.min(99);
             if percent >= last + 5 {
                 last = percent;
@@ -361,9 +470,7 @@ async fn upload_attachment(
         .as_ref()
         .is_err_and(Failure::unauthorized);
     if result.is_some() {
-        update(UploadUpdate::Finished(Err(
-            "Upload failed. Remove the file or add it again.",
-        )));
+        update(UploadUpdate::Finished(Err("Upload failed.")));
     }
     expired
 }
@@ -374,9 +481,11 @@ pub fn image_preview(bytes: &[u8]) -> Option<Arc<RenderImage>> {
 }
 
 pub(super) fn raster_thumbnail(bytes: &[u8], width: u32, height: u32) -> Option<Arc<RenderImage>> {
-    let mut reader = ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .ok()?;
+    thumbnail(Cursor::new(bytes), width, height)
+}
+
+fn thumbnail(reader: impl BufRead + Seek, width: u32, height: u32) -> Option<Arc<RenderImage>> {
+    let mut reader = ImageReader::new(reader).with_guessed_format().ok()?;
     let mut limits = Limits::default();
     limits.max_image_width = Some(8192);
     limits.max_image_height = Some(8192);

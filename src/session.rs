@@ -158,9 +158,20 @@ pub enum Command {
         channel_id: String,
         key: uuid::Uuid,
     },
+    RetryChatAttachment {
+        channel_id: String,
+        key: uuid::Uuid,
+    },
     ToggleChatAttachmentSpoiler {
         channel_id: String,
         key: uuid::Uuid,
+    },
+    DownloadChatAttachment {
+        channel_id: String,
+        message_id: String,
+        attachment_id: String,
+        destination: tempfile::NamedTempFile,
+        reply: oneshot::Sender<Result<tempfile::NamedTempFile, Failure>>,
     },
     ReadChatAttachment {
         channel_id: String,
@@ -1004,7 +1015,11 @@ async fn watch_session(
                 }
                 Ok(Command::AddChatAttachments { channel_id, files }) => chat.add_attachments(client, channel_id, files),
                 Ok(Command::CancelChatAttachment { channel_id, key }) => chat.cancel_attachment(client, &channel_id, key),
+                Ok(Command::RetryChatAttachment { channel_id, key }) => chat.retry_attachment(client, &channel_id, key),
                 Ok(Command::ToggleChatAttachmentSpoiler { channel_id, key }) => chat.toggle_attachment_spoiler(&channel_id, key),
+                Ok(Command::DownloadChatAttachment { channel_id, message_id, attachment_id, destination, reply }) => {
+                    chat.download_attachment(client, &channel_id, &message_id, attachment_id, destination, reply);
+                }
                 Ok(Command::ReadChatAttachment { channel_id, message_id, attachment_id, reply }) => {
                     chat.read_attachment(client, &channel_id, &message_id, attachment_id, reply);
                 }
