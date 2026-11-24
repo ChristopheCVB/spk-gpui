@@ -62,7 +62,7 @@ pub struct ChatView {
     pub message_send_error: Option<String>,
     pub vote_error: Option<&'static str>,
     pub action_pending: bool,
-    pub action_outcome: Option<ActionOutcome>,
+    pub action_outcome: Option<Arc<ActionOutcome>>,
     pub paging_forward: bool,
     opening_latest: bool,
     history: History,
