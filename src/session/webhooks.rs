@@ -1,7 +1,7 @@
 use reqwest::StatusCode;
 use tokio::sync::oneshot;
 
-use super::{ChatNavigation, ChatSession, SearchSession, Sidebar};
+use super::{ChatNavigation, ChatSession, Sidebar};
 use crate::api::{Channel, Failure, SpkClient, WebhookSettings, WebhookUrl};
 
 pub enum WebhookAction {
@@ -22,6 +22,20 @@ pub(super) enum WebhookChange {
     Edited(Channel),
     Rotated(String, WebhookUrl),
     Deleted(String),
+}
+
+impl Sidebar {
+    fn owns_webhook(&self, feed: &Channel) -> bool {
+        self.profile.id.is_some() && self.profile.id == feed.owner_id
+    }
+
+    pub(super) fn can_view_webhook(&self, feed: &Channel) -> bool {
+        !feed.private || self.owns_webhook(feed)
+    }
+
+    pub fn can_manage_webhook(&self, feed: &Channel) -> bool {
+        self.can_view_webhook(feed) && (self.is_admin() || self.owns_webhook(feed))
+    }
 }
 
 impl WebhookAction {
@@ -95,10 +109,7 @@ pub(super) fn reconcile_access(
     sidebar: &mut Sidebar,
     chat: &mut ChatSession,
     navigation: &mut Option<ChatNavigation>,
-    search: &mut SearchSession,
-    previous: Vec<String>,
 ) {
-    search.reconcile_webhooks(sidebar, previous);
     if let Some(id) = chat.selected_webhook()
         && sidebar.webhook_feed(id).is_none()
     {

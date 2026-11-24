@@ -768,12 +768,13 @@ async fn watch_session(
                                     *listed = channel;
                                 } else {
                                     channels.push(channel);
+                                    unread.refresh(client);
                                 }
                                 (Ok(Some(url)), None)
                             }
                             WebhookChange::Edited(channel) => {
                                 refresh.webhook_changed(client);
-                                if channel.private && (sidebar.profile.id.is_none() || channel.owner_id != sidebar.profile.id) {
+                                if !sidebar.can_view_webhook(&channel) {
                                     (Ok(None), Some(channel.id))
                                 } else {
                                     if let Some(listed) = sidebar.channels.iter_mut().flatten().find(|listed| listed.id == channel.id) {
@@ -797,9 +798,14 @@ async fn watch_session(
                         };
                         if let Some(id) = removed {
                             if let Some(channels) = &mut sidebar.channels {
+                                let count = channels.len();
                                 channels.retain(|listed| listed.id != id);
+                                if channels.len() != count {
+                                    unread.refresh(client);
+                                }
                             }
-                            webhooks::reconcile_access(&mut sidebar, &mut chat, &mut chat_navigation, &mut search, vec![id]);
+                            webhooks::reconcile_access(&mut sidebar, &mut chat, &mut chat_navigation);
+                            search.reconcile_channels(&mut sidebar);
                         }
                         url
                     }
@@ -1268,7 +1274,7 @@ async fn watch_session(
                 if result.as_ref().is_err_and(Failure::unauthorized) {
                     break SessionEnd::Invalidated(SESSION_EXPIRED);
                 }
-                search.complete(&mut sidebar.search, result);
+                search.complete(&mut sidebar, &mut refresh, client, result);
             }
             () = RadioSession::playback_changed(&mut radio.player) => {}
             Some(Ok((id, result))) = radio.tasks.join_next_with_id() => {
@@ -1345,11 +1351,15 @@ async fn watch_session(
                 let refresh_avatars = data.is_ok() && matches!(resource, Resource::Users | Resource::Presence);
                 let listed_voice_channel = matches!(resource, Resource::Channels)
                     && sidebar.voice.as_ref().is_some_and(|voice| sidebar.has_voice_channel(&voice.channel_id));
-                let previous_webhooks = (resource == Resource::Channels && presence_loaded)
-                    .then(|| sidebar.webhook_feeds().map(|feed| feed.id.clone()).collect());
-                refresh.complete(&mut sidebar, resource, data);
-                if let Some(previous) = previous_webhooks {
-                    webhooks::reconcile_access(&mut sidebar, &mut chat, &mut chat_navigation, &mut search, previous);
+                if refresh.complete(&mut sidebar, resource, data) {
+                    unread.refresh(client);
+                }
+                if resource == Resource::Channels && presence_loaded {
+                    webhooks::reconcile_access(&mut sidebar, &mut chat, &mut chat_navigation);
+                    search.reconcile_channels(&mut sidebar);
+                }
+                if resource == Resource::Channels && !refresh.dirty.contains(&resource) {
+                    search.channels_refreshed(&mut sidebar, presence_loaded);
                 }
                 account_admin.clear_if_demoted(&mut sidebar);
                 if resource == Resource::Channels

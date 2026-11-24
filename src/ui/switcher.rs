@@ -108,51 +108,57 @@ struct Entry {
 
 impl Spk {
     pub(super) fn open_quick_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let View::SignedIn(sidebar) = &self.view else {
+        if !matches!(self.view, View::SignedIn(_)) {
             return;
-        };
-        let mut groups: [Vec<Entry>; Group::ALL.len()] = std::array::from_fn(|_| Vec::new());
-        for channel in sidebar.channels.iter().flatten() {
-            if let Some((group, destination)) = Destination::channel(channel) {
-                let label = channel.other_user_id.as_deref().map_or_else(
-                    || channel_name(channel),
-                    |peer| sidebar.message_author(peer),
-                );
-                groups[group as usize].push(Entry {
-                    label: label.to_owned(),
-                    destination,
-                    icon: group.icon(channel.icon.as_deref()),
-                });
-            }
         }
-        groups[Group::People as usize].extend(sidebar.people().into_iter().map(|(id, name)| {
-            Entry {
-                label: name.to_owned(),
-                destination: Destination::Person(id.to_owned()),
-                icon: Group::People.icon(None),
-            }
-        }));
-        groups[Group::Actions as usize].extend(
-            [
-                ("Settings", Destination::Settings),
-                ("Keyboard shortcuts", Destination::Shortcuts),
-                ("Toggle theme", Destination::Theme),
-            ]
-            .map(|(label, destination)| Entry {
-                label: label.to_owned(),
-                destination,
-                icon: Group::Actions.icon(None),
-            }),
-        );
         let state = cx.new(|cx| CommandState::new(window, cx));
         let app = cx.weak_entity();
-        let entries = std::rc::Rc::new(groups);
         let first_render = Cell::new(true);
         self.quick_switcher = Some(state.downgrade());
         window.open_dialog(cx, move |dialog, window, cx| {
             if first_render.replace(false) {
                 state.read(cx).focus_handle(cx).focus(window, cx);
             }
+            let Some(entity) = app.upgrade() else {
+                return dialog;
+            };
+            let View::SignedIn(sidebar) = &entity.read(cx).view else {
+                return dialog;
+            };
+            let mut groups: [Vec<Entry>; Group::ALL.len()] = std::array::from_fn(|_| Vec::new());
+            for channel in sidebar.channels.iter().flatten() {
+                if let Some((group, destination)) = Destination::channel(channel) {
+                    let label = channel.other_user_id.as_deref().map_or_else(
+                        || channel_name(channel),
+                        |peer| sidebar.message_author(peer),
+                    );
+                    groups[group as usize].push(Entry {
+                        label: label.to_owned(),
+                        destination,
+                        icon: group.icon(channel.icon.as_deref()),
+                    });
+                }
+            }
+            groups[Group::People as usize].extend(sidebar.people().into_iter().map(|(id, name)| {
+                Entry {
+                    label: name.to_owned(),
+                    destination: Destination::Person(id.to_owned()),
+                    icon: Group::People.icon(None),
+                }
+            }));
+            groups[Group::Actions as usize].extend(
+                [
+                    ("Settings", Destination::Settings),
+                    ("Keyboard shortcuts", Destination::Shortcuts),
+                    ("Toggle theme", Destination::Theme),
+                ]
+                .map(|(label, destination)| Entry {
+                    label: label.to_owned(),
+                    destination,
+                    icon: Group::Actions.icon(None),
+                }),
+            );
+            let entries = std::rc::Rc::new(groups);
             let entries_for_confirm = entries.clone();
             let app = app.clone();
             let mut palette = CommandPalette::new(&state)
@@ -176,6 +182,11 @@ impl Spk {
                     window.close_dialog(cx);
                     let _ = app.update(cx, |app, cx| {
                         app.quick_switcher = None;
+                        if let Destination::Webhook(id) = &entry.destination
+                            && !matches!(&app.view, View::SignedIn(sidebar) if sidebar.webhook_feed(id).is_some())
+                        {
+                            return;
+                        }
                         entry.destination.clone().open(app, window, cx);
                     });
                 });

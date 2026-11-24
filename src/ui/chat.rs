@@ -41,8 +41,13 @@ use crate::{
 struct RenderedChatMarkdown {
     view: TextView,
     source: SharedString,
-    spoiler_key: (String, u64),
-    hidden: Vec<usize>,
+    spoilers: HiddenChatSpoilers,
+}
+
+#[derive(Clone)]
+struct HiddenChatSpoilers {
+    key: (String, u64),
+    offsets: Vec<usize>,
 }
 
 pub(super) const BOLD: (&str, &str) = ("**", "**");
@@ -1183,8 +1188,10 @@ impl Spk {
         RenderedChatMarkdown {
             view,
             source,
-            spoiler_key,
-            hidden,
+            spoilers: HiddenChatSpoilers {
+                key: spoiler_key,
+                offsets: hidden,
+            },
         }
     }
 
@@ -1205,9 +1212,28 @@ impl Spk {
         let RenderedChatMarkdown {
             view: text,
             source: share_text,
-            spoiler_key,
-            hidden,
+            spoilers,
         } = self.chat_message_markdown("message-body", &message_id, &body, sidebar, cx);
+        let embed = message.embed.as_ref().filter(|_| chat.webhook);
+        let description = embed
+            .and_then(|embed| embed.description.as_deref())
+            .map(|description| {
+                self.chat_message_markdown(
+                    "embed-description",
+                    &message_id,
+                    description,
+                    sidebar,
+                    cx,
+                )
+            });
+        let hidden_spoilers = std::iter::once(spoilers)
+            .chain(
+                description
+                    .as_ref()
+                    .map(|markdown| markdown.spoilers.clone()),
+            )
+            .filter(|spoilers| !spoilers.offsets.is_empty())
+            .collect();
         let target = MessageTarget::new(&message.channel_id, &message.id);
         let images = self.message_images(chat, target.clone(), &body, &share_text, cx);
         let app = cx.weak_entity();
@@ -1226,15 +1252,13 @@ impl Spk {
             can_edit: !chat.webhook && sidebar.profile.id.as_deref() == Some(&message.user_id),
             can_delete: sidebar.can_remove_message_content(message),
             pin_to: chat.can_pin(sidebar.is_admin()).then_some(!message.pinned),
-            disabled: chat.action_pending
-                || !(chat.can_send() || chat.webhook && chat.history_ready()),
+            disabled: chat.action_pending || !chat.can_delete_messages(),
             read_only: chat.webhook,
             composer_busy,
             body,
             share_text,
             target,
-            spoiler_key,
-            hidden,
+            hidden_spoilers,
         });
         let reply = message.reply_to.as_ref().filter(|_| !chat.webhook);
         let reply_channel = channel.clone();
@@ -1377,10 +1401,14 @@ impl Spk {
                 })
             })
             .when(!message.body.is_empty(), |row| row.child(text))
-            .when_some(
-                message.embed.as_ref().filter(|_| chat.webhook),
-                |row, embed| row.child(self.webhook_embed(embed, sidebar, &message.id, now, cx)),
-            )
+            .when_some(embed, |row, embed| {
+                row.child(self.webhook_embed(
+                    embed,
+                    description.map(|markdown| markdown.view),
+                    now,
+                    cx,
+                ))
+            })
             .child(images)
             .when(!message.attachments.is_empty(), |row| {
                 row.child(self.attachment_cards(message, cx))

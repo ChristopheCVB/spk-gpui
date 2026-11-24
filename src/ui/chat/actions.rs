@@ -90,7 +90,7 @@ impl Spk {
         };
         if view.webhook
             && !(matches!(kind, ActionForm::Delete)
-                && view.history_ready()
+                && view.can_delete_messages()
                 && sidebar.can_remove_message_content(message))
         {
             return;
@@ -123,9 +123,10 @@ impl Spk {
         ) else {
             return;
         };
-        if !(view.can_send()
-            || view.webhook && view.history_ready() && matches!(form.kind, ActionForm::Delete))
-        {
+        if !match form.kind {
+            ActionForm::Edit => view.can_send(),
+            ActionForm::Delete => view.can_delete_messages(),
+        } {
             return;
         }
         let text = self.message_action_input.read(cx).value();
@@ -683,8 +684,7 @@ pub(super) struct MessageActions {
     pub body: String,
     pub share_text: SharedString,
     pub target: Option<MessageTarget>,
-    pub spoiler_key: (String, u64),
-    pub hidden: Vec<usize>,
+    pub(super) hidden_spoilers: Vec<HiddenChatSpoilers>,
 }
 
 impl MessageActions {
@@ -808,8 +808,7 @@ impl MessageActions {
             .collect::<Vec<_>>()
             .join("\n");
         let copy_text = self.share_text.clone();
-        let spoiler_key = self.spoiler_key.clone();
-        let hidden = self.hidden.clone();
+        let hidden = self.hidden_spoilers.clone();
         let menu = menu
             .max_h(window.viewport_size().height - px(24.))
             .scrollable(true)
@@ -891,10 +890,12 @@ impl MessageActions {
                         .on_click(move |_, _, cx| {
                             let _ = app.update(cx, |this, cx| {
                                 this.preserve_chat_position();
-                                this.chat_spoilers
-                                    .entry(spoiler_key.clone())
-                                    .or_default()
-                                    .extend(&hidden);
+                                for spoilers in &hidden {
+                                    this.chat_spoilers
+                                        .entry(spoilers.key.clone())
+                                        .or_default()
+                                        .extend(&spoilers.offsets);
+                                }
                                 cx.notify();
                             });
                         }),

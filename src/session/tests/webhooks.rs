@@ -379,6 +379,145 @@ async fn channel_refresh_discards_revoked_webhook_history_and_in_flight_pages() 
     http.abort();
 }
 
+#[tokio::test]
+async fn late_search_omits_revoked_feed_never_listed_to_reader() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+    let (channels, listed) =
+        watch::channel(value!([{"id":"general","type":"text","name":"General"}]));
+    let (requests, searches) = async_channel::unbounded();
+    let http = tokio::spawn(async move {
+        loop {
+            let (line, request) = Request::receive(&listener).await;
+            assert_eq!(request.header("cookie"), Some("session=bob"));
+            let body = match line.as_str() {
+                "GET /api/channels HTTP/1.1" => listed.borrow().clone(),
+                "GET /api/users HTTP/1.1" | "GET /api/voice HTTP/1.1" => value!([]),
+                "GET /api/users/presence HTTP/1.1" | "GET /api/unread HTTP/1.1" => value!({}),
+                "GET /api/search?q=build&scope=everything HTTP/1.1" => {
+                    requests.send(request).await.unwrap();
+                    continue;
+                }
+                _ => panic!("unexpected request {line}"),
+            };
+            request.respond(&[], &body.to_string()).await;
+        }
+    });
+
+    timeout(Duration::from_secs(10), async {
+        let (commands, views, _, mut peer, session) =
+            chat::direct_message_session(base, "bob").await;
+        wait_for_sidebar(&views, |view| view.channels.is_some()).await;
+        commands
+            .send(Command::SearchMessages {
+                query: "build".into(),
+                scope: crate::api::SearchScope::Everything,
+            })
+            .await
+            .unwrap();
+        let search = searches.recv().await.unwrap();
+
+        // The private feed was public when this search started but became private
+        // before the reader received a channel list containing it.
+        channels.send_replace(value!([{"id":"general","type":"text","name":"Renamed"}]));
+        peer.send(Message::text(r#"{"type":"channels:changed"}"#))
+            .await
+            .unwrap();
+        wait_for_sidebar(&views, |view| {
+            view.channels
+                .iter()
+                .flatten()
+                .any(|channel| channel.name.as_deref() == Some("Renamed"))
+        }).await;
+
+        // A feed that really is accessible may also be missing from the local list.
+        channels.send_replace(value!([
+            {"id":"general","type":"text","name":"Renamed"},
+            {"id":"shared","type":"webhook","name":"Shared","ownerId":"alice"}
+        ]));
+        search.respond(&[], &value!({
+            "results":[
+                {"messageId":"stale","channelId":"private","userId":"alice","createdAt":2,"snippet":"Private build","text":"Private build","attachments":0},
+                {"messageId":"fresh","channelId":"shared","userId":"alice","createdAt":3,"snippet":"Shared build","text":"Shared build","attachments":0},
+                {"messageId":"text","channelId":"general","userId":"alice","createdAt":1,"snippet":"Text build","text":"Text build","attachments":0}
+            ],
+            "nextCursor":"20"
+        }).to_string()).await;
+        let done = wait_for_sidebar(&views, |view| view.search.searched).await;
+        assert!(done.search.results.iter().map(|hit| hit.target.message_id()).eq(["fresh", "text"]));
+        assert_eq!(done.search.next_cursor.as_deref(), Some("20"));
+
+        commands.send(Command::SignOut).await.unwrap();
+        assert!(matches!(session.await.unwrap(), SessionEnd::SignOut));
+    }).await.expect("late webhook search timed out");
+    assert!(!http.is_finished());
+    http.abort();
+}
+
+#[tokio::test]
+async fn newly_visible_webhook_loads_existing_unread_alert_count() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+    let (state, feed_state) = watch::channel((false, 0));
+    let http = tokio::spawn(async move {
+        loop {
+            let (line, request) = Request::receive(&listener).await;
+            assert_eq!(request.header("cookie"), Some("session=bob"));
+            let (public, baseline) = *feed_state.borrow();
+            let body = match line.as_str() {
+                "GET /api/channels HTTP/1.1" if public => value!([
+                    {"id":"feed","type":"webhook","name":"Builds","ownerId":"alice"}
+                ]),
+                "GET /api/channels HTTP/1.1"
+                | "GET /api/users HTTP/1.1"
+                | "GET /api/voice HTTP/1.1" => value!([]),
+                "GET /api/users/presence HTTP/1.1" => value!({}),
+                "GET /api/unread HTTP/1.1" if public => {
+                    value!({"feed":{"unread":3,"mentions":1}})
+                }
+                "GET /api/unread HTTP/1.1" => {
+                    value!({"general":{"unread":baseline,"mentions":0}})
+                }
+                _ => panic!("unexpected request {line}"),
+            };
+            request.respond(&[], &body.to_string()).await;
+        }
+    });
+
+    timeout(Duration::from_secs(10), async {
+        let (commands, views, _, mut peer, session) =
+            chat::direct_message_session(base, "bob").await;
+        state.send_replace((false, 1));
+        commands.send(Command::Refresh).await.unwrap();
+        let initial = wait_for_sidebar(&views, |view| view.unread("general").unread == 1).await;
+        assert!(initial.webhook_feed("feed").is_none());
+        assert_eq!(initial.unread("feed").unread, 0);
+
+        state.send_replace((true, 1));
+        peer.send(Message::text(r#"{"type":"channels:changed"}"#))
+            .await
+            .unwrap();
+        wait_for_sidebar(&views, |view| view.webhook_feed("feed").is_some()).await;
+        let updated = timeout(
+            Duration::from_secs(1),
+            wait_for_sidebar(&views, |view| view.unread("feed").unread == 3),
+        )
+        .await
+        .expect("unread badge should include alerts posted before sharing");
+        assert_eq!(updated.unread("feed").mentions, 0);
+        assert!(updated.alerts.is_empty());
+
+        commands.send(Command::SignOut).await.unwrap();
+        assert!(matches!(session.await.unwrap(), SessionEnd::SignOut));
+    })
+    .await
+    .expect("newly visible webhook unread count timed out");
+    assert!(!http.is_finished());
+    http.abort();
+}
+
 mod creation {
     use super::*;
     use crate::{api::WebhookSettings, session::WebhookAction};

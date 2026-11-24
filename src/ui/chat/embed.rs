@@ -5,8 +5,7 @@ impl Spk {
     pub(super) fn webhook_embed(
         &self,
         embed: &ChatEmbed,
-        sidebar: &Sidebar,
-        message_id: &str,
+        description: Option<TextView>,
         now: i64,
         cx: &Context<Self>,
     ) -> impl IntoElement {
@@ -66,18 +65,7 @@ impl Spk {
                     card.child(Label::new(title.to_owned()).font_semibold())
                 }
             })
-            .when_some(embed.description.as_deref(), |card, description| {
-                card.child(
-                    self.chat_message_markdown(
-                        "embed-description",
-                        message_id,
-                        description,
-                        sidebar,
-                        cx,
-                    )
-                    .view,
-                )
-            })
+            .children(description)
             .when(!embed.fields.is_empty(), |card| {
                 card.child(div().grid().grid_cols(3).gap_x_4().gap_y_1().children(
                     embed.fields.iter().enumerate().map(|(index, field)| {

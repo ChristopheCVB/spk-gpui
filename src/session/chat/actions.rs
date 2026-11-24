@@ -22,6 +22,10 @@ pub(in crate::session) struct PendingAction {
 }
 
 impl ChatView {
+    pub fn can_delete_messages(&self) -> bool {
+        self.can_send() || (self.webhook && self.history_ready())
+    }
+
     pub fn can_pin(&self, is_admin: bool) -> bool {
         !self.webhook && (self.direct_message_peer.is_some() || is_admin)
     }
@@ -34,11 +38,6 @@ impl Sidebar {
         } else {
             self.is_admin() || self.profile.id.as_deref() == Some(message.user_id.as_str())
         }
-    }
-
-    pub fn can_manage_webhook(&self, feed: &Channel) -> bool {
-        (self.profile.id.is_some() && self.profile.id == feed.owner_id)
-            || (!feed.private && self.is_admin())
     }
 }
 
@@ -56,10 +55,10 @@ impl ChatSession {
         };
         if self.pending_action.is_some()
             || view.channel_id != channel_id
-            || !(view.can_send()
-                || (view.webhook
-                    && view.history_ready()
-                    && matches!(action, MessageAction::Delete)))
+            || !match &action {
+                MessageAction::Delete => view.can_delete_messages(),
+                _ => view.can_send(),
+            }
         {
             return;
         }
