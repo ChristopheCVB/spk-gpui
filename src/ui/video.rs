@@ -65,6 +65,7 @@ pub(super) struct TileActions {
     theater: bool,
     fullscreen: bool,
     is_me: bool,
+    pub sharing_screen: bool,
     pub watched_screen: bool,
     pub screen_quality: Option<Quality>,
     screen_volume: bool,
@@ -74,6 +75,7 @@ pub(super) struct TileControls {
     pub actions: TileActions,
     pub revealed: bool,
     pub compact: bool,
+    pub screen_overlay: bool,
 }
 
 impl TileActions {
@@ -86,19 +88,21 @@ impl TileActions {
         let is_me = sidebar.profile.id.as_deref() == Some(participant.id);
         let report = call.video.as_ref();
         let video = report.and_then(|report| report.participants.get(participant.id));
-        let live = (is_me
+        let local_screen = is_me
             && call
                 .screen
                 .as_ref()
-                .is_some_and(|screen| screen.state.active()))
+                .is_some_and(|screen| screen.state.active());
+        let sharing_screen = local_screen
+            || participant.video.is_some_and(|video| video.screen)
+            || video.is_some_and(|video| video.live.contains(&VideoSource::Screen));
+        let live = local_screen
             || participant_video(video)
             || participant
                 .video
                 .is_some_and(|media| !is_me && (media.cam || media.screen));
         let watching = sidebar.voice_intent.watching.contains(participant.id);
-        let watched_screen = watching
-            && (participant.video.is_some_and(|video| video.screen)
-                || video.is_some_and(|video| video.live.contains(&VideoSource::Screen)));
+        let watched_screen = watching && sharing_screen;
         Self {
             live,
             can_watch: !is_me
@@ -110,6 +114,7 @@ impl TileActions {
             theater: app.video_stage.theater.as_deref() == Some(participant.id),
             fullscreen: app.video_stage.fullscreen,
             is_me,
+            sharing_screen,
             watched_screen,
             screen_quality: video
                 .filter(|_| watched_screen)
@@ -618,11 +623,11 @@ impl Spk {
             actions: available,
             revealed: reveal_actions,
             compact,
+            screen_overlay,
         } = controls;
         let id = participant.id.to_owned();
         let watch_id = id.clone();
         let theater_id = id.clone();
-        let watched_screen = available.watched_screen;
         let viewers = sidebar.viewers(&call.channel_id, participant.id);
         let row = div()
             .absolute()
@@ -630,13 +635,13 @@ impl Spk {
             .left_2()
             .right_2()
             .flex()
-            .when(!watched_screen, |row| row.flex_wrap())
-            .when(watched_screen, |row| row.min_h(CONTROL_HEIGHT))
+            .when(!screen_overlay, |row| row.flex_wrap())
+            .when(screen_overlay, |row| row.min_h(CONTROL_HEIGHT))
             .items_center()
             .justify_end()
             .gap_1()
             .when(available.live && !viewers.is_empty(), |row| {
-                if watched_screen {
+                if screen_overlay {
                     row.child(screen_viewers(&viewers, compact, sidebar, cx))
                 } else {
                     let names = viewers.iter().map(|viewer| viewer.name).collect::<Vec<_>>();
@@ -652,7 +657,7 @@ impl Spk {
                     )
                 }
             });
-        if watched_screen && !reveal_actions {
+        if screen_overlay && !reveal_actions {
             return row;
         }
         let watch = available.permits(TileAction::Watch).then(|| {
@@ -677,7 +682,7 @@ impl Spk {
                 app.apply_tile_action(&watch_id, TileAction::Watch, &available, window, cx);
             }))
         });
-        let (watch, stop) = if watched_screen {
+        let (watch, screen_watch) = if screen_overlay {
             (None, watch)
         } else {
             (watch, None)
@@ -687,13 +692,13 @@ impl Spk {
                 .flex()
                 .items_center()
                 .gap_1()
-                .when(watched_screen, |row| row.gap_0p5().flex_shrink_0())
+                .when(screen_overlay, |row| row.gap_0p5().flex_shrink_0())
                 .when(!reveal_actions, |actions| {
                     actions
                         .invisible()
                         .group_hover("voice-tile", |style| style.visible())
                 })
-                .children(stop)
+                .children(screen_watch)
                 .when(available.is_me && available.live, |row| {
                     let label = if self.video_stage.hide_preview {
                         "Show preview"
