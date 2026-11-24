@@ -1,4 +1,4 @@
-use std::{borrow::Cow, cmp::Reverse, collections::HashSet, ops::Range};
+use std::{borrow::Cow, cell::RefCell, cmp::Reverse, collections::HashSet, ops::Range};
 
 use ::markdown::{ParseOptions, mdast::Node};
 use url::Url;
@@ -39,20 +39,28 @@ pub(crate) fn message_markdown<'a, 'b>(
     render_message(source, name_of, revealed, spoiler_link, None)
 }
 
+pub(crate) struct SpoilerRange {
+    pub offset: usize,
+    pub body: Range<usize>,
+    pub revealed: bool,
+}
+
 pub(crate) fn styled_message_markdown<'a, 'b>(
     source: &'a str,
     name_of: impl Fn(&str) -> &'b str,
     revealed: impl Fn(usize) -> bool,
     spoiler_link: &str,
     own_id: Option<&str>,
-) -> Cow<'a, str> {
-    render_message(
+) -> (Cow<'a, str>, Vec<SpoilerRange>) {
+    let spoilers = RefCell::new(Vec::new());
+    let markdown = render_message(
         source,
         name_of,
         revealed,
         Some(spoiler_link),
-        Some(own_id.unwrap_or_default()),
-    )
+        Some((own_id.unwrap_or_default(), &spoilers)),
+    );
+    (markdown, spoilers.into_inner())
 }
 
 fn render_message<'a, 'b>(
@@ -60,7 +68,7 @@ fn render_message<'a, 'b>(
     name_of: impl Fn(&str) -> &'b str,
     revealed: impl Fn(usize) -> bool,
     spoiler_link: Option<&str>,
-    styled_for: Option<&str>,
+    styled_for: Option<(&str, &RefCell<Vec<SpoilerRange>>)>,
 ) -> Cow<'a, str> {
     if !source.contains("<@")
         && !source.contains("||")
@@ -145,7 +153,7 @@ fn find_edits<'a>(
     name_of: &impl Fn(&str) -> &'a str,
     revealed: &impl Fn(usize) -> bool,
     spoiler_link: Option<&str>,
-    styled_for: Option<&str>,
+    styled_for: Option<(&str, &RefCell<Vec<SpoilerRange>>)>,
     edits: &mut Vec<(Range<usize>, String)>,
 ) {
     let Some(children) = parent.children() else {
@@ -185,16 +193,23 @@ fn find_edits<'a>(
                             if source[open.end..marker.start].trim().is_empty() {
                                 continue;
                             }
-                            if !preview && revealed(open.start) {
+                            if let (Some(link), Some((_, spoilers))) = (spoiler_link, styled_for) {
+                                let shown = revealed(open.start);
+                                spoilers.borrow_mut().push(SpoilerRange {
+                                    offset: open.start,
+                                    body: open.end..marker.start,
+                                    revealed: shown,
+                                });
+                                let kind = if shown { "shown" } else { "hidden" };
+                                edits.push((
+                                    open.start..marker.end,
+                                    format!("![{kind}]({link}{})", open.start),
+                                ));
+                            } else if !preview && revealed(open.start) {
                                 edits.push((open, String::new()));
                                 edits.push((marker, String::new()));
                             } else {
                                 let label = match spoiler_link {
-                                    Some(link) if styled_for.is_some() => {
-                                        let text = plain_text(&source[open.end..marker.start]);
-                                        let width = text.chars().count();
-                                        format!("![{width}]({link}{})", open.start)
-                                    }
                                     Some(link) => format!("[Reveal spoiler]({link}{})", open.start),
                                     None => "▒▒▒".into(),
                                 };
@@ -219,7 +234,7 @@ fn find_edits<'a>(
                         } else {
                             escape_markdown(name)
                         };
-                        let label = if let Some(own_id) = styled_for {
+                        let label = if let Some((own_id, _)) = styled_for {
                             let kind = if own_id == id { "self" } else { "other" };
                             format!("![@{name}](spk-mention:{kind})")
                         } else {
@@ -386,7 +401,7 @@ mod tests {
     #[test]
     fn styled_mentions_use_distinct_markers_and_respect_code_and_spoilers() {
         let source = "<@alice> <@bob> `<@alice>` ||<@bob>|| ![spoof](spk-mention:self)";
-        let styled = styled_message_markdown(
+        let (styled, spoilers) = styled_message_markdown(
             source,
             |id| if id == "alice" { "Alice" } else { "Bob" },
             |_| false,
@@ -397,7 +412,9 @@ mod tests {
             styled.starts_with("![@Alice](spk-mention:self) ![@Bob](spk-mention:other) `<@alice>`")
         );
         assert_eq!(styled.matches("spk-mention:").count(), 2);
-        assert!(styled.contains("![6](spk-spoiler:test:"));
+        assert!(styled.contains("![hidden](spk-spoiler:test:"));
+        assert_eq!(spoilers.len(), 1);
+        assert_eq!(&source[spoilers[0].body.clone()], "<@bob>");
         assert!(!styled.contains("||"));
         assert!(styled.ends_with(" spoof"));
     }

@@ -7,6 +7,7 @@ impl Spk {
         embed: &ChatEmbed,
         description: Option<TextView>,
         now: i64,
+        window: &Window,
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
@@ -69,55 +70,75 @@ impl Spk {
             .children(description)
             .when(!embed.fields.is_empty(), |card| {
                 let app = cx.weak_entity();
-                card.child(div().flex().flex_wrap().gap_x_4().gap_y_1().children(
-                    embed.fields.iter().enumerate().map(|(index, field)| {
-                        let link = field.link();
-                        let full_row = !field.inline
-                            || field.value.encode_utf16().count() > 40
-                            || link.is_some();
-                        let element = div()
-                            .id(("embed-field", index))
-                            .min_w_0()
-                            .flex_basis(if full_row {
-                                relative(1.).into()
-                            } else {
-                                Length::from(rems(11.))
-                            })
-                            .flex_grow_1()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                Label::new(field.name.clone())
-                                    .text_xs()
-                                    .font_semibold()
-                                    .text_color(theme.muted_foreground),
-                            );
-                        if let Some(link) = link {
-                            let app = app.clone();
-                            element.child(
-                                Button::new("embed-field-link")
-                                    .link()
-                                    .w_full()
-                                    .h_auto()
-                                    .tab_stop(true)
-                                    .accessibility_label(field.value.clone())
-                                    .child(
-                                        div()
-                                            .w_full()
-                                            .min_w_0()
-                                            .whitespace_normal()
-                                            .text_color(theme.primary)
-                                            .child(field.value.clone()),
-                                    )
-                                    .on_click(move |_, _, cx| {
-                                        search::activate_chat_link(&app, link.clone(), cx);
-                                    }),
+                let columns = self.webhook_field_columns.clone();
+                let gap = window.rem_size();
+                let minimum = gap * 11.;
+                card.child(
+                    div()
+                        .relative()
+                        .grid()
+                        .grid_cols(columns.get())
+                        .gap_x(gap)
+                        .gap_y_1()
+                        .child(
+                            canvas(
+                                move |bounds, window, _| {
+                                    let count =
+                                        (f32::from((bounds.size.width + gap) / (minimum + gap)))
+                                            .floor()
+                                            .max(1.) as u16;
+                                    if columns.replace(count) != count {
+                                        window.request_animation_frame();
+                                    }
+                                },
+                                |_, (), _, _| {},
                             )
-                        } else {
-                            element.child(Label::new(field.value.clone()))
-                        }
-                    }),
-                ))
+                            .absolute()
+                            .inset_0(),
+                        )
+                        .children(embed.fields.iter().enumerate().map(|(index, field)| {
+                            let link = field.link();
+                            let full_row = !field.inline
+                                || field.value.encode_utf16().count() > 40
+                                || link.is_some();
+                            let element = div()
+                                .id(("embed-field", index))
+                                .min_w_0()
+                                .when(full_row, |field| field.col_span_full())
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    Label::new(field.name.clone())
+                                        .text_xs()
+                                        .font_semibold()
+                                        .text_color(theme.muted_foreground),
+                                );
+                            if let Some(link) = link {
+                                let app = app.clone();
+                                element.child(
+                                    Button::new("embed-field-link")
+                                        .link()
+                                        .w_full()
+                                        .h_auto()
+                                        .tab_stop(true)
+                                        .accessibility_label(field.value.clone())
+                                        .child(
+                                            div()
+                                                .w_full()
+                                                .min_w_0()
+                                                .whitespace_normal()
+                                                .text_color(theme.primary)
+                                                .child(field.value.clone()),
+                                        )
+                                        .on_click(move |_, _, cx| {
+                                            search::activate_chat_link(&app, link.clone(), cx);
+                                        }),
+                                )
+                            } else {
+                                element.child(Label::new(field.value.clone()))
+                            }
+                        })),
+                )
             })
             .when_some(footer, |card, footer| {
                 card.child(
