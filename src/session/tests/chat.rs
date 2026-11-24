@@ -409,17 +409,11 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat|
             chat.draft.body.is_empty() && !chat.outgoing.is_empty()
         )).await;
-        tx.send(Command::SendChatMessage {
-            channel_id: "general".into(),
-            body: "Next message".into(),
-        }).await.unwrap();
-        let second = receive_chat_send(&mut peer, "general", "Next message").await;
-        assert_ne!(first["nonce"], second["nonce"]);
         tx.send(Command::UpdateChatDraft {
             channel_id: "general".into(), body: "Newest draft".into(),
         }).await.unwrap();
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| chat.draft.body == "Newest draft")).await;
         receive_typing(&mut peer, "general").await;
-        live(&mut peer, &message("m3-early", 3, "alice", "Next message"), second["nonce"].as_str()).await;
         peer.send(Message::text(
             value!({"type":"message:error","nonce":first["nonce"],"error":"Slow down"}).to_string(),
         ))
@@ -433,14 +427,14 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         tx.send(Command::RetryChatSend(first["nonce"].as_str().unwrap().into())).await.unwrap();
         let retry = receive_chat_send(&mut peer, "general", "Hi from desktop").await;
         assert_ne!(first["nonce"], retry["nonce"]);
-        let sent = message("m3", 4, "alice", "Hi from desktop <@alice>");
+        let sent = message("m3", 3, "alice", "Hi from desktop <@alice>");
         live(&mut peer, &sent, retry["nonce"].as_str()).await;
         live(&mut peer, &sent, retry["nonce"].as_str()).await;
         wait_for_sidebar(&rx, |view| {
             assert!(view.alerts.is_empty(), "self-authored frames must stay silent");
             view.chat.as_ref().is_some_and(|chat| {
-                chat.messages.iter().map(|message| message.id.as_str()).eq(["m1", "m2", "m3-early", "m3"])
-                    && chat.messages[3].poll.is_none()
+                chat.messages.iter().map(|message| message.id.as_str()).eq(["m1", "m2", "m3"])
+                    && chat.messages[2].poll.is_none()
                     && chat.draft.body == "Newest draft"
             })
         }).await;
@@ -753,6 +747,26 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
             chat.channel_id == "quiet" && !chat.loading() && chat.draft.body == "Quiet draft"
         })).await;
+
+        // Both sends can be queued in the same conversation before either echo arrives.
+        let mut sends = Vec::new();
+        for body in ["First queued", "Second queued"] {
+            tx.send(Command::SendChatMessage { channel_id: "quiet".into(), body: body.into() }).await.unwrap();
+            sends.push(receive_chat_send(&mut peer, "quiet", body).await);
+        }
+        assert_ne!(sends[0]["nonce"], sends[1]["nonce"]);
+        tx.send(Command::UpdateChatDraft { channel_id: "quiet".into(), body: "Third draft".into() }).await.unwrap();
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat|
+            chat.draft.body == "Third draft" && chat.outgoing.len() == 2
+        )).await;
+        for i in [1, 0] {
+            let nonce = sends[i]["nonce"].as_str();
+            let message = value!({"id":format!("quiet-{i}"),"channelId":"quiet","userId":"alice","createdAt":i,"body":sends[i]["body"]});
+            live(&mut peer, &message, nonce).await;
+            wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat|
+                chat.draft.body == "Third draft" && chat.outgoing.len() == i
+            )).await;
+        }
 
         tx.close();
         assert!(matches!(session.await.unwrap(), SessionEnd::Closed));
