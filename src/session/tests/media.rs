@@ -364,6 +364,163 @@ async fn desktop_voice_routes_samples_and_synchronizes_presence() {
     assert!(matches!(end, SessionEnd::Closed));
 }
 
+#[tokio::test]
+async fn missing_remote_microphone_connects_locally_until_the_peer_mutes() {
+    let (peers, mut arrivals) = tokio::sync::mpsc::unbounded_channel();
+    let (mute, muted) = oneshot::channel();
+    let end = voice_session(
+        start_call(peers),
+        async |listener, requests, snapshots| {
+            let mut socket = accept_async(listener.accept().await.unwrap().0)
+                .await
+                .unwrap();
+            let join = accept_voice_join(&requests, &mut socket, "first").await;
+            acknowledge_voice(&mut socket, &join).await;
+            remote_presence(&mut socket, "missing", false).await;
+            remote_presence(&mut socket, "muted", true).await;
+            muted.await.unwrap();
+            remote_presence(&mut socket, "missing", true).await;
+            mirror_presence_until_leave(&mut socket, &join, "first", &snapshots).await;
+        },
+        async |commands, views| {
+            request_first_voice(&commands, &views).await;
+            let _peer = arrivals.recv().await.unwrap();
+            let waiting = wait_for_sidebar(&views, |sidebar| {
+                sidebar.participants("first").len() == 2
+                    && sidebar
+                        .voice
+                        .as_ref()
+                        .is_some_and(|voice| voice.is_participating())
+            })
+            .await;
+            assert!(
+                waiting
+                    .participants("first")
+                    .iter()
+                    .all(|peer| !peer.microphone_connecting)
+            );
+
+            let connecting = wait_for_sidebar(&views, |sidebar| {
+                sidebar
+                    .participants("first")
+                    .iter()
+                    .any(|peer| peer.id == "missing" && peer.microphone_connecting)
+            })
+            .await;
+            assert!(connecting.participants("first").iter().any(|peer| {
+                peer.id == "muted" && peer.flags.muted && !peer.microphone_connecting
+            }));
+            assert!(connecting.voice.as_ref().unwrap().is_participating());
+
+            mute.send(()).unwrap();
+            wait_for_sidebar(&views, |sidebar| {
+                sidebar.participants("first").iter().any(|peer| {
+                    peer.id == "missing" && peer.flags.muted && !peer.microphone_connecting
+                })
+            })
+            .await;
+            commands.send(Command::LeaveVoice).await.unwrap();
+            wait_for_sidebar(&views, |sidebar| sidebar.voice.is_none()).await;
+        },
+    )
+    .await;
+    assert!(matches!(end, SessionEnd::Closed));
+}
+
+#[tokio::test]
+async fn isolated_stuck_subscription_repairs_once_without_rejoining() {
+    let (peers, mut arrivals) = tokio::sync::mpsc::unbounded_channel();
+    let end = voice_session(
+        start_call(peers),
+        async |listener, requests, snapshots| {
+            let mut socket = accept_async(listener.accept().await.unwrap().0)
+                .await
+                .unwrap();
+            let join = accept_voice_join(&requests, &mut socket, "first").await;
+            acknowledge_voice(&mut socket, &join).await;
+            for (id, muted) in [
+                ("stalled", false),
+                ("healthy", false),
+                ("muted", true),
+                ("unknown", false),
+            ] {
+                remote_presence(&mut socket, id, muted).await;
+            }
+            mirror_presence_until_leave(&mut socket, &join, "first", &snapshots).await;
+            assert!(requests.is_empty());
+        },
+        async |commands, views| {
+            request_first_voice(&commands, &views).await;
+            let peer = Arc::new(arrivals.recv().await.unwrap());
+            peer.detach_remote_microphone("stalled");
+            peer.set_remote_microphone_packets("muted", Some(1));
+            peer.set_remote_microphone_packets("unknown", None);
+            let keep_packets_flowing = |peer: Arc<Peer>, id| {
+                tokio::spawn(async move {
+                    for packets in 1.. {
+                        peer.set_remote_microphone_packets(id, Some(packets));
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                })
+            };
+            let healthy = keep_packets_flowing(peer.clone(), "healthy");
+
+            let connecting = wait_for_sidebar(&views, |sidebar| {
+                sidebar
+                    .participants("first")
+                    .iter()
+                    .any(|peer| peer.id == "stalled" && peer.microphone_connecting)
+            })
+            .await;
+            assert_eq!(
+                connecting
+                    .participants("first")
+                    .iter()
+                    .filter(|peer| peer.microphone_connecting)
+                    .map(|peer| peer.id)
+                    .collect::<Vec<_>>(),
+                ["stalled"]
+            );
+            assert!(peer.microphone_repairs().is_empty());
+
+            while peer.microphone_repairs().is_empty() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            tokio::time::sleep(Duration::from_millis(1100)).await;
+            assert_eq!(peer.microphone_repairs(), ["stalled"]);
+
+            let recovering = keep_packets_flowing(peer.clone(), "stalled");
+            let recovered = wait_for_sidebar(&views, |sidebar| {
+                sidebar
+                    .participants("first")
+                    .iter()
+                    .all(|peer| !peer.microphone_connecting)
+            })
+            .await;
+            assert!(recovered.voice.as_ref().unwrap().is_participating());
+            assert_eq!(peer.exchange(0, 25).1, Some(25));
+            assert_eq!(peer.microphone_repairs(), ["stalled"]);
+            healthy.abort();
+            recovering.abort();
+
+            commands.send(Command::LeaveVoice).await.unwrap();
+            wait_for_sidebar(&views, |sidebar| sidebar.voice.is_none()).await;
+        },
+    )
+    .await;
+    assert!(matches!(end, SessionEnd::Closed));
+}
+
+async fn remote_presence(socket: &mut WebSocketStream<TcpStream>, id: &str, muted: bool) {
+    socket
+        .send(Message::text(
+            value!({"type":"voice:presence","userId":id,"channelId":"first","muted":muted})
+                .to_string(),
+        ))
+        .await
+        .unwrap();
+}
+
 async fn wait_for_route(
     views: &Receiver<View>,
     status: VoiceStatus,

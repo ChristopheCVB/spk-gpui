@@ -94,6 +94,8 @@ def run_peers(command, signaling, key, secret, room, timeout=300):
         **os.environ,
         "SPK_TEST_LIVEKIT": f"ws://127.0.0.1:{signaling}",
         "SPK_TEST_PUBLISHER": token(key, secret, room, "alice", lifetime),
+        "SPK_TEST_HEALTHY_PUBLISHER": token(key, secret, room, "healthy", lifetime),
+        "SPK_TEST_MUTED_PUBLISHER": token(key, secret, room, "muted", lifetime),
         "SPK_TEST_RECEIVER": token(key, secret, room, "bob", lifetime),
     }
     subprocess.run(command, env=environment, check=True, timeout=timeout)

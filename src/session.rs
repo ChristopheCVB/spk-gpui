@@ -1268,6 +1268,7 @@ async fn watch_session(
                             settings.sounds.play(cue, rising);
                         }
                         voice.prune_watching(&mut sidebar);
+                        voice.sync_remote_audio_presence(&mut sidebar);
                         if own_update {
                             voice.own_presence_updated(&mut sidebar);
                         }

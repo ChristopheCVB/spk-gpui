@@ -527,7 +527,7 @@ async fn voice_session_with_activity(
         .await
     };
 
-    timeout(Duration::from_secs(7), async {
+    timeout(Duration::from_secs(15), async {
         tokio::select! {
             () = http => unreachable!(),
             ((), (), end) = async { tokio::join!(server(sockets, requests, update_snapshots), desktop(command_tx, view_rx), session) } => end,
@@ -1528,6 +1528,7 @@ fn local_cues_follow_first_ready_report_and_explicit_leave() {
             speakers: None,
             diagnostics: Default::default(),
             echo_reference_unavailable: false,
+            connecting_microphones: HashSet::new(),
             speaking: HashSet::new(),
         })
     };

@@ -990,6 +990,7 @@ pub(super) fn joined_participants<'a>(
                 id,
                 name: sidebar.profile.name(),
                 flags: Default::default(),
+                microphone_connecting: false,
                 video: None,
             },
         );

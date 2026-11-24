@@ -1093,7 +1093,10 @@ impl Spk {
             )
             .children(participants.into_iter().enumerate().map(|(index, person)| {
                 let flags = person.flags;
-                let speaking = flags.speaking && !flags.muted && !flags.deafened;
+                let speaking = flags.speaking
+                    && !flags.muted
+                    && !flags.deafened
+                    && !person.microphone_connecting;
                 let presence = sidebar.user_presence(person.id);
                 let presence_color = super::profile::user_presence_color(presence, cx);
                 let last = index + 1 == participant_count;
@@ -1102,6 +1105,9 @@ impl Spk {
                     .role(Role::Group)
                     .aria_label(person.name.to_owned())
                     .when(speaking, |row| row.aria_description("Speaking"))
+                    .when(person.microphone_connecting, |row| {
+                        row.aria_description("Microphone connecting").opacity(0.75)
+                    })
                     .relative()
                     .flex()
                     .items_center()
@@ -1164,6 +1170,14 @@ impl Spk {
                             .truncate()
                             .text_color(theme.muted_foreground),
                     )
+                    .when(person.microphone_connecting, |row| {
+                        row.child(
+                            Label::new("Connecting…")
+                                .text_xs()
+                                .flex_shrink_0()
+                                .text_color(theme.muted_foreground),
+                        )
+                    })
                     .children(participant_status(flags.muted, flags.deafened, cx))
                     .when(flags.radio_listening == Some(true), |row| {
                         row.child(radio_badge(cx))
