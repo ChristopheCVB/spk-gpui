@@ -999,6 +999,7 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
         assert_eq!(vote.header("cookie"), Some("session=bob"));
         let mut poll = latest[3]["poll"].clone();
         poll["options"][0]["userIds"] = value!(["bob"]);
+        poll["options"][1]["userIds"] = value!(["alice"]);
         poll_update(&mut alice_peer, "private", "private-4", &poll).await;
         poll_update(&mut bob_peer, "private", "private-4", &poll).await;
         vote.respond(&[], &value!({"channelId":"private","messageId":"private-4","poll":poll}).to_string()).await;
@@ -1010,6 +1011,109 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
                     .is_some_and(|poll| poll.options[0].user_ids == ["bob"])
             }).await;
         }
+
+        // The latest loaded votes require confirmation even if the edit was prepared earlier.
+        let options = || vec![
+            crate::api::PollEditOption { id: Some("now".into()), label: "  Right now ".into() },
+            crate::api::PollEditOption { id: None, label: "Tomorrow".into() },
+        ];
+        let edit = |reset_votes| {
+            let (completed, result) = tokio::sync::oneshot::channel();
+            (Command::EditChatPoll {
+                channel_id: "private".into(),
+                message_id: "private-4".into(),
+                question: "  When suits you? ".into(),
+                options: options(),
+                reset_votes,
+                completed,
+            }, result)
+        };
+        let (command, result) = edit(None);
+        alice.send(command).await.unwrap();
+        assert!(result.await.unwrap().is_err());
+        let (command, result) = edit(None);
+        bob.send(command).await.unwrap();
+        assert_eq!(result.await.unwrap(), Ok(PollEditOutcome::ConfirmVoteChange));
+        assert!(requests.is_empty());
+
+        let (command, result) = edit(Some(false));
+        bob.send(command).await.unwrap();
+        let edited_options = value!([{"id":"now","label":"Right now"},{"label":"Tomorrow"}]);
+        let patch = chat_action_request(&requests, "PATCH /api/messages/private-4 HTTP/1.1", value!({
+            "body":"When suits you?","poll":edited_options,"resetVotes":false
+        })).await;
+        assert_eq!(patch.header("cookie"), Some("session=bob"));
+        patch.respond_raw("500 Server error", &[], b"").await;
+        assert!(result.await.unwrap().is_err());
+        let refused = wait_for_sidebar(&bob_views, |view| {
+            view.chat.as_ref().unwrap().action_outcome.as_ref().is_some_and(|outcome| outcome.error.is_some())
+        }).await;
+        assert_eq!(refused.chat.unwrap().messages[1].body, "When should we meet?");
+
+        let (command, result) = edit(Some(false));
+        bob.send(command).await.unwrap();
+        let patch = chat_action_request(&requests, "PATCH /api/messages/private-4 HTTP/1.1", value!({
+            "body":"When suits you?","poll":edited_options,"resetVotes":false
+        })).await;
+        let mut edited = latest[3].clone();
+        edited["body"] = value!("When suits you?");
+        edited["editedAt"] = value!(5);
+        edited["poll"]["options"] = value!([
+            {"id":"now","label":"Right now","userIds":["bob"]},
+            {"id":"tomorrow","label":"Tomorrow","userIds":[]}
+        ]);
+        let event = value!({"type":"message:edit","message":edited});
+        alice_peer.send(Message::text(event.to_string())).await.unwrap();
+        patch.respond(&[], &edited.to_string()).await;
+        assert_eq!(result.await.unwrap(), Ok(PollEditOutcome::Saved));
+        for views in [&alice_views, &bob_views] {
+            wait_for_sidebar(views, |view| {
+                view.chat.as_ref().unwrap().messages.last().is_some_and(|message| {
+                    message.body == "When suits you?" && message.edited_at.is_some()
+                        && message.poll.as_ref().is_some_and(|poll| {
+                            poll.options[0].label == "Right now" && poll.options[0].user_ids == ["bob"]
+                                && poll.options[1].id == "tomorrow" && poll.options[1].user_ids.is_empty()
+                        })
+                })
+            }).await;
+        }
+
+        bob.send(Command::MutateChatMessage {
+            channel_id: "private".into(), message_id: "private-4".into(),
+            action: MessageAction::Edit("When should we go?".into()),
+        }).await.unwrap();
+        let patch = chat_action_request(&requests, "PATCH /api/messages/private-4 HTTP/1.1",
+            value!({"body":"When should we go?"})).await;
+        edited["body"] = value!("When should we go?");
+        patch.respond(&[], &edited.to_string()).await;
+        wait_for_sidebar(&bob_views, |view| {
+            let message = view.chat.as_ref().unwrap().messages.last().unwrap();
+            message.body == "When should we go?"
+                && message.poll.as_ref().is_some_and(|poll| poll.options[0].user_ids == ["bob"])
+        }).await;
+
+        let (command, result) = edit(Some(true));
+        bob.send(command).await.unwrap();
+        let patch = chat_action_request(&requests, "PATCH /api/messages/private-4 HTTP/1.1", value!({
+            "body":"When suits you?","poll":edited_options,"resetVotes":true
+        })).await;
+        edited["poll"]["options"][0]["userIds"] = value!([]);
+        patch.respond(&[], &edited.to_string()).await;
+        assert_eq!(result.await.unwrap(), Ok(PollEditOutcome::Saved));
+        wait_for_sidebar(&bob_views, |view| {
+            view.chat.as_ref().unwrap().messages.last()
+                .and_then(|message| message.poll.as_ref())
+                .is_some_and(|poll| poll.total_votes() == 0)
+        }).await;
+        bob.send(Command::MutateChatMessage {
+            channel_id: "private".into(), message_id: "private-4".into(), action: MessageAction::Delete,
+        }).await.unwrap();
+        let (line, request) = requests.recv().await.unwrap();
+        assert_eq!(line, "DELETE /api/messages/private-4 HTTP/1.1");
+        request.respond(&[], r#"{"ok":true}"#).await;
+        alice_peer.send(Message::text(value!({"type":"message:delete","channelId":"private","id":"private-4"}).to_string())).await.unwrap();
+        wait_for_messages(&alice_views, &["private-2", "private-3"]).await;
+        wait_for_messages(&bob_views, &["private-2"]).await;
 
         bob.send(Command::UpdateChatDraft { channel_id: "private".into(), body: "Unsent draft".into() }).await.unwrap();
         receive_typing(&mut bob_peer, "private").await;
@@ -1062,7 +1166,14 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
         }
 
         // The server orders Pins by pin time, even when the most recently pinned Message is oldest.
-        let older = value!({"id":"older-pin","channelId":"private","userId":"bob","body":"Older pin outside history","createdAt":0,"pinned":true,"pinnedAt":5});
+        let older = value!({
+            "id":"older-pin","channelId":"private","userId":"bob","body":"Tea or coffee?",
+            "createdAt":0,"pinned":true,"pinnedAt":5,
+            "poll":{"options":[
+                {"id":"tea","label":"Tea","userIds":[]},
+                {"id":"coffee","label":"Coffee","userIds":[]}
+            ]}
+        });
         let recent = value!({"id":"private-2","channelId":"private","userId":"bob","body":body,"createdAt":2,"pinned":true,"pinnedAt":4});
         *pinned_messages.lock().unwrap() = vec![older.clone(), recent];
         bob_peer.send(Message::text(value!({
@@ -1074,6 +1185,8 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
         }).await;
         let chat = view.chat.as_ref().unwrap();
         assert!(chat.messages.iter().all(|message| message.id != "older-pin"));
+        let Some(Pins::Ready(pins)) = &chat.pins else { unreachable!() };
+        assert_eq!(pins[0].body, "Tea or coffee?");
         bob.send(Command::JumpToChatMessage {
             channel_id: chat.channel_id.clone(), message_id: "older-pin".into()
         }).await.unwrap();
@@ -1082,7 +1195,13 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
         assert_eq!(request.header("cookie"), Some("session=bob"));
         page(request, &[older], false).await;
         wait_for_sidebar(&bob_views, |view| {
-            view.chat.as_ref().unwrap().jump.as_ref().is_some_and(|jump| jump.message_id == "older-pin")
+            let chat = view.chat.as_ref().unwrap();
+            chat.jump.as_ref().is_some_and(|jump| jump.message_id == "older-pin")
+                && chat.messages.iter().any(|message| {
+                    message.id == "older-pin" && message.poll.as_ref().is_some_and(|poll| {
+                        poll.options.iter().map(|option| option.id.as_str()).eq(["tea", "coffee"])
+                    })
+                })
         }).await;
         alice.close();
         bob.close();
@@ -1136,6 +1255,10 @@ async fn admin_message_moderation_is_role_gated_and_updates_a_peer() {
         let url = "https://example.test/moderation";
         let mut target = message("target", 1, "charlie", url);
         target["previews"] = value!([{"url":url,"title":"Moderated card","image":false}]);
+        target["poll"] = value!({"options":[
+            {"id":"yes","label":"Yes","userIds":["charlie"]},
+            {"id":"no","label":"No","userIds":[]}
+        ]});
         for (commands, views, cookie) in [
             (&alice, &alice_views, "session=alice"),
             (&bob, &bob_views, "session=bob"),

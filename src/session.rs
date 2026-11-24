@@ -60,8 +60,8 @@ pub use {
     avatars::AvatarPhoto,
     channel_admin::{ChannelAction, ChannelAdmin, ChannelKind},
     chat::{
-        AttachmentInput, ChatView, Delivery, GifPickerView, Pins, UploadStatus, image_preview,
-        validate_poll,
+        AttachmentInput, ChatView, Delivery, GifPickerView, Pins, PollEditOutcome, PollEditReply,
+        UploadStatus, image_preview, validate_poll,
     },
     presence::Participant,
     profiles::ProfileEdit,
@@ -174,6 +174,14 @@ pub enum Command {
         channel_id: String,
         message_id: String,
         action: MessageAction,
+    },
+    EditChatPoll {
+        channel_id: String,
+        message_id: String,
+        question: String,
+        options: Vec<crate::api::PollEditOption>,
+        reset_votes: Option<bool>,
+        completed: PollEditReply,
     },
     RetryChatPins(String),
     LoadChangelog {
@@ -933,6 +941,16 @@ async fn watch_session(
                 Ok(Command::MarkChatSendDelivered(channel)) => chat.mark_send_delivered(&channel),
                 Ok(Command::MutateChatMessage { channel_id, message_id, action }) => {
                     chat.mutate(client, &sidebar, &channel_id, message_id, action);
+                }
+                Ok(Command::EditChatPoll { channel_id, message_id, question, options, reset_votes, completed }) => {
+                    let result = chat.prepare_poll_edit(
+                        &sidebar, &channel_id, &message_id, &question, options, reset_votes,
+                    );
+                    match result {
+                        Ok(Some(action)) => chat.start_message_action(client, &channel_id, message_id, action, Some(completed)),
+                        Ok(None) => { let _ = completed.send(Ok(PollEditOutcome::ConfirmVoteChange)); }
+                        Err(error) => { let _ = completed.send(Err(error)); }
+                    }
                 }
                 Ok(Command::RetryChatPins(channel_id)) => chat.retry_pins(client, &channel_id),
                 Ok(command @ (Command::SaveNickname(_) | Command::UploadAvatar(_) | Command::InspectProfileEmail(..))) => {

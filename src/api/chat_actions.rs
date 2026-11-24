@@ -28,10 +28,25 @@ impl LinkPreview {
     }
 }
 
+#[derive(Serialize)]
+pub struct PollEditOption {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub label: String,
+}
+
 pub enum MessageAction {
     Edit(String),
+    EditPoll {
+        body: String,
+        options: Vec<PollEditOption>,
+        reset_votes: bool,
+    },
     Delete,
-    React { emoji: String, on: bool },
+    React {
+        emoji: String,
+        on: bool,
+    },
     Vote(Option<String>),
     Pin(bool),
     RemovePreview(String),
@@ -72,6 +87,15 @@ impl SpkClient {
 
         let (method, route, body) = match &action {
             MessageAction::Edit(body) => (Method::PATCH, None, Some(json!({ "body": body }))),
+            MessageAction::EditPoll {
+                body,
+                options,
+                reset_votes,
+            } => (
+                Method::PATCH,
+                None,
+                Some(json!({ "body": body, "poll": options, "resetVotes": reset_votes })),
+            ),
             MessageAction::Delete => (Method::DELETE, None, None),
             MessageAction::React { emoji, on } => (
                 Method::POST,
@@ -102,7 +126,7 @@ impl SpkClient {
         };
         let response = Self::send(request).await?;
         match action {
-            MessageAction::Edit(_) => {
+            MessageAction::Edit(_) | MessageAction::EditPoll { .. } => {
                 let message: Box<ChatMessage> = response
                     .json()
                     .await

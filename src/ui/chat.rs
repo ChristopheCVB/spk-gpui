@@ -420,7 +420,9 @@ impl Spk {
         self.begin_message_action(
             &channel_id,
             &message_id,
-            actions::ActionForm::Edit,
+            actions::ActionForm::Edit {
+                show_poll_form: false,
+            },
             window,
             cx,
         );

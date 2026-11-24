@@ -1,7 +1,9 @@
 use super::*;
 
 use super::super::Sidebar;
-use crate::api::{MessageAction, MessageChange};
+use crate::api::{MessageAction, MessageChange, PollEditOption};
+
+const CHANGE_DENIED: &str = "You don’t have permission to change this message.";
 
 #[derive(Clone)]
 pub enum Pins {
@@ -16,13 +18,33 @@ pub struct ActionOutcome {
     pub error: Option<&'static str>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum PollEditOutcome {
+    Saved,
+    ConfirmVoteChange,
+}
+
+pub type PollEditReply = tokio::sync::oneshot::Sender<Result<PollEditOutcome, &'static str>>;
+
 pub(in crate::session) struct PendingAction {
     message_id: String,
     saw_change: bool,
     voting: bool,
+    poll_edit_reply: Option<PollEditReply>,
 }
 
 impl ChatView {
+    fn message(&self, id: &str) -> Option<&ChatMessage> {
+        let pins = match &self.pins {
+            Some(Pins::Ready(messages)) => messages.as_slice(),
+            _ => &[],
+        };
+        self.messages
+            .iter()
+            .chain(pins)
+            .find(|message| message.id == id)
+    }
+
     pub fn can_pin(&self, is_admin: bool) -> bool {
         self.direct_message_peer.is_some() || is_admin
     }
@@ -49,21 +71,13 @@ impl ChatSession {
         if self.pending_action.is_some() || view.channel_id != channel_id || !view.can_send() {
             return;
         }
-        let pins = match &view.pins {
-            Some(Pins::Ready(messages)) => messages.as_slice(),
-            _ => &[],
-        };
-        let Some(message) = view
-            .messages
-            .iter()
-            .chain(pins)
-            .find(|message| message.id == message_id)
-        else {
+        let Some(message) = view.message(&message_id) else {
             return;
         };
         let own = sidebar.profile.id.as_deref() == Some(message.user_id.as_str());
         let allowed = match &action {
             MessageAction::Edit(_) => own,
+            MessageAction::EditPoll { .. } => false,
             MessageAction::Delete | MessageAction::RemovePreview(_) => {
                 sidebar.can_remove_message_content(message)
             }
@@ -74,16 +88,80 @@ impl ChatSession {
         if !allowed {
             view.action_outcome = Some(ActionOutcome {
                 message_id,
-                error: Some("You don’t have permission to change this message."),
+                error: Some(CHANGE_DENIED),
             });
             return;
         }
+        self.start_message_action(client, channel_id, message_id, action, None);
+    }
+
+    pub fn prepare_poll_edit(
+        &self,
+        sidebar: &Sidebar,
+        channel_id: &str,
+        message_id: &str,
+        question: &str,
+        mut options: Vec<PollEditOption>,
+        reset_votes: Option<bool>,
+    ) -> Result<Option<MessageAction>, &'static str> {
+        let view = self
+            .selected
+            .as_ref()
+            .filter(|view| view.channel_id == channel_id && view.can_send())
+            .ok_or("This conversation is unavailable.")?;
+        let message = view
+            .message(message_id)
+            .ok_or("This message is unavailable.")?;
+        if sidebar.profile.id.as_deref() != Some(message.user_id.as_str()) {
+            return Err(CHANGE_DENIED);
+        }
+        let poll = message.poll.as_ref().ok_or("This poll is unavailable.")?;
+        if self.pending_action.is_some() {
+            return Err("A message change is in progress. Try again.");
+        }
+
+        let (body, labels) =
+            validate_poll(question, options.iter().map(|option| option.label.as_str()))?;
+        let changed = poll.options.len() != options.len()
+            || poll.options.iter().zip(options.iter().zip(&labels)).any(
+                |(existing, (option, label))| {
+                    option.id.as_deref() != Some(existing.id.as_str()) || existing.label != *label
+                },
+            );
+        if reset_votes.is_none() && changed && poll.total_votes() > 0 {
+            return Ok(None);
+        }
+        let body = body.to_owned();
+        let trimmed_labels = labels.into_iter().map(str::to_owned).collect::<Vec<_>>();
+        for (option, label) in options.iter_mut().zip(trimmed_labels) {
+            option.label = label;
+        }
+        Ok(Some(MessageAction::EditPoll {
+            body,
+            options,
+            reset_votes: reset_votes.unwrap_or(false),
+        }))
+    }
+
+    pub fn start_message_action(
+        &mut self,
+        client: &SpkClient,
+        channel_id: &str,
+        message_id: String,
+        action: MessageAction,
+        poll_edit_reply: Option<PollEditReply>,
+    ) {
+        let view = self
+            .selected
+            .as_mut()
+            .expect("message action has a selected conversation");
         let client = client.clone();
         let channel_id = channel_id.to_owned();
         self.pending_action = Some(PendingAction {
             message_id: message_id.clone(),
             saw_change: false,
             voting: matches!(action, MessageAction::Vote(_)),
+            poll_edit_reply,
         });
         view.action_pending = true;
         view.action_outcome = None;
@@ -100,28 +178,32 @@ impl ChatSession {
             return;
         };
         view.action_pending = false;
+        let editing_poll = pending.poll_edit_reply.is_some();
+        let error = match result {
+            Ok(_) => None,
+            Err(Failure::Http(reqwest::StatusCode::FORBIDDEN)) => Some(CHANGE_DENIED),
+            Err(Failure::Http(reqwest::StatusCode::NOT_FOUND)) => {
+                Some("This message is unavailable.")
+            }
+            Err(Failure::Http(reqwest::StatusCode::BAD_REQUEST)) if editing_poll => {
+                Some("SPK rejected the poll edit. Check the question and options.")
+            }
+            Err(Failure::Http(reqwest::StatusCode::BAD_REQUEST)) if pending.voting => {
+                Some("SPK rejected the vote. Try again.")
+            }
+            Err(Failure::Http(reqwest::StatusCode::BAD_REQUEST)) => {
+                Some("SPK rejected the change. Check the message or emoji.")
+            }
+            Err(Failure::Http(reqwest::StatusCode::TOO_MANY_REQUESTS)) => {
+                Some("Too many changes. Try again shortly.")
+            }
+            Err(_) if editing_poll => Some("Could not save the poll. Try again."),
+            Err(_) if pending.voting => Some("Could not vote. Try again."),
+            Err(_) => Some("Could not change the message. Try again."),
+        };
         view.action_outcome = Some(ActionOutcome {
             message_id: pending.message_id.clone(),
-            error: match result {
-                Ok(_) => None,
-                Err(Failure::Http(reqwest::StatusCode::FORBIDDEN)) => {
-                    Some("You don’t have permission to change this message.")
-                }
-                Err(Failure::Http(reqwest::StatusCode::NOT_FOUND)) => {
-                    Some("This message is unavailable.")
-                }
-                Err(Failure::Http(reqwest::StatusCode::BAD_REQUEST)) if pending.voting => {
-                    Some("SPK rejected the vote. Try again.")
-                }
-                Err(Failure::Http(reqwest::StatusCode::BAD_REQUEST)) => {
-                    Some("SPK rejected the change. Check the message or emoji.")
-                }
-                Err(Failure::Http(reqwest::StatusCode::TOO_MANY_REQUESTS)) => {
-                    Some("Too many changes. Try again shortly.")
-                }
-                Err(_) if pending.voting => Some("Could not vote. Try again."),
-                Err(_) => Some("Could not change the message. Try again."),
-            },
+            error,
         });
         // Poll votes share the web client's last-arriving HTTP and socket update handling.
         if let Ok(change) = result
@@ -129,6 +211,9 @@ impl ChatSession {
         {
             let channel_id = view.channel_id.clone();
             self.apply_message_change(client, &channel_id, &pending.message_id, change);
+        }
+        if let Some(reply) = pending.poll_edit_reply {
+            let _ = reply.send(error.map_or(Ok(PollEditOutcome::Saved), Err));
         }
     }
 
@@ -145,7 +230,11 @@ impl ChatSession {
             .is_some_and(|view| view.channel_id == channel_id)
             && let Some(pending) = &mut self.pending_action
             && pending.message_id == message_id
-            && !matches!(change, MessageChange::Poll(_))
+            && if pending.poll_edit_reply.is_some() {
+                matches!(change, MessageChange::Edit(_) | MessageChange::Delete)
+            } else {
+                !matches!(change, MessageChange::Poll(_))
+            }
         {
             pending.saw_change = true;
         }

@@ -3,8 +3,8 @@ mod attachments;
 mod gifs;
 mod preview_images;
 
-pub use actions::Pins;
 use actions::{ActionOutcome, PendingAction, change_message};
+pub use actions::{Pins, PollEditOutcome, PollEditReply};
 pub use attachments::{AttachmentInput, UploadStatus, image_preview};
 use attachments::{AttachmentWork, QueuedAttachment};
 pub use gifs::GifPickerView;

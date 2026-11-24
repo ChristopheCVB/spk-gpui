@@ -13,7 +13,7 @@ pub use account_admin::{
 };
 pub use attachments::{Attachment, AttachmentRef, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS};
 pub use channel_admin::{ChannelKind, ChannelMutation};
-pub use chat_actions::{LinkPreview, MessageAction, MessageChange, Reaction};
+pub use chat_actions::{LinkPreview, MessageAction, MessageChange, PollEditOption, Reaction};
 pub use gifs::{GifItem, GifPage, image_message_url};
 pub(crate) use public_media::{PublicDns, public_media_url};
 pub use search::{MessageTarget, SearchHit, SearchPage, SearchScope, conversation_link};
