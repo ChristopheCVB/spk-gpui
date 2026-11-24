@@ -2,6 +2,7 @@ use gpui_kit::{
     base::FocusTrapElement,
     component::{
         Disableable,
+        kbd::Kbd,
         menu::{DropdownMenu, PopupMenuItem},
     },
 };
@@ -19,7 +20,7 @@ static SPK_BASE: LazyLock<Url> =
 pub(super) struct SearchPanel {
     spk: WeakEntity<Spk>,
     focus: FocusHandle,
-    return_focus: FocusHandle,
+    return_focus: Option<FocusHandle>,
     query: Entity<InputState>,
     scope: SearchScope,
     selected_result: Option<MessageTarget>,
@@ -28,8 +29,66 @@ pub(super) struct SearchPanel {
 }
 
 impl Spk {
+    pub(super) fn search_query_event(
+        &mut self,
+        _: &Entity<InputState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            InputEvent::Change => {
+                if let Some(panel) = &self.search_panel {
+                    panel.update(cx, |panel, _| panel.selected_result = None);
+                }
+                cx.notify();
+            }
+            InputEvent::Focus
+                if self.search_panel.is_none() && workspace::wide_workspace(window) =>
+            {
+                self.open_message_search(window, cx);
+            }
+            InputEvent::Focus | InputEvent::Blur => cx.notify(),
+            _ => {}
+        }
+    }
+
     pub(super) fn open_message_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_search(false, window, cx);
+    }
+
+    pub(super) fn search_header(&self, window: &Window, cx: &App) -> Div {
+        div()
+            .ml_auto()
+            .w(if window.viewport_size().width >= px(1280.0) {
+                px(288.0)
+            } else {
+                px(224.0)
+            })
+            .min_w(px(96.0))
+            .child(
+                self.search_input(window, cx).suffix(
+                    Kbd::new(Keystroke::parse("/").expect("valid search shortcut"))
+                        .bg(cx.theme().sidebar),
+                ),
+            )
+    }
+
+    fn search_input(&self, window: &Window, cx: &App) -> Input {
+        let theme = cx.theme();
+        let fill = if self.search_query.focus_handle(cx).is_focused(window) {
+            theme.secondary_hover
+        } else {
+            theme.background
+        };
+        surface_input(&self.search_query, fill, cx)
+            .bordered(false)
+            .aria_label("Search messages")
+            .prefix(
+                Icon::new(IconName::Search)
+                    .size(px(16.0))
+                    .text_color(theme.muted_foreground),
+            )
     }
 
     pub(super) fn open_search(
@@ -58,27 +117,19 @@ impl Spk {
             }
             return;
         }
+        let query = self.search_query.clone();
+        let query_focus = query.focus_handle(cx);
         let return_focus = window
             .focused(cx)
-            .filter(|focus| focus != &self.workspace_focus)
-            .unwrap_or_else(|| self.search_button_focus.clone());
+            .filter(|focus| focus != &self.workspace_focus && focus != &query_focus);
         let scope = if everything {
             SearchScope::Everything
         } else {
             conversation_scope(sidebar).map_or(SearchScope::TextChannels, |(scope, _)| scope)
         };
-        let query = cx.new(|cx| InputState::new(window, cx).placeholder("Search messages"));
         let spk = cx.entity();
-        let panel_query = query.clone();
         let panel = cx.new(|cx: &mut Context<SearchPanel>| {
             cx.observe(&spk, |_, _, cx| cx.notify()).detach();
-            cx.subscribe(&panel_query, |this, _, event, cx| {
-                if matches!(event, InputEvent::Change) {
-                    this.selected_result = None;
-                    cx.notify();
-                }
-            })
-            .detach();
             let panel = cx.weak_entity();
             let window_id = window.window_handle().window_id();
             let keyboard = cx.intercept_keystrokes(move |event, window, cx| {
@@ -112,7 +163,7 @@ impl Spk {
                 spk: spk.downgrade(),
                 focus: cx.focus_handle().tab_stop(false),
                 return_focus,
-                query: panel_query,
+                query,
                 scope,
                 selected_result: None,
                 results_scroll: ScrollHandle::new(),
@@ -128,8 +179,8 @@ impl Spk {
             cx,
         );
 
-        query.focus_handle(cx).focus(window, cx);
         self.search_panel = Some(panel);
+        query_focus.focus(window, cx);
     }
 
     pub(super) fn sync_search_conversation(&self, sidebar: &Sidebar, cx: &mut Context<Self>) {
@@ -147,16 +198,31 @@ impl Spk {
     pub(super) fn close_message_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(panel) = self.search_panel.take() {
             let panel = panel.read(cx);
-            if panel.focus.contains_focused(window, cx) {
-                let return_focus = if self.workspace_focus.contains(&panel.return_focus, window) {
-                    panel.return_focus.clone()
-                } else {
-                    self.search_button_focus.clone()
-                };
+            if self.search_query.focus_handle(cx).is_focused(window)
+                || panel.focus.contains_focused(window, cx)
+            {
+                let return_focus = panel
+                    .return_focus
+                    .as_ref()
+                    .filter(|focus| self.workspace_focus.contains(focus, window))
+                    .unwrap_or_else(|| {
+                        if workspace::wide_workspace(window) {
+                            &self.sidebar_toggle_focus
+                        } else {
+                            &self.search_button_focus
+                        }
+                    })
+                    .clone();
                 return_focus.focus(window, cx);
             }
+            self.clear_search_query(window, cx);
             cx.notify();
         }
+    }
+
+    pub(super) fn clear_search_query(&self, window: &mut Window, cx: &mut App) {
+        self.search_query
+            .update(cx, |input, cx| input.set_value("", window, cx));
     }
 
     pub(super) fn dismiss_search_on_escape(
@@ -167,6 +233,7 @@ impl Spk {
     ) {
         if self.search_panel.is_some()
             && !self.video_stage.fullscreen
+            && !window.has_active_dialog(cx)
             && event.keystroke.key == "escape"
             && !event.keystroke.modifiers.modified()
         {
@@ -198,6 +265,16 @@ impl Spk {
             return layer;
         };
         let theme = cx.theme();
+        let viewport_width = window.viewport_size().width;
+        let width = if wide {
+            if viewport_width >= px(1280.0) {
+                px(384.0)
+            } else {
+                px(320.0)
+            }
+        } else {
+            (viewport_width * 0.3).clamp(px(304.0), px(384.0))
+        };
         let search = div()
             .id("search-surface")
             .role(if wide {
@@ -207,11 +284,9 @@ impl Spk {
             })
             .aria_label("Search")
             .h_full()
-            .w((window.viewport_size().width * 0.3).clamp(px(304.0), px(384.0)))
+            .w(width)
             .flex_shrink_0()
-            .border_l_1()
-            .border_color(theme.border)
-            .bg(theme.background)
+            .bg(theme.sidebar)
             .occlude()
             .child(panel.clone());
         if wide {
@@ -385,6 +460,7 @@ impl SearchPanel {
                 .into_owned()
         };
         let copy_target = target.clone();
+        let selected = self.selected_result.as_ref() == Some(&target);
         div()
             .id(SharedString::from(target.message_id().to_owned()))
             .flex()
@@ -398,7 +474,8 @@ impl SearchPanel {
                     .min_w_0()
                     .tab_stop(true)
                     .accessibility_label(accessibility_label)
-                    .selected(self.selected_result.as_ref() == Some(&target))
+                    .selected(selected)
+                    .when(!selected, |button| button.bg(cx.theme().background))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.open_result(target.clone(), window, cx);
                     }))
@@ -438,13 +515,15 @@ impl SearchPanel {
 }
 
 impl Render for SearchPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(spk) = self.spk.upgrade() else {
             return div();
         };
-        let View::SignedIn(sidebar) = &spk.read(cx).view else {
+        let spk = spk.read(cx);
+        let View::SignedIn(sidebar) = &spk.view else {
             return div();
         };
+        let wide = workspace::wide_workspace(window);
         let empty = Default::default();
         let search = if sidebar.search.scope.as_ref() == Some(&self.scope) {
             &sidebar.search
@@ -472,8 +551,6 @@ impl Render for SearchPanel {
             Some("Searching…")
         } else if search.searched && search.results.is_empty() {
             Some("No results.")
-        } else if !search.searched {
-            Some("Use from:, mentions:, in:, has:, before:, or after: to filter.")
         } else {
             None
         };
@@ -483,14 +560,29 @@ impl Render for SearchPanel {
             .size_full()
             .flex()
             .flex_col()
-            .p_3()
-            .gap_2()
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .justify_between()
-                    .child(Label::new("Search").font_semibold())
+                    .p_2()
+                    .gap_2()
+                    .when(wide, |row| {
+                        row.child(div().size(CONTROL_HEIGHT).flex_shrink_0()).child(
+                            div()
+                                .flex_1()
+                                .text_center()
+                                .child(Label::new("Search").font_medium()),
+                        )
+                    })
+                    .when(!wide, |row| {
+                        row.child(div().min_w_0().flex_1().child(spk.search_input(window, cx)))
+                            .child(
+                                control_button("submit-search")
+                                    .label("Search")
+                                    .tab_stop(true)
+                                    .on_click(cx.listener(|this, _, _, cx| this.search(cx))),
+                            )
+                    })
                     .child(
                         tool_button("close-search", IconName::X, "Close search").on_click(
                             move |_, window, cx| {
@@ -502,53 +594,41 @@ impl Render for SearchPanel {
                     ),
             )
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .child(Input::new(&self.query).aria_label("Search messages")),
-                    )
-                    .child(
-                        control_button("submit-search")
-                            .label("Search")
-                            .tab_stop(true)
-                            .on_click(cx.listener(|this, _, _, cx| this.search(cx))),
-                    ),
-            )
-            .child(
-                control_button("search-scope")
-                    .small()
-                    .tab_stop(true)
-                    .ghost()
-                    .child(
-                        control_content()
-                            .child(Label::new(scope))
-                            .child(Icon::new(IconName::ChevronDown).size(ACTION_ICON_SIZE)),
-                    )
-                    .accessibility_label(format!("Search scope, {scope}"))
-                    .dropdown_menu(move |mut menu, _, _| {
-                        for (scope, label) in &scopes {
-                            let checked = scope == &selected;
-                            let scope = scope.clone();
-                            let panel = panel.clone();
-                            menu = menu.item(PopupMenuItem::new(*label).checked(checked).on_click(
-                                move |_, _, cx| {
-                                    let _ = panel.update(cx, |panel, cx| {
-                                        panel.set_scope(scope.clone(), cx);
-                                        panel.search(cx);
-                                    });
-                                },
-                            ));
-                        }
-                        menu
-                    }),
+                div().px_2().pb_2().child(
+                    control_button("search-scope")
+                        .w_full()
+                        .secondary()
+                        .tab_stop(true)
+                        .label(scope)
+                        .dropdown_caret(true)
+                        .accessibility_label(format!("Search scope, {scope}"))
+                        .dropdown_menu(move |mut menu, _, _| {
+                            for (scope, label) in &scopes {
+                                let checked = scope == &selected;
+                                let scope = scope.clone();
+                                let panel = panel.clone();
+                                menu = menu.item(
+                                    PopupMenuItem::new(*label).checked(checked).on_click(
+                                        move |_, _, cx| {
+                                            let _ = panel.update(cx, |panel, cx| {
+                                                panel.set_scope(scope.clone(), cx);
+                                                panel.search(cx);
+                                            });
+                                        },
+                                    ),
+                                );
+                            }
+                            menu
+                        }),
+                ),
             )
             .when_some(status, |panel, text| {
-                panel.child(Label::new(text).text_color(cx.theme().muted_foreground))
+                panel.child(
+                    div()
+                        .p_2()
+                        .text_center()
+                        .child(Label::new(text).text_color(cx.theme().muted_foreground)),
+                )
             })
             .child(
                 div()
@@ -558,6 +638,9 @@ impl Render for SearchPanel {
                     .flex_col()
                     .min_h_0()
                     .flex_1()
+                    .px_2()
+                    .pb_2()
+                    .gap_2()
                     .overflow_y_scroll()
                     .children(
                         search

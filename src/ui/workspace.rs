@@ -370,6 +370,7 @@ impl Spk {
                                 .h_12()
                                 .flex_shrink_0()
                                 .px_3()
+                                .when(wide && self.search_panel.is_some(), |header| header.pr_0())
                                 .bg(theme.sidebar)
                                 .border_b_1()
                                 .border_color(theme.sidebar_border)
@@ -406,23 +407,26 @@ impl Spk {
                                 .when(stage_has_controls, |header| {
                                     header.child(super::voice::connection_diagnostics(cx))
                                 })
-                                .child(
-                                    tool_button(
-                                        "message-search",
-                                        IconName::Search,
-                                        "Search messages",
+                                .when(wide, |header| header.child(self.search_header(window, cx)))
+                                .when(!wide, |header| {
+                                    header.child(
+                                        tool_button(
+                                            "message-search",
+                                            IconName::Search,
+                                            "Search messages",
+                                        )
+                                        .ml_auto()
+                                        .flex_shrink_0()
+                                        .track_focus(&self.search_button_focus)
+                                        .selected(self.search_panel.is_some())
+                                        .on_click(
+                                            cx.listener(|this, _, window, cx| {
+                                                this.search_button_focus.focus(window, cx);
+                                                this.open_message_search(window, cx);
+                                            }),
+                                        ),
                                     )
-                                    .ml_auto()
-                                    .flex_shrink_0()
-                                    .track_focus(&self.search_button_focus)
-                                    .selected(self.search_panel.is_some())
-                                    .on_click(cx.listener(
-                                        |this, _, window, cx| {
-                                            this.search_button_focus.focus(window, cx);
-                                            this.open_message_search(window, cx);
-                                        },
-                                    )),
-                                ),
+                                }),
                         )
                     })
                     .when(sidebar.load_failed, |area| {

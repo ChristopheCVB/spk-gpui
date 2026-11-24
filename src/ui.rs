@@ -89,6 +89,7 @@ pub(super) struct Spk {
     new_text_channel_focus: FocusHandle,
     new_voice_channel_focus: FocusHandle,
     search_button_focus: FocusHandle,
+    search_query: Entity<InputState>,
     search_panel: Option<Entity<search::SearchPanel>>,
     voice_strip_toggle_focus: FocusHandle,
     quick_switcher: Option<WeakEntity<gpui_kit::component::command::CommandState>>,
@@ -139,6 +140,9 @@ impl Spk {
             input
         });
         let nickname = cx.new(|cx| InputState::new(window, cx));
+        let search_query = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
+        cx.subscribe_in(&search_query, window, Self::search_query_event)
+            .detach();
         let chat_input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(1, 6)
@@ -400,6 +404,7 @@ impl Spk {
                             this.device_picker = None;
                             this.close_sidebar_drawer(window, cx);
                             this.search_panel = None;
+                            this.clear_search_query(window, cx);
                             this.dismiss_workspace_dialogs(window, cx);
                         }
                         this.focus_account_input(&view, window, cx);
@@ -415,6 +420,7 @@ impl Spk {
                 this.shortcuts.signed_in(false);
                 this.close_sidebar_drawer(window, cx);
                 this.search_panel = None;
+                this.clear_search_query(window, cx);
                 this.dismiss_workspace_dialogs(window, cx);
                 this.set_session_view(
                     View::SignIn {
@@ -469,6 +475,7 @@ impl Spk {
             new_text_channel_focus: cx.focus_handle(),
             new_voice_channel_focus: cx.focus_handle(),
             search_button_focus: cx.focus_handle(),
+            search_query,
             search_panel: None,
             voice_strip_toggle_focus: cx.focus_handle(),
             quick_switcher: None,
