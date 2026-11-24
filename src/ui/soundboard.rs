@@ -242,16 +242,5 @@ impl Render for SoundboardPanel {
 }
 
 pub(super) fn clip_icon(name: &str) -> Icon {
-    let path = format!("icons/{name}.svg");
-    if name
-        .bytes()
-        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-        && assets::AllAssets
-            .load(&path)
-            .is_ok_and(|data| data.is_some())
-    {
-        Icon::new(IconName::Megaphone).path(path)
-    } else {
-        Icon::new(IconName::Megaphone)
-    }
+    bundled_icon(name, Icon::new(IconName::Megaphone))
 }

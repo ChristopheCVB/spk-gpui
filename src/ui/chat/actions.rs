@@ -71,7 +71,14 @@ impl Spk {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(view) = chat(&self.view).filter(|view| view.channel_id == channel_id) else {
+        let View::SignedIn(sidebar) = &self.view else {
+            return;
+        };
+        let Some(view) = sidebar
+            .chat
+            .as_ref()
+            .filter(|view| view.channel_id == channel_id)
+        else {
             return;
         };
         let Some(message) = view
@@ -81,6 +88,13 @@ impl Spk {
         else {
             return;
         };
+        if view.webhook
+            && !(matches!(kind, ActionForm::Delete)
+                && view.history_ready()
+                && sidebar.can_remove_message_content(message))
+        {
+            return;
+        }
         let initial = match kind {
             ActionForm::Edit => &message.body,
             _ => "",
@@ -105,13 +119,15 @@ impl Spk {
         };
         let (Some(form), Some(view)) = (
             &mut self.message_action_form,
-            sidebar
-                .chat
-                .as_ref()
-                .filter(|view| !view.action_pending && view.can_send()),
+            sidebar.chat.as_ref().filter(|view| !view.action_pending),
         ) else {
             return;
         };
+        if !(view.can_send()
+            || view.webhook && view.history_ready() && matches!(form.kind, ActionForm::Delete))
+        {
+            return;
+        }
         let text = self.message_action_input.read(cx).value();
         let action = match form.kind {
             ActionForm::Edit => MessageAction::Edit(text.to_string()),
@@ -261,7 +277,7 @@ impl Spk {
         message: &ChatMessage,
         cx: &Context<Self>,
     ) -> impl IntoElement {
-        let can_remove = sidebar.can_remove_message_content(message);
+        let can_remove = !chat.webhook && sidebar.can_remove_message_content(message);
         let theme = cx.theme();
         div()
             .flex()
@@ -662,6 +678,7 @@ pub(super) struct MessageActions {
     pub can_delete: bool,
     pub pin_to: Option<bool>,
     pub disabled: bool,
+    pub read_only: bool,
     pub composer_busy: bool,
     pub body: String,
     pub share_text: SharedString,
@@ -707,44 +724,48 @@ impl MessageActions {
                     .invisible()
                     .group_hover("message-row", |style| style.visible())
             })
-            .children(QUICK_REACTIONS.into_iter().map(|(emoji, name)| {
-                let key = reaction_choice_key(message, emoji);
-                let own = message.reacted_with(key, sidebar.profile.id.as_deref());
-                let label = format!("{} {name} reaction", if own { "Remove" } else { "Add" });
-                reaction_button(chat, message, emoji, own, ReactionSelection::Choice, cx)
-                    .xsmall()
-                    .w(CONTROL_HEIGHT)
-                    .h(px(28.0))
-                    .px(px(8.0))
-                    .py(CONTROL_PADDING)
-                    .self_center()
-                    .ghost()
-                    .child(reaction_glyph(emoji, px(16.0)))
-                    .accessibility_label(label.clone())
-                    .tooltip(label)
-            }))
-            .child(
-                div()
-                    .relative()
+            .when(!self.read_only, |toolbar| {
+                toolbar
+                    .children(QUICK_REACTIONS.into_iter().map(|(emoji, name)| {
+                        let key = reaction_choice_key(message, emoji);
+                        let own = message.reacted_with(key, sidebar.profile.id.as_deref());
+                        let label =
+                            format!("{} {name} reaction", if own { "Remove" } else { "Add" });
+                        reaction_button(chat, message, emoji, own, ReactionSelection::Choice, cx)
+                            .xsmall()
+                            .w(CONTROL_HEIGHT)
+                            .h(px(28.0))
+                            .px(px(8.0))
+                            .py(CONTROL_PADDING)
+                            .self_center()
+                            .ghost()
+                            .child(reaction_glyph(emoji, px(16.0)))
+                            .accessibility_label(label.clone())
+                            .tooltip(label)
+                    }))
                     .child(
-                        tool_button(
-                            "add-reaction",
-                            IconName::FaceSlightlySmilingPlus,
-                            "Add reaction",
-                        )
-                        .open(picker_open)
-                        .disabled(self.disabled)
-                        .on_click(self.open_reaction_picker()),
+                        div()
+                            .relative()
+                            .child(
+                                tool_button(
+                                    "add-reaction",
+                                    IconName::FaceSlightlySmilingPlus,
+                                    "Add reaction",
+                                )
+                                .open(picker_open)
+                                .disabled(self.disabled)
+                                .on_click(self.open_reaction_picker()),
+                            )
+                            .when(picker_open, |anchor| {
+                                anchor.children(app.reaction_picker_anchor(cx))
+                            }),
                     )
-                    .when(picker_open, |anchor| {
-                        anchor.children(app.reaction_picker_anchor(cx))
-                    }),
-            )
-            .child(
-                tool_button("message-reply", IconName::Reply, "Reply")
-                    .disabled(self.composer_busy)
-                    .on_click(self.reply()),
-            )
+                    .child(
+                        tool_button("message-reply", IconName::Reply, "Reply")
+                            .disabled(self.composer_busy)
+                            .on_click(self.reply()),
+                    )
+            })
             .when(self.can_edit, |toolbar| {
                 toolbar.child(
                     tool_button("message-edit", IconName::Pencil, "Edit message")
@@ -792,34 +813,36 @@ impl MessageActions {
         let menu = menu
             .max_h(window.viewport_size().height - px(24.))
             .scrollable(true)
-            .item(
-                PopupMenuItem::new("Reply")
-                    .icon(IconName::Reply)
-                    .disabled(self.composer_busy)
-                    .on_click(self.reply()),
-            )
-            .item(
-                PopupMenuItem::new("Quote")
-                    .icon(IconName::Quote)
-                    .disabled(self.composer_busy)
-                    .on_click(move |_, window, cx| {
-                        let _ = quote_app.update(cx, |this, cx| {
-                            if chat(&this.view).is_some_and(|chat| {
-                                chat.channel_id == quote_channel
-                                    && chat.can_send()
-                                    && chat.outgoing.is_none()
-                            }) {
-                                this.chat_input.update(cx, |input, cx| {
-                                    let end = input.value().len();
-                                    input.set_selected_range(end..end, cx);
-                                    input.insert(format!("\n\n{quoted}\n\n"), window, cx);
-                                    input.focus(window, cx);
-                                });
-                                this.update_chat_draft(cx);
-                            }
-                        });
-                    }),
-            );
+            .when(!self.read_only, |menu| {
+                menu.item(
+                    PopupMenuItem::new("Reply")
+                        .icon(IconName::Reply)
+                        .disabled(self.composer_busy)
+                        .on_click(self.reply()),
+                )
+                .item(
+                    PopupMenuItem::new("Quote")
+                        .icon(IconName::Quote)
+                        .disabled(self.composer_busy)
+                        .on_click(move |_, window, cx| {
+                            let _ = quote_app.update(cx, |this, cx| {
+                                if chat(&this.view).is_some_and(|chat| {
+                                    chat.channel_id == quote_channel
+                                        && chat.can_send()
+                                        && chat.outgoing.is_none()
+                                }) {
+                                    this.chat_input.update(cx, |input, cx| {
+                                        let end = input.value().len();
+                                        input.set_selected_range(end..end, cx);
+                                        input.insert(format!("\n\n{quoted}\n\n"), window, cx);
+                                        input.focus(window, cx);
+                                    });
+                                    this.update_chat_draft(cx);
+                                }
+                            });
+                        }),
+                )
+            });
         let mark_app = app.clone();
         self.mutation_items(menu, cx.theme().danger)
             .separator()
@@ -895,12 +918,14 @@ impl MessageActions {
     }
 
     fn mutation_items(&self, menu: PopupMenu, danger: Hsla) -> PopupMenu {
-        let menu = menu.item(
-            PopupMenuItem::new("Add reaction…")
-                .icon(IconName::FaceSlightlySmilingPlus)
-                .disabled(self.disabled)
-                .on_click(self.open_reaction_picker()),
-        );
+        let menu = menu.when(!self.read_only, |menu| {
+            menu.item(
+                PopupMenuItem::new("Add reaction…")
+                    .icon(IconName::FaceSlightlySmilingPlus)
+                    .disabled(self.disabled)
+                    .on_click(self.open_reaction_picker()),
+            )
+        });
         let menu = if self.can_edit {
             menu.item(
                 self.form_item("Edit message", ActionForm::Edit)

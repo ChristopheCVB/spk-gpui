@@ -816,3 +816,25 @@ fn action_icon(button: Button, icon: impl Into<Icon>) -> Button {
 fn themed_icon(icon: IconName, color: Hsla, size: f32) -> Icon {
     Icon::new(icon).size(px(size)).text_color(color)
 }
+
+fn bundled_icon(name: &str, fallback: Icon) -> Icon {
+    let path = format!("icons/{name}.svg");
+    if name
+        .bytes()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && assets::AllAssets
+            .load(&path)
+            .is_ok_and(|data| data.is_some())
+    {
+        fallback.path(path)
+    } else {
+        fallback
+    }
+}
+
+fn webhook_icon(name: Option<&str>) -> Icon {
+    bundled_icon(
+        name.unwrap_or("webhook"),
+        Icon::new(IconName::Bell).path("icons/webhook.svg"),
+    )
+}

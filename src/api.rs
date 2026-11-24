@@ -121,11 +121,21 @@ pub struct Channel {
     pub name: Option<String>,
     pub other_user_id: Option<String>,
     pub last_activity_at: Option<i64>,
+    pub icon: Option<String>,
+    pub owner_id: Option<String>,
+    #[serde(default)]
+    pub private: bool,
 }
 
 impl Channel {
     pub fn is_conversation(&self) -> bool {
-        self.kind == "text" || (self.kind == "dm" && self.other_user_id.is_some())
+        self.kind == "text"
+            || self.is_webhook()
+            || (self.kind == "dm" && self.other_user_id.is_some())
+    }
+
+    pub fn is_webhook(&self) -> bool {
+        self.kind == "webhook"
     }
 }
 

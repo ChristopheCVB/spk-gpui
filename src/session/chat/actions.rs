@@ -23,13 +23,22 @@ pub(in crate::session) struct PendingAction {
 
 impl ChatView {
     pub fn can_pin(&self, is_admin: bool) -> bool {
-        self.direct_message_peer.is_some() || is_admin
+        !self.webhook && (self.direct_message_peer.is_some() || is_admin)
     }
 }
 
 impl Sidebar {
     pub fn can_remove_message_content(&self, message: &ChatMessage) -> bool {
-        self.is_admin() || self.profile.id.as_deref() == Some(message.user_id.as_str())
+        if let Some(feed) = self.webhook_feed(&message.channel_id) {
+            self.can_manage_webhook(feed)
+        } else {
+            self.is_admin() || self.profile.id.as_deref() == Some(message.user_id.as_str())
+        }
+    }
+
+    pub fn can_manage_webhook(&self, feed: &Channel) -> bool {
+        (self.profile.id.is_some() && self.profile.id == feed.owner_id)
+            || (!feed.private && self.is_admin())
     }
 }
 
@@ -45,7 +54,13 @@ impl ChatSession {
         let Some(view) = &mut self.selected else {
             return;
         };
-        if self.pending_action.is_some() || view.channel_id != channel_id || !view.can_send() {
+        if self.pending_action.is_some()
+            || view.channel_id != channel_id
+            || !(view.can_send()
+                || (view.webhook
+                    && view.history_ready()
+                    && matches!(action, MessageAction::Delete)))
+        {
             return;
         }
         let pins = match &view.pins {
@@ -206,7 +221,11 @@ impl ChatSession {
     }
 
     pub fn refresh_pins(&mut self, client: &SpkClient) {
-        let Some(view) = self.selected.as_mut().filter(|view| !view.unavailable()) else {
+        let Some(view) = self
+            .selected
+            .as_mut()
+            .filter(|view| !view.webhook && !view.unavailable())
+        else {
             return;
         };
         view.pins.get_or_insert(Pins::Loading);

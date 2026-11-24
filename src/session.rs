@@ -89,6 +89,7 @@ pub enum Command {
     Refresh,
     ManageChannel(ChannelAction),
     OpenTextChannel(String),
+    OpenWebhook(String),
     OpenDirectMessage(String),
     StartDirectMessage(String),
     CloseChat,
@@ -328,8 +329,23 @@ impl Sidebar {
         }
     }
 
+    pub fn webhook_feeds(&self) -> impl Iterator<Item = &Channel> {
+        self.channels
+            .iter()
+            .flatten()
+            .filter(|channel| channel.is_webhook())
+    }
+
+    pub fn webhook_feed(&self, id: &str) -> Option<&Channel> {
+        self.webhook_feeds().find(|channel| channel.id == id)
+    }
+
     pub fn unread(&self, channel_id: &str) -> UnreadState {
-        self.unread.get(channel_id).copied().unwrap_or_default()
+        let mut state = self.unread.get(channel_id).copied().unwrap_or_default();
+        if self.webhook_feed(channel_id).is_some() {
+            state.mentions = 0;
+        }
+        state
     }
 
     pub fn user_presence(&self, id: &str) -> UserPresence {
@@ -796,6 +812,15 @@ async fn watch_session(
                         ChatNavigation::open_chat(&mut chat_navigation, &mut chat, client, channel);
                     }
                 }
+                Ok(Command::OpenWebhook(id)) => {
+                    if let Some(channel) = sidebar.webhook_feed(&id) {
+                        direct_message_opens = JoinSet::new();
+                        ChatNavigation::open_chat(&mut chat_navigation, &mut chat, client, channel);
+                        sidebar.chat_notice = None;
+                    } else {
+                        sidebar.chat_notice = Some("Webhook feed unavailable.");
+                    }
+                }
                 Ok(Command::OpenDirectMessage(id)) => {
                     direct_message_opens = JoinSet::new();
                     if let Some(channel) = sidebar.channels.iter().flatten().find(|channel| channel.id == id && channel.kind == "dm" && channel.is_conversation()) {
@@ -1249,6 +1274,17 @@ async fn watch_session(
                         (Ok(_), false) => Ok("Channel updated. Refresh to reload the channel list."),
                         _ => result,
                     });
+                }
+                if resource == Resource::Channels
+                    && presence_loaded
+                    && let Some(id) = chat.selected_webhook()
+                    && sidebar.webhook_feed(id).is_none()
+                {
+                    chat.close();
+                    if !matches!(chat_navigation, Some(ChatNavigation::AwaitingChannel { .. })) {
+                        chat_navigation = None;
+                        sidebar.chat_notice = Some("Webhook feed unavailable.");
+                    }
                 }
                 if resource == Resource::Channels
                     && presence_loaded

@@ -3,7 +3,7 @@ mod voice_session_layout;
 
 use gpui_kit::component::{
     Disableable, Placement,
-    menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem},
+    menu::{ContextMenu, ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem},
     resizable::{HandleEdge, resize_handle},
     window_paddings,
 };
@@ -281,7 +281,7 @@ impl Spk {
                 (destination.icon, destination.name)
             }
             None => (
-                IconName::Volume2,
+                Icon::new(IconName::Volume2),
                 selected_channel.map_or("Voice channels", channel_name),
             ),
         };
@@ -393,7 +393,7 @@ impl Spk {
                                         },
                                     )),
                                 )
-                                .child(themed_icon(stage_icon, theme.muted_foreground, 16.0))
+                                .child(stage_icon.text_color(theme.muted_foreground).size(px(16.0)))
                                 .child(
                                     Label::new(stage_name.to_owned())
                                         .font_semibold()
@@ -580,6 +580,36 @@ impl Spk {
                 self.channel_row(sidebar, channel, selected, actions, target, cx)
             }));
         let primary = cx.theme().primary;
+        let mut feeds = sidebar.webhook_feeds().peekable();
+        let webhook_card =
+            navigation_card("Webhooks", cx)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .h_8()
+                        .px_2()
+                        .text_color(cx.theme().muted_foreground)
+                        .font_semibold()
+                        .child(webhook_icon(None).size(px(16.0)))
+                        .child("Webhooks"),
+                )
+                .when(feeds.peek().is_none(), |card| {
+                    card.child(div().px_2().py_1().child(
+                        Label::new("No webhooks yet").text_color(cx.theme().muted_foreground),
+                    ))
+                })
+                .children(feeds.map(|channel| {
+                    let target = navigation_target(
+                        format!("webhook-{}", channel.id).into(),
+                        scroll_on_focus,
+                        window,
+                        cx,
+                    )
+                    .0;
+                    self.chat_channel_row(sidebar, channel, target, None, cx)
+                }));
 
         let destinations = div()
             .id("channel-navigation")
@@ -628,78 +658,28 @@ impl Spk {
                             .child(self.channel_section_title(sidebar, ChannelKind::Text, cx)),
                     )
                     .children(text.enumerate().map(|(index, channel)| {
-                        let id = channel.id.clone();
-                        let name = channel_name(channel).to_owned();
-                        let active = sidebar
-                            .chat
-                            .as_ref()
-                            .is_some_and(|chat| chat.channel_id == id);
-                        let counts = sidebar.unread(&id);
-                        let muted = self.notification_preferences.muted.contains(&id);
-                        let menu_id = id.clone();
-                        let app = cx.weak_entity();
-                        navigation_target(format!("text-{id}").into(), scroll_on_focus, window, cx)
-                            .0
-                            .flex()
-                            .items_center()
-                            .pr_1()
-                            .child(
-                                control_button("select")
-                                    .ghost()
-                                    .small()
-                                    .tab_stop(true)
-                                    .selected(active)
-                                    .accessibility_label(unread_label(&name, counts))
-                                    .flex_1()
-                                    .min_w_0()
-                                    .h_8()
-                                    .when(active || counts.mentions > 0, |button| {
-                                        button.bg(primary.opacity(0.10))
-                                    })
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap_2()
-                                            .w_full()
-                                            .min_w_0()
-                                            .child(
-                                                Label::new(name)
-                                                    .flex_1()
-                                                    .truncate()
-                                                    .when(active, |label| label.text_color(primary))
-                                                    .when(counts.unread > 0, |label| {
-                                                        label.font_bold()
-                                                    }),
-                                            )
-                                            .child(unread_badges(counts, cx)),
-                                    )
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.close_sidebar_drawer(window, cx);
-                                        this.device_picker = None;
-                                        this.send(Command::OpenTextChannel(id.clone()), None, cx);
-                                    })),
+                        let target = navigation_target(
+                            format!("text-{}", channel.id).into(),
+                            scroll_on_focus,
+                            window,
+                            cx,
+                        )
+                        .0;
+                        let actions = sidebar.is_admin().then(|| {
+                            self.channel_actions(
+                                channel,
+                                ChannelKind::Text,
+                                index > 0,
+                                index + 1 < text_count,
+                                cx,
                             )
-                            .children(sidebar.is_admin().then(|| {
-                                self.channel_actions(
-                                    channel,
-                                    ChannelKind::Text,
-                                    index > 0,
-                                    index + 1 < text_count,
-                                    cx,
-                                )
-                            }))
-                            .context_menu(move |menu, _, _| {
-                                menu.item(mark_read_item(menu_id.clone(), app.clone()))
-                                    .item(notifications::mute_item(
-                                        menu_id.clone(),
-                                        muted,
-                                        app.clone(),
-                                    ))
-                            })
+                            .into_any_element()
+                        });
+                        self.chat_channel_row(sidebar, channel, target, actions, cx)
                     })),
             )
             .child(voice_card)
+            .child(webhook_card)
             .when(sidebar.is_admin(), |nav| {
                 nav.children(channel_admin::channel_status(
                     sidebar.channel_admin.result,
@@ -716,6 +696,108 @@ impl Spk {
             .px_2()
             .child(destinations)
             .child(overlay_scrollbar(&scroll))
+    }
+
+    fn chat_channel_row(
+        &self,
+        sidebar: &Sidebar,
+        channel: &Channel,
+        target: Stateful<Div>,
+        actions: Option<AnyElement>,
+        cx: &Context<Self>,
+    ) -> ContextMenu<Stateful<Div>> {
+        let id = channel.id.clone();
+        let name = channel_name(channel).to_owned();
+        let webhook = channel.is_webhook();
+        let active = sidebar
+            .chat
+            .as_ref()
+            .is_some_and(|chat| chat.channel_id == id);
+        let counts = sidebar.unread(&id);
+        let muted = self.notification_preferences.muted.contains(&id);
+        let menu_id = id.clone();
+        let app = cx.weak_entity();
+        let primary = cx.theme().primary;
+        let muted_color = cx.theme().muted_foreground;
+        let label = if webhook {
+            let mut label = name.clone();
+            if channel.private {
+                label.push_str(", private feed");
+            }
+            if counts.unread > 0 {
+                label.push_str(&format!(", {} unread", counts.unread));
+            }
+            label
+        } else {
+            unread_label(&name, counts)
+        };
+        target
+            .flex()
+            .items_center()
+            .pr_1()
+            .child(
+                control_button("select")
+                    .ghost()
+                    .small()
+                    .tab_stop(true)
+                    .selected(active)
+                    .accessibility_label(label)
+                    .flex_1()
+                    .min_w_0()
+                    .h_8()
+                    .when(active || counts.mentions > 0, |button| {
+                        button.bg(primary.opacity(0.10))
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .w_full()
+                            .min_w_0()
+                            .when(webhook, |row| {
+                                row.child(webhook_icon(channel.icon.as_deref()).size(px(16.0)))
+                            })
+                            .child(
+                                Label::new(name)
+                                    .flex_1()
+                                    .truncate()
+                                    .when(active, |label| label.text_color(primary))
+                                    .when(webhook && muted && !active, |label| {
+                                        label.text_color(muted_color)
+                                    })
+                                    .when(counts.unread > 0, |label| label.font_bold()),
+                            )
+                            .when(webhook && channel.private, |row| {
+                                row.child(
+                                    Icon::new(IconName::Bell)
+                                        .path("icons/lock.svg")
+                                        .size(px(12.0))
+                                        .text_color(muted_color),
+                                )
+                            })
+                            .child(unread_badges(counts, cx)),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.close_sidebar_drawer(window, cx);
+                        this.device_picker = None;
+                        let command = if webhook {
+                            Command::OpenWebhook(id.clone())
+                        } else {
+                            Command::OpenTextChannel(id.clone())
+                        };
+                        this.send(command, None, cx);
+                    })),
+            )
+            .children(actions)
+            .context_menu(move |menu, _, _| {
+                menu.item(mark_read_item(menu_id.clone(), app.clone()))
+                    .item(notifications::mute_item(
+                        menu_id.clone(),
+                        muted,
+                        app.clone(),
+                    ))
+            })
     }
 
     fn navigation_footer(

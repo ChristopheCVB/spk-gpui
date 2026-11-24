@@ -296,7 +296,15 @@ impl Refresh {
             Ok(data) => {
                 self.failed.remove(&resource);
                 match data {
-                    Data::Channels(channels) => sidebar.channels = Some(channels),
+                    Data::Channels(mut channels) => {
+                        channels.retain(|channel| {
+                            !channel.is_webhook()
+                                || !channel.private
+                                || (sidebar.profile.id.is_some()
+                                    && channel.owner_id == sidebar.profile.id)
+                        });
+                        sidebar.channels = Some(channels);
+                    }
                     Data::Users(users) => {
                         // A snapshot queued before a completed edit can contain the old Profile.
                         if !self.dirty.contains(&resource)

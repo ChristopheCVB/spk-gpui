@@ -543,13 +543,27 @@ async fn direct_message_history_is_visible_only_to_a_participant_even_for_admins
     http.abort();
 }
 
+pub(super) async fn direct_message_session(
+    base: Url,
+    account: &str,
+) -> (
+    async_channel::Sender<Command>,
+    Receiver<View>,
+    TcpListener,
+    WebSocketStream<TcpStream>,
+    tokio::task::JoinHandle<SessionEnd>,
+) {
+    signed_in_chat_session(base, account, "user").await
+}
+
 #[allow(
     clippy::result_large_err,
     reason = "Tungstenite defines the handshake callback type"
 )]
-pub(super) async fn direct_message_session(
+pub(super) async fn signed_in_chat_session(
     base: Url,
     account: &str,
+    role: &str,
 ) -> (
     async_channel::Sender<Command>,
     Receiver<View>,
@@ -563,9 +577,10 @@ pub(super) async fn direct_message_session(
     let mut cookies = CookieStore::default();
     cookies.parse(&format!("{cookie}; Path=/"), &base).unwrap();
     let client = SpkClient::new(base, cookies).unwrap();
-    let profile =
-        serde_json::from_value(value!({"id":account,"email":format!("{account}@example.test")}))
-            .unwrap();
+    let profile = serde_json::from_value(
+        value!({"id":account,"email":format!("{account}@example.test"),"role":role}),
+    )
+    .unwrap();
     let (tx, commands) = async_channel::unbounded();
     let (views, rx) = async_channel::unbounded();
     let session = tokio::spawn(async move {
