@@ -14,7 +14,7 @@ mod unread;
 mod voice_session;
 mod webhooks;
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
 use async_channel::{Receiver, Sender};
 use gpui_kit::RenderImage;
@@ -45,7 +45,7 @@ use authentication::{
     SESSION_EXPIRED, SavedSession, login, restore, sign_in, sign_in_message, sign_out,
 };
 use avatars::AvatarLoads;
-use chat::ChatSession;
+use chat::{ChatSession, DraftStore};
 use presence::{PresenceReporter, PresenceSettings, Refresh, Resource, VoiceMembership};
 use profiles::Work as ProfileWork;
 use radio::{RadioSession, RadioView};
@@ -61,9 +61,9 @@ pub use {
     avatars::AvatarPhoto,
     channel_admin::{ChannelAction, ChannelAdmin, ChannelKind},
     chat::{
-        AttachmentInput, ChatView, Delivery, GifPickerView, POLL_MAX_OPTIONS, POLL_MIN_OPTIONS,
-        POLL_OPTION_LIMIT, POLL_QUESTION_LIMIT, Pins, PollEditOutcome, PollEditReply, UploadStatus,
-        image_preview, trim_poll_text, validate_poll,
+        AttachmentInput, ChatView, Delivery, GifPickerView, Outgoing, POLL_MAX_OPTIONS,
+        POLL_MIN_OPTIONS, POLL_OPTION_LIMIT, POLL_QUESTION_LIMIT, Pins, PollEditOutcome,
+        PollEditReply, UploadStatus, image_preview, trim_poll_text, validate_poll,
     },
     presence::Participant,
     profiles::ProfileEdit,
@@ -121,6 +121,11 @@ pub enum Command {
         channel_id: String,
         body: String,
     },
+    ResolveChatDraftRestoration {
+        channel_id: String,
+        nonce: String,
+        accept: bool,
+    },
     SetChatReply {
         channel_id: String,
         message_id: Option<String>,
@@ -158,9 +163,20 @@ pub enum Command {
         channel_id: String,
         key: uuid::Uuid,
     },
+    RetryChatAttachment {
+        channel_id: String,
+        key: uuid::Uuid,
+    },
     ToggleChatAttachmentSpoiler {
         channel_id: String,
         key: uuid::Uuid,
+    },
+    DownloadChatAttachment {
+        channel_id: String,
+        message_id: String,
+        attachment_id: String,
+        destination: tempfile::NamedTempFile,
+        reply: oneshot::Sender<Result<tempfile::NamedTempFile, Failure>>,
     },
     ReadChatAttachment {
         channel_id: String,
@@ -175,8 +191,12 @@ pub enum Command {
     MoreSearchResults,
     OpenMessageTarget(crate::api::MessageTarget),
     OpenConversationTarget(String),
-    RetryChatSend,
-    DismissChatSend,
+    RetryChatSend(String),
+    ResendChatMessage {
+        nonce: String,
+        body: String,
+        completed: oneshot::Sender<Result<(), &'static str>>,
+    },
     MarkChatSendDelivered(String),
     MutateChatMessage {
         channel_id: String,
@@ -292,6 +312,7 @@ pub struct Sidebar {
     pub chat: Option<ChatView>,
     pub search: SearchView,
     pub chat_notice: Option<&'static str>,
+    pub draft_notice: Option<&'static str>,
     pub read_notice: Option<&'static str>,
     pub alerts: Vec<Alert>,
     unread: Arc<HashMap<String, UnreadState>>,
@@ -310,6 +331,7 @@ pub struct Sidebar {
     pub device_notice: Option<&'static str>,
     pub avatars: Arc<HashMap<String, Arc<AvatarPhoto>>>,
     users: Arc<HashMap<String, User>>,
+    user_order: Arc<[String]>,
     voice_presence: HashMap<String, VoiceMembership>,
     user_presence: Arc<HashMap<String, UserPresence>>,
 }
@@ -330,6 +352,7 @@ impl Sidebar {
             chat: None,
             search: SearchView::default(),
             chat_notice: None,
+            draft_notice: None,
             read_notice: None,
             alerts: Vec::new(),
             unread: Arc::default(),
@@ -348,6 +371,7 @@ impl Sidebar {
             device_notice: None,
             avatars: Arc::default(),
             users: Arc::default(),
+            user_order: Arc::default(),
             voice_presence: HashMap::new(),
             user_presence: Arc::default(),
         }
@@ -404,6 +428,21 @@ impl Sidebar {
         people
     }
 
+    pub fn mention_directory(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.user_order.iter().filter_map(|id| {
+            let user = self.users.get(id)?;
+            Some((id.as_str(), user.name()?))
+        })
+    }
+
+    pub fn mention_name(&self, id: &str) -> Option<&str> {
+        self.users.get(id).and_then(User::name)
+    }
+
+    pub fn same_user_directory(&self, previous: &Self) -> bool {
+        Arc::ptr_eq(&self.users, &previous.users)
+    }
+
     pub fn direct_message(&self, user_id: &str) -> Option<&Channel> {
         self.channels.iter().flatten().find(|channel| {
             channel.kind == "dm" && channel.other_user_id.as_deref() == Some(user_id)
@@ -454,7 +493,11 @@ impl Sidebar {
         if self.profile.id.as_deref() == Some(id) {
             self.profile.avatar_key.as_deref()
         } else {
-            self.inspect_person(id)?.avatar_key.as_deref()
+            self.users
+                .get(id)
+                .or_else(|| self.inspect_person(id))?
+                .avatar_key
+                .as_deref()
         }
         .filter(|key| !key.is_empty())
     }
@@ -462,6 +505,7 @@ impl Sidebar {
 
 struct SessionSettings {
     socket_endpoint: String,
+    drafts_path: Option<PathBuf>,
     start_call: Box<StartCall>,
     enumerate_devices: fn() -> Devices,
     devices: DeviceSettings,
@@ -483,6 +527,7 @@ pub async fn run(
     let saved = SavedSession::new(&base);
     let settings = SessionSettings {
         socket_endpoint: env!("SPK_WS_URL").to_owned(),
+        drafts_path: dirs::data_local_dir().map(|dir| dir.join("spk-gpui").join("drafts.json")),
         start_call: Box::new(Call::start),
         enumerate_devices: Devices::enumerate,
         devices: DeviceSettings::load(),
@@ -641,7 +686,22 @@ async fn watch_session(
     sidebar.voice_intent.preferred = settings.devices.preferred.clone();
     sidebar.device_notice = settings.devices.notice;
     sidebar.devices = Arc::new((settings.enumerate_devices)());
-    let mut chat = ChatSession::default();
+    let draft_store = settings
+        .drafts_path
+        .clone()
+        .zip(sidebar.profile.id.clone())
+        .map(|(path, account)| DraftStore::new(path, client.origin().to_owned(), account));
+    let mut chat = if let Some(store) = &draft_store {
+        match store.load().await {
+            Ok(bodies) => ChatSession::with_drafts(bodies),
+            Err(_) => {
+                sidebar.draft_notice = Some("Could not load saved Drafts.");
+                ChatSession::default()
+            }
+        }
+    } else {
+        ChatSession::default()
+    };
     let mut unread = UnreadSession::default();
     unread.refresh(client);
     let mut direct_message_opens = JoinSet::new();
@@ -660,9 +720,13 @@ async fn watch_session(
     let mut channel_mutation_result = None;
     let mut profiles = JoinSet::new();
     let mut account_admin = AccountAdmin::default();
+    let mut draft_save_at = None;
     let end = loop {
         if commands.is_closed() {
             break SessionEnd::Closed;
+        }
+        if draft_store.is_some() && chat.drafts_to_save() {
+            draft_save_at.get_or_insert_with(|| Instant::now() + Duration::from_millis(250));
         }
         unread.write_next(client);
         chat.fill_previews(client);
@@ -704,6 +768,15 @@ async fn watch_session(
             () = presence.report(sidebar.user_status, active) => {}
             Ok(()) = settings.presence.activity.changed() => {}
             _ = sleep_until(chat_timeout.unwrap_or_else(Instant::now)), if chat_timeout.is_some() => chat.expire(),
+            _ = sleep_until(draft_save_at.unwrap_or_else(Instant::now)), if draft_save_at.is_some() => {
+                draft_save_at = None;
+                if let Some(store) = &draft_store {
+                    chat.save_drafts(store);
+                }
+            }
+            Some(result) = chat.draft_writes.join_next() => {
+                chat.draft_save_completed(result, &mut sidebar.draft_notice);
+            }
             Some(result) = unread.writes.join_next() => {
                 let result = result.unwrap_or(Err(Failure::Connection));
                 if result.as_ref().is_err_and(Failure::unauthorized) {
@@ -948,6 +1021,9 @@ async fn watch_session(
                     chat.latest(client);
                 }
                 Ok(Command::UpdateChatDraft { channel_id, body }) => chat.update_draft(channel_id, body),
+                Ok(Command::ResolveChatDraftRestoration { channel_id, nonce, accept }) => {
+                    chat.resolve_draft_restoration(&channel_id, &nonce, accept);
+                }
                 Ok(Command::SetChatReply { channel_id, message_id }) => chat.set_reply(&channel_id, message_id.as_deref()),
                 Ok(Command::SendChatMessage { channel_id, body }) => chat.send(channel_id, body),
                 Ok(Command::SendChatPoll { channel_id, question, options, completed }) => {
@@ -968,7 +1044,11 @@ async fn watch_session(
                 }
                 Ok(Command::AddChatAttachments { channel_id, files }) => chat.add_attachments(client, channel_id, files),
                 Ok(Command::CancelChatAttachment { channel_id, key }) => chat.cancel_attachment(client, &channel_id, key),
+                Ok(Command::RetryChatAttachment { channel_id, key }) => chat.retry_attachment(client, &channel_id, key),
                 Ok(Command::ToggleChatAttachmentSpoiler { channel_id, key }) => chat.toggle_attachment_spoiler(&channel_id, key),
+                Ok(Command::DownloadChatAttachment { channel_id, message_id, attachment_id, destination, reply }) => {
+                    chat.download_attachment(client, &channel_id, &message_id, attachment_id, destination, reply);
+                }
                 Ok(Command::ReadChatAttachment { channel_id, message_id, attachment_id, reply }) => {
                     chat.read_attachment(client, &channel_id, &message_id, attachment_id, reply);
                 }
@@ -1008,9 +1088,13 @@ async fn watch_session(
                         expired
                     });
                 }
-                Ok(Command::RetryChatSend) => chat.retry_send(),
-                Ok(Command::DismissChatSend) => chat.dismiss_send(),
-                Ok(Command::MarkChatSendDelivered(channel)) => chat.mark_send_delivered(&channel),
+                Ok(Command::RetryChatSend(nonce)) => {
+                    let _ = chat.retry_send(&nonce, None);
+                }
+                Ok(Command::ResendChatMessage { nonce, body, completed }) => {
+                    let _ = completed.send(chat.retry_send(&nonce, Some(body)));
+                }
+                Ok(Command::MarkChatSendDelivered(nonce)) => chat.mark_send_delivered(&nonce),
                 Ok(Command::MutateChatMessage { channel_id, message_id, action }) => {
                     chat.mutate(client, &sidebar, &channel_id, message_id, action);
                 }
@@ -1418,6 +1502,34 @@ async fn watch_session(
             }
         }
     };
+    if let Some(store) = &draft_store {
+        if matches!(end, SessionEnd::Closed) {
+            while let Ok(command) = commands.try_recv() {
+                match command {
+                    Command::UpdateChatDraft { channel_id, body } => {
+                        chat.update_draft(channel_id, body)
+                    }
+                    Command::ResolveChatDraftRestoration {
+                        channel_id,
+                        nonce,
+                        accept,
+                    } => {
+                        chat.resolve_draft_restoration(&channel_id, &nonce, accept);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if let Some(result) = chat.draft_writes.join_next().await {
+            chat.draft_save_completed(result, &mut sidebar.draft_notice);
+        }
+        if chat.drafts_to_save() {
+            chat.save_drafts(store);
+            if let Some(result) = chat.draft_writes.join_next().await {
+                chat.draft_save_completed(result, &mut sidebar.draft_notice);
+            }
+        }
+    }
     if matches!(end, SessionEnd::Invalidated(SESSION_EXPIRED))
         && matches!(
             chat_navigation,

@@ -1,6 +1,189 @@
 use super::*;
 
 #[tokio::test]
+async fn draft_text_survives_restart_by_conversation_and_account() {
+    const GENERAL: &str = "**Hello** <@bob>\n\n> Keep the Markdown";
+    const GENERAL_AT_QUIT: &str = "**New Draft** <@bob>";
+    const PRIVATE: &str = "_Unsent_ <@alice> 📝";
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let http = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = Url::parse(&format!("http://{}", http.local_addr().unwrap())).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let server = tokio::spawn(async move {
+        loop {
+            let (line, request) = Request::receive(&http).await;
+            let body = match line.as_str() {
+                "GET /api/channels HTTP/1.1" => {
+                    r#"[
+                    {"id":"general","type":"text","name":"general"},
+                    {"id":"private","type":"dm","otherUserId":"bob"}
+                ]"#
+                }
+                "GET /api/channels/general/messages?unread=1 HTTP/1.1" => {
+                    r#"{"messages":[{"id":"first","channelId":"general","userId":"bob","body":"Existing message","createdAt":1}],"hasMoreBefore":false}"#
+                }
+                "GET /api/channels/private/messages?unread=1 HTTP/1.1" => {
+                    r#"{"messages":[],"hasMoreBefore":false}"#
+                }
+                "GET /api/unread HTTP/1.1" | "GET /api/users/presence HTTP/1.1" => "{}",
+                "GET /api/users HTTP/1.1"
+                | "GET /api/voice HTTP/1.1"
+                | "GET /api/channels/general/pins HTTP/1.1"
+                | "GET /api/channels/private/pins HTTP/1.1" => "[]",
+                _ => panic!("unexpected request: {line}"),
+            };
+            request.respond(&[], body).await;
+        }
+    });
+
+    timeout(Duration::from_secs(10), async {
+        for (account, first_launch) in [("alice", true), ("charlie", false), ("alice", false)] {
+            let client = SpkClient::new(base.clone(), CookieStore::default()).unwrap();
+            let (tx, commands) = async_channel::unbounded();
+            let (views, rx) = async_channel::unbounded();
+            let sockets = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut settings = fixture_settings(
+                format!("ws://{}/_ws", sockets.local_addr().unwrap()),
+                Call::start_for_test,
+            );
+            settings.drafts_path = Some(directory.path().join("drafts.json"));
+            let session = tokio::spawn(async move {
+                let (mut saved, _) = SavedSession::with_test_store(None);
+                let profile =
+                    serde_json::from_value(value!({"id":account,"email":"member@example.test"}))
+                        .unwrap();
+                watch_session(
+                    &client,
+                    profile,
+                    None,
+                    &mut saved,
+                    &mut settings,
+                    &commands,
+                    &views,
+                )
+                .await
+            });
+            let mut peer = accept_async(sockets.accept().await.unwrap().0)
+                .await
+                .unwrap();
+            wait_for_sidebar(&rx, |view| {
+                view.channels.is_some() && matches!(view.connection, Connection::Online)
+            })
+            .await;
+
+            for (conversation, open, body) in [
+                (
+                    "general",
+                    Command::OpenTextChannel("general".into()),
+                    GENERAL,
+                ),
+                (
+                    "private",
+                    Command::OpenDirectMessage("private".into()),
+                    PRIVATE,
+                ),
+            ] {
+                tx.send(open).await.unwrap();
+                let ready = wait_for_sidebar(&rx, |view| {
+                    view.chat
+                        .as_ref()
+                        .is_some_and(|chat| chat.channel_id == conversation && chat.history_ready())
+                })
+                .await;
+                let draft = &ready.chat.as_ref().unwrap().draft;
+                let expected = if !first_launch && account == "alice" {
+                    if conversation == "general" {
+                        GENERAL_AT_QUIT
+                    } else {
+                        body
+                    }
+                } else {
+                    ""
+                };
+                assert_eq!(draft.body, expected);
+                assert!(draft.reply.is_none());
+                assert!(draft.gif.is_none());
+                assert!(draft.uploads.is_empty());
+                assert!(ready.chat.unwrap().outgoing.is_empty());
+                if first_launch {
+                    tx.send(Command::UpdateChatDraft {
+                        channel_id: conversation.into(),
+                        body: "In progress".into(),
+                    })
+                    .await
+                    .unwrap();
+                    receive_typing(&mut peer, conversation).await;
+                    tx.send(Command::UpdateChatDraft {
+                        channel_id: conversation.into(),
+                        body: body.into(),
+                    })
+                    .await
+                    .unwrap();
+                    if conversation == "general" {
+                        tx.send(Command::SetChatReply {
+                            channel_id: conversation.into(),
+                            message_id: Some("first".into()),
+                        })
+                        .await
+                        .unwrap();
+                    }
+                } else if account == "charlie" {
+                    tx.send(Command::UpdateChatDraft {
+                        channel_id: conversation.into(),
+                        body: "Another account's Draft".into(),
+                    })
+                    .await
+                    .unwrap();
+                    receive_typing(&mut peer, conversation).await;
+                }
+            }
+
+            if first_launch {
+                tx.send(Command::OpenTextChannel("general".into()))
+                    .await
+                    .unwrap();
+                let returned = wait_for_sidebar(&rx, |view| {
+                    view.chat
+                        .as_ref()
+                        .is_some_and(|chat| chat.channel_id == "general" && chat.history_ready())
+                })
+                .await;
+                let draft = returned.chat.unwrap().draft;
+                assert_eq!(draft.body, GENERAL);
+                assert_eq!(draft.reply.unwrap().id, "first");
+                tx.send(Command::SendChatMessage {
+                    channel_id: "general".into(),
+                    body: GENERAL.into(),
+                })
+                .await
+                .unwrap();
+                receive_chat_send(&mut peer, "general", GENERAL).await;
+                for revision in 0..64 {
+                    tx.send(Command::UpdateChatDraft {
+                        channel_id: "general".into(),
+                        body: format!("Newest Draft revision {revision}"),
+                    })
+                    .await
+                    .unwrap();
+                }
+                tx.send(Command::UpdateChatDraft {
+                    channel_id: "general".into(),
+                    body: GENERAL_AT_QUIT.into(),
+                })
+                .await
+                .unwrap();
+            }
+            tx.close();
+            assert!(matches!(session.await.unwrap(), SessionEnd::Closed));
+        }
+    })
+    .await
+    .expect("draft restart timed out");
+    server.abort();
+}
+
+#[tokio::test]
 #[allow(
     clippy::result_large_err,
     reason = "Tungstenite defines the handshake callback type"
@@ -213,16 +396,24 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         }).to_string())).await.unwrap();
         wait_for_sidebar(&rx, |view| {
             view.chat.as_ref().is_some_and(|chat| chat.message_send_error.as_deref() == Some("Poll rejected")
-                && chat.outgoing.is_none() && chat.messages.len() == 2)
+                && chat.outgoing.is_empty() && chat.messages.len() == 2)
         }).await;
 
         tx.send(Command::SendChatMessage {
             channel_id: "general".into(),
-            body: "Hi from desktop".into(),
+            body: "  Hi from desktop  ".into(),
         })
         .await
         .unwrap();
         let first = receive_chat_send(&mut peer, "general", "Hi from desktop").await;
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat|
+            chat.draft.body.is_empty() && !chat.outgoing.is_empty()
+        )).await;
+        tx.send(Command::UpdateChatDraft {
+            channel_id: "general".into(), body: "Newest draft".into(),
+        }).await.unwrap();
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| chat.draft.body == "Newest draft")).await;
+        receive_typing(&mut peer, "general").await;
         peer.send(Message::text(
             value!({"type":"message:error","nonce":first["nonce"],"error":"Slow down"}).to_string(),
         ))
@@ -233,10 +424,15 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
             |delivery| matches!(delivery, Delivery::Failed(error) if error == "Slow down"),
         )
         .await;
-        tx.send(Command::RetryChatSend).await.unwrap();
+        tx.send(Command::RetryChatSend(first["nonce"].as_str().unwrap().into())).await.unwrap();
         let retry = receive_chat_send(&mut peer, "general", "Hi from desktop").await;
         assert_ne!(first["nonce"], retry["nonce"]);
-        let sent = message("m3", 3, "alice", "Hi from desktop <@alice>");
+        let saved_markdown = "**Hi from desktop** ||<@bob>||\n\n> Keep _this_ text";
+        let mut sent = message("m3", 3, "alice", saved_markdown);
+        sent["replyTo"] = value!({"id":"m1","userId":"bob","preview":"Earlier","deleted":false});
+        sent["attachments"] = value!([{
+            "id":"file-id","filename":"notes.txt","mime":"text/plain","size":3,"spoiler":true
+        }]);
         live(&mut peer, &sent, retry["nonce"].as_str()).await;
         live(&mut peer, &sent, retry["nonce"].as_str()).await;
         wait_for_sidebar(&rx, |view| {
@@ -244,22 +440,55 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
             view.chat.as_ref().is_some_and(|chat| {
                 chat.messages.iter().map(|message| message.id.as_str()).eq(["m1", "m2", "m3"])
                     && chat.messages[2].poll.is_none()
+                    && chat.draft.body == "Newest draft"
             })
         }).await;
-        tx.send(Command::MutateChatMessage {
+        let edit = |body: &str| Command::MutateChatMessage {
             channel_id: "general".into(),
             message_id: "m3".into(),
-            action: MessageAction::Edit("Corrected from desktop https://example.test/story".into()),
-        }).await.unwrap();
-        let (line, edit) = history.recv().await.unwrap();
+            action: MessageAction::Edit(body.into()),
+        };
+        tx.send(edit(saved_markdown)).await.unwrap();
+        let unchanged = wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
+            !chat.action_pending
+                && chat.action_outcome.as_ref().is_some_and(|result| {
+                    result.message_id == "m3" && result.error.is_none()
+                })
+        }));
+        tokio::select! {
+            _ = unchanged => {}
+            request = history.recv() => panic!("unchanged edit sent {}", request.unwrap().0),
+        }
+
+        let changed = "**Corrected from desktop** ||<@bob>||\n\n> Keep _this_ text https://example.test/story";
+        tx.send(edit(changed)).await.unwrap();
+        let (line, rejected) = history.recv().await.unwrap();
         assert_eq!(line, "PATCH /api/messages/m3 HTTP/1.1");
-        assert_eq!(serde_json::from_slice::<Value>(&edit.body).unwrap(), value!({"body":"Corrected from desktop https://example.test/story"}));
-        let mut edited = message("m3", 3, "alice", "Corrected from desktop https://example.test/story");
+        assert_eq!(serde_json::from_slice::<Value>(&rejected.body).unwrap(), value!({"body":changed}));
+        rejected.respond_raw("400 Bad Request", &[], b"").await;
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
+            !chat.action_pending
+                && chat.action_outcome.as_ref().is_some_and(|result| result.error.is_some())
+                && chat.messages.last().unwrap().body == saved_markdown
+        })).await;
+
+        tx.send(edit(changed)).await.unwrap();
+        let (line, retry) = history.recv().await.unwrap();
+        assert_eq!(line, "PATCH /api/messages/m3 HTTP/1.1");
+        assert_eq!(serde_json::from_slice::<Value>(&retry.body).unwrap(), value!({"body":changed}));
+        let mut edited = sent.clone();
+        edited["body"] = value!(changed);
         edited["editedAt"] = value!(30);
         peer.send(Message::text(value!({"type":"message:edit","message":edited}).to_string())).await.unwrap();
-        edit.respond(&[], &edited.to_string()).await;
+        retry.respond(&[], &edited.to_string()).await;
         wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
-            chat.messages.iter().any(|m| m.id == "m3" && m.body == "Corrected from desktop https://example.test/story" && m.edited_at == Some(30))
+            !chat.action_pending && chat.messages.iter().any(|m| {
+                m.id == "m3" && m.body == changed && m.edited_at == Some(30)
+                    && m.reply_to.as_ref().is_some_and(|reply| reply.id == "m1")
+                    && m.attachments.first().is_some_and(|attachment| {
+                        attachment.id == "file-id" && attachment.spoiler
+                    })
+            })
         })).await;
 
         let url = "https://example.test/story";
@@ -295,18 +524,37 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
             !chat.loading() && chat.messages.last().is_some_and(|message| message.previews.is_empty())
         })).await;
 
-        tx.send(Command::RetryChatSend).await.unwrap();
         tx.send(Command::SendChatMessage {
             channel_id: "general".into(),
             body: "Closed before confirmation".into(),
         })
         .await
         .unwrap();
-        receive_chat_send(&mut peer, "general", "Closed before confirmation").await;
+        let interrupted = receive_chat_send(&mut peer, "general", "Closed before confirmation").await;
+        let interrupted_nonce = interrupted["nonce"].as_str().unwrap();
+        tx.send(Command::SendChatMessage { channel_id: "general".into(), body: "Another interrupted message".into() }).await.unwrap();
+        let interrupted_also = receive_chat_send(&mut peer, "general", "Another interrupted message").await;
+        let edit_nonce = interrupted_also["nonce"].as_str().unwrap();
         peer.close(None).await.unwrap();
         wait_for_delivery(&rx, |delivery| matches!(delivery, Delivery::Unconfirmed)).await;
         let completed = send_poll(&tx, "general", "Offline poll?", &["Yes", "No"]).await;
         assert!(completed.await.unwrap().is_err());
+        tx.send(Command::SendChatMessage { channel_id: "general".into(), body: "Offline message".into() }).await.unwrap();
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
+            if chat.message_send_error.as_deref() != Some("Could not reach SPK. Try again.") {
+                return false;
+            }
+            assert_eq!(chat.draft.body, "Offline message");
+            assert!(chat.outgoing.iter().all(|outgoing| matches!(outgoing.status, Delivery::Unconfirmed)));
+            true
+        })).await;
+        tx.send(Command::UpdateChatDraft { channel_id: "general".into(), body: "Newer work before restoration was displayed".into() }).await.unwrap();
+        let updated = wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat|
+            chat.draft.body == "Newer work before restoration was displayed" && chat.draft_restoration.is_none()
+        )).await;
+        let offline = updated.chat.unwrap().outgoing.into_iter()
+            .find(|outgoing| outgoing.draft.body == "Offline message").unwrap();
+        assert!(matches!(offline.status, Delivery::Failed(_)));
         let mut peer = accept_async(sockets.accept().await.unwrap().0)
             .await
             .unwrap();
@@ -445,16 +693,23 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
             chat.latest_ready() && chat.jump.is_none()
         })).await;
 
-        tx.send(Command::RetryChatSend).await.unwrap();
-        tx.send(Command::MarkChatSendDelivered("general".into())).await.unwrap();
-        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| chat.outgoing.is_none() && chat.draft.body.is_empty())).await;
-        tx.send(Command::SendChatMessage {
-            channel_id: "general".into(),
-            body: "Still here".into(),
-        })
-        .await
-        .unwrap();
-        receive_chat_send(&mut peer, "general", "Still here").await;
+        tx.send(Command::RetryChatSend(interrupted_nonce.into())).await.unwrap();
+        tx.send(Command::MarkChatSendDelivered(interrupted_nonce.into())).await.unwrap();
+        tx.send(Command::RetryChatSend(offline.nonce)).await.unwrap();
+        receive_chat_send(&mut peer, "general", "Offline message").await;
+        tx.send(Command::UpdateChatDraft { channel_id: "general".into(), body: "Still here".into() }).await.unwrap();
+        receive_typing(&mut peer, "general").await;
+        let (completed, resend) = oneshot::channel();
+        tx.send(Command::ResendChatMessage {
+            nonce: edit_nonce.into(), body: "  Edited while still composing  ".into(), completed,
+        }).await.unwrap();
+        assert_eq!(resend.await.unwrap(), Ok(()));
+        let edited_send = receive_chat_send(&mut peer, "general", "Edited while still composing").await;
+        assert_ne!(edited_send["nonce"].as_str(), Some(edit_nonce));
+        live(&mut peer, &message("edited-recovery", 7, "alice", "Edited while still composing"), edited_send["nonce"].as_str()).await;
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat|
+            chat.draft.body == "Still here" && chat.outgoing.len() == 1 && chat.outgoing[0].draft.body == "Offline message"
+        )).await;
 
         let completed = send_poll(&tx, "general", "Which day?", &["Monday", "Friday"]).await;
         assert_eq!(completed.await.unwrap(), Ok(()));
@@ -462,7 +717,7 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         live(&mut peer, &message("legacy-poll", 8, "alice", "Which day?"), old_server["nonce"].as_str()).await;
         wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
             chat.messages.iter().any(|message| message.id == "legacy-poll" && message.poll.is_none())
-                && chat.outgoing.is_some() && chat.draft.body == "Still here"
+                && !chat.outgoing.is_empty() && chat.draft.body == "Still here"
         })).await;
 
         let completed = send_poll(&tx, "general", "Rejected after switching?", &["Yes", "No"]).await;
@@ -539,6 +794,26 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
             chat.channel_id == "quiet" && !chat.loading() && chat.draft.body == "Quiet draft"
         })).await;
 
+        // Both sends can be queued in the same conversation before either echo arrives.
+        let mut sends = Vec::new();
+        for body in ["First queued", "Second queued"] {
+            tx.send(Command::SendChatMessage { channel_id: "quiet".into(), body: body.into() }).await.unwrap();
+            sends.push(receive_chat_send(&mut peer, "quiet", body).await);
+        }
+        assert_ne!(sends[0]["nonce"], sends[1]["nonce"]);
+        tx.send(Command::UpdateChatDraft { channel_id: "quiet".into(), body: "Third draft".into() }).await.unwrap();
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat|
+            chat.draft.body == "Third draft" && chat.outgoing.len() == 2
+        )).await;
+        for i in [1, 0] {
+            let nonce = sends[i]["nonce"].as_str();
+            let message = value!({"id":format!("quiet-{i}"),"channelId":"quiet","userId":"alice","createdAt":i,"body":sends[i]["body"]});
+            live(&mut peer, &message, nonce).await;
+            wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat|
+                chat.draft.body == "Third draft" && chat.outgoing.len() == i
+            )).await;
+        }
+
         tx.close();
         assert!(matches!(session.await.unwrap(), SessionEnd::Closed));
     })
@@ -605,15 +880,16 @@ async fn wait_for_messages(views: &Receiver<View>, expected: &[&str]) {
 
 async fn wait_for_delivery(views: &Receiver<View>, predicate: impl Fn(&Delivery) -> bool) {
     wait_for_sidebar(views, |view| {
-        view.chat
-            .as_ref()
-            .and_then(|chat| chat.outgoing.as_ref())
-            .is_some_and(|outgoing| predicate(&outgoing.status))
+        view.chat.as_ref().is_some_and(|chat| {
+            chat.outgoing
+                .iter()
+                .any(|outgoing| predicate(&outgoing.status))
+        })
     })
     .await;
 }
 
-async fn receive_chat_send(
+pub(super) async fn receive_chat_send(
     peer: &mut WebSocketStream<TcpStream>,
     conversation: &str,
     body: &str,
@@ -876,7 +1152,7 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
         http,
     } = direct_message_http(false).await;
 
-    timeout(Duration::from_secs(10), async {
+    timeout(Duration::from_secs(25), async {
         let (alice, alice_views, sockets, mut alice_peer, alice_session) =
             direct_message_session(base.clone(), "alice").await;
         let (bob, bob_views, _, mut bob_peer, bob_session) =
@@ -997,7 +1273,12 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
         bob.send(Command::SendChatMessage { channel_id: "private".into(), body: body.into() }).await.unwrap();
         let reply = receive_chat_send(&mut bob_peer, "private", body).await;
         assert_eq!(reply["replyToId"], "private-1");
-        wait_for_sidebar(&bob_views, |view| view.chat.as_ref().is_some_and(|chat| chat.outgoing.is_some() && chat.draft.body == body)).await;
+        wait_for_sidebar(&bob_views, |view| view.chat.as_ref().is_some_and(|chat|
+            chat.outgoing.len() == 1 && chat.draft.body.is_empty() && chat.draft.reply.is_none()
+        )).await;
+        bob.send(Command::UpdateChatDraft { channel_id: "private".into(), body: "Next private draft".into() }).await.unwrap();
+        bob.send(Command::SetChatReply { channel_id: "private".into(), message_id: Some("private-1".into()) }).await.unwrap();
+        wait_for_delivery(&bob_views, |delivery| matches!(delivery, Delivery::Unconfirmed)).await;
         let second = value!({"id":"private-2","channelId":"private","userId":"bob","body":body,"createdAt":2,
             "replyTo":{"id":"private-1","userId":"alice","preview":"Hello Bob","deleted":false}});
         live(&mut bob_peer, &second, reply["nonce"].as_str()).await;
@@ -1008,8 +1289,14 @@ async fn direct_message_starts_reuses_and_recovers_between_participants() {
             })
         })).await;
         wait_for_sidebar(&bob_views, |view| view.chat.as_ref().is_some_and(|chat| {
-            chat.messages.len() == 2 && chat.draft.body.is_empty() && chat.draft.reply.is_none() && chat.outgoing.is_none()
+            chat.messages.len() == 2 && chat.draft.body == "Next private draft"
+                && chat.draft.reply.as_ref().is_some_and(|reply| reply.id == "private-1") && chat.outgoing.is_empty()
         })).await;
+        let (completed, resend) = oneshot::channel();
+        bob.send(Command::ResendChatMessage {
+            nonce: reply["nonce"].as_str().unwrap().into(), body: "Edited original".into(), completed,
+        }).await.unwrap();
+        assert_eq!(resend.await.unwrap(), Err("This message has already been resolved. Check message history."));
 
         alice_peer.close(None).await.unwrap();
         let mut alice_peer = accept_async(sockets.accept().await.unwrap().0).await.unwrap();
@@ -1256,7 +1543,7 @@ async fn direct_message_participants_vote_edit_create_and_reopen_polls() {
             })).await;
             if received.profile.id.as_deref() == Some("bob") {
                 let chat = received.chat.unwrap();
-                assert!(chat.outgoing.is_none());
+                assert!(chat.outgoing.is_empty());
                 assert_eq!(chat.draft.body, "Unsent draft");
                 assert_eq!(chat.draft.reply.unwrap().id, "private-2");
             }

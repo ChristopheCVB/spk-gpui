@@ -54,7 +54,9 @@ pub(super) struct Spk {
     password: Entity<InputState>,
     nickname: Entity<InputState>,
     chat_input: Entity<TextareaState>,
-    slash_choice: Option<usize>,
+    chat_submitting: bool,
+    chat_draft_edited: bool,
+    suggestions: [chat::suggestions::MenuState; 2],
     gif_input: Entity<InputState>,
     gif_button_focus: FocusHandle,
     chat_pins: Option<chat::PinPanel>,
@@ -147,17 +149,34 @@ impl Spk {
             &chat_input,
             window,
             |this, _, event, window, cx| match event {
-                InputEvent::Change => this.on_chat_input(window, cx),
-                InputEvent::PressEnter { shift: false, .. } => {
-                    if !this.chat_slash_key("enter", window, cx) {
-                        this.submit_chat(cx);
+                InputEvent::Change => {
+                    this.chat_draft_edited = true;
+                    this.refresh_chat_editor(false, cx);
+                    this.on_chat_input(window, cx);
+                }
+                InputEvent::Focus => cx.notify(),
+                InputEvent::Blur => {
+                    this.suggestions[0].dismiss();
+                    cx.notify();
+                }
+                InputEvent::PressEnter {
+                    secondary,
+                    shift: false,
+                } => {
+                    if !this.chat_suggestion_key("enter", false, window, cx)
+                        && (*secondary || !chat::editor::enter(&this.chat_input, window, cx))
+                    {
+                        this.submit_chat(window, cx);
                     }
                 }
                 _ => {}
             },
         )
         .detach();
-        cx.observe(&chat_input, |_, _, cx| cx.notify()).detach();
+        cx.observe(&chat_input, |this, _, cx| {
+            this.sync_chat_suggestions(false, cx)
+        })
+        .detach();
         let gif_input = cx.new(|cx| InputState::new(window, cx));
         cx.subscribe(&gif_input, |this, input, event, cx| {
             if matches!(event, InputEvent::Change) {
@@ -171,10 +190,28 @@ impl Spk {
         .detach();
         let message_action_input =
             cx.new(|cx| TextareaState::new(window, cx).rows(2).submit_on_enter(true));
-        cx.subscribe_in(&message_action_input, window, |this, _, event, _, cx| {
-            if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
-                this.submit_message_action(cx);
-            }
+        cx.subscribe_in(
+            &message_action_input,
+            window,
+            |this, input, event, window, cx| match event {
+                InputEvent::Change => this.refresh_chat_editor(true, cx),
+                InputEvent::Focus => cx.notify(),
+                InputEvent::Blur => {
+                    this.suggestions[1].dismiss();
+                    cx.notify();
+                }
+                InputEvent::PressEnter {
+                    secondary,
+                    shift: false,
+                } if *secondary || !chat::editor::enter(&input, window, cx) => {
+                    this.submit_message_action(window, cx);
+                }
+                _ => {}
+            },
+        )
+        .detach();
+        cx.observe(&message_action_input, |this, _, cx| {
+            this.sync_chat_suggestions(true, cx)
         })
         .detach();
         let reaction_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search emoji…"));
@@ -200,7 +237,8 @@ impl Spk {
             .detach();
         }
 
-        let (commands, requests) = async_channel::bounded(8);
+        // Keep draft changes ordered with sends and navigation when the session falls behind.
+        let (commands, requests) = async_channel::unbounded();
         let (updates, views) = async_channel::bounded(16);
         let shortcuts = Shortcuts::new(window);
         let (window_activation, window_active) =
@@ -263,6 +301,10 @@ impl Spk {
                 this.activity
                     .send_if_modified(|active| std::mem::replace(active, false));
                 this.shortcuts.clear_focused();
+                for suggestions in &mut this.suggestions {
+                    suggestions.dismiss();
+                }
+                cx.notify();
                 if this
                     .shortcuts
                     .editor
@@ -392,7 +434,9 @@ impl Spk {
             password,
             nickname,
             chat_input,
-            slash_choice: None,
+            chat_submitting: false,
+            chat_draft_edited: false,
+            suggestions: Default::default(),
             gif_input,
             gif_button_focus: cx.focus_handle(),
             chat_pins: None,
@@ -535,9 +579,18 @@ impl Spk {
     fn send(&mut self, command: Command, busy: Option<&'static str>, cx: &mut Context<Self>) {
         self.form_error = None;
         let signing_out = matches!(command, Command::SignOut);
+        let edits_draft = matches!(
+            command,
+            Command::SetChatReply { .. }
+                | Command::PickGif(_)
+                | Command::RemoveDraftGif(_)
+                | Command::AddChatAttachments { .. }
+                | Command::RetryChatAttachment { .. }
+        );
         if self.commands.try_send(command).is_err() {
             self.form_error = Some("Could not reach the SPK connection. Try again.");
         } else {
+            self.chat_draft_edited |= edits_draft;
             if signing_out {
                 self.signing_out = true;
                 self.shortcuts.signed_in(false);

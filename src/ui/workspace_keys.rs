@@ -1,4 +1,4 @@
-use super::chat::{BOLD, CODE_BLOCK, INLINE_CODE, ITALIC, QUOTE, STRIKETHROUGH};
+use super::chat::editor::{self, Format};
 use super::*;
 use crate::{session::VoiceProcessingSetting, shortcuts::Action, voice::NoiseSuppression};
 
@@ -110,21 +110,65 @@ impl Spk {
                 .message_action_input
                 .focus_handle(cx)
                 .is_focused(window);
-        if composer && count == 0 && self.chat_slash_key(key_name, window, cx) {
+        // GPUI's X11 clipboard can omit paths when it reads plain text or no representation.
+        if composer && primary && count == 1 && key_name == "v" && self.paste_attachment_paths(cx) {
             return true;
         }
+        let navigating_chat = matches!(
+            (primary, modifiers.alt, count, key_name),
+            (false, true, 1 | 2, "up" | "down")
+        );
+        if (composer || editor)
+            && !navigating_chat
+            && self.chat_suggestion_key(key_name, editor, window, cx)
+        {
+            return true;
+        }
+        if editor && count == 0 && key_name == "escape" {
+            let composing = self.message_action_input.update(cx, |input, cx| {
+                input.marked_text_range(window, cx).is_some()
+            });
+            return !composing && self.dismiss_message_action(window, cx);
+        }
         if composer || editor {
+            let input = if editor {
+                &self.message_action_input
+            } else {
+                &self.chat_input
+            };
+            if count == 0 && key_name == "backspace" && editor::backspace_mention(input, window, cx)
+            {
+                return true;
+            }
+            if primary
+                && count == 1
+                && matches!(key_name, "c" | "x")
+                && editor::clipboard_key(input, key_name == "x", window, cx)
+            {
+                return true;
+            }
+            if primary
+                && modifiers.shift
+                && count == 2
+                && key_name == "v"
+                && let Some(item) = cx.read_from_clipboard()
+                && editor::paste(input, &item, true, window, cx)
+            {
+                return true;
+            }
             let formatting = match (primary, modifiers.alt, modifiers.shift, count, key_name) {
-                (true, false, false, 1, "b") => Some(BOLD),
-                (true, false, false, 1, "i") => Some(ITALIC),
-                (true, false, false, 1, "e") => Some(INLINE_CODE),
-                (true, false, true, 2, "x") => Some(STRIKETHROUGH),
-                (true, true, false, 2, "c") | (true, false, true, 2, "c") => Some(CODE_BLOCK),
-                (true, false, true, 2, "." | ">") => Some(QUOTE),
+                (true, false, false, 1, "b") => Some(Format::Bold),
+                (true, false, false, 1, "i") => Some(Format::Italic),
+                (true, false, false, 1, "e") => Some(Format::Code),
+                (true, false, true, 2, "x") => Some(Format::Strike),
+                (true, true, false, 2, "c") | (true, false, true, 2, "c") => {
+                    Some(Format::CodeBlock)
+                }
+                (true, false, true, 2, "." | ">") => Some(Format::Quote),
                 _ => None,
             };
-            if let Some((before, after)) = formatting {
-                self.format_chat_input(before, after, editor, window, cx);
+            if let Some(format) = formatting {
+                self.format_chat_input(format, editor, window, cx);
                 return true;
             }
         }

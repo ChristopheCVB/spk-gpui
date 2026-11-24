@@ -43,7 +43,7 @@ impl Spk {
 
     pub(super) fn gif_toggle(&self, chat: &ChatView, cx: &Context<Self>) -> impl IntoElement {
         let opened = chat.gifs.is_some();
-        let disabled = !chat.can_send() || chat.outgoing.is_some();
+        let disabled = !chat.can_send();
         let trigger = tool_button("toggle-gif-picker", IconName::ImagePlay, "GIFs")
             .track_focus(&self.gif_button_focus)
             .toggled(opened)
@@ -244,8 +244,11 @@ impl Spk {
                     )
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.send(Command::PickGif(select.clone()), None, cx);
-                        this.chat_input
-                            .update(cx, |input, cx| input.focus(window, cx));
+                        this.chat_input.update(cx, |input, cx| {
+                            let end = input.value().len();
+                            input.set_selected_range(end..end, cx);
+                            input.focus(window, cx);
+                        });
                     })),
             )
             .child(
@@ -282,7 +285,7 @@ impl Spk {
                 .child(Label::new(format!("GIF · {}", gif_title(&gif.item))).truncate())
                 .child(
                     gif_button("remove-staged-gif", "Remove GIF")
-                        .disabled(chat.outgoing.is_some() || !chat.can_send())
+                        .disabled(!chat.can_send())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.send(Command::RemoveDraftGif(channel.clone()), None, cx);
                         })),

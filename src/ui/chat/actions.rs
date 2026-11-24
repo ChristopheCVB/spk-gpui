@@ -1,6 +1,9 @@
 use super::*;
 
-use gpui_kit::component::menu::PopupMenu;
+use gpui_kit::{
+    base::{ElementExt, TextSelection},
+    component::menu::PopupMenu,
+};
 
 use crate::{
     chat_markdown::{notification_preview, plain_text},
@@ -28,15 +31,46 @@ pub(super) enum ActionForm {
 pub(in crate::ui) struct MessageActionForm {
     message_id: String,
     kind: ActionForm,
+    original_body: String,
     submitted: bool,
 }
 
 impl Spk {
+    pub(super) fn cancel_inline_message_edit(&mut self) {
+        if self
+            .message_action_form
+            .as_ref()
+            .is_some_and(|form| matches!(form.kind, ActionForm::Edit { .. }))
+        {
+            self.message_action_form = None;
+        }
+    }
+
+    pub(in crate::ui) fn dismiss_message_action(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.message_action_form.take().is_none() {
+            return false;
+        }
+        self.chat_input
+            .update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
+        true
+    }
+
+    pub(super) fn is_editing_message(&self, message_id: &str) -> bool {
+        self.message_action_form.as_ref().is_some_and(|form| {
+            form.message_id == message_id && matches!(form.kind, ActionForm::Edit { .. })
+        })
+    }
+
     pub(super) fn update_message_actions(
         form_state: &mut Option<MessageActionForm>,
         previous: Option<&ChatView>,
         next: Option<&ChatView>,
-    ) {
+    ) -> bool {
         if let Some(form) = form_state {
             let Some(next) = next.filter(|next| {
                 previous.is_some_and(|previous| previous.channel_id == next.channel_id)
@@ -47,20 +81,24 @@ impl Spk {
                         .any(|message| message.id == form.message_id)
             }) else {
                 *form_state = None;
-                return;
+                return false;
             };
             if form.submitted
-                && previous.is_some_and(|view| view.action_pending)
                 && let Some(result) = &next.action_outcome
                 && result.message_id == form.message_id
+                && previous
+                    .and_then(|view| view.action_outcome.as_ref())
+                    .is_none_or(|old| !Arc::ptr_eq(old, result))
             {
                 if result.error.is_none() {
+                    let edited = matches!(form.kind, ActionForm::Edit { .. });
                     *form_state = None;
-                } else {
-                    form.submitted = false;
+                    return edited;
                 }
+                form.submitted = false;
             }
         }
+        false
     }
 
     pub(super) fn begin_message_action(
@@ -95,6 +133,13 @@ impl Spk {
         {
             return;
         }
+        if matches!(kind, ActionForm::Edit { .. })
+            && (sidebar.profile.id.as_deref() != Some(message.user_id.as_str())
+                || !view.can_send()
+                || view.action_pending)
+        {
+            return;
+        }
         if matches!(
             kind,
             ActionForm::Edit {
@@ -102,13 +147,7 @@ impl Spk {
             }
         ) && message.poll.is_some()
         {
-            if let View::SignedIn(sidebar) = &self.view
-                && sidebar.profile.id.as_deref() == Some(message.user_id.as_str())
-                && view.can_send()
-                && !view.action_pending
-            {
-                self.open_poll_editor(message, window, cx);
-            }
+            self.open_poll_editor(message, window, cx);
             return;
         }
         let initial = match kind {
@@ -118,18 +157,25 @@ impl Spk {
         self.message_action_form = Some(MessageActionForm {
             message_id: message_id.to_owned(),
             kind,
+            original_body: initial.to_owned(),
             submitted: false,
         });
         if !matches!(kind, ActionForm::Delete) {
             self.message_action_input.update(cx, |input, cx| {
                 input.set_value(initial.to_owned(), window, cx);
+                input.set_selected_range(initial.len()..initial.len(), cx);
                 input.focus(window, cx);
             });
+            self.refresh_chat_editor(true, cx);
         }
         cx.notify();
     }
 
-    pub(in crate::ui) fn submit_message_action(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::ui) fn submit_message_action(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let View::SignedIn(sidebar) = &self.view else {
             return;
         };
@@ -139,80 +185,123 @@ impl Spk {
         ) else {
             return;
         };
-        if !match form.kind {
-            ActionForm::Edit { .. } => view.can_send(),
-            ActionForm::Delete => view.can_delete_messages(),
-        } {
+        if form.submitted
+            || !match form.kind {
+                ActionForm::Edit { .. } => view.can_send(),
+                ActionForm::Delete => view.can_delete_messages(),
+            }
+        {
             return;
         }
-        let text = self.message_action_input.read(cx).value();
         let action = match form.kind {
-            ActionForm::Edit { .. } => MessageAction::Edit(text.to_string()),
+            ActionForm::Edit { .. } => {
+                let input = self.message_action_input.read(cx);
+                let body = editor::edit_wire(input, &form.original_body);
+                if body == form.original_body
+                    || input.value().as_ref() == form.original_body.as_str()
+                {
+                    self.dismiss_message_action(window, cx);
+                    return;
+                }
+                self.message_action_input
+                    .update(cx, |input, cx| input.focus(window, cx));
+                MessageAction::Edit(body)
+            }
             ActionForm::Delete => MessageAction::Delete,
         };
-        form.submitted = true;
         let command = Command::MutateChatMessage {
             channel_id: view.channel_id.clone(),
             message_id: form.message_id.clone(),
             action,
         };
-        self.send(command, None, cx);
+        form.submitted = match self.commands.try_send(command) {
+            Ok(()) => {
+                self.form_error = None;
+                true
+            }
+            Err(_) => {
+                self.form_error = Some("Could not reach the SPK connection. Try again.");
+                false
+            }
+        };
+        cx.notify();
     }
 
     pub(super) fn message_action_form(
         &self,
         chat: &ChatView,
         message: &ChatMessage,
+        window: &Window,
         cx: &Context<Self>,
     ) -> Option<impl IntoElement> {
         let form = self
             .message_action_form
             .as_ref()
             .filter(|form| form.message_id == message.id)?;
-        let (title, action) = match form.kind {
-            ActionForm::Edit { .. } => ("Edit message", "Save"),
-            ActionForm::Delete => ("Delete this message?", "Delete"),
-        };
+        let editing = matches!(form.kind, ActionForm::Edit { .. });
+        let disabled = form.submitted || chat.action_pending;
         let button = control_button("submit-message-action")
             .small()
             .tab_stop(true)
-            .label(action)
-            .disabled(chat.action_pending)
-            .on_click(cx.listener(|this, _, _, cx| this.submit_message_action(cx)));
+            .label(if editing { "Save" } else { "Delete" })
+            .disabled(disabled)
+            .on_click(cx.listener(|this, _, window, cx| this.submit_message_action(window, cx)));
+        let cancel = control_button("cancel-message-action")
+            .small()
+            .tab_stop(true)
+            .ghost()
+            .label("Cancel")
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.dismiss_message_action(window, cx);
+            }));
+        let theme = cx.theme();
         Some(
             div()
                 .flex()
                 .flex_col()
                 .gap_2()
-                .child(Label::new(title).font_semibold())
-                .when(!matches!(form.kind, ActionForm::Delete), |panel| {
-                    panel.child(
-                        Textarea::new(&self.message_action_input)
-                            .aria_label(title)
-                            .disabled(chat.action_pending),
-                    )
+                .when(editing, |panel| {
+                    let input = self.message_action_input.clone();
+                    panel
+                        .rounded_md()
+                        .border_1()
+                        .border_color(theme.primary)
+                        .children(self.suggestion_menu(true, window, cx))
+                        .child(
+                            editor::textarea(&self.message_action_input)
+                                .aria_label("Edit message")
+                                .on_paste(move |item, window, cx| {
+                                    editor::paste(&input, item, false, window, cx)
+                                })
+                                .disabled(disabled),
+                        )
+                })
+                .when(!editing, |panel| {
+                    panel.child(Label::new("Delete this message?").font_semibold())
                 })
                 .child(
                     div()
                         .flex()
+                        .items_center()
                         .gap_2()
-                        .child(if matches!(form.kind, ActionForm::Delete) {
-                            button.danger()
-                        } else {
-                            button.primary()
+                        .when(editing, |footer| {
+                            footer
+                                .p_1()
+                                .border_t_1()
+                                .border_color(theme.border)
+                                .child(
+                                    Label::new("Esc to cancel · Enter to save")
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground),
+                                )
+                                .child(div().flex_1())
                         })
-                        .child(
-                            control_button("cancel-message-action")
-                                .small()
-                                .tab_stop(true)
-                                .label("Cancel")
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.message_action_form = None;
-                                    this.chat_input
-                                        .update(cx, |input, cx| input.focus(window, cx));
-                                    cx.notify();
-                                })),
-                        ),
+                        .child(cancel)
+                        .child(if editing {
+                            button.primary()
+                        } else {
+                            button.danger()
+                        }),
                 ),
         )
     }
@@ -228,7 +317,7 @@ impl Spk {
         let View::SignedIn(sidebar) = &self.view else {
             return;
         };
-        let Some((_, message)) = reaction_message(sidebar.chat.as_ref(), channel_id, message_id)
+        let Some((_, message)) = active_chat_message(sidebar.chat.as_ref(), channel_id, message_id)
             .filter(|(chat, _)| !chat.action_pending)
         else {
             return;
@@ -799,6 +888,7 @@ impl MessageActions {
             })
             .child(
                 tool_button("more-message-actions", IconName::Ellipsis, "More actions")
+                    .keep_text_selection("more-message-actions-selection")
                     .dropdown_menu_with_anchor(Anchor::TopRight, move |popup, window, cx| {
                         menu.menu(popup, window, cx)
                     }),
@@ -821,9 +911,14 @@ impl MessageActions {
             (self.app.clone(), self.channel.clone(), self.message.clone());
         let quote_app = app.clone();
         let quote_channel = channel.clone();
-        let quoted = self
-            .body
-            .lines()
+        let selected = TextSelection::selected_text(window, cx);
+        let source = if selected.trim().is_empty() {
+            &self.body
+        } else {
+            selected.trim()
+        };
+        let quoted = source
+            .split('\n')
             .map(|line| format!("> {line}"))
             .collect::<Vec<_>>()
             .join("\n");
@@ -846,14 +941,18 @@ impl MessageActions {
                         .on_click(move |_, window, cx| {
                             let _ = quote_app.update(cx, |this, cx| {
                                 if chat(&this.view).is_some_and(|chat| {
-                                    chat.channel_id == quote_channel
-                                        && chat.can_send()
-                                        && chat.outgoing.is_none()
+                                    chat.channel_id == quote_channel && chat.can_send()
                                 }) {
                                     this.chat_input.update(cx, |input, cx| {
-                                        let end = input.value().len();
-                                        input.set_selected_range(end..end, cx);
-                                        input.insert(format!("\n\n{quoted}\n\n"), window, cx);
+                                        let draft = input.value();
+                                        if draft.trim().is_empty() {
+                                            input.set_selected_range(0..draft.len(), cx);
+                                            input.replace(format!("{quoted}\n\n"), window, cx);
+                                        } else {
+                                            let end = draft.len();
+                                            input.set_selected_range(end..end, cx);
+                                            input.insert(format!("\n\n{quoted}\n\n"), window, cx);
+                                        }
                                         input.focus(window, cx);
                                     });
                                     this.update_chat_draft(cx);

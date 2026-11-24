@@ -1,12 +1,14 @@
 mod actions;
 mod attachments;
+pub(super) mod editor;
 mod embed;
 mod gifs;
 mod history;
 mod poll_composer;
 mod poll_results;
 mod reaction_picker;
-mod slash_commands;
+mod recovery;
+pub(super) mod suggestions;
 
 pub(super) use actions::{MessageActionForm, PinPanel};
 pub(super) use attachments::AttachmentUi;
@@ -27,6 +29,7 @@ use gpui_kit::component::{
     tooltip::Tooltip,
 };
 
+use editor::Format;
 use history::{
     HistoryRow, JUMP_HIGHLIGHT_HOLD, date_label, history_message_at, history_message_index,
     history_rows, jump_highlight_opacity, message_row_background, relative_time,
@@ -36,7 +39,7 @@ use super::*;
 
 use crate::{
     api::{ChatMessage, MessageTarget, UnreadState},
-    chat_markdown::{message_markdown, safe_link},
+    chat_markdown::{message_markdown, reply_preview, safe_link},
     reaction_artwork::reaction_artwork_path,
     session::{ChatView, Delivery, Pins},
 };
@@ -53,13 +56,6 @@ struct HiddenChatSpoilers {
     offsets: Vec<usize>,
 }
 
-pub(super) const BOLD: (&str, &str) = ("**", "**");
-pub(super) const ITALIC: (&str, &str) = ("_", "_");
-pub(super) const STRIKETHROUGH: (&str, &str) = ("~~", "~~");
-pub(super) const INLINE_CODE: (&str, &str) = ("`", "`");
-pub(super) const CODE_BLOCK: (&str, &str) = ("\n```\n", "\n```\n");
-pub(super) const QUOTE: (&str, &str) = ("\n> ", "");
-
 fn chat(view: &View) -> Option<&ChatView> {
     match view {
         View::SignedIn(sidebar) => sidebar.chat.as_ref(),
@@ -67,7 +63,7 @@ fn chat(view: &View) -> Option<&ChatView> {
     }
 }
 
-fn reaction_message<'a>(
+fn active_chat_message<'a>(
     chat: Option<&'a ChatView>,
     channel_id: &str,
     message_id: &str,
@@ -386,10 +382,8 @@ impl Spk {
         if chat.gifs.is_some() {
             self.gif_button_focus.focus(window, cx);
             self.send(Command::ShowGifs(false), None, cx);
-        } else if self.message_action_form.take().is_some() {
-            self.chat_input
-                .update(cx, |input, cx| input.focus(window, cx));
-            cx.notify();
+        } else if self.message_action_form.is_some() {
+            return self.dismiss_message_action(window, cx);
         } else if chat.draft.reply.is_some() {
             self.send(
                 Command::SetChatReply {
@@ -412,7 +406,8 @@ impl Spk {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.chat_input.read(cx).value().is_empty() || self.message_action_form.is_some() {
+        if !editor::wire(self.chat_input.read(cx)).is_empty() || self.message_action_form.is_some()
+        {
             return false;
         }
         let View::SignedIn(sidebar) = &self.view else {
@@ -436,6 +431,9 @@ impl Spk {
         else {
             return false;
         };
+        if let Some(index) = history_message_index(chat, &message.id) {
+            self.chat_scroll.scroll_to_item(index);
+        }
         let channel_id = chat.channel_id.clone();
         let message_id = message.id.clone();
         self.begin_message_action(
@@ -450,24 +448,32 @@ impl Spk {
         true
     }
 
+    pub(super) fn refresh_chat_editor(&self, editing: bool, cx: &mut App) {
+        let input = if editing {
+            &self.message_action_input
+        } else {
+            &self.chat_input
+        };
+        let directory = match &self.view {
+            View::SignedIn(sidebar) => Some(sidebar.as_ref()),
+            _ => None,
+        };
+        editor::refresh(input, directory, cx);
+    }
+
     pub(super) fn format_chat_input(
         &mut self,
-        before: &str,
-        after: &str,
+        format: Format,
         editing: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if editing {
-            self.message_action_input.update(cx, |input, cx| {
-                let selected = input.selected_value();
-                let start = input.selected_range().start + before.len();
-                input.replace(format!("{before}{selected}{after}"), window, cx);
-                input.set_selected_range(start..start + selected.len(), cx);
-            });
-        } else {
-            self.insert_chat_text(before, after, window, cx);
+            editor::toggle(&self.message_action_input, format, window, cx);
+        } else if chat(&self.view).is_some_and(|chat| chat.can_send()) {
+            editor::toggle(&self.chat_input, format, window, cx);
         }
+        self.refresh_chat_editor(editing, cx);
     }
 
     pub(super) fn update_chat(&mut self, next: &View, window: &mut Window, cx: &mut Context<Self>) {
@@ -482,7 +488,15 @@ impl Spk {
             });
         }
         let previous = chat(&self.view);
-        let signed_in = matches!(next, View::SignedIn(_));
+        let directory = match next {
+            View::SignedIn(sidebar) => Some(sidebar.as_ref()),
+            _ => None,
+        };
+        let signed_in = directory.is_some();
+        let directory_changed = directory.is_some_and(|directory| match &self.view {
+            View::SignedIn(previous) => !directory.same_user_directory(previous),
+            _ => true,
+        });
         let next = chat(next);
         if previous
             .map(|chat| (&chat.channel_id, &chat.messages))
@@ -512,9 +526,12 @@ impl Spk {
             }
         }
         self.update_gif_input(previous, next, window, cx);
-        Self::update_message_actions(&mut self.message_action_form, previous, next);
+        if Self::update_message_actions(&mut self.message_action_form, previous, next) {
+            self.chat_input
+                .update(cx, |input, cx| input.focus(window, cx));
+        }
         if self.reaction_picker.as_ref().is_some_and(|picker| {
-            reaction_message(next, &picker.channel_id, &picker.message_id).is_none()
+            active_chat_message(next, &picker.channel_id, &picker.message_id).is_none()
         }) {
             self.reaction_picker = None;
         }
@@ -540,8 +557,30 @@ impl Spk {
         {
             self.chat_pins = None;
         }
+        let mut restore_body = false;
+        if let Some(next) = next
+            && let Some(nonce) = &next.draft_restoration
+            && (reset || previous.and_then(|chat| chat.draft_restoration.as_ref()) != Some(nonce))
+        {
+            let accept = reset
+                || !self.chat_draft_edited
+                    && self.chat_input.update(cx, |input, cx| {
+                        input.value().is_empty() && input.marked_text_range(window, cx).is_none()
+                    });
+            restore_body = self
+                .commands
+                .try_send(Command::ResolveChatDraftRestoration {
+                    channel_id: next.channel_id.clone(),
+                    nonce: nonce.clone(),
+                    accept,
+                })
+                .is_ok()
+                && accept;
+        }
         if reset {
-            self.slash_choice = None;
+            self.chat_submitting = false;
+            self.chat_draft_edited = false;
+            self.suggestions = Default::default();
             self.chat_input.update(cx, |input, cx| {
                 input.set_value(
                     next.map_or("", |chat| chat.draft.body.as_str()).to_owned(),
@@ -549,6 +588,7 @@ impl Spk {
                     cx,
                 )
             });
+            editor::refresh(&self.chat_input, directory, cx);
             self.chat_spoilers.clear();
             self.chat_scroll_anchor = None;
             self.chat_history_position
@@ -568,20 +608,33 @@ impl Spk {
                 self.chat_scroll_anchor = history_anchor(previous, &self.chat_scroll)
                     .map(|(id, offset)| (id.to_owned(), offset));
             }
-            let acknowledged = previous.outgoing.as_ref().is_some_and(|pending| {
-                next.outgoing.is_none()
-                    && !next.loading()
-                    && next.draft.body.is_empty()
-                    && self.chat_input.read(cx).value().as_ref() == pending.body
-            });
-            let restored = previous.loading()
-                && !next.loading()
+            if previous.draft_generation != next.draft_generation {
+                self.chat_submitting = false;
+            }
+            let failed_send =
+                restore_body || previous.draft_restore_generation != next.draft_restore_generation;
+            let restored = (next.draft_restoration.is_none() || restore_body)
+                && !self.chat_submitting
+                && (failed_send || previous.loading() && !next.loading())
                 && !next.draft.body.is_empty()
                 && self.chat_input.read(cx).value().is_empty();
-            if acknowledged || restored {
+            if restored {
                 self.chat_input.update(cx, |input, cx| {
-                    input.set_value(next.draft.body.clone(), window, cx)
+                    input.set_value(next.draft.body.clone(), window, cx);
+                    if failed_send {
+                        let end = next.draft.body.len();
+                        input.set_selected_range(end..end, cx);
+                    }
                 });
+                editor::refresh(&self.chat_input, directory, cx);
+            }
+        }
+        if directory_changed {
+            if !reset {
+                editor::refresh(&self.chat_input, directory, cx);
+            }
+            if self.message_action_form.is_some() {
+                editor::refresh(&self.message_action_input, directory, cx);
             }
         }
         let previous_jump = previous
@@ -663,7 +716,7 @@ impl Spk {
             self.send(
                 Command::UpdateChatDraft {
                     channel_id: chat.channel_id.clone(),
-                    body: self.chat_input.read(cx).value().to_string(),
+                    body: editor::wire(self.chat_input.read(cx)),
                 },
                 None,
                 cx,
@@ -671,13 +724,12 @@ impl Spk {
         }
     }
 
-    pub(super) fn submit_chat(&mut self, cx: &mut Context<Self>) {
-        let Some(chat) = chat(&self.view).filter(|chat| chat.can_send() && chat.outgoing.is_none())
-        else {
+    pub(super) fn submit_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chat) = chat(&self.view).filter(|chat| chat.can_send()) else {
             return;
         };
-        let body = self.chat_input.read(cx).value().to_string();
-        if !chat.draft.can_send(&body) {
+        let body = editor::wire(self.chat_input.read(cx));
+        if self.chat_submitting || !chat.draft.can_send(&body) {
             return;
         }
         let reading_older = chat.has_more_after;
@@ -689,8 +741,18 @@ impl Spk {
             None,
             cx,
         );
-        if self.form_error.is_none() && !reading_older {
-            self.chat_scroll.scroll_to_bottom();
+        if self.form_error.is_none() {
+            self.chat_submitting = true;
+            self.chat_draft_edited = false;
+            self.suggestions[0].dismiss();
+            self.chat_input.update(cx, |input, cx| {
+                input.set_value("", window, cx);
+                input.focus(window, cx);
+            });
+            self.refresh_chat_editor(false, cx);
+            if !reading_older {
+                self.chat_scroll.scroll_to_bottom();
+            }
         }
     }
 
@@ -802,9 +864,10 @@ impl Spk {
                 .into_iter()
                 .filter_map(|(id, error)| {
                     error.map(|error| {
-                        div().px_4().py_2().child(
-                            Label::new(error.to_owned()).id(id).text_color(theme.danger),
-                        )
+                        div()
+                            .px_4()
+                            .py_2()
+                            .child(Label::new(error.to_owned()).id(id).text_color(theme.danger))
                     })
                 }),
             )
@@ -885,31 +948,38 @@ impl Spk {
             ))
             .when(chat.has_more_after && !chat.loading(), |area| {
                 area.child(
-                    div().px_4().py_2().flex().gap_2().child(
-                        control_button("newer-messages")
-                            .small()
-                            .tab_stop(true)
-                            .label("Load newer messages")
-                            .disabled(!chat.history_ready() || chat.messages.is_empty())
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.send(Command::LoadNewerMessages, None, cx)
-                            })),
-                    ).child(
-                        control_button("latest-messages")
-                            .small()
-                            .tab_stop(true)
-                            .label("Jump to latest messages")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.send(Command::LoadLatestMessages, None, cx)
-                            })),
-                    ),
+                    div()
+                        .px_4()
+                        .py_2()
+                        .flex()
+                        .gap_2()
+                        .child(
+                            control_button("newer-messages")
+                                .small()
+                                .tab_stop(true)
+                                .label("Load newer messages")
+                                .disabled(!chat.history_ready() || chat.messages.is_empty())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.send(Command::LoadNewerMessages, None, cx)
+                                })),
+                        )
+                        .child(
+                            control_button("latest-messages")
+                                .small()
+                                .tab_stop(true)
+                                .label("Jump to latest messages")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.send(Command::LoadLatestMessages, None, cx)
+                                })),
+                        ),
                 )
             })
             .when(chat.webhook && !chat.unavailable(), |area| {
                 area.child(
-                    div().px_4().py_3().child(
-                        Label::new("Read-only feed").text_color(theme.muted_foreground),
-                    ),
+                    div()
+                        .px_4()
+                        .py_3()
+                        .child(Label::new("Read-only feed").text_color(theme.muted_foreground)),
                 )
             })
             .children((!chat.webhook && !chat.unavailable()).then(|| {
@@ -920,17 +990,10 @@ impl Spk {
                     .flex()
                     .flex_col()
                     .min_h_0()
-                    .border_1()
-                    .border_color(theme.background.opacity(0.0))
-                    .when(chat.can_send() && chat.outgoing.is_none(), |composer| {
-                        let accent = theme.primary;
-                        composer
-                            .drag_over::<ExternalPaths>(move |style, _, _, _| {
-                                style.border_color(accent)
-                            })
-                            .on_drop(cx.listener(|app, paths: &ExternalPaths, _, cx| {
-                                app.add_attachment_paths(paths.paths().to_vec(), cx);
-                            }))
+                    .when(chat.can_send(), |composer| {
+                        composer.on_drop(cx.listener(|app, paths: &ExternalPaths, _, cx| {
+                            app.add_attachment_paths(paths.paths().to_vec(), cx);
+                        }))
                     })
                     .when(!chat.typing.is_empty(), |composer| {
                         let names: Vec<_> = chat
@@ -945,148 +1008,100 @@ impl Spk {
                         };
                         composer.child(Label::new(text).text_color(theme.muted_foreground))
                     })
-                    .when_some(chat.draft.reply.as_ref(), |composer, reply| {
-                        let channel_id = chat.channel_id.clone();
-                        composer.child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .pb_2()
-                                .child(
-                                    Label::new(format!(
-                                        "Replying to {}",
-                                        sidebar.message_author(&reply.user_id)
-                                    ))
-                                    .font_semibold(),
-                                )
-                                .child(
-                                    Label::new(
-                                        message_markdown(
-                                            &reply.preview,
-                                            |id| sidebar.message_author(id),
-                                            |_| false,
-                                            None,
-                                        )
-                                        .into_owned(),
+                    .when_some(
+                        chat.draft.reply.as_ref().filter(|_| !self.chat_submitting),
+                        |composer, reply| {
+                            let channel_id = chat.channel_id.clone();
+                            composer.child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .mb_2()
+                                    .px_2()
+                                    .rounded_md()
+                                    .bg(theme.muted)
+                                    .child(
+                                        Icon::new(IconName::Reply)
+                                            .size(ACTION_ICON_SIZE)
+                                            .flex_none(),
                                     )
-                                    .truncate(),
-                                )
-                                .child(
-                                    control_button("cancel-reply")
-                                        .small()
-                                        .tab_stop(true)
-                                        .label("Cancel reply")
-                                        .disabled(chat.outgoing.is_some() || !chat.can_send())
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.send(
-                                                Command::SetChatReply {
-                                                    channel_id: channel_id.clone(),
-                                                    message_id: None,
-                                                },
-                                                None,
-                                                cx,
-                                            );
-                                        })),
-                                ),
-                        )
-                    })
-                    .when_some(chat.outgoing.as_ref(), |composer, outgoing| {
-                        let channel_id = chat.channel_id.clone();
-                        let (status, retry, dismiss) = match &outgoing.status {
-                            Delivery::Sending(_) => ("Sending…".into(), false, false),
-                            Delivery::Failed(error) => {
-                                (format!("Could not send message. {error}"), true, true)
-                            }
-                            Delivery::Unconfirmed => (
-                                "Delivery unconfirmed. Resending may post a duplicate. Check message history."
-                                    .into(),
-                                false,
-                                true,
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .gap_2()
+                                            .child(
+                                                Label::new(format!(
+                                                    "Replying to {}",
+                                                    sidebar.message_author(&reply.user_id)
+                                                ))
+                                                .max_w(px(220.))
+                                                .font_semibold()
+                                                .truncate(),
+                                            )
+                                            .child(
+                                                Label::new(reply_preview(&reply.preview, |id| {
+                                                    sidebar.message_author(id)
+                                                }))
+                                                .min_w_0()
+                                                .text_color(theme.muted_foreground)
+                                                .truncate(),
+                                            ),
+                                    )
+                                    .child(
+                                        tool_button("cancel-reply", IconName::X, "Cancel reply")
+                                            .flex_none()
+                                            .disabled(!chat.can_send())
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.send(
+                                                    Command::SetChatReply {
+                                                        channel_id: channel_id.clone(),
+                                                        message_id: None,
+                                                    },
+                                                    None,
+                                                    cx,
+                                                );
+                                                this.chat_input.update(cx, |input, cx| {
+                                                    input.focus(window, cx);
+                                                });
+                                            })),
+                                    ),
+                            )
+                        },
+                    )
+                    .child(
+                        div()
+                            .id("send-recovery-list")
+                            .max_h(px(176.))
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .children(
+                                chat.outgoing
+                                    .iter()
+                                    .filter(|outgoing| {
+                                        !matches!(outgoing.status, Delivery::Sending(_))
+                                    })
+                                    .map(|outgoing| self.chat_send_recovery(sidebar, outgoing, cx)),
                             ),
-                        };
-                        composer.child(
-                            div()
-                                .pb_2()
-                                .child(
-                                    Label::new(
-                                        message_markdown(
-                                            &outgoing.body,
-                                            |id| sidebar.message_author(id),
-                                            |_| false,
-                                            None,
-                                        )
-                                        .into_owned(),
-                                    )
-                                    .truncate(),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_wrap()
-                                        .items_center()
-                                        .gap_2()
-                                        .child(
-                                            Label::new(status).text_color(theme.muted_foreground),
-                                        )
-                                        .when(retry, |bar| {
-                                            bar.child(
-                                                control_button("retry-send")
-                                                    .small()
-                                                    .tab_stop(true)
-                                                    .label("Retry send")
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.send(Command::RetryChatSend, None, cx)
-                                                    })),
-                                            )
-                                        })
-                                        .when(dismiss, |bar| {
-                                            bar.child(
-                                                control_button("dismiss-send")
-                                                    .small()
-                                                    .tab_stop(true)
-                                                    .label(if retry {
-                                                        "Edit message"
-                                                    } else {
-                                                        "Edit and resend"
-                                                    })
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.send(
-                                                            Command::DismissChatSend,
-                                                            None,
-                                                            cx,
-                                                        )
-                                                    })),
-                                            )
-                                        })
-                                        .when(matches!(outgoing.status, Delivery::Unconfirmed), |bar| {
-                                            bar.child(
-                                                control_button("mark-send-delivered")
-                                                    .small()
-                                                    .tab_stop(true)
-                                                    .label("Already sent")
-                                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                                        this.send(Command::MarkChatSendDelivered(channel_id.clone()), None, cx)
-                                                    })),
-                                            )
-                                        }),
-                                ),
-                        )
-                    })
-                    .child(self.message_composer(sidebar, chat, cx))
+                    )
+                    .child(self.message_composer(chat, window, cx))
             }))
     }
 
     fn message_composer(
         &self,
-        sidebar: &Sidebar,
         chat: &ChatView,
+        window: &Window,
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
         let surface = theme.popover;
-        let disabled = chat.outgoing.is_some() || !chat.can_send();
-        let can_send = !disabled && chat.draft.can_send(&self.chat_input.read(cx).value());
+        let disabled = !chat.can_send();
+        let can_send = !disabled
+            && !self.chat_submitting
+            && chat.draft.can_send(&editor::wire(self.chat_input.read(cx)));
         let app = cx.weak_entity();
         div()
             .id("message-composer")
@@ -1098,24 +1113,36 @@ impl Spk {
             .bg(surface)
             .border_1()
             .border_color(surface)
+            .when(!disabled, |composer| {
+                let accent = theme.primary;
+                composer
+                    .drag_over::<ExternalPaths>(move |style, _, _, _| style.border_color(accent))
+            })
             .child(
                 div()
                     .id("composer-media")
                     .min_h_0()
                     .overflow_y_scroll()
-                    .child(self.staged_gif(chat, cx))
-                    .child(self.attachment_queue(chat, cx)),
+                    .when(!self.chat_submitting, |media| {
+                        media
+                            .child(self.staged_gif(chat, cx))
+                            .child(self.attachment_queue(chat, cx))
+                    }),
             )
-            .children(self.slash_suggestions(cx))
+            .children(self.suggestion_menu(false, window, cx))
             .child(
-                Textarea::new(&self.chat_input)
+                editor::textarea(&self.chat_input)
                     .flex_shrink_0()
                     .bg(surface)
-                    .border_color(surface)
+                    .bordered(false)
                     .aria_label("Write a message")
-                    .on_paste(move |item, _, cx| {
-                        app.update(cx, |app, cx| app.paste_attachments(item, cx))
-                            .unwrap_or(false)
+                    .on_paste(move |item, window, cx| {
+                        app.update(cx, |app, cx| {
+                            app.paste_attachments(item, cx)
+                                || app.paste_attachment_paths(cx)
+                                || editor::paste(&app.chat_input, item, false, window, cx)
+                        })
+                        .unwrap_or(false)
                     })
                     .disabled(disabled),
             )
@@ -1125,7 +1152,7 @@ impl Spk {
                     .flex_shrink_0()
                     .items_end()
                     .gap_2()
-                    .child(self.composer_tools(sidebar, chat, disabled, cx))
+                    .child(self.composer_tools(chat, disabled, cx))
                     .child(
                         icon_label_button(
                             control_button("send-chat").primary(),
@@ -1135,7 +1162,7 @@ impl Spk {
                         .tab_stop(true)
                         .flex_shrink_0()
                         .disabled(!can_send)
-                        .on_click(cx.listener(|this, _, _, cx| this.submit_chat(cx))),
+                        .on_click(cx.listener(|this, _, window, cx| this.submit_chat(window, cx))),
                     ),
             )
     }
@@ -1223,6 +1250,7 @@ impl Spk {
         let channel = chat.channel_id.clone();
         let message_id = message.id.clone();
         let body = message.body.clone();
+        let editing = self.is_editing_message(&message_id);
         let RenderedChatMarkdown {
             view: text,
             source: share_text,
@@ -1257,7 +1285,7 @@ impl Spk {
             .entry(message.id.clone())
             .or_insert_with(|| cx.focus_handle().tab_stop(true))
             .clone();
-        let composer_busy = chat.outgoing.is_some() || !chat.can_send();
+        let composer_busy = !chat.can_send();
         let message_actions = Rc::new(actions::MessageActions {
             app: app.clone(),
             channel: channel.clone(),
@@ -1277,6 +1305,7 @@ impl Spk {
         let reply = message.reply_to.as_ref().filter(|_| !chat.webhook);
         let reply_channel = channel.clone();
         let reply_id = message_id.clone();
+        let reply_focus = row_focus.clone();
         let keyboard_focused = row_focus.is_focused(window) && window.last_input_was_keyboard();
         let row_focused = row_focus.contains_focused(window, cx);
         let feed = sidebar.webhook_feed(&chat.channel_id);
@@ -1302,6 +1331,9 @@ impl Spk {
             row_focused || menu_focused,
             cx,
         );
+        let user_menu = chat
+            .can_send()
+            .then(|| (message.user_id.clone(), app.clone()));
         let content = div()
             .flex_1()
             .min_w_0()
@@ -1313,7 +1345,17 @@ impl Spk {
                     .items_center()
                     .gap_2()
                     .when(starts_group, |header| {
-                        header.child(Label::new(author.to_owned()).font_semibold())
+                        let label = div()
+                            .id("message-author")
+                            .child(Label::new(author.to_owned()).font_semibold());
+                        header.child(match user_menu {
+                            Some((id, app)) => label
+                                .context_menu(move |menu, _, _| {
+                                    menu.item(profile::mention_user_item(id.clone(), app.clone()))
+                                })
+                                .into_any_element(),
+                            None => label.into_any_element(),
+                        })
                     })
                     .when_some(
                         exact_time.clone().filter(|_| starts_group),
@@ -1339,13 +1381,16 @@ impl Spk {
                                 .text_color(theme.muted_foreground),
                         )
                     })
-                    .when(message.edited_at.is_some() && !chat.webhook, |row| {
-                        row.child(
-                            Label::new("(edited)")
-                                .text_xs()
-                                .text_color(theme.muted_foreground),
-                        )
-                    }),
+                    .when(
+                        message.edited_at.is_some() && !chat.webhook && !editing,
+                        |row| {
+                            row.child(
+                                Label::new("(edited)")
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground),
+                            )
+                        },
+                    ),
             )
             .when_some(reply, |row, reply| {
                 let icon = Icon::new(IconName::CornerUpRight).text_color(theme.muted_foreground);
@@ -1414,7 +1459,10 @@ impl Spk {
                         .into_any_element()
                 })
             })
-            .when(!message.body.is_empty(), |row| row.child(text))
+            .when(!message.body.is_empty() && !editing, |row| row.child(text))
+            .when(editing, |row| {
+                row.children(self.message_action_form(chat, message, window, cx))
+            })
             .when_some(embed, |row, embed| {
                 row.child(self.webhook_embed(
                     embed,
@@ -1427,7 +1475,9 @@ impl Spk {
             .when(!message.attachments.is_empty(), |row| {
                 row.child(self.attachment_cards(message, cx))
             })
-            .children(self.message_action_form(chat, message, cx))
+            .when(!editing, |row| {
+                row.children(self.message_action_form(chat, message, window, cx))
+            })
             .when(!message.previews.is_empty(), |row| {
                 row.child(self.link_previews(sidebar, chat, message, cx))
             })
@@ -1478,7 +1528,7 @@ impl Spk {
                 if !event.is_held
                     && !event.keystroke.modifiers.modified()
                     && event.keystroke.key == "r"
-                    && !window.has_focused_input(cx)
+                    && reply_focus.is_focused(window)
                     && !composer_busy
                 {
                     app.reply_to_message(reply_channel.clone(), reply_id.clone(), window, cx);
@@ -1575,7 +1625,7 @@ impl Spk {
                     ),
             )
             .child(content)
-            .child(toolbar)
+            .when(!editing, |row| row.child(toolbar))
             .context_menu(move |menu, window, cx| message_actions.menu(menu, window, cx))
     }
 
@@ -1586,6 +1636,12 @@ impl Spk {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !active_chat_message(chat(&self.view), &channel_id, &message_id)
+            .is_some_and(|(chat, _)| chat.can_send())
+        {
+            return;
+        }
+        self.cancel_inline_message_edit();
         self.send(
             Command::SetChatReply {
                 channel_id,
@@ -1594,24 +1650,45 @@ impl Spk {
             None,
             cx,
         );
-        self.chat_input
-            .update(cx, |input, cx| input.focus(window, cx));
+        self.chat_input.update(cx, |input, cx| {
+            let end = input.value().len();
+            input.set_selected_range(end..end, cx);
+            input.focus(window, cx);
+        });
+    }
+
+    pub(super) fn append_chat_mention(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !chat(&self.view).is_some_and(ChatView::can_send)
+            || !crate::chat_markdown::valid_mention_id(id)
+        {
+            return;
+        }
+        self.close_sidebar_drawer(window, cx);
+        self.chat_input.update(cx, |input, cx| {
+            let source = input.value();
+            let empty = editor::wire(input).trim().is_empty();
+            let start = if empty { 0 } else { source.trim_end().len() };
+            let separator = if empty { "" } else { " " };
+            input.set_selected_range(start..source.len(), cx);
+            input.replace(format!("{separator}<@{id}> "), window, cx);
+            input.focus(window, cx);
+        });
+        self.refresh_chat_editor(false, cx);
+        self.update_chat_draft(cx);
     }
 
     fn composer_tools(
         &self,
-        sidebar: &Sidebar,
         chat: &ChatView,
         disabled: bool,
         cx: &Context<Self>,
     ) -> impl IntoElement {
-        let app = cx.weak_entity();
-        let mention_app = app.clone();
-        let people: Vec<_> = sidebar
-            .people()
-            .into_iter()
-            .map(|(id, name)| (name.to_owned(), id.to_owned()))
-            .collect();
+        let active = editor::active_formats(self.chat_input.read(cx));
         div()
             .flex()
             .flex_1()
@@ -1620,89 +1697,26 @@ impl Spk {
             .gap_1()
             .children(
                 [
-                    (IconName::Bold, "Bold", BOLD),
-                    (IconName::Italic, "Italic", ITALIC),
-                    (IconName::Strikethrough, "Strikethrough", STRIKETHROUGH),
-                    (IconName::Code, "Inline code", INLINE_CODE),
-                    (IconName::SquareCode, "Code block", CODE_BLOCK),
-                    (IconName::Quote, "Quote", QUOTE),
-                    (IconName::EyeOff, "Spoiler", ("||", "||")),
+                    (IconName::Bold, "Bold", Format::Bold),
+                    (IconName::Italic, "Italic", Format::Italic),
+                    (IconName::Strikethrough, "Strikethrough", Format::Strike),
+                    (IconName::Code, "Inline code", Format::Code),
+                    (IconName::SquareCode, "Code block", Format::CodeBlock),
+                    (IconName::Quote, "Quote", Format::Quote),
+                    (IconName::EyeOff, "Spoiler", Format::Spoiler),
                 ]
                 .into_iter()
-                .map(|(icon, label, (before, after))| {
+                .map(|(icon, label, format)| {
                     tool_button(label, icon, label)
+                        .selected(active(format))
                         .disabled(disabled)
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            this.insert_chat_text(before, after, window, cx);
+                            this.format_chat_input(format, false, window, cx);
                         }))
                 }),
             )
-            .child(
-                tool_button("mention-menu", IconName::AtSign, "Mention")
-                    .disabled(disabled || people.is_empty())
-                    .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
-                        people.iter().fold(menu, |menu, (name, id)| {
-                            let app = mention_app.clone();
-                            let mention = format!("<@{id}> ");
-                            menu.item(PopupMenuItem::new(name.clone()).on_click(
-                                move |_, window, cx| {
-                                    let _ = app.update(cx, |this, cx| {
-                                        this.insert_chat_text("", &mention, window, cx)
-                                    });
-                                },
-                            ))
-                        })
-                    }),
-            )
-            .child(
-                tool_button("emoji-menu", IconName::FaceSlightlySmiling, "Emoji")
-                    .disabled(disabled)
-                    .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
-                        [
-                            ("👍", "Thumbs up"),
-                            ("❤️", "Heart"),
-                            ("😂", "Laugh"),
-                            ("😊", "Smile"),
-                            ("👋", "Wave"),
-                            ("🎉", "Celebrate"),
-                        ]
-                        .into_iter()
-                        .fold(menu, |menu, (emoji, name)| {
-                            let app = app.clone();
-                            menu.item(PopupMenuItem::new(format!("{emoji} {name}")).on_click(
-                                move |_, window, cx| {
-                                    let _ = app.update(cx, |this, cx| {
-                                        this.insert_chat_text("", emoji, window, cx)
-                                    });
-                                },
-                            ))
-                        })
-                    }),
-            )
             .child(self.attachment_picker(chat, cx))
             .child(self.gif_toggle(chat, cx))
-    }
-
-    fn insert_chat_text(
-        &mut self,
-        before: &str,
-        after: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !chat(&self.view).is_some_and(|chat| chat.can_send() && chat.outgoing.is_none()) {
-            return;
-        }
-        self.chat_input.update(cx, |input, cx| {
-            let selected = input.selected_value();
-            let start = input.selected_range().start + before.len();
-            input.replace(format!("{before}{selected}{after}"), window, cx);
-            if !before.is_empty() {
-                input.set_selected_range(start..start + selected.len(), cx);
-            }
-            input.focus(window, cx);
-        });
-        self.update_chat_draft(cx);
     }
 }
 

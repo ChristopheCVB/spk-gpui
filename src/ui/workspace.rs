@@ -299,6 +299,7 @@ impl Spk {
             status,
             sidebar.notice,
             sidebar.chat_notice,
+            sidebar.draft_notice,
             sidebar.read_notice,
             sidebar.device_notice,
             sidebar.voice_moderation_notice,

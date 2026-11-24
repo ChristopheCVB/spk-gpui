@@ -12,7 +12,9 @@ pub(crate) use account_admin::account_link_token;
 pub use account_admin::{
     AccountRole, AdminDirectory, AdminUser, Invite, InviteStatus, IssuedAccountLink,
 };
-pub use attachments::{Attachment, AttachmentRef, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS};
+pub use attachments::{
+    Attachment, AttachmentRef, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENT_PREVIEW_BYTES, MAX_ATTACHMENTS,
+};
 pub use channel_admin::{ChannelKind, ChannelMutation};
 pub use chat_actions::{LinkPreview, MessageAction, MessageChange, PollEditOption, Reaction};
 pub use gifs::{GifItem, GifPage, image_message_url};
@@ -754,6 +756,10 @@ impl SpkClient {
 
     pub fn cookies(&self) -> &CookieStoreMutex {
         &self.cookies
+    }
+
+    pub fn origin(&self) -> &str {
+        &self.origin
     }
 
     fn request(&self, method: Method, path: &str) -> reqwest::RequestBuilder {

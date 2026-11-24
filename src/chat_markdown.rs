@@ -5,6 +5,31 @@ use url::Url;
 
 use crate::api::image_message_url;
 
+pub(crate) fn valid_mention_id(id: &str) -> bool {
+    !id.is_empty() && id.bytes().all(mention_id_byte)
+}
+
+fn mention_id_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
+}
+
+pub(crate) fn mention_at(source: &str) -> Option<&str> {
+    let rest = source.strip_prefix("<@")?;
+    let len = rest
+        .bytes()
+        .take_while(|byte| mention_id_byte(*byte))
+        .count();
+    (len > 0 && rest.as_bytes().get(len) == Some(&b'>')).then(|| &rest[..len])
+}
+
+pub(crate) fn spoiler_marker_width(source: &str) -> Option<usize> {
+    match source.as_bytes() {
+        [b'|', b'|', ..] => Some(2),
+        [b'|', b'\\', b'|', ..] => Some(3),
+        _ => None,
+    }
+}
+
 pub(crate) fn message_markdown<'a, 'b>(
     source: &'a str,
     name_of: impl Fn(&str) -> &'b str,
@@ -48,6 +73,45 @@ pub(crate) fn message_markdown<'a, 'b>(
     Cow::Owned(result)
 }
 
+pub(crate) fn reply_preview<'a>(source: &str, name_of: impl Fn(&str) -> &'a str) -> String {
+    const LIMIT: usize = 80;
+    let line = source
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default()
+        .replace(r"\|", "|");
+    let mut preview = String::new();
+    for (index, part) in line.split("||").enumerate() {
+        if index % 2 != 0 {
+            // Mask an unclosed span as well, including spoilers spanning lines.
+            preview.push_str("▒▒▒");
+            continue;
+        }
+        let mut parts = part.split("<@");
+        preview.push_str(parts.next().unwrap_or_default());
+        for token in parts {
+            if let Some((id, tail)) = token.split_once('>')
+                && valid_mention_id(id)
+            {
+                preview.push('@');
+                preview.push_str(name_of(id));
+                preview.push_str(tail);
+            } else {
+                preview.push_str("<@");
+                preview.push_str(token);
+            }
+        }
+    }
+    let mut units = 0;
+    if let Some((end, _)) = preview.char_indices().find(|(_, ch)| {
+        units += ch.len_utf16();
+        units > LIMIT
+    }) {
+        preview.truncate(end);
+    }
+    preview
+}
+
 fn find_edits<'a>(
     parent: &Node,
     source: &str,
@@ -83,11 +147,7 @@ fn find_edits<'a>(
                         != 0;
                     let start = range.start + i;
                     if ch == "|" {
-                        let width = if text[i..].starts_with("||") {
-                            2
-                        } else if text[i..].starts_with("|\\|") {
-                            3
-                        } else {
+                        let Some(width) = spoiler_marker_width(&text[i..]) else {
                             continue;
                         };
                         end = i + width;
@@ -118,15 +178,9 @@ fn find_edits<'a>(
                                 source.as_bytes().get(start.wrapping_sub(1)) == Some(&b'\r'),
                             );
                         edits.push((offset..offset, "  ".into()));
-                    } else if let Some(token) = text[i..].strip_prefix("<@")
-                        && let Some(end_id) = token.find(|ch: char| {
-                            !ch.is_ascii_alphanumeric() && !matches!(ch, '_' | '-')
-                        })
-                        && end_id > 0
-                        && token.as_bytes()[end_id] == b'>'
-                    {
-                        end = i + end_id + 3;
-                        let name = name_of(&token[..end_id]);
+                    } else if let Some(id) = mention_at(&source[start..]) {
+                        end = i + id.len() + 3;
+                        let name = name_of(id);
                         let name = if preview {
                             name.to_owned()
                         } else {
@@ -388,6 +442,33 @@ mod tests {
         assert_eq!(
             notification_preview("`||inline spoiler||`", false, |_| "Alice"),
             "[spoiler]"
+        );
+    }
+
+    #[test]
+    fn composer_reply_preview_masks_spoilers_and_limits_visible_text() {
+        let body = format!(
+            " \n\n<@alice> ||keep **this** private|| {}\nsecond line",
+            "😀".repeat(40)
+        );
+        let preview = reply_preview(&body, |_| "Alice");
+        assert_eq!(preview, format!("@Alice ▒▒▒ {}", "😀".repeat(34)));
+
+        let body = format!("{}😀 tail", "a".repeat(79));
+        assert_eq!(reply_preview(&body, |_| "Alice"), "a".repeat(79));
+
+        let body = format!(" <@lee> ||{}|| visible", "secret".repeat(30));
+        assert_eq!(reply_preview(&body, |_| "Renamed"), " @Renamed ▒▒▒ visible");
+        assert_eq!(
+            reply_preview(
+                r"`<@x_1>` \|\|hidden | secret|\| <@> <@not valid>",
+                |_| "Lee"
+            ),
+            "`@Lee` ▒▒▒ <@> <@not valid>",
+        );
+        assert_eq!(
+            reply_preview("Visible ||first line\nsecond line||", |_| "Alice"),
+            "Visible ▒▒▒",
         );
     }
 

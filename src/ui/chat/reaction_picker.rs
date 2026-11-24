@@ -10,15 +10,15 @@ const ROW_HEIGHT: Pixels = CONTROL_HEIGHT;
 const POPOVER_MARGIN: Pixels = px(8.);
 const POPOVER_GAP: Pixels = px(4.);
 
-#[derive(Deserialize)]
-struct Emoji {
-    emoji: String,
-    annotation: String,
-    shortcodes: Vec<String>,
-    tags: Vec<String>,
+#[derive(Deserialize, PartialEq, Eq)]
+pub(super) struct Emoji {
+    pub(super) emoji: String,
+    pub(super) annotation: String,
+    pub(super) shortcodes: Vec<String>,
+    pub(super) tags: Vec<String>,
 }
 
-static EMOJI: LazyLock<Vec<Emoji>> = LazyLock::new(|| {
+pub(super) static EMOJI: LazyLock<Vec<Emoji>> = LazyLock::new(|| {
     serde_json::from_str(include_str!("../../../assets/emoji/emojibase-en.json"))
         .expect("bundled Emojibase catalog must be valid")
 });
@@ -82,7 +82,7 @@ impl Spk {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !reaction_message(chat(&self.view), channel_id, message_id)
+        if !active_chat_message(chat(&self.view), channel_id, message_id)
             .is_some_and(|(chat, _)| !chat.action_pending)
         {
             return;

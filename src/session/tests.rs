@@ -545,6 +545,7 @@ fn fixture_settings(
     }
     SessionSettings {
         socket_endpoint,
+        drafts_path: None,
         start_call: Box::new(start_call),
         enumerate_devices: Devices::default,
         devices: DeviceSettings {
@@ -1328,6 +1329,18 @@ impl Request {
     }
 
     async fn receive(listener: &TcpListener) -> (String, Self) {
+        let (line, mut request) = Self::receive_headers(listener).await;
+        if let Some(length) = request
+            .header("content-length")
+            .map(|length| length.parse().unwrap())
+        {
+            request.body.resize(length, 0);
+            request.stream.read_exact(&mut request.body).await.unwrap();
+        }
+        (line, request)
+    }
+
+    async fn receive_headers(listener: &TcpListener) -> (String, Self) {
         let mut line = String::new();
         let stream = loop {
             let (stream, _) = listener.accept().await.unwrap();
@@ -1351,13 +1364,6 @@ impl Request {
                 break;
             }
             request.headers.push_str(&line);
-        }
-        if let Some(length) = request
-            .header("content-length")
-            .map(|length| length.parse().unwrap())
-        {
-            request.body.resize(length, 0);
-            request.stream.read_exact(&mut request.body).await.unwrap();
         }
         (request_line, request)
     }

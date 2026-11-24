@@ -149,20 +149,34 @@ async fn gif_picker_searches_saves_and_shares_across_conversations() {
             if channel_id == "general" {
                 open_chat(channel_id, false).await;
             }
-            send(Command::SendChatMessage { channel_id: channel_id.into(), body: body.into() }).await;
-            let frame = loop {
-                let raw = peer.next().await.unwrap().unwrap();
-                let frame: Value = serde_json::from_str(raw.to_text().unwrap()).unwrap();
-                if frame["type"] == "message:send" {
-                    break frame;
-                }
-            };
-            assert_eq!(frame["channelId"], channel_id);
-            assert_eq!(frame["body"], expected);
+            let submit = || send(Command::SendChatMessage { channel_id: channel_id.into(), body: body.into() });
+            submit().await;
+            let mut frame = super::chat::receive_chat_send(&mut peer, channel_id, &expected).await;
+            if channel_id == "general" {
+                peer.send(Message::text(value!({
+                    "type":"message:error","nonce":frame["nonce"],"error":"GIF send rejected"
+                }).to_string())).await.unwrap();
+                wait_for_sidebar(&rx, |s| s.chat.as_ref().is_some_and(|chat| {
+                    if chat.message_send_error.as_deref() != Some("GIF send rejected") {
+                        return false;
+                    }
+                    assert!(chat.draft.body.is_empty());
+                    assert_eq!(chat.draft.gif.as_ref().unwrap().item.id, "cat");
+                    assert!(chat.outgoing.is_empty());
+                    true
+                })).await;
+                send(Command::ResolveChatDraftRestoration {
+                    channel_id: channel_id.into(),
+                    nonce: frame["nonce"].as_str().unwrap().into(),
+                    accept: true,
+                }).await;
+                submit().await;
+                frame = super::chat::receive_chat_send(&mut peer, channel_id, &expected).await;
+            }
             peer.send(Message::text(value!({"type":"message:new","nonce":frame["nonce"],"message":{
                 "id":"sent","channelId":channel_id,"userId":"alice","body":expected,"createdAt":1
             }}).to_string())).await.unwrap();
-            wait_for_sidebar(&rx, |s| s.chat.as_ref().is_some_and(|chat| chat.outgoing.is_none()
+            wait_for_sidebar(&rx, |s| s.chat.as_ref().is_some_and(|chat| chat.outgoing.is_empty()
                 && chat.draft.gif.is_none() && chat.messages.iter().any(|m| m.body == expected))).await;
         }
 
