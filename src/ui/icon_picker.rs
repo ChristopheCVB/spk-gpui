@@ -34,6 +34,7 @@ pub(super) fn icon_picker(
             window,
             cx,
         )
+        .searchable(true)
     })
 }
 

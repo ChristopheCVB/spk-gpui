@@ -181,6 +181,7 @@ pub(super) struct Refresh {
     in_flight: HashSet<Resource>,
     pub(super) dirty: HashSet<Resource>,
     failed: HashSet<Resource>,
+    discard_channel_snapshot: bool,
     pub(super) presence_updates: Option<HashMap<String, Option<VoiceMembership>>>,
     pub(super) presence_ready: bool,
     user_presence_updates: Option<HashMap<String, UserPresence>>,
@@ -207,6 +208,11 @@ impl Refresh {
             };
             (resource, data)
         });
+    }
+
+    pub(super) fn webhook_changed(&mut self, client: &SpkClient) {
+        self.discard_channel_snapshot = self.in_flight.contains(&Resource::Channels);
+        self.fetch(client, Resource::Channels);
     }
 
     pub(super) fn fetch_all(&mut self, client: &SpkClient) {
@@ -292,12 +298,14 @@ impl Refresh {
         data: Result<Data, Failure>,
     ) {
         self.in_flight.remove(&resource);
+        let discard =
+            resource == Resource::Channels && std::mem::take(&mut self.discard_channel_snapshot);
         match data {
             Ok(data) => {
                 self.failed.remove(&resource);
                 match data {
                     // A snapshot started before a mutation may omit the confirmed feed.
-                    Data::Channels(_) if self.dirty.contains(&resource) => {}
+                    Data::Channels(_) if discard => {}
                     Data::Channels(mut channels) => {
                         channels.retain(|channel| {
                             !channel.is_webhook()

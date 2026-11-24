@@ -28,7 +28,7 @@ use url::Url;
 
 use crate::api::{
     Channel, Connection, Failure, Frame, MessageChange, MessageTarget, Profile, SocketEvent,
-    SpkClient, UnreadState, User, UserPresence, VoiceModeration, WebhookSettings,
+    SpkClient, UnreadState, User, UserPresence, VoiceModeration,
 };
 use crate::notifications::{Alert, LiveAlerts};
 use crate::sounds::{Sound, VoiceSounds};
@@ -66,6 +66,7 @@ pub use {
     radio::RadioPlayback,
     soundboard_admin::{SoundboardAdminAction, SoundboardCrop},
     voice_session::VoiceView,
+    webhooks::{WebhookAction, WebhookReply},
 };
 
 #[cfg(test)]
@@ -89,9 +90,9 @@ pub enum Command {
     SetUserStatus(UserStatus),
     Refresh,
     ManageChannel(ChannelAction),
-    CreateWebhook {
-        settings: WebhookSettings,
-        reply: webhooks::WebhookCreateReply,
+    MutateWebhook {
+        action: WebhookAction,
+        reply: WebhookReply,
     },
     OpenTextChannel(String),
     OpenWebhook(String),
@@ -634,7 +635,7 @@ async fn watch_session(
     let mut camera_previews = JoinSet::new();
     let mut voice_moderation = JoinSet::new();
     let mut channel_mutations = JoinSet::new();
-    let mut webhook_creates = JoinSet::<webhooks::WebhookCreateCompletion>::new();
+    let mut webhook_mutations = JoinSet::<webhooks::WebhookCompletion>::new();
     let mut channel_mutation_result = None;
     let mut profiles = JoinSet::new();
     let mut account_admin = AccountAdmin::default();
@@ -752,26 +753,65 @@ async fn watch_session(
                 }
             }
             Ok(event) = chat.attachments.events.recv() => chat.attachment_event(client, event),
-            Some(Ok((result, reply))) = webhook_creates.join_next() => {
-                match result {
-                    Ok((channel, url)) => {
-                        direct_message_opens = JoinSet::new();
-                        sidebar.chat_notice = None;
-                        ChatNavigation::open_chat(&mut chat_navigation, &mut chat, client, &channel);
-                        let channels = sidebar.channels.get_or_insert_default();
-                        if let Some(listed) = channels.iter_mut().find(|listed| listed.id == channel.id) {
-                            *listed = channel;
-                        } else {
-                            channels.push(channel);
+            Some(Ok((result, reply, creating))) = webhook_mutations.join_next() => {
+                let result = match result {
+                    Ok(change) => {
+                        use webhooks::WebhookChange;
+                        let (url, removed) = match change {
+                            WebhookChange::Created(channel, url) => {
+                                refresh.webhook_changed(client);
+                                direct_message_opens = JoinSet::new();
+                                sidebar.chat_notice = None;
+                                ChatNavigation::open_chat(&mut chat_navigation, &mut chat, client, &channel);
+                                let channels = sidebar.channels.get_or_insert_default();
+                                if let Some(listed) = channels.iter_mut().find(|listed| listed.id == channel.id) {
+                                    *listed = channel;
+                                } else {
+                                    channels.push(channel);
+                                }
+                                (Ok(Some(url)), None)
+                            }
+                            WebhookChange::Edited(channel) => {
+                                refresh.webhook_changed(client);
+                                if channel.private && (sidebar.profile.id.is_none() || channel.owner_id != sidebar.profile.id) {
+                                    (Ok(None), Some(channel.id))
+                                } else {
+                                    if let Some(listed) = sidebar.channels.iter_mut().flatten().find(|listed| listed.id == channel.id) {
+                                        *listed = channel;
+                                    }
+                                    (Ok(None), None)
+                                }
+                            }
+                            WebhookChange::Rotated(id, url) => {
+                                refresh.fetch(client, Resource::Channels);
+                                let url = sidebar.webhook_feed(&id)
+                                    .filter(|feed| sidebar.can_manage_webhook(feed))
+                                    .map(|_| Some(url))
+                                    .ok_or("Webhook feed unavailable.");
+                                (url, None)
+                            }
+                            WebhookChange::Deleted(id) => {
+                                refresh.webhook_changed(client);
+                                (Ok(None), Some(id))
+                            }
+                        };
+                        if let Some(id) = removed {
+                            if let Some(channels) = &mut sidebar.channels {
+                                channels.retain(|listed| listed.id != id);
+                            }
+                            webhooks::reconcile_access(&mut sidebar, &mut chat, &mut chat_navigation, &mut search, vec![id]);
                         }
-                        refresh.fetch(client, Resource::Channels);
-                        let _ = reply.send(Ok(url));
+                        url
                     }
                     Err(error) if error.unauthorized() => break SessionEnd::Invalidated(SESSION_EXPIRED),
                     Err(error) => {
-                        let _ = reply.send(Err(webhooks::create_error(error)));
+                        if !creating && matches!(error, Failure::Http(reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::FORBIDDEN)) {
+                            refresh.fetch(client, Resource::Channels);
+                        }
+                        Err(webhooks::mutation_error(error, creating))
                     }
-                }
+                };
+                let _ = reply.send(result);
             }
             Some(result) = direct_message_opens.join_next() => {
                 match result.unwrap_or(Err(Failure::Connection)) {
@@ -832,16 +872,14 @@ async fn watch_session(
                         }
                     }
                 }
-                Ok(Command::CreateWebhook { settings, reply }) => {
-                    if !webhook_creates.is_empty() {
+                Ok(Command::MutateWebhook { action, reply }) => {
+                    if !webhook_mutations.is_empty() {
                         let _ = reply.send(Err("A webhook change is already in progress."));
                     } else {
-                        match settings.validated() {
-                            Ok(settings) => {
+                        match action.validated(&sidebar) {
+                            Ok(action) => {
                                 let client = client.clone();
-                                webhook_creates.spawn(async move {
-                                    (client.create_webhook(settings).await, reply)
-                                });
+                                webhook_mutations.spawn(async move { action.send(&client, reply).await });
                             }
                             Err(message) => {
                                 let _ = reply.send(Err(message));
@@ -1311,7 +1349,7 @@ async fn watch_session(
                     .then(|| sidebar.webhook_feeds().map(|feed| feed.id.clone()).collect());
                 refresh.complete(&mut sidebar, resource, data);
                 if let Some(previous) = previous_webhooks {
-                    search.reconcile_webhooks(&mut sidebar, previous);
+                    webhooks::reconcile_access(&mut sidebar, &mut chat, &mut chat_navigation, &mut search, previous);
                 }
                 account_admin.clear_if_demoted(&mut sidebar);
                 if resource == Resource::Channels
@@ -1323,17 +1361,6 @@ async fn watch_session(
                         (Ok(_), false) => Ok("Channel updated. Refresh to reload the channel list."),
                         _ => result,
                     });
-                }
-                if resource == Resource::Channels
-                    && presence_loaded
-                    && let Some(id) = chat.selected_webhook()
-                    && sidebar.webhook_feed(id).is_none()
-                {
-                    chat.close();
-                    if !matches!(chat_navigation, Some(ChatNavigation::AwaitingChannel { .. })) {
-                        chat_navigation = None;
-                        sidebar.chat_notice = Some("Webhook feed unavailable.");
-                    }
                 }
                 if resource == Resource::Channels
                     && presence_loaded
@@ -1398,7 +1425,7 @@ async fn watch_session(
     {
         settings.alert_activation.mark_changed();
     }
-    drop(webhook_creates);
+    drop(webhook_mutations);
     drop(chat);
     camera_previews.shutdown().await;
     drop(soundboard);

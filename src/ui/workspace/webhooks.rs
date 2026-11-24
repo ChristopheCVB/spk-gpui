@@ -3,30 +3,117 @@ use gpui_kit::component::{dialog::DialogEntrance, switch::Switch};
 use super::*;
 use crate::{
     api::WebhookSettings,
+    session::WebhookAction,
     ui::icon_picker::{IconPicker, bundled_icon_names, icon_picker, icon_picker_field},
 };
 
+#[derive(Clone)]
+enum WebhookForm {
+    Create,
+    Edit(String),
+    Rotate(String),
+    Delete(String),
+}
+
+impl WebhookForm {
+    fn title(&self) -> &'static str {
+        match self {
+            Self::Create => "New webhook",
+            Self::Edit(_) => "Edit webhook",
+            Self::Rotate(_) => "New secret URL",
+            Self::Delete(_) => "Delete webhook",
+        }
+    }
+
+    fn id(&self) -> Option<&str> {
+        match self {
+            Self::Create => None,
+            Self::Edit(id) | Self::Rotate(id) | Self::Delete(id) => Some(id),
+        }
+    }
+
+    fn confirmation(&self, name: &str) -> Option<String> {
+        match self {
+            Self::Rotate(_) => Some(format!(
+                "Generate a new URL for {name}? The old URL stops working immediately."
+            )),
+            Self::Delete(_) => Some(format!(
+                "Delete {name}? This removes the feed and its alerts for everyone. Its URL stops working immediately."
+            )),
+            _ => None,
+        }
+    }
+
+    fn button(&self, pending: bool) -> &'static str {
+        match (self, pending) {
+            (Self::Create, false) => "Create",
+            (Self::Create, true) => "Creating…",
+            (Self::Edit(_), false) => "Save",
+            (Self::Edit(_), true) => "Saving…",
+            (Self::Rotate(_), false) => "Generate new URL",
+            (Self::Rotate(_), true) => "Generating…",
+            (Self::Delete(_), false) => "Delete",
+            (Self::Delete(_), true) => "Deleting…",
+        }
+    }
+}
+
 impl Spk {
     pub(super) fn new_webhook(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.signing_out || !matches!(self.view, View::SignedIn(_)) {
+        self.open_webhook_form(WebhookForm::Create, window, cx);
+    }
+
+    fn open_webhook_form(
+        &mut self,
+        form: WebhookForm,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let View::SignedIn(sidebar) = &self.view else {
+            return;
+        };
+        if self.signing_out {
             return;
         }
-
+        let channel = if let Some(id) = form.id() {
+            let Some(channel) = sidebar
+                .webhook_feed(id)
+                .filter(|feed| sidebar.can_manage_webhook(feed))
+            else {
+                return;
+            };
+            Some(channel)
+        } else {
+            None
+        };
         let opener = window.focused(cx);
-        let fields = WebhookFields::new(None, window, cx);
-        let input = fields.name.clone();
+        let confirmation = channel.and_then(|channel| form.confirmation(channel_name(channel)));
+        let fields = confirmation
+            .is_none()
+            .then(|| WebhookFields::new(channel, window, cx));
+        let cancel_focus = cx.focus_handle();
+        let initial_focus = fields.as_ref().map_or_else(
+            || cancel_focus.clone(),
+            |fields| fields.name.focus_handle(cx),
+        );
+        let title = form.title();
         let app = cx.entity();
         let editor = cx.new(|cx: &mut Context<WebhookEditor>| {
-            cx.observe(&fields.icon, |_, _, cx| cx.notify()).detach();
-            cx.subscribe_in(&input, window, |editor, _, event, window, cx| {
-                if matches!(event, InputEvent::PressEnter { .. }) {
-                    editor.submit(window, cx);
-                }
-            })
-            .detach();
+            if let Some(fields) = &fields {
+                cx.observe(&fields.icon, |_, _, cx| cx.notify()).detach();
+                cx.subscribe_in(&fields.name, window, |editor, _, event, window, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. }) {
+                        editor.submit(window, cx);
+                    }
+                })
+                .detach();
+            }
             WebhookEditor {
                 app,
+                form,
                 fields,
+                confirmation,
+                cancel_focus,
                 pending: false,
                 error: None,
                 url: None,
@@ -35,16 +122,16 @@ impl Spk {
                 opener,
             }
         });
-        let initial_focus = Cell::new(true);
+        let focus_once = Cell::new(true);
         window.open_dialog(cx, move |dialog, window, cx| {
-            if initial_focus.replace(false) {
-                input.focus_handle(cx).focus(window, cx);
+            if focus_once.replace(false) {
+                initial_focus.focus(window, cx);
             }
             let state = editor.read(cx);
             let title = if state.url.is_some() {
                 "Webhook URL"
             } else {
-                "New webhook"
+                title
             };
             let pending = state.pending;
             dialog
@@ -64,6 +151,95 @@ impl Spk {
                 })
                 .child(editor.clone())
         });
+    }
+}
+
+#[derive(Clone, IntoElement)]
+pub(super) struct WebhookRowMenu {
+    pub(super) id: String,
+    pub(super) name: String,
+    pub(super) muted: bool,
+    pub(super) app: WeakEntity<Spk>,
+}
+
+impl RenderOnce for WebhookRowMenu {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let focus = window
+            .use_keyed_state("webhook-actions-focus", cx, |_, cx| cx.focus_handle())
+            .read(cx)
+            .clone();
+        tool_button(
+            "webhook-actions",
+            IconName::Ellipsis,
+            format!("Actions for {}", self.name),
+        )
+        .track_focus(&focus)
+        .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, cx| {
+            self.items(menu, Some(&focus), cx)
+        })
+    }
+}
+
+impl WebhookRowMenu {
+    pub(super) fn items(
+        &self,
+        mut menu: PopupMenu,
+        focus: Option<&FocusHandle>,
+        cx: &App,
+    ) -> PopupMenu {
+        let id = self.id.clone();
+        menu = menu
+            .item(mark_read_item(id.clone(), self.app.clone()))
+            .item(notifications::mute_item(
+                id.clone(),
+                self.muted,
+                self.app.clone(),
+            ))
+            .item(
+                PopupMenuItem::new("Copy link")
+                    .icon(IconName::Link)
+                    .on_click(move |_, _, cx| search::copy_conversation_link(&id, cx)),
+            );
+        let can_manage = self.app.upgrade().is_some_and(|app| {
+            matches!(&app.read(cx).view, View::SignedIn(sidebar)
+                if sidebar.webhook_feed(&self.id).is_some_and(|feed| sidebar.can_manage_webhook(feed)))
+        });
+        if can_manage {
+            menu = menu.separator();
+            for (label, icon, form) in [
+                (
+                    "Edit…",
+                    IconName::Pencil,
+                    WebhookForm::Edit(self.id.clone()),
+                ),
+                (
+                    "New secret URL…",
+                    IconName::RefreshCw,
+                    WebhookForm::Rotate(self.id.clone()),
+                ),
+                (
+                    "Delete…",
+                    IconName::Trash,
+                    WebhookForm::Delete(self.id.clone()),
+                ),
+            ] {
+                let app = self.app.clone();
+                let focus = focus.cloned();
+                menu = menu.item(PopupMenuItem::new(label).icon(icon).on_click(
+                    move |_, window, cx| {
+                        let (app, focus, form) = (app.clone(), focus.clone(), form.clone());
+                        window.defer(cx, move |window, cx| {
+                            if let Some(focus) = focus {
+                                focus.focus(window, cx);
+                            }
+                            let _ =
+                                app.update(cx, |app, cx| app.open_webhook_form(form, window, cx));
+                        });
+                    },
+                ));
+            }
+        }
+        menu
     }
 }
 
@@ -105,7 +281,10 @@ impl WebhookFields {
 
 struct WebhookEditor {
     app: Entity<Spk>,
-    fields: WebhookFields,
+    form: WebhookForm,
+    fields: Option<WebhookFields>,
+    confirmation: Option<String>,
+    cancel_focus: FocusHandle,
     pending: bool,
     error: Option<&'static str>,
     url: Option<Entity<InputState>>,
@@ -134,10 +313,19 @@ impl WebhookEditor {
         }
         self.pending = true;
         self.error = None;
-        let settings = self.fields.settings(cx);
+        let action = match (&self.form, &self.fields) {
+            (WebhookForm::Create, Some(fields)) => WebhookAction::Create(fields.settings(cx)),
+            (WebhookForm::Edit(id), Some(fields)) => WebhookAction::Edit {
+                id: id.clone(),
+                settings: fields.settings(cx),
+            },
+            (WebhookForm::Rotate(id), _) => WebhookAction::Rotate(id.clone()),
+            (WebhookForm::Delete(id), _) => WebhookAction::Delete(id.clone()),
+            _ => unreachable!("webhook form settings"),
+        };
         let (reply, result) = tokio::sync::oneshot::channel();
         self.app.update(cx, |app, cx| {
-            app.send(Command::CreateWebhook { settings, reply }, None, cx)
+            app.send(Command::MutateWebhook { action, reply }, None, cx)
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = result
@@ -149,7 +337,7 @@ impl WebhookEditor {
                     && matches!(this.app.read(cx).view, View::SignedIn(_))
                 {
                     match result {
-                        Ok(url) => {
+                        Ok(Some(url)) => {
                             this.url = Some(cx.new(|cx| {
                                 InputState::new(window, cx).default_value(url.as_str().to_owned())
                             }));
@@ -157,6 +345,7 @@ impl WebhookEditor {
                                 .update(cx, |app, cx| app.close_sidebar_drawer(window, cx));
                             this.copy_focus.focus(window, cx);
                         }
+                        Ok(None) => this.close(window, cx),
                         Err(message) => this.error = Some(message),
                     }
                 }
@@ -176,7 +365,7 @@ impl WebhookEditor {
 impl Render for WebhookEditor {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body = div().flex().flex_col().gap_3();
-        if self.app.read(cx).signing_out {
+        if self.app.read(cx).signing_out || !matches!(self.app.read(cx).view, View::SignedIn(_)) {
             self.url = None;
             return body;
         }
@@ -208,48 +397,61 @@ impl Render for WebhookEditor {
                 );
         }
 
-        body.child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(Label::new("Name"))
-                .child(
-                    Input::new(&self.fields.name)
-                        .w_full()
-                        .aria_label("Name")
-                        .disabled(self.pending),
-                ),
+        body.children(
+            self.confirmation
+                .as_ref()
+                .map(|text| Label::new(text.clone())),
         )
-        .child(icon_picker_field(
-            &self.fields.icon,
-            Some(&self.fields.original_icon),
-            |name| webhook_icon(Some(name)),
-            self.pending,
-            cx,
-        ))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    Switch::new("webhook-private")
-                        .label("Private")
-                        .accessibility_label("Private")
-                        .checked(self.fields.private)
-                        .disabled(self.pending)
-                        .tab_stop(true)
-                        .on_change(cx.listener(|this, private: &bool, _, cx| {
-                            this.fields.private = *private;
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    Label::new("Only you can see a private feed.")
+        .when_some(self.fields.as_ref(), |body, fields| {
+            body.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(Label::new("Name"))
+                    .child(
+                        Input::new(&fields.name)
+                            .w_full()
+                            .aria_label("Name")
+                            .disabled(self.pending),
+                    ),
+            )
+            .child(icon_picker_field(
+                &fields.icon,
+                Some(&fields.original_icon),
+                |name| webhook_icon(Some(name)),
+                self.pending,
+                cx,
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        Switch::new("webhook-private")
+                            .label("Private")
+                            .accessibility_label("Private")
+                            .checked(fields.private)
+                            .disabled(self.pending)
+                            .tab_stop(true)
+                            .on_change(cx.listener(|this, private: &bool, _, cx| {
+                                if let Some(fields) = &mut this.fields {
+                                    fields.private = *private;
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Label::new(if matches!(self.form, WebhookForm::Edit(_)) {
+                            "Only the owner can see a private feed."
+                        } else {
+                            "Only you can see a private feed."
+                        })
                         .text_color(cx.theme().muted_foreground),
-                ),
-        )
+                    ),
+            )
+        })
         .children(channel_admin::channel_status(self.error.map(Err), cx))
         .child(
             div()
@@ -258,6 +460,7 @@ impl Render for WebhookEditor {
                 .gap_2()
                 .child(
                     control_button("cancel-webhook")
+                        .track_focus(&self.cancel_focus)
                         .label("Cancel")
                         .ghost()
                         .tab_stop(true)
@@ -265,14 +468,15 @@ impl Render for WebhookEditor {
                         .on_click(cx.listener(|this, _, window, cx| this.close(window, cx))),
                 )
                 .child(
-                    control_button("create-webhook")
-                        .primary()
-                        .tab_stop(true)
-                        .label(if self.pending {
-                            "Creating…"
-                        } else {
-                            "Create"
+                    control_button("submit-webhook")
+                        .when(matches!(self.form, WebhookForm::Delete(_)), |button| {
+                            button.danger()
                         })
+                        .when(!matches!(self.form, WebhookForm::Delete(_)), |button| {
+                            button.primary()
+                        })
+                        .tab_stop(true)
+                        .label(self.form.button(self.pending))
                         .disabled(self.pending)
                         .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx))),
                 ),

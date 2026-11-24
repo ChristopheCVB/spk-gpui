@@ -729,6 +729,12 @@ impl Spk {
         let muted = self.notification_preferences.muted.contains(&id);
         let menu_id = id.clone();
         let app = cx.weak_entity();
+        let webhook_menu = webhook.then(|| webhooks::WebhookRowMenu {
+            id: id.clone(),
+            name: name.clone(),
+            muted,
+            app: app.clone(),
+        });
         let primary = cx.theme().primary;
         let muted_color = cx.theme().muted_foreground;
         let label = if webhook {
@@ -802,21 +808,18 @@ impl Spk {
                     })),
             )
             .children(actions)
-            .context_menu(move |menu, _, _| {
-                menu.item(mark_read_item(menu_id.clone(), app.clone()))
-                    .item(notifications::mute_item(
-                        menu_id.clone(),
-                        muted,
-                        app.clone(),
-                    ))
-                    .when(webhook, |menu| {
-                        let id = menu_id.clone();
-                        menu.item(
-                            PopupMenuItem::new("Copy link")
-                                .icon(IconName::Link)
-                                .on_click(move |_, _, cx| search::copy_conversation_link(&id, cx)),
-                        )
-                    })
+            .children(webhook_menu.clone())
+            .context_menu(move |menu, _, cx| {
+                if let Some(webhook_menu) = &webhook_menu {
+                    webhook_menu.items(menu, None, cx)
+                } else {
+                    menu.item(mark_read_item(menu_id.clone(), app.clone()))
+                        .item(notifications::mute_item(
+                            menu_id.clone(),
+                            muted,
+                            app.clone(),
+                        ))
+                }
             })
     }
 

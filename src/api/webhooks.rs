@@ -76,4 +76,77 @@ impl SpkClient {
         }
         Ok((result.channel, WebhookUrl::parse(result.url)?))
     }
+
+    pub async fn edit_webhook(
+        &self,
+        id: &str,
+        settings: WebhookSettings,
+    ) -> Result<Channel, Failure> {
+        let feed: Channel = Self::send(
+            self.webhook_request(Method::PATCH, id, false)?
+                .json(&settings),
+        )
+        .await?
+        .json()
+        .await
+        .map_err(|_| Failure::InvalidResponse)?;
+        if !feed.is_webhook() || feed.id != id {
+            return Err(Failure::InvalidResponse);
+        }
+        Ok(feed)
+    }
+
+    pub async fn rotate_webhook(&self, id: &str) -> Result<WebhookUrl, Failure> {
+        #[derive(Deserialize)]
+        struct RotatedWebhook {
+            url: String,
+        }
+
+        let result: RotatedWebhook = Self::send(self.webhook_request(Method::POST, id, true)?)
+            .await?
+            .json()
+            .await
+            .map_err(|_| Failure::InvalidResponse)?;
+        WebhookUrl::parse(result.url)
+    }
+
+    pub async fn delete_webhook(&self, id: &str) -> Result<(), Failure> {
+        #[derive(Deserialize)]
+        struct DeletedWebhook {
+            ok: bool,
+        }
+
+        let result: DeletedWebhook = Self::send(self.webhook_request(Method::DELETE, id, false)?)
+            .await?
+            .json()
+            .await
+            .map_err(|_| Failure::InvalidResponse)?;
+        result.ok.then_some(()).ok_or(Failure::InvalidResponse)
+    }
+
+    fn webhook_request(
+        &self,
+        method: Method,
+        id: &str,
+        secret: bool,
+    ) -> Result<reqwest::RequestBuilder, Failure> {
+        if matches!(id, "" | "." | "..") {
+            return Err(Failure::InvalidResponse);
+        }
+        let mut url = self
+            .base
+            .join("/api/webhooks/")
+            .expect("fixed SPK endpoint path");
+        {
+            let mut segments = url.path_segments_mut().expect("SPK URL has a host");
+            segments.pop_if_empty().push(id);
+            if secret {
+                segments.push("secret");
+            }
+        }
+        Ok(self
+            .http
+            .request(method, url)
+            .header(header::ORIGIN, &self.origin))
+    }
 }

@@ -1,3 +1,4 @@
+mod management;
 mod rich_alerts;
 
 use super::*;
@@ -380,7 +381,7 @@ async fn channel_refresh_discards_revoked_webhook_history_and_in_flight_pages() 
 
 mod creation {
     use super::*;
-    use crate::api::WebhookSettings;
+    use crate::{api::WebhookSettings, session::WebhookAction};
 
     #[tokio::test]
     async fn ordinary_user_creates_and_opens_webhook_with_one_time_url() {
@@ -443,7 +444,7 @@ mod creation {
             request
                 .respond(&[], &value!({"channel":feed(),"url":url}).to_string())
                 .await;
-            let issued = result.await.unwrap().ok().expect("webhook URL");
+            let issued = result.await.unwrap().unwrap().expect("webhook URL");
             assert!(issued.as_str() == url);
             let opened = wait_for_sidebar(&views, |view| {
                 view.chat.as_ref().is_some_and(ChatView::history_ready)
@@ -576,15 +577,15 @@ mod creation {
         commands: &Sender<Command>,
         name: &str,
         private: bool,
-    ) -> oneshot::Receiver<Result<crate::api::WebhookUrl, &'static str>> {
+    ) -> oneshot::Receiver<Result<Option<crate::api::WebhookUrl>, &'static str>> {
         let (reply, result) = oneshot::channel();
         commands
-            .send(Command::CreateWebhook {
-                settings: WebhookSettings {
+            .send(Command::MutateWebhook {
+                action: WebhookAction::Create(WebhookSettings {
                     name: name.to_owned(),
                     icon: "webhook".to_owned(),
                     private,
-                },
+                }),
                 reply,
             })
             .await
