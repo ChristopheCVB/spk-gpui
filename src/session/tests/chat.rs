@@ -427,7 +427,12 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         tx.send(Command::RetryChatSend(first["nonce"].as_str().unwrap().into())).await.unwrap();
         let retry = receive_chat_send(&mut peer, "general", "Hi from desktop").await;
         assert_ne!(first["nonce"], retry["nonce"]);
-        let sent = message("m3", 3, "alice", "Hi from desktop <@alice>");
+        let saved_markdown = "**Hi from desktop** ||<@bob>||\n\n> Keep _this_ text";
+        let mut sent = message("m3", 3, "alice", saved_markdown);
+        sent["replyTo"] = value!({"id":"m1","userId":"bob","preview":"Earlier","deleted":false});
+        sent["attachments"] = value!([{
+            "id":"file-id","filename":"notes.txt","mime":"text/plain","size":3,"spoiler":true
+        }]);
         live(&mut peer, &sent, retry["nonce"].as_str()).await;
         live(&mut peer, &sent, retry["nonce"].as_str()).await;
         wait_for_sidebar(&rx, |view| {
@@ -438,20 +443,52 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
                     && chat.draft.body == "Newest draft"
             })
         }).await;
-        tx.send(Command::MutateChatMessage {
+        let edit = |body: &str| Command::MutateChatMessage {
             channel_id: "general".into(),
             message_id: "m3".into(),
-            action: MessageAction::Edit("Corrected from desktop https://example.test/story".into()),
-        }).await.unwrap();
-        let (line, edit) = history.recv().await.unwrap();
+            action: MessageAction::Edit(body.into()),
+        };
+        tx.send(edit(saved_markdown)).await.unwrap();
+        let unchanged = wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
+            !chat.action_pending
+                && chat.action_outcome.as_ref().is_some_and(|result| {
+                    result.message_id == "m3" && result.error.is_none()
+                })
+        }));
+        tokio::select! {
+            _ = unchanged => {}
+            request = history.recv() => panic!("unchanged edit sent {}", request.unwrap().0),
+        }
+
+        let changed = "**Corrected from desktop** ||<@bob>||\n\n> Keep _this_ text https://example.test/story";
+        tx.send(edit(changed)).await.unwrap();
+        let (line, rejected) = history.recv().await.unwrap();
         assert_eq!(line, "PATCH /api/messages/m3 HTTP/1.1");
-        assert_eq!(serde_json::from_slice::<Value>(&edit.body).unwrap(), value!({"body":"Corrected from desktop https://example.test/story"}));
-        let mut edited = message("m3", 3, "alice", "Corrected from desktop https://example.test/story");
+        assert_eq!(serde_json::from_slice::<Value>(&rejected.body).unwrap(), value!({"body":changed}));
+        rejected.respond_raw("400 Bad Request", &[], b"").await;
+        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
+            !chat.action_pending
+                && chat.action_outcome.as_ref().is_some_and(|result| result.error.is_some())
+                && chat.messages.last().unwrap().body == saved_markdown
+        })).await;
+
+        tx.send(edit(changed)).await.unwrap();
+        let (line, retry) = history.recv().await.unwrap();
+        assert_eq!(line, "PATCH /api/messages/m3 HTTP/1.1");
+        assert_eq!(serde_json::from_slice::<Value>(&retry.body).unwrap(), value!({"body":changed}));
+        let mut edited = sent.clone();
+        edited["body"] = value!(changed);
         edited["editedAt"] = value!(30);
         peer.send(Message::text(value!({"type":"message:edit","message":edited}).to_string())).await.unwrap();
-        edit.respond(&[], &edited.to_string()).await;
+        retry.respond(&[], &edited.to_string()).await;
         wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
-            chat.messages.iter().any(|m| m.id == "m3" && m.body == "Corrected from desktop https://example.test/story" && m.edited_at == Some(30))
+            !chat.action_pending && chat.messages.iter().any(|m| {
+                m.id == "m3" && m.body == changed && m.edited_at == Some(30)
+                    && m.reply_to.as_ref().is_some_and(|reply| reply.id == "m1")
+                    && m.attachments.first().is_some_and(|attachment| {
+                        attachment.id == "file-id" && attachment.spoiler
+                    })
+            })
         })).await;
 
         let url = "https://example.test/story";

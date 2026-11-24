@@ -8,7 +8,7 @@ mod poll_composer;
 mod poll_results;
 mod reaction_picker;
 mod recovery;
-mod slash_commands;
+pub(super) mod suggestions;
 
 pub(super) use actions::{MessageActionForm, PinPanel};
 pub(super) use attachments::AttachmentUi;
@@ -382,10 +382,8 @@ impl Spk {
         if chat.gifs.is_some() {
             self.gif_button_focus.focus(window, cx);
             self.send(Command::ShowGifs(false), None, cx);
-        } else if self.message_action_form.take().is_some() {
-            self.chat_input
-                .update(cx, |input, cx| input.focus(window, cx));
-            cx.notify();
+        } else if self.message_action_form.is_some() {
+            return self.dismiss_message_action(window, cx);
         } else if chat.draft.reply.is_some() {
             self.send(
                 Command::SetChatReply {
@@ -433,6 +431,9 @@ impl Spk {
         else {
             return false;
         };
+        if let Some(index) = history_message_index(chat, &message.id) {
+            self.chat_scroll.scroll_to_item(index);
+        }
         let channel_id = chat.channel_id.clone();
         let message_id = message.id.clone();
         self.begin_message_action(
@@ -503,7 +504,10 @@ impl Spk {
             }
         }
         self.update_gif_input(previous, next, window, cx);
-        Self::update_message_actions(&mut self.message_action_form, previous, next);
+        if Self::update_message_actions(&mut self.message_action_form, previous, next) {
+            self.chat_input
+                .update(cx, |input, cx| input.focus(window, cx));
+        }
         if self.reaction_picker.as_ref().is_some_and(|picker| {
             active_chat_message(next, &picker.channel_id, &picker.message_id).is_none()
         }) {
@@ -533,7 +537,7 @@ impl Spk {
         }
         if reset {
             self.chat_submitting = false;
-            self.slash_choice = None;
+            self.suggestions = Default::default();
             self.chat_input.update(cx, |input, cx| {
                 input.set_value(
                     next.map_or("", |chat| chat.draft.body.as_str()).to_owned(),
@@ -682,7 +686,7 @@ impl Spk {
         );
         if self.form_error.is_none() {
             self.chat_submitting = true;
-            self.slash_choice = None;
+            self.suggestions[0].dismiss();
             self.chat_input.update(cx, |input, cx| {
                 input.set_value("", window, cx);
                 input.focus(window, cx);
@@ -1031,7 +1035,7 @@ impl Spk {
                                     .map(|outgoing| self.chat_send_recovery(sidebar, outgoing, cx)),
                             ),
                     )
-                    .child(self.message_composer(sidebar, chat, cx))
+                    .child(self.message_composer(sidebar, chat, window, cx))
             }))
     }
 
@@ -1039,6 +1043,7 @@ impl Spk {
         &self,
         sidebar: &Sidebar,
         chat: &ChatView,
+        window: &Window,
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
@@ -1069,7 +1074,7 @@ impl Spk {
                             .child(self.attachment_queue(chat, cx))
                     }),
             )
-            .children(self.slash_suggestions(cx))
+            .children(self.suggestion_menu(false, window, cx))
             .child(
                 editor::textarea(&self.chat_input)
                     .flex_shrink_0()
@@ -1189,6 +1194,7 @@ impl Spk {
         let channel = chat.channel_id.clone();
         let message_id = message.id.clone();
         let body = message.body.clone();
+        let editing = self.is_editing_message(&message_id);
         let RenderedChatMarkdown {
             view: text,
             source: share_text,
@@ -1306,13 +1312,16 @@ impl Spk {
                                 .text_color(theme.muted_foreground),
                         )
                     })
-                    .when(message.edited_at.is_some() && !chat.webhook, |row| {
-                        row.child(
-                            Label::new("(edited)")
-                                .text_xs()
-                                .text_color(theme.muted_foreground),
-                        )
-                    }),
+                    .when(
+                        message.edited_at.is_some() && !chat.webhook && !editing,
+                        |row| {
+                            row.child(
+                                Label::new("(edited)")
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground),
+                            )
+                        },
+                    ),
             )
             .when_some(reply, |row, reply| {
                 let icon = Icon::new(IconName::CornerUpRight).text_color(theme.muted_foreground);
@@ -1381,7 +1390,10 @@ impl Spk {
                         .into_any_element()
                 })
             })
-            .when(!message.body.is_empty(), |row| row.child(text))
+            .when(!message.body.is_empty() && !editing, |row| row.child(text))
+            .when(editing, |row| {
+                row.children(self.message_action_form(chat, message, window, cx))
+            })
             .when_some(embed, |row, embed| {
                 row.child(self.webhook_embed(
                     embed,
@@ -1394,7 +1406,9 @@ impl Spk {
             .when(!message.attachments.is_empty(), |row| {
                 row.child(self.attachment_cards(message, cx))
             })
-            .children(self.message_action_form(chat, message, cx))
+            .when(!editing, |row| {
+                row.children(self.message_action_form(chat, message, window, cx))
+            })
             .when(!message.previews.is_empty(), |row| {
                 row.child(self.link_previews(sidebar, chat, message, cx))
             })
@@ -1542,7 +1556,7 @@ impl Spk {
                     ),
             )
             .child(content)
-            .child(toolbar)
+            .when(!editing, |row| row.child(toolbar))
             .context_menu(move |menu, window, cx| message_actions.menu(menu, window, cx))
     }
 

@@ -110,8 +110,14 @@ impl Spk {
                 .message_action_input
                 .focus_handle(cx)
                 .is_focused(window);
-        if composer && count == 0 && self.chat_slash_key(key_name, window, cx) {
+        if (composer || editor) && self.chat_suggestion_key(key_name, editor, window, cx) {
             return true;
+        }
+        if editor && count == 0 && key_name == "escape" {
+            let composing = self.message_action_input.update(cx, |input, cx| {
+                input.marked_text_range(window, cx).is_some()
+            });
+            return !composing && self.dismiss_message_action(window, cx);
         }
         if composer || editor {
             let input = if editor {

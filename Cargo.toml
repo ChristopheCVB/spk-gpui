@@ -19,6 +19,8 @@ html5ever = "0.27"
 gpui-kit = "=0.10.0"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 image-webp = "0.2.4"
+icu_normalizer = { version = "2.4", default-features = false, features = ["compiled_data"] }
+icu_properties = { version = "2.4", default-features = false, features = ["compiled_data"] }
 keyring = "4.2"
 livekit = { version = "=0.12.0", features = ["rustls-tls-native-roots"] }
 markdown = "=1.0.0"

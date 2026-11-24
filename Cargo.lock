@@ -7767,6 +7767,8 @@ dependencies = [
  "global-hotkey",
  "gpui-kit",
  "html5ever",
+ "icu_normalizer",
+ "icu_properties",
  "image",
  "image-webp",
  "keyring",
