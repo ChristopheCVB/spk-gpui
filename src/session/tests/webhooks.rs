@@ -289,7 +289,7 @@ async fn owner_alerts_arrive_quietly_and_share_the_feed_read_position() {
         let feed = denied.chat.unwrap();
         assert!(feed.draft.body.is_empty());
         assert!(feed.draft.reply.is_none());
-        assert!(feed.outgoing.is_none());
+        assert!(feed.outgoing.is_empty());
         assert!(!feed.can_pin(true));
         assert!(feed.messages.iter().any(|message| message.id == "old"));
 

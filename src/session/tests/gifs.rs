@@ -162,7 +162,7 @@ async fn gif_picker_searches_saves_and_shares_across_conversations() {
             peer.send(Message::text(value!({"type":"message:new","nonce":frame["nonce"],"message":{
                 "id":"sent","channelId":channel_id,"userId":"alice","body":expected,"createdAt":1
             }}).to_string())).await.unwrap();
-            wait_for_sidebar(&rx, |s| s.chat.as_ref().is_some_and(|chat| chat.outgoing.is_none()
+            wait_for_sidebar(&rx, |s| s.chat.as_ref().is_some_and(|chat| chat.outgoing.is_empty()
                 && chat.draft.gif.is_none() && chat.messages.iter().any(|m| m.body == expected))).await;
         }
 

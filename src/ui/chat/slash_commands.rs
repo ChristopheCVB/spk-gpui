@@ -41,7 +41,7 @@ impl Spk {
         if let Some(command) = command
             && !window.has_active_dialog(cx)
             && self.chat_input.focus_handle(cx).is_focused(window)
-            && chat(&self.view).is_some_and(|chat| chat.can_send() && chat.outgoing.is_none())
+            && chat(&self.view).is_some_and(|chat| chat.can_send())
         {
             self.apply_slash_command(command, 0..value.len(), window, cx);
         }
@@ -50,7 +50,7 @@ impl Spk {
 
     fn slash_matches(&self, cx: &Context<Self>) -> Option<(Range<usize>, Vec<SlashCommand>)> {
         self.slash_choice?;
-        if !chat(&self.view).is_some_and(|chat| chat.can_send() && chat.outgoing.is_none()) {
+        if !chat(&self.view).is_some_and(|chat| chat.can_send()) {
             return None;
         }
         let input = self.chat_input.read(cx);

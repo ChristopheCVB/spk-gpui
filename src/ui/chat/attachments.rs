@@ -280,8 +280,7 @@ impl Spk {
 
     fn add_attachments(&mut self, files: Vec<AttachmentInput>, cx: &mut Context<Self>) {
         if !files.is_empty()
-            && let Some(chat) =
-                chat(&self.view).filter(|chat| chat.can_send() && chat.outgoing.is_none())
+            && let Some(chat) = chat(&self.view).filter(|chat| chat.can_send())
         {
             self.chat_attachments.picker_error = None;
             self.send(
@@ -376,11 +375,7 @@ impl Spk {
     pub(super) fn attachment_picker(&self, chat: &ChatView, cx: &Context<Self>) -> Button {
         let channel = chat.channel_id.clone();
         tool_button("add-attachments", IconName::Paperclip, "Attach files")
-            .disabled(
-                self.chat_attachments.picker.is_some()
-                    || !chat.can_send()
-                    || chat.outgoing.is_some(),
-            )
+            .disabled(self.chat_attachments.picker.is_some() || !chat.can_send())
             .on_click(cx.listener(move |app, _, window, cx| {
                 app.choose_attachments(channel.clone(), window, cx)
             }))
@@ -388,7 +383,7 @@ impl Spk {
 
     pub(super) fn attachment_queue(&self, chat: &ChatView, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let disabled = chat.outgoing.is_some() || !chat.can_send();
+        let disabled = !chat.can_send();
         div()
             .id("attachment-queue")
             .flex()
