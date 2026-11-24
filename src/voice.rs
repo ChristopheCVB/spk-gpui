@@ -88,6 +88,7 @@ pub enum Update {
     Media(Arc<Report>),
     Video(Arc<video::VideoReport>),
     VideoParticipantLeft(String),
+    RemoteAudioStalled,
     Screen(screen::Report),
     Finished(Result<(), Issue>),
 }
@@ -125,6 +126,7 @@ pub struct Intent {
     pub screen: screen::Request,
     pub watching: HashSet<String>,
     pub remote_microphone_mutes: HashMap<String, bool>,
+    pub watchdog_rejoin_after: Option<Instant>,
 }
 
 impl Intent {

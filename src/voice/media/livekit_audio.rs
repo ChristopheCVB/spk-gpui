@@ -48,6 +48,10 @@ impl RoomAudio for LiveKitAudio<'_> {
         self.remote.sync(self.room, intent, devices, speakers)
     }
 
+    fn voice_output_healthy_since(&self) -> Option<Instant> {
+        self.remote.voice_output_healthy_since()
+    }
+
     fn suspend_remote_audio(&mut self) {
         self.remote.suspend();
     }

@@ -50,6 +50,8 @@ struct State {
     speakers: Option<Device>,
     hardware_format: Option<(u32, u32)>,
     output_format: Option<(u32, u32)>,
+    voice_output_since: Option<Instant>,
+    voice_output_failed: bool,
     subscribed: bool,
     echo_reference_unavailable: bool,
     echo_cancellation: bool,
@@ -104,6 +106,12 @@ impl Peer {
     pub(crate) fn set_echo_reference_unavailable(&self, unavailable: bool) {
         self.state.lock().unwrap().echo_reference_unavailable = unavailable;
         let _ = self.events.send(MediaEvent::RemoteAudioChanged);
+    }
+
+    pub(crate) fn set_voice_output_failed(&self, failed: bool) {
+        let mut state = self.state.lock().unwrap();
+        state.voice_output_failed = failed;
+        state.voice_output_since = (!failed && state.output_format.is_some()).then(Instant::now);
     }
 
     pub(crate) fn echo_cancellation(&self) -> bool {
@@ -197,8 +205,11 @@ impl Peer {
         let state = self.state.lock().unwrap();
         (
             (state.open && state.capture.is_some() && !state.muted).then_some(microphone),
-            (state.open && state.subscribed && state.output_format == Some(state.format()))
-                .then_some(incoming),
+            (state.open
+                && state.subscribed
+                && !state.voice_output_failed
+                && state.output_format == Some(state.format()))
+            .then_some(incoming),
         )
     }
 
@@ -250,6 +261,8 @@ impl TestRoom {
             speakers: None,
             hardware_format: None,
             output_format: None,
+            voice_output_since: None,
+            voice_output_failed: false,
             subscribed: false,
             echo_reference_unavailable: false,
             echo_cancellation: false,
@@ -334,11 +347,17 @@ impl RoomAudio for TestRoom {
             // An initialized stream keeps its old format until explicitly reopened.
             if state.output_format.is_none() {
                 state.output_format = Some(state.format());
+                state.voice_output_since = (!state.voice_output_failed).then(Instant::now);
                 self.playout_changed.notify_one();
             }
         } else {
             state.output_format = None;
+            state.voice_output_since = None;
         }
+    }
+
+    fn voice_output_healthy_since(&self) -> Option<Instant> {
+        self.state.lock().unwrap().voice_output_since
     }
 
     fn sync_remote_audio(&mut self, _: &Intent, _: &Devices, speakers: Option<&Device>) -> bool {
