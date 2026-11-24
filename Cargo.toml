@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 async-channel = "2.5"
+arboard = { version = "3.7", default-features = false }
 bytes = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 cookie_store = "0.22"
@@ -14,6 +15,7 @@ dirs = "7"
 flate2 = "1"
 futures = "0.3"
 global-hotkey = "=0.10.0"
+html5ever = "0.27"
 gpui-kit = "=0.10.0"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 image-webp = "0.2.4"
@@ -22,6 +24,7 @@ icu_properties = { version = "2.4", default-features = false, features = ["compi
 keyring = "4.2"
 livekit = { version = "=0.12.0", features = ["rustls-tls-native-roots"] }
 markdown = "=1.0.0"
+markup5ever_rcdom = "0.3"
 mime_guess = "2"
 nokhwa = { version = "=0.10.11", default-features = false, features = ["input-native"] }
 oxideav-aac = "=0.1.7"

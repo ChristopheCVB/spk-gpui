@@ -274,6 +274,14 @@ impl AttachmentUi {
 }
 
 impl Spk {
+    pub(in crate::ui) fn paste_attachment_paths(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(paths) = super::editor::clipboard_file_paths(cx) else {
+            return false;
+        };
+        self.add_attachment_paths(paths, cx);
+        true
+    }
+
     pub(super) fn add_attachment_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         self.add_attachments(paths.into_iter().map(AttachmentInput::Path).collect(), cx);
     }

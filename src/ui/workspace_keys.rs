@@ -110,6 +110,10 @@ impl Spk {
                 .message_action_input
                 .focus_handle(cx)
                 .is_focused(window);
+        // GPUI's X11 clipboard can omit paths when it reads plain text or no representation.
+        if composer && primary && count == 1 && key_name == "v" && self.paste_attachment_paths(cx) {
+            return true;
+        }
         if (composer || editor) && self.chat_suggestion_key(key_name, editor, window, cx) {
             return true;
         }
