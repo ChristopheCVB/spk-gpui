@@ -6,6 +6,7 @@ use gpui_kit::component::{
     Disableable, Placement,
     menu::{ContextMenu, ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem},
     resizable::{HandleEdge, resize_handle},
+    tooltip::Tooltip,
     window_paddings,
 };
 
@@ -1093,7 +1094,10 @@ impl Spk {
             )
             .children(participants.into_iter().enumerate().map(|(index, person)| {
                 let flags = person.flags;
-                let speaking = flags.speaking && !flags.muted && !flags.deafened;
+                let speaking = flags.speaking
+                    && !flags.muted
+                    && !flags.deafened
+                    && !person.microphone_connecting;
                 let presence = sidebar.user_presence(person.id);
                 let presence_color = super::profile::user_presence_color(presence, cx);
                 let last = index + 1 == participant_count;
@@ -1102,6 +1106,9 @@ impl Spk {
                     .role(Role::Group)
                     .aria_label(person.name.to_owned())
                     .when(speaking, |row| row.aria_description("Speaking"))
+                    .when(person.microphone_connecting, |row| {
+                        row.aria_description("Microphone connecting").opacity(0.75)
+                    })
                     .relative()
                     .flex()
                     .items_center()
@@ -1164,9 +1171,21 @@ impl Spk {
                             .truncate()
                             .text_color(theme.muted_foreground),
                     )
-                    .children(participant_status(flags.muted, flags.deafened, cx))
                     .when(flags.radio_listening == Some(true), |row| {
                         row.child(radio_badge(cx))
+                    })
+                    .when(
+                        call.is_some_and(|call| call.channel_id == channel.id),
+                        |row| row.children(soundboard_badge(sidebar, person.id, cx)),
+                    )
+                    .children(participant_status(flags.muted, flags.deafened, cx))
+                    .when(person.microphone_connecting, |row| {
+                        row.child(
+                            Label::new("Connecting…")
+                                .text_xs()
+                                .flex_shrink_0()
+                                .text_color(theme.muted_foreground),
+                        )
                     })
                     .child(div().flex_1())
                     .child(
@@ -1555,10 +1574,10 @@ impl Spk {
                             .min_w_0()
                             .truncate(),
                     )
-                    .children(participant_status(flags.muted, flags.deafened, cx))
                     .when(flags.radio_listening == Some(true), |row| {
                         row.child(radio_badge(cx))
-                    }),
+                    })
+                    .children(participant_status(flags.muted, flags.deafened, cx)),
             )
     }
 
@@ -1819,10 +1838,11 @@ impl Spk {
                     .rounded_md()
                     .when(showing_video, |row| row.bg(theme.background))
                     .child(Label::new(name.to_owned()).text_xs().min_w_0().truncate())
-                    .children(participant_status(flags.muted, flags.deafened, cx))
                     .when(flags.radio_listening == Some(true), |row| {
                         row.child(radio_badge(cx))
                     })
+                    .children(soundboard_badge(sidebar, participant.id, cx))
+                    .children(participant_status(flags.muted, flags.deafened, cx))
                     .when_some(actions.screen_quality, |row, quality| {
                         row.child(
                             div()
@@ -1939,9 +1959,10 @@ fn voice_moderation_item(
 fn radio_badge(cx: &App) -> impl IntoElement {
     div()
         .id("radio-listening")
+        .flex_shrink_0()
         .role(Role::Image)
         .aria_label("Listening to Radio")
-        .child(themed_icon(IconName::Radio, cx.theme().primary, 14.0))
+        .child(themed_icon(IconName::Radio, cx.theme().primary, 12.0))
 }
 
 fn participant_status(muted: bool, deafened: bool, cx: &App) -> Option<impl IntoElement> {
@@ -1955,8 +1976,27 @@ fn participant_status(muted: bool, deafened: bool, cx: &App) -> Option<impl Into
     Some(
         div()
             .id("voice-state")
+            .flex_shrink_0()
             .role(Role::Image)
             .aria_label(label)
-            .child(themed_icon(icon, cx.theme().danger, 14.0)),
+            .child(themed_icon(icon, cx.theme().danger, 12.0)),
+    )
+}
+
+fn soundboard_badge(sidebar: &Sidebar, user_id: &str, cx: &App) -> Option<impl IntoElement> {
+    let clip = sidebar.soundboard.active_clips.get(user_id)?.as_ref();
+    let label = format!(
+        "Playing {}",
+        clip.map_or("a Soundboard clip", |clip| clip.name.as_str())
+    );
+    let icon = super::soundboard::clip_icon(clip.map_or("megaphone", |clip| &clip.icon));
+    Some(
+        div()
+            .id("soundboard-clip")
+            .flex_shrink_0()
+            .role(Role::Image)
+            .aria_label(label.clone())
+            .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
+            .child(icon.size(px(12.)).text_color(cx.theme().primary)),
     )
 }

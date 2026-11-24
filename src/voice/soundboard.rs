@@ -16,7 +16,7 @@ use tokio::{sync::watch, task::spawn_blocking, time};
 
 use super::devices::{MediaOutput, open_media_output};
 
-const MAX_SECONDS: u32 = 10;
+pub(crate) const MAX_SECONDS: u32 = 10;
 
 use crate::api::MAX_SOUND_BYTES;
 const MAX_SOURCE_BYTES: usize = 20 * 1024 * 1024;

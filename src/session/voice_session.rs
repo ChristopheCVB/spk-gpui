@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
 use tokio::{
     task::{JoinSet, spawn_blocking},
@@ -194,6 +194,16 @@ impl Sidebar {
         self.voice_presence.get(self.profile.id.as_ref()?)
     }
 
+    fn remote_microphone_mutes(&self, channel_id: &str) -> HashMap<String, bool> {
+        self.voice_presence
+            .iter()
+            .filter(|(id, member)| {
+                member.channel_id == channel_id && self.profile.id.as_ref() != Some(id)
+            })
+            .map(|(id, member)| (id.clone(), member.flags.muted || member.flags.deafened))
+            .collect()
+    }
+
     fn voice_replaced(&self) -> bool {
         self.own_voice_presence()
             .zip(self.voice.as_ref())
@@ -219,6 +229,7 @@ impl Sidebar {
     fn clear_voice_media(&mut self) {
         self.voice_intent.camera.enabled = false;
         self.voice_intent.watching.clear();
+        self.voice_intent.remote_microphone_mutes.clear();
         self.voice_intent.screen.action = Action::Stop;
     }
 
@@ -319,6 +330,8 @@ impl VoiceSession {
         if let Some(socket) = &self.socket
             && (server_move || sidebar.has_voice_channel(&channel_id))
         {
+            sidebar.voice_intent.remote_microphone_mutes =
+                sidebar.remote_microphone_mutes(&channel_id);
             if let Some(rejoin) = &mut self.rejoin {
                 rejoin.attempted += 1;
             }
@@ -441,6 +454,7 @@ impl VoiceSession {
     pub(super) fn presence_refreshed(&mut self, sidebar: &mut Sidebar, loaded: bool) {
         if loaded {
             self.prune_watching(sidebar);
+            self.sync_remote_audio_presence(sidebar);
         }
         if self.reclaim.is_some() && loaded {
             let first_check = matches!(self.reclaim.take(), Some(VoiceReclaim::WaitingForPresence));
@@ -678,6 +692,19 @@ impl VoiceSession {
             && let Some(call) = &self.call
         {
             call.apply(&sidebar.voice_intent);
+        }
+    }
+
+    pub(super) fn sync_remote_audio_presence(&self, sidebar: &mut Sidebar) {
+        if let Some(call) = &self.call
+            && let Some(voice) = &sidebar.voice
+            && voice.status != VoiceStatus::Leaving
+        {
+            let mutes = sidebar.remote_microphone_mutes(&voice.channel_id);
+            if mutes != sidebar.voice_intent.remote_microphone_mutes {
+                sidebar.voice_intent.remote_microphone_mutes = mutes;
+                call.apply(&sidebar.voice_intent);
+            }
         }
     }
 

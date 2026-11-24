@@ -1,4 +1,9 @@
-use std::{collections::HashSet, future::pending, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    future::pending,
+    sync::Arc,
+    time::Duration,
+};
 
 use async_channel::{Receiver, Sender};
 use tokio::{
@@ -119,6 +124,18 @@ pub struct Intent {
     pub camera: video::CameraIntent,
     pub screen: screen::Request,
     pub watching: HashSet<String>,
+    pub remote_microphone_mutes: HashMap<String, bool>,
+}
+
+impl Intent {
+    pub(crate) fn expects_remote_microphone(&self, id: &str) -> bool {
+        let volume = self.preferred.participant_volume(id);
+        self.remote_microphone_mutes.get(id) == Some(&false)
+            && !self.mute.deafened
+            && !volume.muted
+            && volume.mic != 0
+            && self.preferred.output_volume != 0
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -128,6 +145,7 @@ pub struct Report {
     pub microphone: Option<Device>,
     pub speakers: Option<Device>,
     pub speaking: HashSet<String>,
+    pub connecting_microphones: HashSet<String>,
     pub diagnostics: Diagnostics,
     pub echo_reference_unavailable: bool,
 }
@@ -208,6 +226,7 @@ impl Call {
                             speakers: None,
                             diagnostics: Diagnostics::default(),
                             echo_reference_unavailable: false,
+                            connecting_microphones: HashSet::new(),
                             speaking: if muted {
                                 HashSet::new()
                             } else {

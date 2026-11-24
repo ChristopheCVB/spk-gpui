@@ -133,6 +133,13 @@ impl Render for SoundboardPanel {
             .filter(|clip| clip.name.to_lowercase().contains(&query))
             .collect::<Vec<_>>();
         let theme = cx.theme();
+        let turn = if !board.active_clips.is_empty() {
+            Some("A clip is playing.")
+        } else if board.cooling {
+            Some("Wait a moment to play again.")
+        } else {
+            None
+        };
         let status = if board.loading {
             Some("Loading sounds…")
         } else if board.clips.as_ref().is_some_and(|clips| clips.is_empty()) {
@@ -152,7 +159,12 @@ impl Render for SoundboardPanel {
                     .prefix(themed_icon(IconName::Search, theme.muted_foreground, 16.0))
                     .aria_label("Search sounds"),
             )
-            .children(status.map(|message| Label::new(message).text_color(theme.muted_foreground)))
+            .children(
+                status
+                    .into_iter()
+                    .chain(turn)
+                    .map(|message| Label::new(message).text_color(theme.muted_foreground)),
+            )
             .children(board.directory_error.map(|error| {
                 div()
                     .flex()

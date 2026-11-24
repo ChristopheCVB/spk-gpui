@@ -46,6 +46,35 @@ fn participant_playback_matches_watch_and_local_volume_settings() {
     assert_eq!(route(&intent, "alice", screen, false), None);
 }
 
+#[test]
+fn remote_microphone_uses_spk_mute_when_livekit_mute_is_stale() {
+    let mut intent = Intent::default();
+    let mic = TrackSource::Microphone;
+    intent.remote_microphone_mutes.insert("alice".into(), false);
+    intent.remote_microphone_mutes.insert("bob".into(), true);
+    assert_eq!(route(&intent, "alice", mic, true), Some(Route::Voice(1.0)));
+    assert_eq!(route(&intent, "bob", mic, false), Some(Route::Silent));
+    assert_eq!(route(&intent, "unknown", mic, true), Some(Route::Silent));
+    intent.mute.deafened = true;
+    assert_eq!(route(&intent, "alice", mic, true), Some(Route::Silent));
+    intent.mute.deafened = false;
+    let volume = intent
+        .preferred
+        .participant_volumes
+        .entry("alice".into())
+        .or_default();
+    volume.muted = true;
+    assert_eq!(route(&intent, "alice", mic, true), Some(Route::Silent));
+    let volume = intent
+        .preferred
+        .participant_volumes
+        .get_mut("alice")
+        .unwrap();
+    volume.muted = false;
+    volume.mic = 0;
+    assert_eq!(route(&intent, "alice", mic, true), Some(Route::Silent));
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 #[ignore = "requires the isolated stereo PulseAudio output from tests/fixtures/linux-screen-share.sh"]
@@ -255,6 +284,130 @@ async fn livekit_watch_audio_keeps_microphone_and_recovers_after_full_reconnect(
     receiver.close().await.unwrap();
     jobs.abort_all();
     publisher.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires the isolated LiveKit fixture with three publishers"]
+async fn livekit_microphone_repair_preserves_other_playback_and_remote_mute() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let endpoint = std::env::var("SPK_TEST_LIVEKIT").unwrap();
+    let connect = |token: &str| {
+        let token = std::env::var(token).unwrap();
+        let endpoint = endpoint.clone();
+        async move {
+            let mut options = RoomOptions::default();
+            options.auto_subscribe = false;
+            Room::connect(&endpoint, &token, options).await.unwrap()
+        }
+    };
+    let (receiver, mut events) = connect("SPK_TEST_RECEIVER").await;
+    let (affected, _) = connect("SPK_TEST_PUBLISHER").await;
+    let (healthy, _) = connect("SPK_TEST_HEALTHY_PUBLISHER").await;
+    let (muted, _) = connect("SPK_TEST_MUTED_PUBLISHER").await;
+    let (affected_mic, affected_source) =
+        publish_audio(&affected, TrackSource::Microphone, 1).await;
+    let (healthy_mic, healthy_source) = publish_audio(&healthy, TrackSource::Microphone, 1).await;
+    let (muted_mic, muted_source) = publish_audio(&muted, TrackSource::Microphone, 1).await;
+    let mut jobs = tokio::task::JoinSet::new();
+    jobs.spawn(tone(affected_source, 1, 0.03));
+    jobs.spawn(tone(healthy_source, 1, 0.06));
+    jobs.spawn(tone(muted_source, 1, 0.09));
+
+    let affected_id = affected.local_participant().identity().0;
+    let healthy_id = healthy.local_participant().identity().0;
+    let muted_id = muted.local_participant().identity().0;
+    let affected_sid = affected_mic.sid();
+    let healthy_sid = healthy_mic.sid();
+    let muted_sid = muted_mic.sid();
+    let mut intent = Intent::default();
+    intent.remote_microphone_mutes = HashMap::from([
+        (affected_id.clone(), false),
+        (healthy_id.clone(), false),
+        (muted_id.clone(), true),
+    ]);
+    let mut remote = RemoteAudio::default();
+    let (mixer, mut pcm) =
+        rodio::mixer::mixer(NonZero::new(2).unwrap(), NonZero::new(48_000).unwrap());
+    let routes = await_routes(&receiver, &intent, |routes| {
+        [&affected_sid, &healthy_sid, &muted_sid]
+            .iter()
+            .all(|sid| routes.contains_key(*sid))
+    })
+    .await;
+    assert_eq!(routes[&muted_sid].1, Route::Silent);
+    sync_playback(&mut remote.tracks, routes, Some(&mixer), None);
+    assert!(!remote.tracks.contains_key(&muted_sid));
+    let healthy_player = remote.tracks[&healthy_sid].player.clone();
+    await_pcm(&mut pcm).await;
+
+    let packets_before = inbound_packets(&receiver, &healthy_id).await;
+    remote.forget(&affected_sid);
+    tokio::join!(
+        repair_microphones(&receiver, vec![(affected_id.clone(), affected_sid.clone())]),
+        async {
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while let Some(event) = events.recv().await {
+                    if let RoomEvent::TrackUnsubscribed { publication, .. } = event {
+                        assert_eq!(publication.sid(), affected_sid);
+                        return;
+                    }
+                }
+                panic!("the room ended during subscription repair");
+            })
+            .await
+            .unwrap();
+            assert!(
+                publication(&receiver, &healthy_id, &healthy_sid)
+                    .unwrap()
+                    .is_subscribed()
+            );
+            assert!(
+                publication(&receiver, &muted_id, &muted_sid)
+                    .unwrap()
+                    .is_subscribed()
+            );
+        }
+    );
+
+    let routes = await_routes(&receiver, &intent, |routes| {
+        routes.contains_key(&affected_sid)
+    })
+    .await;
+    sync_playback(&mut remote.tracks, routes, Some(&mixer), None);
+    assert!(Arc::ptr_eq(
+        &remote.tracks[&healthy_sid].player,
+        &healthy_player
+    ));
+    assert!(remote.tracks.contains_key(&affected_sid));
+    assert!(!remote.tracks.contains_key(&muted_sid));
+    assert!(inbound_packets(&receiver, &healthy_id).await > packets_before);
+    inbound_packets(&receiver, &affected_id).await;
+    await_pcm(&mut pcm).await;
+
+    jobs.abort_all();
+    receiver.close().await.unwrap();
+    affected.close().await.unwrap();
+    healthy.close().await.unwrap();
+    muted.close().await.unwrap();
+}
+
+async fn inbound_packets(room: &Room, id: &str) -> u64 {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let samples = sample_microphones(room, vec![id.to_owned()]).await;
+            if let MicrophoneSample::Subscribed {
+                packets: Some((_, n)),
+                ..
+            } = &samples[id]
+                && *n > 0
+            {
+                return *n;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("expected an inbound microphone packet counter")
 }
 
 async fn await_routes(

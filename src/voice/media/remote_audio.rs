@@ -9,7 +9,10 @@ use std::{
 };
 
 use futures::StreamExt;
-use livekit::{prelude::*, webrtc::audio_stream::native::NativeAudioStream};
+use livekit::{
+    prelude::*,
+    webrtc::{audio_stream::native::NativeAudioStream, stats::RtcStats},
+};
 use rodio::{MixerDeviceSink, Player, buffer::SamplesBuffer, mixer::Mixer};
 use tokio::{sync::broadcast, task::JoinHandle, time::Instant};
 
@@ -17,7 +20,9 @@ use crate::voice::{
     Device, DeviceKind, Devices, Intent, audio_preview::cpal_device, devices::open_media_output,
 };
 
-use super::{processing::RenderBlock, voice_output::VoiceOutput};
+use super::{
+    MicrophoneSample, MicrophoneSamples, processing::RenderBlock, voice_output::VoiceOutput,
+};
 
 #[cfg(test)]
 mod tests;
@@ -31,9 +36,16 @@ enum Route {
 
 fn route(intent: &Intent, id: &str, source: TrackSource, muted: bool) -> Option<Route> {
     let volume = intent.preferred.participant_volume(id);
-    let gain = match source {
-        TrackSource::Microphone => volume.mic,
-        TrackSource::ScreenshareAudio if intent.watching.contains(id) => volume.screen,
+    let (gain, muted) = match source {
+        TrackSource::Microphone => (
+            volume.mic,
+            intent
+                .remote_microphone_mutes
+                .get(id)
+                .copied()
+                .unwrap_or(muted),
+        ),
+        TrackSource::ScreenshareAudio if intent.watching.contains(id) => (volume.screen, muted),
         _ => return None,
     };
     let gain = f32::from(gain) / 100.0 * intent.preferred.output_gain();
@@ -167,6 +179,89 @@ fn sync_subscriptions(
         }
     }
     routes
+}
+
+pub(super) async fn sample_microphones(room: &Room, expected: Vec<String>) -> MicrophoneSamples {
+    let participants = room.remote_participants();
+    futures::future::join_all(expected.into_iter().map(|id| {
+        let participant = participants.get(&ParticipantIdentity(id.clone()));
+        async move {
+            let sample = match participant {
+                None => MicrophoneSample::ParticipantMissing,
+                Some(participant) => match microphone_publication(participant) {
+                    None => MicrophoneSample::PublicationMissing,
+                    Some(publication) => match publication.track() {
+                        Some(RemoteTrack::Audio(track)) if publication.is_desired() => {
+                            let packets =
+                                tokio::time::timeout(Duration::from_secs(1), track.get_stats())
+                                    .await
+                                    .ok()
+                                    .and_then(Result::ok)
+                                    .and_then(|stats| {
+                                        stats.into_iter().find_map(|stat| match stat {
+                                            RtcStats::InboundRtp(stat)
+                                                if stat.stream.kind == "audio"
+                                                    && !stat.rtc.id.is_empty() =>
+                                            {
+                                                Some((stat.rtc.id, stat.received.packets_received))
+                                            }
+                                            _ => None,
+                                        })
+                                    });
+                            MicrophoneSample::Subscribed {
+                                sid: publication.sid(),
+                                packets,
+                            }
+                        }
+                        _ => MicrophoneSample::Unsubscribed(publication.sid()),
+                    },
+                },
+            };
+            (id, sample)
+        }
+    }))
+    .await
+    .into_iter()
+    .collect()
+}
+
+pub(super) async fn repair_microphones(room: &Room, repairs: Vec<(String, TrackSid)>) {
+    let participants = room.remote_participants();
+    let publications = repairs
+        .into_iter()
+        .filter_map(|(id, sid)| {
+            let publication = participants
+                .get(&ParticipantIdentity(id))?
+                .track_publications()
+                .remove(&sid)?;
+            (publication.is_allowed() && publication.source() == TrackSource::Microphone)
+                .then_some(publication)
+        })
+        .collect::<Vec<_>>();
+    for publication in &publications {
+        if let Some(RemoteTrack::Audio(track)) = publication.track() {
+            track.disable();
+        }
+        publication.set_subscribed(false);
+    }
+    if !publications.is_empty() {
+        // shortcut: allow for asynchronous unsubscribe, wait for an acknowledgement when the SDK exposes one.
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    for publication in publications {
+        publication.set_subscribed(true);
+    }
+}
+
+fn microphone_publication(participant: &RemoteParticipant) -> Option<RemoteTrackPublication> {
+    participant
+        .track_publications()
+        .into_values()
+        .filter(|publication| {
+            publication.kind() == TrackKind::Audio
+                && publication.source() == TrackSource::Microphone
+        })
+        .max_by_key(|publication| (publication.is_subscribed(), publication.sid().to_string()))
 }
 
 fn sync_playback(

@@ -353,7 +353,7 @@ async fn voice_session_with_activity(
         start_call,
         server,
         desktop,
-        Duration::from_secs(7),
+        Duration::from_secs(15),
     )
     .await
 }
@@ -1554,6 +1554,7 @@ fn local_cues_follow_first_ready_report_and_explicit_leave() {
             speakers: None,
             diagnostics: Default::default(),
             echo_reference_unavailable: false,
+            connecting_microphones: HashSet::new(),
             speaking: HashSet::new(),
         })
     };

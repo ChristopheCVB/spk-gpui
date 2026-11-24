@@ -117,6 +117,18 @@ impl RoomAudio for LiveKitAudio<'_> {
         self.capture.reconcile_publication(self.room).await;
     }
 
+    fn sample_microphones(&self, expected: Vec<String>, jobs: &mut JoinSet<MicrophoneSamples>) {
+        let room = self.room.clone();
+        jobs.spawn(async move { remote_audio::sample_microphones(&room, expected).await });
+    }
+
+    async fn repair_microphones(&mut self, repairs: Vec<(String, TrackSid)>) {
+        for (_, sid) in &repairs {
+            self.remote.forget(sid);
+        }
+        remote_audio::repair_microphones(self.room, repairs).await;
+    }
+
     fn start_stats(&self, jobs: &mut JoinSet<Option<SessionStats>>) {
         let room = self.room.clone();
         jobs.spawn(async move {

@@ -54,6 +54,8 @@ struct State {
     echo_reference_unavailable: bool,
     echo_cancellation: bool,
     stats: VecDeque<SessionStats>,
+    remote_microphones: MicrophoneSamples,
+    microphone_repairs: Vec<String>,
     device_scan: Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>,
     microphone_resumptions: usize,
 }
@@ -135,6 +137,27 @@ impl Peer {
         self.events
             .send(MediaEvent::Quality(quality))
             .unwrap_or_else(|_| panic!("voice fixture closed"));
+    }
+
+    pub(crate) fn detach_remote_microphone(&self, id: &str) {
+        self.state.lock().unwrap().remote_microphones.insert(
+            id.into(),
+            MicrophoneSample::Unsubscribed(format!("TR_{id}").try_into().unwrap()),
+        );
+    }
+
+    pub(crate) fn set_remote_microphone_packets(&self, id: &str, packets: Option<u64>) {
+        self.state.lock().unwrap().remote_microphones.insert(
+            id.into(),
+            MicrophoneSample::Subscribed {
+                sid: format!("TR_{id}").try_into().unwrap(),
+                packets: packets.map(|count| (id.into(), count)),
+            },
+        );
+    }
+
+    pub(crate) fn microphone_repairs(&self) -> Vec<String> {
+        self.state.lock().unwrap().microphone_repairs.clone()
     }
 
     pub(crate) fn report_stats(&self, stats: SessionStats) {
@@ -231,6 +254,8 @@ impl TestRoom {
             echo_reference_unavailable: false,
             echo_cancellation: false,
             stats: VecDeque::new(),
+            remote_microphones: HashMap::new(),
+            microphone_repairs: Vec::new(),
             device_scan: None,
             microphone_resumptions: 0,
         }));
@@ -370,6 +395,30 @@ impl RoomAudio for TestRoom {
     }
 
     async fn reconcile_microphone(&mut self) {}
+
+    fn sample_microphones(&self, expected: Vec<String>, jobs: &mut JoinSet<MicrophoneSamples>) {
+        let state = self.state.lock().unwrap();
+        let samples = expected
+            .into_iter()
+            .map(|id| {
+                let sample = state
+                    .remote_microphones
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or(MicrophoneSample::ParticipantMissing);
+                (id, sample)
+            })
+            .collect();
+        jobs.spawn(async move { samples });
+    }
+
+    async fn repair_microphones(&mut self, repairs: Vec<(String, TrackSid)>) {
+        self.state
+            .lock()
+            .unwrap()
+            .microphone_repairs
+            .extend(repairs.into_iter().map(|(id, _)| id));
+    }
 
     fn start_stats(&self, jobs: &mut JoinSet<Option<SessionStats>>) {
         if let Some(stats) = self.state.lock().unwrap().stats.pop_front() {

@@ -109,7 +109,7 @@ impl PresenceReporter {
 #[derive(Clone)]
 pub(super) struct VoiceMembership {
     pub(super) channel_id: String,
-    flags: VoiceFlags,
+    pub(super) flags: VoiceFlags,
     video: VideoPresence,
 }
 
@@ -117,6 +117,7 @@ pub struct Participant<'a> {
     pub id: &'a str,
     pub name: &'a str,
     pub flags: VoiceFlags,
+    pub microphone_connecting: bool,
     pub video: Option<&'a VideoPresence>,
 }
 
@@ -134,6 +135,11 @@ impl Sidebar {
     }
 
     pub fn participants(&self, channel: &str) -> Vec<Participant<'_>> {
+        let media = self
+            .voice
+            .as_ref()
+            .filter(|voice| voice.channel_id == channel)
+            .and_then(|voice| voice.media.as_deref());
         let mut people = self
             .voice_presence
             .iter()
@@ -150,6 +156,10 @@ impl Sidebar {
                 }
                 .unwrap_or("Unknown user"),
                 flags: member.flags,
+                microphone_connecting: self.voice_intent.expects_remote_microphone(user)
+                    && !member.flags.muted
+                    && !member.flags.deafened
+                    && media.is_some_and(|report| report.connecting_microphones.contains(user)),
                 video: Some(&member.video),
             })
             .collect::<Vec<_>>();
