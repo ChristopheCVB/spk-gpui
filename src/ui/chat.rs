@@ -1,5 +1,6 @@
 mod actions;
 mod attachments;
+pub(super) mod editor;
 mod embed;
 mod gifs;
 mod history;
@@ -28,6 +29,7 @@ use gpui_kit::component::{
     tooltip::Tooltip,
 };
 
+use editor::Format;
 use history::{
     HistoryRow, JUMP_HIGHLIGHT_HOLD, date_label, history_message_at, history_message_index,
     history_rows, jump_highlight_opacity, message_row_background, relative_time,
@@ -53,13 +55,6 @@ struct HiddenChatSpoilers {
     key: (String, u64),
     offsets: Vec<usize>,
 }
-
-pub(super) const BOLD: (&str, &str) = ("**", "**");
-pub(super) const ITALIC: (&str, &str) = ("_", "_");
-pub(super) const STRIKETHROUGH: (&str, &str) = ("~~", "~~");
-pub(super) const INLINE_CODE: (&str, &str) = ("`", "`");
-pub(super) const CODE_BLOCK: (&str, &str) = ("\n```\n", "\n```\n");
-pub(super) const QUOTE: (&str, &str) = ("\n> ", "");
 
 fn chat(view: &View) -> Option<&ChatView> {
     match view {
@@ -413,7 +408,8 @@ impl Spk {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.chat_input.read(cx).value().is_empty() || self.message_action_form.is_some() {
+        if !editor::wire(self.chat_input.read(cx)).is_empty() || self.message_action_form.is_some()
+        {
             return false;
         }
         let View::SignedIn(sidebar) = &self.view else {
@@ -453,21 +449,15 @@ impl Spk {
 
     pub(super) fn format_chat_input(
         &mut self,
-        before: &str,
-        after: &str,
+        format: Format,
         editing: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if editing {
-            self.message_action_input.update(cx, |input, cx| {
-                let selected = input.selected_value();
-                let start = input.selected_range().start + before.len();
-                input.replace(format!("{before}{selected}{after}"), window, cx);
-                input.set_selected_range(start..start + selected.len(), cx);
-            });
-        } else {
-            self.insert_chat_text(before, after, window, cx);
+            editor::toggle(&self.message_action_input, format, window, cx);
+        } else if chat(&self.view).is_some_and(|chat| chat.can_send() && chat.outgoing.is_none()) {
+            editor::toggle(&self.chat_input, format, window, cx);
         }
     }
 
@@ -551,6 +541,7 @@ impl Spk {
                     cx,
                 )
             });
+            editor::refresh(&self.chat_input, cx);
             self.chat_spoilers.clear();
             self.chat_scroll_anchor = None;
             self.chat_history_position
@@ -577,11 +568,12 @@ impl Spk {
                 && previous.loading()
                 && !next.loading()
                 && !next.draft.body.is_empty()
-                && self.chat_input.read(cx).value().is_empty();
+                && editor::wire(self.chat_input.read(cx)).is_empty();
             if restored {
                 self.chat_input.update(cx, |input, cx| {
                     input.set_value(next.draft.body.clone(), window, cx)
                 });
+                editor::refresh(&self.chat_input, cx);
             }
         }
         let previous_jump = previous
@@ -663,7 +655,7 @@ impl Spk {
             self.send(
                 Command::UpdateChatDraft {
                     channel_id: chat.channel_id.clone(),
-                    body: self.chat_input.read(cx).value().to_string(),
+                    body: editor::wire(self.chat_input.read(cx)),
                 },
                 None,
                 cx,
@@ -675,7 +667,7 @@ impl Spk {
         let Some(chat) = chat(&self.view).filter(|chat| chat.can_send()) else {
             return;
         };
-        let body = self.chat_input.read(cx).value().to_string();
+        let body = editor::wire(self.chat_input.read(cx));
         if self.chat_submitting || !chat.draft.can_send(&body) {
             return;
         }
@@ -695,6 +687,7 @@ impl Spk {
                 input.set_value("", window, cx);
                 input.focus(window, cx);
             });
+            editor::refresh(&self.chat_input, cx);
             if !reading_older {
                 self.chat_scroll.scroll_to_bottom();
             }
@@ -1023,11 +1016,20 @@ impl Spk {
                             )
                         },
                     )
-                    .children(
-                        chat.outgoing
-                            .iter()
-                            .filter(|outgoing| !matches!(outgoing.status, Delivery::Sending(_)))
-                            .map(|outgoing| self.chat_send_recovery(sidebar, outgoing, cx)),
+                    .child(
+                        div()
+                            .id("send-recovery-list")
+                            .max_h(px(176.))
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .children(
+                                chat.outgoing
+                                    .iter()
+                                    .filter(|outgoing| {
+                                        !matches!(outgoing.status, Delivery::Sending(_))
+                                    })
+                                    .map(|outgoing| self.chat_send_recovery(sidebar, outgoing, cx)),
+                            ),
                     )
                     .child(self.message_composer(sidebar, chat, cx))
             }))
@@ -1044,7 +1046,7 @@ impl Spk {
         let disabled = !chat.can_send();
         let can_send = !disabled
             && !self.chat_submitting
-            && chat.draft.can_send(&self.chat_input.read(cx).value());
+            && chat.draft.can_send(&editor::wire(self.chat_input.read(cx)));
         let app = cx.weak_entity();
         div()
             .id("message-composer")
@@ -1069,14 +1071,17 @@ impl Spk {
             )
             .children(self.slash_suggestions(cx))
             .child(
-                Textarea::new(&self.chat_input)
+                editor::textarea(&self.chat_input)
                     .flex_shrink_0()
                     .bg(surface)
                     .border_color(surface)
                     .aria_label("Write a message")
-                    .on_paste(move |item, _, cx| {
-                        app.update(cx, |app, cx| app.paste_attachments(item, cx))
-                            .unwrap_or(false)
+                    .on_paste(move |item, window, cx| {
+                        app.update(cx, |app, cx| {
+                            app.paste_attachments(item, cx)
+                                || editor::paste(&app.chat_input, item, false, window, cx)
+                        })
+                        .unwrap_or(false)
                     })
                     .disabled(disabled),
             )
@@ -1578,6 +1583,7 @@ impl Spk {
     ) -> impl IntoElement {
         let app = cx.weak_entity();
         let mention_app = app.clone();
+        let active = editor::active_formats(self.chat_input.read(cx));
         let people: Vec<_> = sidebar
             .people()
             .into_iter()
@@ -1591,20 +1597,21 @@ impl Spk {
             .gap_1()
             .children(
                 [
-                    (IconName::Bold, "Bold", BOLD),
-                    (IconName::Italic, "Italic", ITALIC),
-                    (IconName::Strikethrough, "Strikethrough", STRIKETHROUGH),
-                    (IconName::Code, "Inline code", INLINE_CODE),
-                    (IconName::SquareCode, "Code block", CODE_BLOCK),
-                    (IconName::Quote, "Quote", QUOTE),
-                    (IconName::EyeOff, "Spoiler", ("||", "||")),
+                    (IconName::Bold, "Bold", Format::Bold),
+                    (IconName::Italic, "Italic", Format::Italic),
+                    (IconName::Strikethrough, "Strikethrough", Format::Strike),
+                    (IconName::Code, "Inline code", Format::Code),
+                    (IconName::SquareCode, "Code block", Format::CodeBlock),
+                    (IconName::Quote, "Quote", Format::Quote),
+                    (IconName::EyeOff, "Spoiler", Format::Spoiler),
                 ]
                 .into_iter()
-                .map(|(icon, label, (before, after))| {
+                .map(|(icon, label, format)| {
                     tool_button(label, icon, label)
+                        .selected(active(format))
                         .disabled(disabled)
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            this.insert_chat_text(before, after, window, cx);
+                            this.format_chat_input(format, false, window, cx);
                         }))
                 }),
             )

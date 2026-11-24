@@ -1,4 +1,4 @@
-use super::chat::{BOLD, CODE_BLOCK, INLINE_CODE, ITALIC, QUOTE, STRIKETHROUGH};
+use super::chat::editor::{self, Format};
 use super::*;
 use crate::{session::VoiceProcessingSetting, shortcuts::Action, voice::NoiseSuppression};
 
@@ -114,17 +114,40 @@ impl Spk {
             return true;
         }
         if composer || editor {
+            let input = if editor {
+                &self.message_action_input
+            } else {
+                &self.chat_input
+            };
+            if primary
+                && count == 1
+                && matches!(key_name, "c" | "x")
+                && editor::clipboard_key(input, key_name == "x", window, cx)
+            {
+                return true;
+            }
+            if primary
+                && modifiers.shift
+                && count == 2
+                && key_name == "v"
+                && let Some(item) = cx.read_from_clipboard()
+                && editor::paste(input, &item, true, window, cx)
+            {
+                return true;
+            }
             let formatting = match (primary, modifiers.alt, modifiers.shift, count, key_name) {
-                (true, false, false, 1, "b") => Some(BOLD),
-                (true, false, false, 1, "i") => Some(ITALIC),
-                (true, false, false, 1, "e") => Some(INLINE_CODE),
-                (true, false, true, 2, "x") => Some(STRIKETHROUGH),
-                (true, true, false, 2, "c") | (true, false, true, 2, "c") => Some(CODE_BLOCK),
-                (true, false, true, 2, "." | ">") => Some(QUOTE),
+                (true, false, false, 1, "b") => Some(Format::Bold),
+                (true, false, false, 1, "i") => Some(Format::Italic),
+                (true, false, false, 1, "e") => Some(Format::Code),
+                (true, false, true, 2, "x") => Some(Format::Strike),
+                (true, true, false, 2, "c") | (true, false, true, 2, "c") => {
+                    Some(Format::CodeBlock)
+                }
+                (true, false, true, 2, "." | ">") => Some(Format::Quote),
                 _ => None,
             };
-            if let Some((before, after)) = formatting {
-                self.format_chat_input(before, after, editor, window, cx);
+            if let Some(format) = formatting {
+                self.format_chat_input(format, editor, window, cx);
                 return true;
             }
         }

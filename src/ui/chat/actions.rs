@@ -138,6 +138,7 @@ impl Spk {
                 input.set_value(initial.to_owned(), window, cx);
                 input.focus(window, cx);
             });
+            editor::refresh(&self.message_action_input, cx);
         }
         cx.notify();
     }
@@ -158,9 +159,9 @@ impl Spk {
         } {
             return;
         }
-        let text = self.message_action_input.read(cx).value();
+        let text = editor::wire(self.message_action_input.read(cx));
         let action = match form.kind {
-            ActionForm::Edit { .. } => MessageAction::Edit(text.to_string()),
+            ActionForm::Edit { .. } => MessageAction::Edit(text),
             ActionForm::Delete => MessageAction::Delete,
         };
         form.submitted = true;
@@ -199,9 +200,13 @@ impl Spk {
                 .gap_2()
                 .child(Label::new(title).font_semibold())
                 .when(!matches!(form.kind, ActionForm::Delete), |panel| {
+                    let input = self.message_action_input.clone();
                     panel.child(
-                        Textarea::new(&self.message_action_input)
+                        editor::textarea(&self.message_action_input)
                             .aria_label(title)
+                            .on_paste(move |item, window, cx| {
+                                editor::paste(&input, item, false, window, cx)
+                            })
                             .disabled(chat.action_pending),
                     )
                 })
