@@ -105,9 +105,7 @@ pub(super) fn icon_picker_field(
         .min_w_0()
         .child(Label::new("Icon"))
         .child(
-            control_select(picker)
-                .border_color(cx.theme().transparent)
-                .bg(fill)
+            control_select(picker, fill, cx)
                 .w_full()
                 .accessibility_label("Icon")
                 .placeholder("Choose icon")

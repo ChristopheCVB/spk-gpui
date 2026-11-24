@@ -157,6 +157,8 @@ impl Media {
         scan.tick().await;
         let mut check_routes = true;
         let mut retry_mic = intent.retry_mic;
+        let mut mic_uses_system_default = false;
+        let mut previous_default_mic = None;
         let mut retry_speakers = intent.retry_speakers;
         let mut reconnecting = false;
         let mut resync = false;
@@ -178,15 +180,29 @@ impl Media {
             }
             if check_routes && !reconnecting {
                 check_routes = false;
-                let input = devices
+                let preferred_mic = devices
                     .microphones
-                    .resolve(intent.preferred.microphone.as_ref());
+                    .preferred(intent.preferred.microphone.as_ref());
+                let default_mic = devices.microphones.default.as_ref();
+                let use_system_default = !cfg!(windows) && preferred_mic.is_none();
                 let wanted = if intent.mute.effective_muted() {
                     None
                 } else {
-                    input
+                    preferred_mic.or(default_mic)
                 };
-                if backend.selected_microphone() != wanted || retry_mic != intent.retry_mic {
+                // PulseAudio can move a CPAL stream off the device that used to be the default.
+                let restore_preferred_mic = cfg!(target_os = "linux")
+                    && preferred_mic.is_some_and(|device| {
+                        device.id.starts_with("pulseaudio:")
+                            && previous_default_mic.as_ref() == Some(device)
+                            && default_mic != Some(device)
+                    });
+                previous_default_mic.clone_from(&devices.microphones.default);
+                if backend.selected_microphone() != wanted
+                    || retry_mic != intent.retry_mic
+                    || wanted.is_some() && mic_uses_system_default != use_system_default
+                    || restore_preferred_mic
+                {
                     backend.stop_microphone().await;
                     speaking.remove(me.as_str());
                     retry_mic = intent.retry_mic;
@@ -223,9 +239,8 @@ impl Media {
                 if let Some(device) = wanted
                     && backend.can_start_microphone()
                 {
-                    let use_system_default =
-                        !cfg!(windows) && Some(device) == devices.microphones.default.as_ref();
                     backend.start_microphone(device.clone(), processing, use_system_default);
+                    mic_uses_system_default = use_system_default;
                 }
                 backend.sync_microphone_processing(processing).await;
                 if resync

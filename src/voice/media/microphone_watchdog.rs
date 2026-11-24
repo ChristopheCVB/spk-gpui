@@ -17,19 +17,35 @@ pub(super) enum MicrophoneSample {
     },
 }
 
+enum Progress {
+    Stalled,
+    Advancing,
+    Unknown,
+}
+
 impl MicrophoneSample {
-    fn stalled(&self, previous: Option<&Self>) -> bool {
-        match self {
-            Self::ParticipantMissing | Self::PublicationMissing | Self::Unsubscribed(_) => true,
-            Self::Subscribed {
-                sid,
-                packets: Some((stream, packets)),
-            } => matches!(
-                previous,
-                Some(Self::Subscribed { sid: before_sid, packets: Some((before_stream, before_packets)) })
-                    if sid == before_sid && stream == before_stream && packets == before_packets
-            ),
-            Self::Subscribed { packets: None, .. } => false,
+    fn progress(&self, previous: Option<&Self>) -> Progress {
+        match (self, previous) {
+            (Self::ParticipantMissing | Self::PublicationMissing | Self::Unsubscribed(_), _) => {
+                Progress::Stalled
+            }
+            (
+                Self::Subscribed {
+                    sid,
+                    packets: Some((stream, packets)),
+                },
+                Some(Self::Subscribed {
+                    sid: previous_sid,
+                    packets: Some((previous_stream, previous_packets)),
+                }),
+            ) if sid == previous_sid && stream == previous_stream => {
+                match packets.cmp(previous_packets) {
+                    std::cmp::Ordering::Equal => Progress::Stalled,
+                    std::cmp::Ordering::Greater => Progress::Advancing,
+                    std::cmp::Ordering::Less => Progress::Unknown,
+                }
+            }
+            _ => Progress::Unknown,
         }
     }
 
@@ -52,7 +68,7 @@ pub(super) struct MicrophoneWatchdog {
 
 struct Episode {
     since: Instant,
-    present_since: Option<Instant>,
+    confirmed_since: Option<Instant>,
     repaired: bool,
 }
 
@@ -78,31 +94,35 @@ impl MicrophoneWatchdog {
                 continue;
             }
             let previous = self.observations.get_mut(&id);
-            let episode = if sample.stalled(previous.as_deref().map(|(sample, _)| sample)) {
-                let mut episode =
-                    previous
-                        .and_then(|(_, episode)| episode.take())
-                        .unwrap_or(Episode {
-                            since: now,
-                            present_since: None,
-                            repaired: false,
-                        });
-                if sample.participant_present() {
-                    episode.present_since.get_or_insert(now);
-                } else {
-                    episode.present_since = None;
+            let progress = sample.progress(previous.as_deref().map(|(sample, _)| sample));
+            let mut episode = previous.and_then(|(_, episode)| episode.take());
+            match progress {
+                Progress::Advancing => episode = None,
+                Progress::Unknown => {
+                    if let Some(episode) = &mut episode {
+                        episode.confirmed_since = None;
+                    }
                 }
-                if now - episode.since >= REPAIR_AFTER
-                    && !episode.repaired
-                    && let Some(sid) = sample.sid()
-                {
-                    repairs.push((id.clone(), sid.clone()));
-                    episode.repaired = true;
+                Progress::Stalled => {
+                    let episode = episode.get_or_insert(Episode {
+                        since: now,
+                        confirmed_since: None,
+                        repaired: false,
+                    });
+                    if sample.participant_present() {
+                        episode.confirmed_since.get_or_insert(now);
+                    } else {
+                        episode.confirmed_since = None;
+                    }
+                    if now - episode.since >= REPAIR_AFTER
+                        && !episode.repaired
+                        && let Some(sid) = sample.sid()
+                    {
+                        repairs.push((id.clone(), sid.clone()));
+                        episode.repaired = true;
+                    }
                 }
-                Some(episode)
-            } else {
-                None
-            };
+            }
             self.observations.insert(id, (sample, episode));
         }
         repairs
@@ -131,7 +151,7 @@ impl MicrophoneWatchdog {
             }
             if !episode
                 .as_ref()
-                .and_then(|episode| episode.present_since)
+                .and_then(|episode| episode.confirmed_since)
                 .is_some_and(|since| now - since >= REJOIN_AFTER)
             {
                 return false;

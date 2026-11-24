@@ -277,10 +277,18 @@ fn describe_cpal_device(device: cpal::Device) -> Option<Device> {
 }
 
 fn cpal_routes() -> (DeviceList, DeviceList) {
-    fn read(host: &cpal::Host) -> Result<(DeviceList, DeviceList), cpal::Error> {
+    fn read(host: &cpal::Host) -> ((DeviceList, DeviceList), bool) {
         let mut microphones = DeviceList::default();
         let mut outputs = DeviceList::default();
-        for device in host.devices()? {
+        if !cfg!(windows) {
+            // shortcut: ALSA exposes its configured PCM alias, revisit when it exposes the routed endpoint.
+            microphones.default = host.default_input_device().and_then(describe_cpal_device);
+        }
+        outputs.default = host.default_output_device().and_then(describe_cpal_device);
+        let Ok(devices) = host.devices() else {
+            return ((microphones, outputs), false);
+        };
+        for device in devices {
             if let Some(description) = describe_cpal_device(device.clone()) {
                 if device.supports_output() {
                     outputs.choices.push(description.clone());
@@ -290,12 +298,7 @@ fn cpal_routes() -> (DeviceList, DeviceList) {
                 }
             }
         }
-        if !cfg!(windows) {
-            // shortcut: ALSA exposes its configured PCM alias, revisit when it exposes the routed endpoint.
-            microphones.default = host.default_input_device().and_then(describe_cpal_device);
-        }
-        outputs.default = host.default_output_device().and_then(describe_cpal_device);
-        Ok((microphones, outputs))
+        ((microphones, outputs), true)
     }
 
     #[cfg(target_os = "linux")]
@@ -303,16 +306,25 @@ fn cpal_routes() -> (DeviceList, DeviceList) {
         // CPAL's PulseAudio client can outlive its host. Reuse it across device scans.
         static PULSE_HOST: std::sync::Mutex<Option<cpal::Host>> = std::sync::Mutex::new(None);
         let mut cached = PULSE_HOST.lock().unwrap();
-        if let Some(routes) = cached.as_ref().and_then(|host| read(host).ok()) {
-            return routes;
+        let mut previous = None;
+        if let Some(host) = cached.as_ref() {
+            let (routes, listed) = read(host);
+            if listed {
+                return routes;
+            }
+            previous = Some(routes);
         }
         let host = cpal::default_host();
-        let routes = read(&host);
-        *cached = (routes.is_ok() && host.id() == cpal::HostId::PulseAudio).then_some(host);
-        routes.unwrap_or_default()
+        let (mut routes, listed) = read(&host);
+        *cached = (listed && host.id() == cpal::HostId::PulseAudio).then_some(host);
+        if !listed && let Some((microphones, outputs)) = previous {
+            routes.0.default = routes.0.default.or(microphones.default);
+            routes.1.default = routes.1.default.or(outputs.default);
+        }
+        routes
     }
     #[cfg(not(target_os = "linux"))]
-    read(&cpal::default_host()).unwrap_or_default()
+    read(&cpal::default_host()).0
 }
 
 #[derive(Clone, PartialEq)]

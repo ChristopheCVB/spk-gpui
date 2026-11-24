@@ -17,6 +17,10 @@ use crate::{
 static SPK_BASE: LazyLock<Url> =
     LazyLock::new(|| Url::parse(env!("SPK_URL")).expect("validated SPK URL"));
 
+fn wide_search(viewport_width: Pixels) -> bool {
+    viewport_width >= px(1280.0)
+}
+
 pub(super) struct SearchPanel {
     spk: WeakEntity<Spk>,
     focus: FocusHandle,
@@ -60,7 +64,7 @@ impl Spk {
     pub(super) fn search_header(&self, window: &Window, cx: &App) -> Div {
         div()
             .ml_auto()
-            .w(if window.viewport_size().width >= px(1280.0) {
+            .w(if wide_search(window.viewport_size().width) {
                 px(288.0)
             } else {
                 px(224.0)
@@ -267,7 +271,7 @@ impl Spk {
         let theme = cx.theme();
         let viewport_width = window.viewport_size().width;
         let width = if wide {
-            if viewport_width >= px(1280.0) {
+            if wide_search(viewport_width) {
                 px(384.0)
             } else {
                 px(320.0)

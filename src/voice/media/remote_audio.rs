@@ -67,6 +67,8 @@ pub(super) struct RemoteAudio {
     render: broadcast::Sender<Arc<RenderBlock>>,
     pub(super) native_playout: bool,
     voice_output_since: Option<Instant>,
+    voice_uses_system_default: bool,
+    previous_default_output: Option<Device>,
 }
 
 impl Default for RemoteAudio {
@@ -78,6 +80,8 @@ impl Default for RemoteAudio {
             render: broadcast::channel(16).0,
             native_playout: false,
             voice_output_since: None,
+            voice_uses_system_default: false,
+            previous_default_output: None,
         }
     }
 }
@@ -136,27 +140,44 @@ impl RemoteAudio {
             .media_outputs
             .resolve(intent.preferred.media_output.as_ref());
         // Windows voice defaults resolve to a communications endpoint, while CPAL defaults to eConsole.
+        let preferred = devices
+            .speakers
+            .preferred(intent.preferred.speakers.as_ref());
         let system_speakers = !cfg!(windows)
-            && (intent.preferred.speakers.is_none()
-                || devices.speakers.default.as_ref() == speakers);
+            && speakers == devices.speakers.default.as_ref()
+            && (preferred.is_none() || preferred != speakers);
+        let default_output = devices.media_outputs.default.as_ref();
         let voice_device = if system_speakers {
-            devices.media_outputs.default.as_ref().or(voice_output)
+            default_output.or(voice_output)
         } else {
             voice_output
         };
-        let voice_changed = self
-            .voice
-            .update(voice_output.is_some(), voice_device, |failed| {
+        // PulseAudio can move playback off its old default even when the stream named that sink.
+        let restore_preferred = cfg!(target_os = "linux")
+            && !system_speakers
+            && self.previous_default_output.as_ref().is_some_and(|device| {
+                device.id.starts_with("pulseaudio:") && Some(device) != default_output
+            });
+        self.previous_default_output
+            .clone_from(&devices.media_outputs.default);
+        let route_changed = std::mem::replace(&mut self.voice_uses_system_default, system_speakers)
+            != system_speakers;
+        let voice_changed = self.voice.update(
+            voice_output.is_some(),
+            voice_device,
+            route_changed || restore_preferred,
+            |failed| {
                 let selected = voice_output.filter(|_| !system_speakers);
                 let device = cpal_device(DeviceKind::Speakers, selected)?;
                 let reference =
                     VoiceOutput::open(device.clone(), self.render.clone(), failed.clone());
                 VoiceSink::open(device, reference, failed)
-            });
+            },
+        );
         if voice_changed {
             self.voice_output_since = self.voice.sink.as_ref().map(|_| Instant::now());
         }
-        let media_changed = self.media.update(media, media_device, |failed| {
+        let media_changed = self.media.update(media, media_device, false, |failed| {
             open_media_output(media_device, move |_| failed.store(true, Relaxed)).ok()
         });
         if voice_changed || media_changed {
@@ -385,13 +406,14 @@ impl<T> Output<T> {
         &mut self,
         wanted: bool,
         device: Option<&Device>,
+        route_changed: bool,
         open: impl FnOnce(Arc<AtomicBool>) -> Option<T>,
     ) -> bool {
         if !wanted {
             return self.sink.take().is_some();
         }
         let now = Instant::now();
-        let changed = self.device.as_ref() != device || self.failed.load(Relaxed);
+        let changed = route_changed || self.device.as_ref() != device || self.failed.load(Relaxed);
         if !changed && (self.sink.is_some() || self.retry_at.is_some_and(|at| now < at)) {
             return false;
         }

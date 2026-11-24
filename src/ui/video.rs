@@ -1086,9 +1086,7 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for VoiceSelect<T> {
                 picker.selected = selected;
             });
         }
-        control_select(&select)
-            .border_color(cx.theme().transparent)
-            .bg(cx.theme().background)
+        control_select(&select, cx.theme().background, cx)
             .small()
             .w_full()
             .accessibility_label(self.label)

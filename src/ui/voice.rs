@@ -564,9 +564,7 @@ fn microphone_controls(
         .gap_2()
         .child(Label::new("Noise suppression").font_semibold())
         .child(
-            control_select(&noise)
-                .border_color(cx.theme().transparent)
-                .bg(cx.theme().background)
+            control_select(&noise, cx.theme().background, cx)
                 .small()
                 .w_full()
                 .accessibility_label("Noise suppression"),
@@ -801,9 +799,7 @@ impl RenderOnce for DevicePicker {
                 }
             })
             .child(
-                control_select(&select)
-                    .border_color(cx.theme().transparent)
-                    .bg(cx.theme().background)
+                control_select(&select, cx.theme().background, cx)
                     .small()
                     .accessibility_label(label)
                     .w_full(),

@@ -828,12 +828,16 @@ fn control_button(id: impl Into<ElementId>) -> Button {
     Button::new(id).h(CONTROL_HEIGHT).p(CONTROL_PADDING)
 }
 
-fn control_select<D>(state: &Entity<SelectState<D>>) -> Select<D>
+fn control_select<D>(state: &Entity<SelectState<D>>, fill: Hsla, cx: &App) -> Select<D>
 where
     D: SelectDelegate + 'static,
     <D::Item as SelectItem>::Value: PartialEq + Clone,
 {
-    Select::new(state).h(CONTROL_HEIGHT).p(CONTROL_PADDING)
+    Select::new(state)
+        .h(CONTROL_HEIGHT)
+        .p(CONTROL_PADDING)
+        .border_color(cx.theme().transparent)
+        .bg(fill)
 }
 
 fn surface_input(state: &Entity<InputState>, fill: Hsla, cx: &App) -> Input {

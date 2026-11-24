@@ -486,6 +486,22 @@ async fn isolated_stuck_subscription_repairs_once_without_rejoining() {
             tokio::time::sleep(Duration::from_millis(1100)).await;
             assert_eq!(peer.microphone_repairs(), ["stalled"]);
 
+            peer.set_remote_microphone_packets("stalled", Some(1));
+            assert!(
+                tokio::time::timeout(
+                    Duration::from_millis(1500),
+                    wait_for_sidebar(&views, |sidebar| {
+                        sidebar
+                            .participants("first")
+                            .iter()
+                            .any(|peer| peer.id == "stalled" && !peer.microphone_connecting)
+                    }),
+                )
+                .await
+                .is_err()
+            );
+            assert_eq!(peer.microphone_repairs(), ["stalled"]);
+
             let recovering = keep_packets_flowing(peer.clone(), "stalled");
             let recovered = wait_for_sidebar(&views, |sidebar| {
                 sidebar
@@ -639,7 +655,7 @@ async fn widespread_rejoin_requires_all_eligible_microphones_to_stall_and_health
                             }))
                         }
                         Unknown => {
-                            peer.set_remote_microphone_packets("other", None);
+                            peer.set_remote_microphone_packets("other", Some(42));
                             None
                         }
                         Muted => {
@@ -655,6 +671,11 @@ async fn widespread_rejoin_requires_all_eligible_microphones_to_stall_and_health
                     };
                     let later = async {
                         tokio::time::sleep(Duration::from_secs(12)).await;
+                        if matches!(control, Unknown) {
+                            peer.set_remote_microphone_packets("other", None);
+                            tokio::time::sleep(Duration::from_secs(3)).await;
+                            peer.set_remote_microphone_packets("other", Some(42));
+                        }
                         if matches!(control, LateArrival) {
                             peer.detach_remote_microphone("other");
                         }
