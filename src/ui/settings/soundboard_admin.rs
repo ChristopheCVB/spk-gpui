@@ -5,7 +5,7 @@ use crate::{
     api::SoundboardClip,
     session::{SoundboardAdminAction as Action, SoundboardCrop},
     ui::{
-        icon_picker::{IconPicker, bundled_icon_names, icon_picker, icon_picker_field},
+        icon_picker::{IconPicker, icon_picker, icon_picker_field},
         soundboard::clip_icon,
     },
 };
@@ -16,10 +16,10 @@ struct Metadata {
 }
 
 impl Metadata {
-    fn new(icons: &[SharedString], window: &mut Window, cx: &mut App) -> Self {
+    fn new(window: &mut Window, cx: &mut App) -> Self {
         Self {
             name: cx.new(|cx| InputState::new(window, cx)),
-            icon: icon_picker(icons, "audio-lines", window, cx),
+            icon: icon_picker("audio-lines", clip_icon, window, cx),
         }
     }
 
@@ -33,18 +33,12 @@ impl Metadata {
         )
     }
 
-    fn render(&self, original_icon: Option<&str>, disabled: bool, cx: &App) -> impl IntoElement {
+    fn render(&self, disabled: bool) -> impl IntoElement {
         div()
             .flex()
             .gap_3()
             .child(field("Name", &self.name, disabled))
-            .child(icon_picker_field(
-                &self.icon,
-                original_icon,
-                clip_icon,
-                disabled,
-                cx,
-            ))
+            .child(icon_picker_field(&self.icon, disabled))
     }
 }
 
@@ -68,15 +62,9 @@ pub(super) struct SoundboardForm {
 
 impl SoundboardForm {
     pub(super) fn new(window: &mut Window, cx: &mut Context<Settings>) -> Self {
-        let icons = bundled_icon_names();
-        let upload = Metadata::new(&icons, window, cx);
-        let edit = Metadata::new(&icons, window, cx);
-        for state in [&upload.icon, &edit.icon] {
-            cx.observe(state, |_, _, cx| cx.notify()).detach();
-        }
         Self {
-            upload,
-            edit,
+            upload: Metadata::new(window, cx),
+            edit: Metadata::new(window, cx),
             start: cx.new(|cx| InputState::new(window, cx).default_value("0")),
             end: cx.new(|cx| InputState::new(window, cx).placeholder("End of selection")),
             gain: cx.new(|cx| InputState::new(window, cx).default_value("100")),
@@ -220,7 +208,7 @@ impl Settings {
                             .child(field("Start (seconds)", &form.start, disabled))
                             .child(field("End (seconds)", &form.end, disabled))
                             .child(field("Upload gain (%)", &form.gain, disabled)))
-                        .child(form.upload.render(None, disabled, cx))
+                        .child(form.upload.render(disabled))
                         .child(div().flex().gap_2()
                             .child(control_button("preview-crop").label("Play selection").tab_stop(true).disabled(disabled)
                                 .on_click(cx.listener(move |settings, _, _, cx| {
@@ -282,9 +270,8 @@ impl Settings {
                         settings.soundboard.edit.name.update(cx, |input, cx| {
                             input.set_value(edit.name.clone(), window, cx)
                         });
-                        settings.soundboard.edit.icon.update(cx, |select, cx| {
-                            select.set_selected_value(&edit.icon.clone().into(), window, cx);
-                        });
+                        settings.soundboard.edit.icon =
+                            icon_picker(&edit.icon, clip_icon, window, cx);
                         settings.soundboard.clip_action = Some(ClipAction::Edit(edit.clone()));
                         cx.notify();
                     })),
@@ -311,7 +298,7 @@ impl Settings {
                 let original_icon = clip.icon.clone();
                 (
                     format!("Edit {}", clip.name),
-                    Some(self.soundboard.edit.render(Some(&clip.icon), disabled, cx)),
+                    Some(self.soundboard.edit.render(disabled)),
                     control_button("apply-sound-edit")
                         .primary()
                         .label("Save")

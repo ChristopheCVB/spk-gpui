@@ -4,7 +4,7 @@ use super::*;
 use crate::{
     api::WebhookSettings,
     session::WebhookAction,
-    ui::icon_picker::{IconPicker, bundled_icon_names, icon_picker, icon_picker_field},
+    ui::icon_picker::{IconPicker, icon_picker, icon_picker_field},
 };
 
 #[derive(Clone)]
@@ -100,7 +100,6 @@ impl Spk {
         let app = cx.entity();
         let editor = cx.new(|cx: &mut Context<WebhookEditor>| {
             if let Some(fields) = &fields {
-                cx.observe(&fields.icon, |_, _, cx| cx.notify()).detach();
                 cx.subscribe_in(&fields.name, window, |editor, _, event, window, cx| {
                     if matches!(event, InputEvent::PressEnter { .. }) {
                         editor.submit(window, cx);
@@ -260,7 +259,7 @@ impl WebhookFields {
             .unwrap_or("webhook");
         Self {
             name: cx.new(|cx| InputState::new(window, cx).default_value(name)),
-            icon: icon_picker(&bundled_icon_names(), icon, window, cx),
+            icon: icon_picker(icon, |name| webhook_icon(Some(name)), window, cx),
             original_icon: icon.to_owned(),
             private: channel.is_none_or(|channel| channel.private),
         }
@@ -416,13 +415,7 @@ impl Render for WebhookEditor {
                             .disabled(self.pending),
                     ),
             )
-            .child(icon_picker_field(
-                &fields.icon,
-                Some(&fields.original_icon),
-                |name| webhook_icon(Some(name)),
-                self.pending,
-                cx,
-            ))
+            .child(icon_picker_field(&fields.icon, self.pending))
             .child(
                 div()
                     .flex()
