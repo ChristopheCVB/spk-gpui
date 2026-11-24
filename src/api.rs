@@ -756,6 +756,10 @@ impl SpkClient {
         &self.cookies
     }
 
+    pub fn origin(&self) -> &str {
+        &self.origin
+    }
+
     fn request(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
         let url = self.base.join(path).expect("fixed SPK endpoint path");
         self.http

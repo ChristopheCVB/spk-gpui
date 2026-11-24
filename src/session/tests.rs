@@ -545,6 +545,7 @@ fn fixture_settings(
     }
     SessionSettings {
         socket_endpoint,
+        drafts_path: None,
         start_call: Box::new(start_call),
         enumerate_devices: Devices::default,
         devices: DeviceSettings {
