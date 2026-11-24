@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/ChristopheCVB/spk-gpui/compare/v0.7.0...v0.8.0) (2026-11-24)
+
+
+### Features
+
+* align SPK desktop with recent Web workflows ([a0b3d85](https://github.com/ChristopheCVB/spk-gpui/commit/a0b3d85a799b0a14f9dba277e87e08a0fcdb2a7b))
+
 ## [0.7.0](https://github.com/ChristopheCVB/spk-gpui/compare/v0.6.0...v0.7.0) (2026-11-24)
 
 
