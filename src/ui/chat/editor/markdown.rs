@@ -249,12 +249,18 @@ impl Projection {
         let mut offset = selection.start;
         for syntax in &self.syntax {
             let start = syntax.range.start.max(selection.start);
-            let end = syntax.range.end.min(selection.end);
+            let list = syntax.label == "• " || syntax.label.ends_with(". ");
+            let code_label = !syntax.label.is_empty() && !list && syntax.label != "│ ";
+            let end = (syntax.range.end
+                + usize::from(
+                    code_label && source.as_bytes().get(syntax.range.end) == Some(&b'\n'),
+                ))
+            .min(selection.end);
             if start < offset || start >= end {
                 continue;
             }
             text.push_str(&source[offset..start]);
-            if syntax.label == "• " || syntax.label.ends_with(". ") {
+            if list {
                 text.push_str(&syntax.label);
             }
             offset = end;
