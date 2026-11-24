@@ -59,7 +59,11 @@ pub use {
     accounts::AccountLinkForm,
     avatars::AvatarPhoto,
     channel_admin::{ChannelAction, ChannelAdmin, ChannelKind},
-    chat::{AttachmentInput, ChatView, Delivery, GifPickerView, Pins, UploadStatus, image_preview},
+    chat::{
+        AttachmentInput, ChatView, Delivery, GifPickerView, POLL_MAX_OPTIONS, POLL_MIN_OPTIONS,
+        POLL_OPTION_LIMIT, POLL_QUESTION_LIMIT, Pins, PollEditOutcome, PollEditReply, UploadStatus,
+        image_preview, trim_poll_text, validate_poll,
+    },
     presence::Participant,
     profiles::ProfileEdit,
     radio::RadioPlayback,
@@ -118,6 +122,12 @@ pub enum Command {
         channel_id: String,
         body: String,
     },
+    SendChatPoll {
+        channel_id: String,
+        question: String,
+        options: Vec<String>,
+        completed: oneshot::Sender<Result<(), &'static str>>,
+    },
     ShowGifs(bool),
     SearchGifs(String),
     ShowGifFavorites(bool),
@@ -165,6 +175,14 @@ pub enum Command {
         channel_id: String,
         message_id: String,
         action: MessageAction,
+    },
+    EditChatPoll {
+        channel_id: String,
+        message_id: String,
+        question: String,
+        options: Vec<crate::api::PollEditOption>,
+        reset_votes: Option<bool>,
+        completed: PollEditReply,
     },
     RetryChatPins(String),
     LoadChangelog {
@@ -700,6 +718,12 @@ async fn watch_session(
                 }
                 chat.action_complete(client, result);
             }
+            Some(Ok((channel_id, message_id, result))) = chat.vote_tasks.join_next() => {
+                if result.as_ref().is_err_and(Failure::unauthorized) {
+                    break SessionEnd::Invalidated(SESSION_EXPIRED);
+                }
+                chat.vote_complete(client, &channel_id, &message_id, result);
+            }
             Some(Ok(result)) = chat.preview_tasks.join_next() => chat.preview_complete(result),
             Some(result) = chat.gifs.browsing.join_next() => {
                 let result = result.unwrap_or(Err(Failure::Connection));
@@ -861,6 +885,9 @@ async fn watch_session(
                 Ok(Command::UpdateChatDraft { channel_id, body }) => chat.update_draft(channel_id, body),
                 Ok(Command::SetChatReply { channel_id, message_id }) => chat.set_reply(&channel_id, message_id.as_deref()),
                 Ok(Command::SendChatMessage { channel_id, body }) => chat.send(channel_id, body),
+                Ok(Command::SendChatPoll { channel_id, question, options, completed }) => {
+                    let _ = completed.send(chat.send_poll(channel_id, &question, &options));
+                }
                 Ok(Command::ShowGifs(true)) => chat.open_gifs(client),
                 Ok(Command::ShowGifs(false)) => chat.gifs.close(),
                 Ok(Command::SearchGifs(query)) => chat.gifs.search(client, query),
@@ -921,6 +948,16 @@ async fn watch_session(
                 Ok(Command::MarkChatSendDelivered(channel)) => chat.mark_send_delivered(&channel),
                 Ok(Command::MutateChatMessage { channel_id, message_id, action }) => {
                     chat.mutate(client, &sidebar, &channel_id, message_id, action);
+                }
+                Ok(Command::EditChatPoll { channel_id, message_id, question, options, reset_votes, completed }) => {
+                    let result = chat.prepare_poll_edit(
+                        &sidebar, &channel_id, &message_id, &question, options, reset_votes,
+                    );
+                    match result {
+                        Ok(Some(action)) => chat.start_message_action(client, &channel_id, message_id, action, Some(completed)),
+                        Ok(None) => { let _ = completed.send(Ok(PollEditOutcome::ConfirmVoteChange)); }
+                        Err(error) => { let _ = completed.send(Err(error)); }
+                    }
                 }
                 Ok(Command::RetryChatPins(channel_id)) => chat.retry_pins(client, &channel_id),
                 Ok(command @ (Command::SaveNickname(_) | Command::UploadAvatar(_) | Command::InspectProfileEmail(..))) => {
@@ -1052,10 +1089,13 @@ async fn watch_session(
                     Frame::ReactionUpdate { channel_id, message_id, reactions } => {
                         chat.message_changed(client, &channel_id, &message_id, MessageChange::Reactions(reactions));
                     }
+                    Frame::PollUpdate { channel_id, message_id, poll } => {
+                        chat.message_changed(client, &channel_id, &message_id, MessageChange::Poll(poll));
+                    }
                     Frame::PinUpdate { channel_id, message_id, pinned } => {
                         chat.message_changed(client, &channel_id, &message_id, MessageChange::Pin(pinned));
                     }
-                    Frame::MessageError { nonce: Some(nonce), error } => chat.error(&nonce, error),
+                    Frame::MessageError { nonce, error } => chat.error(nonce.as_deref(), error),
                     Frame::Typing { channel_id, user_id } if sidebar.profile.id.as_ref() != Some(&user_id) => {
                         chat.receive_typing(&channel_id, user_id);
                     }
