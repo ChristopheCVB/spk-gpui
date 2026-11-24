@@ -1231,7 +1231,8 @@ impl Spk {
             let contents = spoilers
                 .into_iter()
                 .map(|range| {
-                    let fragment = format!("{}{definitions}", &body[range.body]);
+                    let fragment =
+                        crate::chat_markdown::spoiler_markdown(&body[range.body], &definitions);
                     let (formatted, _) = styled_message_markdown(
                         &fragment,
                         name_of,
