@@ -985,8 +985,8 @@ impl Spk {
             .children((!chat.webhook && !chat.unavailable()).then(|| {
                 div()
                     .id("chat-composer")
-                    .px_4()
-                    .py(if self.compact() { px(6.0) } else { px(12.0) })
+                    .px_2()
+                    .pb_2()
                     .flex()
                     .flex_col()
                     .min_h_0()
@@ -1017,10 +1017,10 @@ impl Spk {
                                     .flex()
                                     .items_center()
                                     .gap_2()
-                                    .mb_2()
+                                    .mb_1()
                                     .px_2()
                                     .rounded_md()
-                                    .bg(theme.muted)
+                                    .bg(theme.popover)
                                     .child(
                                         Icon::new(IconName::Reply)
                                             .size(ACTION_ICON_SIZE)
@@ -1037,6 +1037,7 @@ impl Spk {
                                                     "Replying to {}",
                                                     sidebar.message_author(&reply.user_id)
                                                 ))
+                                                .flex_none()
                                                 .max_w(px(220.))
                                                 .font_semibold()
                                                 .truncate(),
@@ -1097,8 +1098,8 @@ impl Spk {
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
-        let surface = theme.popover;
         let disabled = !chat.can_send();
+        let focused = !disabled && self.chat_input.focus_handle(cx).is_focused(window);
         let can_send = !disabled
             && !self.chat_submitting
             && chat.draft.can_send(&editor::wire(self.chat_input.read(cx)));
@@ -1110,13 +1111,10 @@ impl Spk {
             .min_h_0()
             .p_1()
             .rounded_lg()
-            .bg(surface)
-            .border_1()
-            .border_color(surface)
+            .bg(theme.popover)
             .when(!disabled, |composer| {
-                let accent = theme.primary;
-                composer
-                    .drag_over::<ExternalPaths>(move |style, _, _, _| style.border_color(accent))
+                let tint = theme.primary.opacity(0.05);
+                composer.drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(tint))
             })
             .child(
                 div()
@@ -1133,7 +1131,11 @@ impl Spk {
             .child(
                 editor::textarea(&self.chat_input)
                     .flex_shrink_0()
-                    .bg(surface)
+                    .bg(if focused {
+                        theme.secondary_hover.opacity(0.35)
+                    } else {
+                        transparent_black()
+                    })
                     .bordered(false)
                     .aria_label("Write a message")
                     .on_paste(move |item, window, cx| {
