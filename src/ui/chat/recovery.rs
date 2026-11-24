@@ -136,6 +136,8 @@ impl Spk {
             }
             dialog
                 .centered()
+                .border_0()
+                .bg(cx.theme().popover)
                 .width((window.viewport_size().width * 0.9).min(px(480.)))
                 .title(title)
                 .on_cancel({

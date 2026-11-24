@@ -229,10 +229,10 @@ impl Spk {
         })
         .detach();
         for input in [&email, &password, &nickname] {
-            cx.subscribe_in(input, window, |this, _, event, window, cx| {
-                if matches!(event, InputEvent::PressEnter { .. }) {
-                    this.submit(window, cx);
-                }
+            cx.subscribe_in(input, window, |this, _, event, window, cx| match event {
+                InputEvent::PressEnter { .. } => this.submit(window, cx),
+                InputEvent::Focus | InputEvent::Blur => cx.notify(),
+                _ => {}
             })
             .detach();
         }
@@ -672,12 +672,14 @@ impl Render for Spk {
             View::SignIn {
                 message,
                 retry_restore,
-            } => self.login(*message, *retry_restore, cx).into_any_element(),
-            View::AccountLink { form, message } => {
-                self.account_link(*form, *message, cx).into_any_element()
-            }
+            } => self
+                .login(*message, *retry_restore, window, cx)
+                .into_any_element(),
+            View::AccountLink { form, message } => self
+                .account_link(*form, *message, window, cx)
+                .into_any_element(),
             View::ChooseNickname { message, notice } => self
-                .choose_nickname(*message, *notice, cx)
+                .choose_nickname(*message, *notice, window, cx)
                 .into_any_element(),
             View::SignedIn(sidebar) => self.workspace(sidebar, window, cx).into_any_element(),
             View::RetrySignOut => div()
@@ -705,7 +707,7 @@ impl Render for Spk {
             .on_key_down(cx.listener(Self::dismiss_video_fullscreen))
             .on_key_down(cx.listener(Self::hovered_video_key))
             .size_full()
-            .bg(cx.theme().background)
+            .bg(cx.theme().sidebar)
             .text_color(cx.theme().foreground)
             .font_family(cx.theme().font_family.clone())
             .text_sm()
@@ -825,6 +827,35 @@ where
     <D::Item as SelectItem>::Value: PartialEq + Clone,
 {
     Select::new(state).h(CONTROL_HEIGHT).p(CONTROL_PADDING)
+}
+
+fn surface_input(state: &Entity<InputState>, fill: Hsla, cx: &App) -> Input {
+    Input::new(state)
+        .bg(fill)
+        .border_color(cx.theme().transparent)
+}
+
+fn floating_shadow(cx: &App) -> Vec<BoxShadow> {
+    let ink = gpui_kit::black().alpha(if cx.theme().mode.is_dark() { 0.5 } else { 0.1 });
+    vec![
+        BoxShadow::new(px(0.), px(20.), ink)
+            .blur_radius(px(12.5))
+            .spread_radius(px(-5.)),
+        BoxShadow::new(px(0.), px(8.), ink)
+            .blur_radius(px(5.))
+            .spread_radius(px(-6.)),
+    ]
+}
+
+fn floating_popover(id: impl Into<ElementId>, cx: &App) -> gpui_kit::component::popover::Popover {
+    gpui_kit::component::popover::Popover::new(id).shadow(floating_shadow(cx))
+}
+
+fn floating_tooltip(
+    tooltip: gpui_kit::component::tooltip::Tooltip,
+    cx: &App,
+) -> gpui_kit::component::tooltip::Tooltip {
+    tooltip.border_0().shadow(floating_shadow(cx))
 }
 
 fn control_content() -> Div {

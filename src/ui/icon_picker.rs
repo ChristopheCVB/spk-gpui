@@ -91,7 +91,12 @@ pub(super) fn icon_picker(
     })
 }
 
-pub(super) fn icon_picker_field(picker: &IconPicker, disabled: bool) -> impl IntoElement {
+pub(super) fn icon_picker_field(
+    picker: &IconPicker,
+    disabled: bool,
+    fill: Hsla,
+    cx: &App,
+) -> impl IntoElement {
     div()
         .flex()
         .flex_col()
@@ -101,6 +106,8 @@ pub(super) fn icon_picker_field(picker: &IconPicker, disabled: bool) -> impl Int
         .child(Label::new("Icon"))
         .child(
             control_select(picker)
+                .border_color(cx.theme().transparent)
+                .bg(fill)
                 .w_full()
                 .accessibility_label("Icon")
                 .placeholder("Choose icon")
