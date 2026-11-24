@@ -553,6 +553,7 @@ fn fixture_settings(
             notice: None,
         },
         sounds: VoiceSounds::new(watch::channel(sounds).1),
+        window_active: watch::channel(false).1,
         alert_activation: watch::channel(None).1,
         presence: PresenceSettings {
             path: None,

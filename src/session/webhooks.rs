@@ -1,7 +1,10 @@
 use reqwest::StatusCode;
-use tokio::sync::oneshot;
+use tokio::{sync::oneshot, task::JoinSet};
 
-use super::{ChatNavigation, ChatSession, Sidebar};
+use super::{
+    ChatNavigation, ChatSession, SearchSession, Sidebar, UnreadSession,
+    presence::{Refresh, Resource},
+};
 use crate::api::{Channel, Failure, SpkClient, WebhookSettings, WebhookUrl};
 
 pub enum WebhookAction {
@@ -86,7 +89,96 @@ impl WebhookAction {
     }
 }
 
-pub(super) fn mutation_error(error: Failure, creating: bool) -> &'static str {
+pub(super) struct MutationContext<'a> {
+    pub sidebar: &'a mut Sidebar,
+    pub chat: &'a mut ChatSession,
+    pub navigation: &'a mut Option<ChatNavigation>,
+    pub direct_message_opens: &'a mut JoinSet<Result<Channel, Failure>>,
+    pub refresh: &'a mut Refresh,
+    pub unread: &'a mut UnreadSession,
+    pub search: &'a mut SearchSession,
+}
+
+impl MutationContext<'_> {
+    pub fn complete(
+        self,
+        client: &SpkClient,
+        result: Result<WebhookChange, Failure>,
+        creating: bool,
+    ) -> Result<Option<WebhookUrl>, &'static str> {
+        let change = match result {
+            Ok(change) => change,
+            Err(error) => {
+                if !creating
+                    && matches!(
+                        error,
+                        Failure::Http(StatusCode::NOT_FOUND | StatusCode::FORBIDDEN)
+                    )
+                {
+                    self.refresh.fetch(client, Resource::Channels);
+                }
+                return Err(mutation_error(error, creating));
+            }
+        };
+        let removed = match change {
+            WebhookChange::Created(channel, url) => {
+                self.refresh.webhook_changed(client);
+                *self.direct_message_opens = JoinSet::new();
+                self.sidebar.chat_notice = None;
+                ChatNavigation::open_chat(self.navigation, self.chat, client, &channel);
+                let channels = self.sidebar.channels.get_or_insert_default();
+                if let Some(listed) = channels.iter_mut().find(|listed| listed.id == channel.id) {
+                    *listed = channel;
+                } else {
+                    channels.push(channel);
+                    self.unread.refresh(client);
+                }
+                return Ok(Some(url));
+            }
+            WebhookChange::Edited(channel) => {
+                self.refresh.webhook_changed(client);
+                if self.sidebar.can_view_webhook(&channel) {
+                    if let Some(listed) = self
+                        .sidebar
+                        .channels
+                        .iter_mut()
+                        .flatten()
+                        .find(|listed| listed.id == channel.id)
+                    {
+                        *listed = channel;
+                    }
+                    return Ok(None);
+                }
+                channel.id
+            }
+            WebhookChange::Rotated(id, url) => {
+                self.refresh.fetch(client, Resource::Channels);
+                return self
+                    .sidebar
+                    .webhook_feed(&id)
+                    .filter(|feed| self.sidebar.can_manage_webhook(feed))
+                    .map(|_| Some(url))
+                    .ok_or("Webhook feed unavailable.");
+            }
+            WebhookChange::Deleted(id) => {
+                self.refresh.webhook_changed(client);
+                id
+            }
+        };
+        if let Some(channels) = &mut self.sidebar.channels {
+            let count = channels.len();
+            channels.retain(|listed| listed.id != removed);
+            if channels.len() != count {
+                self.unread.refresh(client);
+            }
+        }
+        reconcile_access(self.sidebar, self.chat, self.navigation);
+        self.search.reconcile_channels(self.sidebar);
+        Ok(None)
+    }
+}
+
+fn mutation_error(error: Failure, creating: bool) -> &'static str {
     match error {
         Failure::Http(StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED) if creating => {
             "This SPK server needs a version that supports Webhooks."

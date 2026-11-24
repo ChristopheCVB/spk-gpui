@@ -43,6 +43,11 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_AVATAR_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_AVATAR_UPLOAD: usize = 5 * 1024 * 1024;
 
+pub fn has_icon_name_characters(name: &str) -> bool {
+    name.bytes()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
 fn signed_storage_url(url: &Url) -> bool {
     if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
         return false;

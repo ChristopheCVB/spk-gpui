@@ -248,7 +248,15 @@ async fn owner_alerts_arrive_quietly_and_share_the_feed_read_position() {
         assert_eq!(unread.chat.unwrap().first_unread_id.as_deref(), Some("live"));
         commands.send(Command::MarkChatRead("feed".into())).await.unwrap();
         assert_eq!(marked.recv().await.unwrap(), None);
-        wait_for_sidebar(&views, |view| view.unread("feed").unread == 0).await;
+        let cleared = wait_for_sidebar(&views, |view| view.unread("feed").unread == 0).await;
+        assert!(cleared.chat.unwrap().first_unread_id.is_none());
+
+        // A repeated event for an existing alert must not start the unread section.
+        peer.send(Message::text(r#"{"type":"message:new","message":{"id":"live","channelId":"feed","userId":"alice","createdAt":2,"body":"Build passed"}}"#)).await.unwrap();
+        peer.send(Message::text(r#"{"type":"message:new","message":{"id":"next","channelId":"feed","userId":"alice","createdAt":4,"body":"Next build passed"}}"#)).await.unwrap();
+        peer.send(Message::text(r#"{"type":"unread:update","channelId":"feed","unread":1,"mentions":0}"#)).await.unwrap();
+        let background = wait_for_sidebar(&views, |view| view.unread("feed").unread == 1).await;
+        assert_eq!(background.chat.unwrap().first_unread_id.as_deref(), Some("next"));
 
         for command in [
             Command::UpdateChatDraft { channel_id: "feed".into(), body: "blocked".into() },

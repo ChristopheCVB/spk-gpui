@@ -98,37 +98,41 @@ impl SearchSession {
             }
         };
         let channels = sidebar.channels.as_deref().unwrap_or_default();
-        let unlisted = page
-            .results
-            .iter()
-            .any(|hit| conversation(channels, hit.target.channel_id()).is_none());
+        let mut unlisted = false;
+        let mut includes_webhook = false;
+        for hit in &page.results {
+            match conversation(channels, hit.target.channel_id()) {
+                Some(channel) => includes_webhook |= channel.is_webhook(),
+                None => unlisted = true,
+            }
+        }
         // Search hits carry no channel type, so an unlisted hit needs a fresh access check.
         if unlisted {
             refresh.fetch(client, Resource::Channels);
         }
         self.pending_page = Some(page);
-        if !refresh.channels_loading() {
+        if !(unlisted || includes_webhook && refresh.channels_loading()) {
             self.channels_refreshed(sidebar, true);
         }
     }
 
     pub fn channels_refreshed(&mut self, sidebar: &mut Sidebar, loaded: bool) {
-        let Some(page) = self.pending_page.take() else {
+        let Some(mut page) = self.pending_page.take() else {
             return;
         };
         let view = &mut sidebar.search;
         view.loading = false;
-        if !loaded {
+        let channels = sidebar.channels.as_deref().unwrap_or_default();
+        page.results.retain(|hit| {
+            conversation(channels, hit.target.channel_id())
+                .is_some_and(|channel| loaded || !channel.is_webhook())
+        });
+        if !loaded && page.results.is_empty() {
             view.failed = true;
             return;
         }
-        let channels = sidebar.channels.as_deref().unwrap_or_default();
         view.searched = true;
-        Arc::make_mut(&mut view.results).extend(
-            page.results
-                .into_iter()
-                .filter(|hit| conversation(channels, hit.target.channel_id()).is_some()),
-        );
+        Arc::make_mut(&mut view.results).extend(page.results);
         view.next_cursor = page.next_cursor;
     }
 }

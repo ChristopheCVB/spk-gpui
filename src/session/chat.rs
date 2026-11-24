@@ -797,7 +797,13 @@ impl ChatSession {
         }
     }
 
-    pub fn message(&mut self, message: ChatMessage, nonce: Option<&str>, own_id: Option<&str>) {
+    pub fn message(
+        &mut self,
+        message: ChatMessage,
+        nonce: Option<&str>,
+        own_id: Option<&str>,
+        window_active: bool,
+    ) {
         if own_id == Some(message.user_id.as_str())
             && self
                 .outgoing
@@ -835,6 +841,14 @@ impl ChatSession {
                 }
             }
             if !view.has_more_after {
+                if view.webhook
+                    && !window_active
+                    && view.history_ready()
+                    && view.first_unread_id.is_none()
+                    && view.messages.iter().all(|listed| listed.id != message.id)
+                {
+                    view.first_unread_id = Some(message.id.clone());
+                }
                 view.merge([message]);
             }
         }

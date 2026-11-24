@@ -18,12 +18,7 @@ impl WebhookSettings {
         if !(1..=32).contains(&self.name.encode_utf16().count()) {
             return Err("Webhook names must be 1–32 characters.");
         }
-        if !(1..=64).contains(&self.icon.len())
-            || !self
-                .icon
-                .bytes()
-                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == b'-')
-        {
+        if !(1..=64).contains(&self.icon.len()) || !has_icon_name_characters(&self.icon) {
             return Err("Choose a valid webhook icon.");
         }
         Ok(self)

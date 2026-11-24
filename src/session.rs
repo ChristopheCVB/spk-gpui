@@ -449,6 +449,7 @@ struct SessionSettings {
     devices: DeviceSettings,
     sounds: VoiceSounds,
     presence: PresenceSettings,
+    window_active: watch::Receiver<bool>,
     alert_activation: watch::Receiver<Option<MessageTarget>>,
 }
 
@@ -457,6 +458,7 @@ pub async fn run(
     views: Sender<View>,
     sounds: VoiceSounds,
     activity: watch::Receiver<bool>,
+    window_active: watch::Receiver<bool>,
     alert_activation: watch::Receiver<Option<MessageTarget>>,
 ) {
     let base = Url::parse(env!("SPK_URL")).expect("validated SPK URL");
@@ -468,6 +470,7 @@ pub async fn run(
         devices: DeviceSettings::load(),
         sounds,
         presence: PresenceSettings::load(activity),
+        window_active,
         alert_activation,
     };
     run_session(base, saved, settings, commands, views).await;
@@ -754,69 +757,18 @@ async fn watch_session(
             }
             Ok(event) = chat.attachments.events.recv() => chat.attachment_event(client, event),
             Some(Ok((result, reply, creating))) = webhook_mutations.join_next() => {
-                let result = match result {
-                    Ok(change) => {
-                        use webhooks::WebhookChange;
-                        let (url, removed) = match change {
-                            WebhookChange::Created(channel, url) => {
-                                refresh.webhook_changed(client);
-                                direct_message_opens = JoinSet::new();
-                                sidebar.chat_notice = None;
-                                ChatNavigation::open_chat(&mut chat_navigation, &mut chat, client, &channel);
-                                let channels = sidebar.channels.get_or_insert_default();
-                                if let Some(listed) = channels.iter_mut().find(|listed| listed.id == channel.id) {
-                                    *listed = channel;
-                                } else {
-                                    channels.push(channel);
-                                    unread.refresh(client);
-                                }
-                                (Ok(Some(url)), None)
-                            }
-                            WebhookChange::Edited(channel) => {
-                                refresh.webhook_changed(client);
-                                if !sidebar.can_view_webhook(&channel) {
-                                    (Ok(None), Some(channel.id))
-                                } else {
-                                    if let Some(listed) = sidebar.channels.iter_mut().flatten().find(|listed| listed.id == channel.id) {
-                                        *listed = channel;
-                                    }
-                                    (Ok(None), None)
-                                }
-                            }
-                            WebhookChange::Rotated(id, url) => {
-                                refresh.fetch(client, Resource::Channels);
-                                let url = sidebar.webhook_feed(&id)
-                                    .filter(|feed| sidebar.can_manage_webhook(feed))
-                                    .map(|_| Some(url))
-                                    .ok_or("Webhook feed unavailable.");
-                                (url, None)
-                            }
-                            WebhookChange::Deleted(id) => {
-                                refresh.webhook_changed(client);
-                                (Ok(None), Some(id))
-                            }
-                        };
-                        if let Some(id) = removed {
-                            if let Some(channels) = &mut sidebar.channels {
-                                let count = channels.len();
-                                channels.retain(|listed| listed.id != id);
-                                if channels.len() != count {
-                                    unread.refresh(client);
-                                }
-                            }
-                            webhooks::reconcile_access(&mut sidebar, &mut chat, &mut chat_navigation);
-                            search.reconcile_channels(&mut sidebar);
-                        }
-                        url
-                    }
-                    Err(error) if error.unauthorized() => break SessionEnd::Invalidated(SESSION_EXPIRED),
-                    Err(error) => {
-                        if !creating && matches!(error, Failure::Http(reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::FORBIDDEN)) {
-                            refresh.fetch(client, Resource::Channels);
-                        }
-                        Err(webhooks::mutation_error(error, creating))
-                    }
-                };
+                if result.as_ref().is_err_and(Failure::unauthorized) {
+                    break SessionEnd::Invalidated(SESSION_EXPIRED);
+                }
+                let result = webhooks::MutationContext {
+                    sidebar: &mut sidebar,
+                    chat: &mut chat,
+                    navigation: &mut chat_navigation,
+                    direct_message_opens: &mut direct_message_opens,
+                    refresh: &mut refresh,
+                    unread: &mut unread,
+                    search: &mut search,
+                }.complete(client, result, creating);
                 let _ = reply.send(result);
             }
             Some(result) = direct_message_opens.join_next() => {
@@ -1147,7 +1099,12 @@ async fn watch_session(
                             refresh.fetch(client, Resource::Channels);
                         }
                         alerts.receive(&sidebar, &message);
-                        chat.message(*message, nonce.as_deref(), sidebar.profile.id.as_deref());
+                        chat.message(
+                            *message,
+                            nonce.as_deref(),
+                            sidebar.profile.id.as_deref(),
+                            *settings.window_active.borrow(),
+                        );
                     }
                     Frame::UnreadUpdate { channel_id, state } => {
                         unread.update(&mut sidebar, channel_id, state);

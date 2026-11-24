@@ -12,6 +12,7 @@ async fn searches_messages_and_opens_authenticated_exact_targets() {
     let sockets = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let socket_url = format!("ws://{}/_ws", sockets.local_addr().unwrap());
     let (requests, search) = async_channel::unbounded();
+    let (hold_channels, channels_held) = watch::channel(false);
     let http = tokio::spawn(async move {
         loop {
             let (line, request) = Request::receive(&http).await;
@@ -26,6 +27,9 @@ async fn searches_messages_and_opens_authenticated_exact_targets() {
             match line.as_str() {
                 "GET /api/profile/me HTTP/1.1" => {
                     request.respond(&[], r#"{"id":"alice","email":"alice@example.test","displayName":"Alice"}"#).await
+                }
+                "GET /api/channels HTTP/1.1" if *channels_held.borrow() => {
+                    requests.send((line, request)).await.unwrap()
                 }
                 "GET /api/channels HTTP/1.1" => {
                     request.respond(&[], r#"[{"id":"general","type":"text","name":"general"},{"id":"dm-1","type":"dm","otherUserId":"bob"},{"id":"builds","type":"webhook","name":"Builds","ownerId":"bob"}]"#).await
@@ -72,7 +76,7 @@ async fn searches_messages_and_opens_authenticated_exact_targets() {
             email: "alice@example.test".into(),
             password: "test password".into(),
         }).await.unwrap();
-        let _peer = accept_async(sockets.accept().await.unwrap().0)
+        let mut peer = accept_async(sockets.accept().await.unwrap().0)
             .await
             .unwrap();
         let (line, request) = search.recv().await.unwrap();
@@ -135,6 +139,46 @@ async fn searches_messages_and_opens_authenticated_exact_targets() {
                 .eq(["m1", "m2"])
         })
         .await;
+
+        hold_channels.send_replace(true);
+        peer.send(Message::text(r#"{"type":"channels:changed"}"#)).await.unwrap();
+        let (line, channel_refresh) = search.recv().await.unwrap();
+        assert_eq!(line, "GET /api/channels HTTP/1.1");
+        for (scope, query, channel) in [
+            (SearchScope::TextChannels, "channels", "general"),
+            (SearchScope::DirectMessages, "dms", "dm-1"),
+        ] {
+            tx.send(Command::SearchMessages { query: "word".into(), scope }).await.unwrap();
+            let (line, request) = search.recv().await.unwrap();
+            assert_eq!(line, format!("GET /api/search?q=word&scope={query} HTTP/1.1"));
+            request.respond(&[], &result_in(channel, query, None)).await;
+            wait_for_sidebar(&rx, |view| {
+                view.search.results.first().is_some_and(|hit| {
+                    hit.target.channel_id() == channel && hit.target.message_id() == query
+                })
+            }).await;
+        }
+
+        channel_refresh.respond_raw("503 Service Unavailable", &[], b"").await;
+        wait_for_sidebar(&rx, |view| view.load_failed).await;
+
+        tx.send(Command::SearchMessages { query: "word".into(), scope: SearchScope::Everything }).await.unwrap();
+        let (line, request) = search.recv().await.unwrap();
+        assert_eq!(line, "GET /api/search?q=word&scope=everything HTTP/1.1");
+        request.respond(&[], &value!({
+            "results": [
+                {"messageId":"webhook","channelId":"unlisted-builds","userId":"bob","createdAt":2,"snippet":"Build word","text":"Build word","attachments":0},
+                {"messageId":"text","channelId":"general","userId":"bob","createdAt":1,"snippet":"Text word","text":"Text word","attachments":0}
+            ],
+            "nextCursor":"20"
+        }).to_string()).await;
+        let (line, access_check) = search.recv().await.unwrap();
+        assert_eq!(line, "GET /api/channels HTTP/1.1");
+        hold_channels.send_replace(false);
+        access_check.respond_raw("503 Service Unavailable", &[], b"").await;
+        let found = wait_for_sidebar(&rx, |view| view.search.next_cursor.as_deref() == Some("20")).await;
+        assert!(found.search.results.iter().map(|hit| hit.target.message_id()).eq(["text"]));
+        assert_eq!(found.search.next_cursor.as_deref(), Some("20"));
 
         let old = MessageTarget::parse(
             &Url::parse("https://spk.example.test").unwrap(),

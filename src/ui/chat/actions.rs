@@ -773,10 +773,12 @@ impl MessageActions {
                         .on_click(self.form_action(ActionForm::Edit)),
                 )
             })
-            .child(
-                tool_button("copy-markdown", IconName::Copy, "Copy Markdown")
-                    .on_click(self.copy_markdown()),
-            )
+            .when(self.has_copyable_body(), |toolbar| {
+                toolbar.child(
+                    tool_button("copy-markdown", IconName::Copy, "Copy Markdown")
+                        .on_click(self.copy_markdown()),
+                )
+            })
             .child(
                 tool_button("more-message-actions", IconName::Ellipsis, "More actions")
                     .dropdown_menu_with_anchor(Anchor::TopRight, move |popup, window, cx| {
@@ -862,18 +864,22 @@ impl MessageActions {
                     }),
             )
             .separator()
-            .item(
-                PopupMenuItem::new("Copy text")
-                    .icon(IconName::Copy)
-                    .on_click(move |_, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(plain_text(&copy_text)));
-                    }),
-            )
-            .item(
-                PopupMenuItem::new("Copy Markdown")
-                    .icon(IconName::FileCode)
-                    .on_click(self.copy_markdown()),
-            )
+            .when(self.has_copyable_body(), |menu| {
+                menu.item(
+                    PopupMenuItem::new("Copy text")
+                        .icon(IconName::Copy)
+                        .on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(plain_text(
+                                &copy_text,
+                            )));
+                        }),
+                )
+                .item(
+                    PopupMenuItem::new("Copy Markdown")
+                        .icon(IconName::FileCode)
+                        .on_click(self.copy_markdown()),
+                )
+            })
             .when_some(self.target.clone(), |menu, target| {
                 menu.item(
                     PopupMenuItem::new("Copy link")
@@ -901,6 +907,10 @@ impl MessageActions {
                         }),
                 )
             })
+    }
+
+    fn has_copyable_body(&self) -> bool {
+        !self.read_only || !self.body.trim().is_empty()
     }
 
     fn copy_markdown(&self) -> impl Fn(&ClickEvent, &mut Window, &mut App) + use<> {

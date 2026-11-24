@@ -10,10 +10,7 @@ pub(super) fn bundled_icon_names() -> Vec<SharedString> {
         .unwrap_or_default()
         .iter()
         .filter_map(|path| path.strip_prefix("icons/")?.strip_suffix(".svg"))
-        .filter(|name| {
-            name.bytes()
-                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == b'-')
-        })
+        .filter(|name| crate::api::has_icon_name_characters(name))
         .map(|name| name.to_owned().into())
         .collect();
     icons.sort_unstable();
