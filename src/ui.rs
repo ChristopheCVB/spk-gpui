@@ -147,9 +147,17 @@ impl Spk {
             &chat_input,
             window,
             |this, _, event, window, cx| match event {
-                InputEvent::Change => this.on_chat_input(window, cx),
-                InputEvent::PressEnter { shift: false, .. } => {
-                    if !this.chat_slash_key("enter", window, cx) {
+                InputEvent::Change => {
+                    chat::editor::refresh(&this.chat_input, cx);
+                    this.on_chat_input(window, cx);
+                }
+                InputEvent::PressEnter {
+                    secondary,
+                    shift: false,
+                } => {
+                    if !this.chat_slash_key("enter", window, cx)
+                        && (*secondary || !chat::editor::enter(&this.chat_input, window, cx))
+                    {
                         this.submit_chat(cx);
                     }
                 }
@@ -171,11 +179,20 @@ impl Spk {
         .detach();
         let message_action_input =
             cx.new(|cx| TextareaState::new(window, cx).rows(2).submit_on_enter(true));
-        cx.subscribe_in(&message_action_input, window, |this, _, event, _, cx| {
-            if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
-                this.submit_message_action(cx);
-            }
-        })
+        cx.subscribe_in(
+            &message_action_input,
+            window,
+            |this, input, event, window, cx| match event {
+                InputEvent::Change => chat::editor::refresh(&input, cx),
+                InputEvent::PressEnter {
+                    secondary,
+                    shift: false,
+                } if *secondary || !chat::editor::enter(&input, window, cx) => {
+                    this.submit_message_action(cx);
+                }
+                _ => {}
+            },
+        )
         .detach();
         let reaction_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search emoji…"));
         cx.subscribe(&reaction_input, |this, _, event, cx| {
