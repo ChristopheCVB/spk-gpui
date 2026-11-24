@@ -348,6 +348,23 @@ async fn voice_session_with_activity(
     server: impl AsyncFnOnce(TcpListener, Receiver<Request>, watch::Sender<SidebarSnapshot>),
     desktop: impl AsyncFnOnce(Sender<Command>, Receiver<View>),
 ) -> SessionEnd {
+    voice_session_with_limit(
+        activity,
+        start_call,
+        server,
+        desktop,
+        Duration::from_secs(7),
+    )
+    .await
+}
+
+async fn voice_session_with_limit(
+    activity: watch::Receiver<bool>,
+    start_call: impl Fn(String, SpkClient, VoiceSocket, Intent) -> Call + Send + Sync + 'static,
+    server: impl AsyncFnOnce(TcpListener, Receiver<Request>, watch::Sender<SidebarSnapshot>),
+    desktop: impl AsyncFnOnce(Sender<Command>, Receiver<View>),
+    limit: Duration,
+) -> SessionEnd {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let http = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = Url::parse(&format!("http://{}", http.local_addr().unwrap())).unwrap();
@@ -527,7 +544,7 @@ async fn voice_session_with_activity(
         .await
     };
 
-    timeout(Duration::from_secs(7), async {
+    timeout(limit, async {
         tokio::select! {
             () = http => unreachable!(),
             ((), (), end) = async { tokio::join!(server(sockets, requests, update_snapshots), desktop(command_tx, view_rx), session) } => end,
@@ -583,6 +600,15 @@ async fn accept_voice_join(
     socket: &mut WebSocketStream<TcpStream>,
     channel: &str,
 ) -> Value {
+    accept_voice_join_with_deafen(requests, socket, channel, false).await
+}
+
+async fn accept_voice_join_with_deafen(
+    requests: &Receiver<Request>,
+    socket: &mut WebSocketStream<TcpStream>,
+    channel: &str,
+    deafened: bool,
+) -> Value {
     request_voice_token(requests, channel)
         .await
         .respond(
@@ -595,7 +621,7 @@ async fn accept_voice_join(
         join,
         value!({
             "type":"voice:join","sid":join["sid"],"channelId":channel,"nonce":join["nonce"],
-            "muted":true,"deafened":false,"watching":[]
+            "muted":true,"deafened":deafened,"watching":[]
         }),
     );
     join
@@ -1851,12 +1877,13 @@ async fn livekit_recovery_and_rejoin_use_the_signed_in_voice_flow() {
             resynced.send(()).unwrap();
             assert_eq!(receive_voice_frame(&mut socket).await, value!({"type":"voice:leave","sid":sid}));
 
-            let retry = accept_voice_join(&requests, &mut socket, "first").await;
+            let retry = accept_voice_join_with_deafen(&requests, &mut socket, "first", true).await;
             assert_ne!(retry["sid"], *sid);
             assert_ne!(retry["nonce"], first["nonce"]);
             acknowledge_voice(&mut socket, &retry).await;
             let sid = &retry["sid"];
             assert_eq!(receive_voice_frame(&mut socket).await, value!({"type":"voice:ready","sid":sid}));
+            send_own_voice_presence(&mut socket, Some("first")).await;
             assert_eq!(receive_voice_frame(&mut socket).await, value!({"type":"voice:leave","sid":sid}));
         },
         async |commands, views| {
@@ -1874,11 +1901,17 @@ async fn livekit_recovery_and_rejoin_use_the_signed_in_voice_flow() {
             wait_for_sidebar(&views, status(VoiceStatus::ListenOnly)).await;
             confirmed.await.unwrap();
             commands.send(Command::RefreshDevices).await.unwrap();
-            let failed = wait_for_sidebar(&views, |sidebar| sidebar.rejoin_channel().is_some()).await;
-            assert!(failed.voice.is_none());
-            assert_eq!(failed.voice_notice, Some(VoiceIssue::LiveKitDisconnected.message()));
-            commands.send(Command::JoinVoice(failed.rejoin_channel().unwrap().into())).await.unwrap();
-            let joined = wait_for_sidebar(&views, status(VoiceStatus::ListenOnly)).await;
+            let retrying = wait_for_sidebar(&views, status(VoiceStatus::Joining)).await;
+            assert!(retrying.voice_notice.is_none());
+            assert!(retrying.rejoin_channel().is_none());
+            commands.send(Command::ToggleMute).await.unwrap();
+            commands.send(Command::ToggleDeafen).await.unwrap();
+            let joined = wait_for_sidebar(&views, |sidebar| {
+                status(VoiceStatus::ListenOnly)(sidebar)
+                    && sidebar.participants("first").iter().any(|member| member.id == "alice")
+            }).await;
+            assert!(joined.voice_intent.mute.muted);
+            assert!(joined.voice_intent.mute.deafened);
             assert!(joined.voice_notice.is_none());
             assert!(joined.rejoin_channel().is_none());
             commands.send(Command::LeaveVoice).await.unwrap();
@@ -1886,6 +1919,248 @@ async fn livekit_recovery_and_rejoin_use_the_signed_in_voice_flow() {
         },
     ).await;
     assert!(matches!(end, SessionEnd::Closed));
+}
+
+#[tokio::test]
+async fn automatic_rejoin_waits_for_the_spk_socket_and_releases_ended_presence() {
+    let (online, connected) = oneshot::channel();
+    let (retrying, backed_off) = oneshot::channel();
+    let end = voice_session(
+        voice::tests::start_recovery_fixture,
+        async |listener, requests, snapshots| {
+            let mut socket = accept_async(listener.accept().await.unwrap().0)
+                .await
+                .unwrap();
+            let first = accept_voice_join(&requests, &mut socket, "first").await;
+            acknowledge_voice(&mut socket, &first).await;
+            let sid = &first["sid"];
+            assert_eq!(
+                receive_voice_frame(&mut socket).await,
+                value!({"type":"voice:ready","sid":sid})
+            );
+            socket
+                .send(Message::text(
+                    value!({"type":"voice:presence","userId":"alice","channelId":"first"})
+                        .to_string(),
+                ))
+                .await
+                .unwrap();
+            connected.await.unwrap();
+            snapshots.send_replace(SidebarSnapshot::MediaPresence {
+                channel: "first",
+                flags: VoiceFlags::default(),
+            });
+            drop(socket);
+
+            let tcp = listener.accept().await.unwrap().0;
+            backed_off.await.unwrap();
+            assert!(
+                timeout(Duration::from_millis(1200), requests.recv())
+                    .await
+                    .is_err()
+            );
+            let mut socket = accept_async(tcp).await.unwrap();
+            assert_eq!(
+                receive_voice_frame(&mut socket).await,
+                value!({"type":"voice:leave","sid":sid})
+            );
+            snapshots.send_replace(SidebarSnapshot::Initial);
+            socket
+                .send(Message::text(
+                    value!({"type":"voice:presence","userId":"alice","channelId":null}).to_string(),
+                ))
+                .await
+                .unwrap();
+            let retry = accept_voice_join(&requests, &mut socket, "first").await;
+            assert_ne!(retry["sid"], *sid);
+            acknowledge_voice(&mut socket, &retry).await;
+            assert_eq!(
+                receive_voice_frame(&mut socket).await,
+                value!({"type":"voice:ready","sid":retry["sid"]})
+            );
+            assert_eq!(
+                receive_voice_frame(&mut socket).await,
+                value!({"type":"voice:leave","sid":retry["sid"]})
+            );
+        },
+        async |commands, views| {
+            request_first_voice(&commands, &views).await;
+            wait_for_sidebar(&views, |sidebar| {
+                sidebar
+                    .participants("first")
+                    .iter()
+                    .any(|member| member.id == "alice")
+                    && voice_has_status(sidebar, VoiceStatus::ListenOnly)
+            })
+            .await;
+            online.send(()).unwrap();
+            wait_for_sidebar(&views, |sidebar| {
+                matches!(sidebar.connection, Connection::Reconnecting)
+            })
+            .await;
+            commands.send(Command::RefreshDevices).await.unwrap();
+            commands.send(Command::RefreshDevices).await.unwrap();
+            commands.send(Command::RefreshDevices).await.unwrap();
+            wait_for_sidebar(&views, |sidebar| {
+                voice_has_status(sidebar, VoiceStatus::Joining)
+            })
+            .await;
+            retrying.send(()).unwrap();
+            wait_for_sidebar(&views, |sidebar| {
+                voice_has_status(sidebar, VoiceStatus::ListenOnly)
+            })
+            .await;
+            commands.send(Command::LeaveVoice).await.unwrap();
+            wait_for_sidebar(&views, |sidebar| sidebar.voice.is_none()).await;
+        },
+    )
+    .await;
+    assert!(matches!(end, SessionEnd::Closed));
+}
+
+#[tokio::test]
+async fn automatic_rejoin_offers_manual_rejoin_after_backoff_or_a_terminal_token_error() {
+    let transient = "500 Internal Server Error";
+    let attempts = [
+        &[(1, transient), (3, transient), (8, transient)][..],
+        &[(1, "403 Forbidden")],
+        &[(1, "503 Service Unavailable")],
+    ];
+    for attempts in attempts {
+        let end = voice_session_with_limit(
+            watch::channel(true).1,
+            voice::tests::start_recovery_fixture,
+            async |listener, requests, _| {
+                let mut socket = accept_async(listener.accept().await.unwrap().0)
+                    .await
+                    .unwrap();
+                let join = accept_voice_join(&requests, &mut socket, "first").await;
+                acknowledge_voice(&mut socket, &join).await;
+                assert_eq!(
+                    receive_voice_frame(&mut socket).await,
+                    value!({"type":"voice:ready","sid":join["sid"]})
+                );
+                let mut previous = Instant::now();
+                assert_eq!(
+                    receive_voice_frame(&mut socket).await,
+                    value!({"type":"voice:leave","sid":join["sid"]})
+                );
+                for &(delay, status) in attempts {
+                    let request = request_voice_token(&requests, "first").await;
+                    assert!(previous.elapsed() >= Duration::from_secs(delay));
+                    previous = Instant::now();
+                    request.respond_raw(status, &[], b"").await;
+                }
+                assert!(
+                    timeout(Duration::from_millis(1200), requests.recv())
+                        .await
+                        .is_err()
+                );
+            },
+            async |commands, views| {
+                request_first_voice(&commands, &views).await;
+                wait_for_sidebar(&views, |sidebar| {
+                    voice_has_status(sidebar, VoiceStatus::ListenOnly)
+                })
+                .await;
+                fail_recovery_fixture(&commands).await;
+                let sidebar =
+                    wait_for_sidebar(&views, |sidebar| sidebar.rejoin_channel().is_some()).await;
+                assert_eq!(sidebar.rejoin_channel(), Some("first"));
+                assert!(sidebar.voice.is_none());
+            },
+            Duration::from_secs(18),
+        )
+        .await;
+        assert!(matches!(end, SessionEnd::Closed));
+    }
+}
+
+#[tokio::test]
+async fn leaving_or_joining_from_another_client_cancels_automatic_rejoin_during_backoff() {
+    for replacement in [false, true] {
+        let (waiting, in_backoff) = oneshot::channel();
+        let end = voice_session(
+            voice::tests::start_recovery_fixture,
+            async |listener, requests, _| {
+                let mut socket = accept_async(listener.accept().await.unwrap().0)
+                    .await
+                    .unwrap();
+                let join = accept_voice_join(&requests, &mut socket, "first").await;
+                acknowledge_voice(&mut socket, &join).await;
+                assert_eq!(
+                    receive_voice_frame(&mut socket).await,
+                    value!({"type":"voice:ready","sid":join["sid"]})
+                );
+                send_own_voice_presence(&mut socket, Some("first")).await;
+                assert_eq!(
+                    receive_voice_frame(&mut socket).await,
+                    value!({"type":"voice:leave","sid":join["sid"]})
+                );
+                send_own_voice_presence(&mut socket, None).await;
+                in_backoff.await.unwrap();
+                if replacement {
+                    // SPK announces the new same-account session without a kicked frame once the old SID has left.
+                    send_own_voice_presence(&mut socket, Some("first")).await;
+                }
+                assert!(
+                    timeout(Duration::from_millis(1200), requests.recv())
+                        .await
+                        .is_err()
+                );
+            },
+            async |commands, views| {
+                request_first_voice(&commands, &views).await;
+                wait_for_sidebar(&views, |sidebar| {
+                    voice_has_status(sidebar, VoiceStatus::ListenOnly)
+                        && sidebar
+                            .participants("first")
+                            .iter()
+                            .any(|member| member.id == "alice")
+                })
+                .await;
+                fail_recovery_fixture(&commands).await;
+                wait_for_sidebar(&views, |sidebar| {
+                    voice_has_status(sidebar, VoiceStatus::Joining)
+                })
+                .await;
+                waiting.send(()).unwrap();
+                if !replacement {
+                    commands.send(Command::LeaveVoice).await.unwrap();
+                }
+                let sidebar = wait_for_sidebar(&views, |sidebar| sidebar.voice.is_none()).await;
+                assert_eq!(sidebar.voice_notice, replacement.then_some(VOICE_REPLACED));
+                assert!(sidebar.rejoin_channel().is_none());
+            },
+        )
+        .await;
+        assert!(matches!(end, SessionEnd::Closed));
+    }
+}
+
+async fn fail_recovery_fixture(commands: &Sender<Command>) {
+    for _ in 0..3 {
+        commands.send(Command::RefreshDevices).await.unwrap();
+    }
+}
+
+async fn send_own_voice_presence(socket: &mut WebSocketStream<TcpStream>, channel: Option<&str>) {
+    socket
+        .send(Message::text(
+            value!({
+                "type":"voice:presence", "userId":"alice", "channelId":channel
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+}
+
+fn voice_has_status(sidebar: &Sidebar, status: VoiceStatus) -> bool {
+    sidebar
+        .voice
+        .as_ref()
+        .is_some_and(|voice| voice.status == status)
 }
 
 #[tokio::test]

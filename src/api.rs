@@ -695,6 +695,12 @@ impl VoiceSocket {
         self.0.same_channel(&other.0)
     }
 
+    pub fn release_voice(&self, sid: &str) {
+        let text = serde_json::to_string(&VoiceFrame::Leave { sid })
+            .expect("voice frames are serializable");
+        let _ = self.0.try_send((text, None));
+    }
+
     pub async fn send(&self, frame: VoiceFrame<'_>) -> Result<(), Failure> {
         let text = serde_json::to_string(&frame).expect("voice frames are serializable");
         let (written, receipt) = oneshot::channel();

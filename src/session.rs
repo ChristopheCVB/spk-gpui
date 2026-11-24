@@ -760,6 +760,7 @@ async fn watch_session(
             break SessionEnd::Closed;
         }
         let retry_at = voice.retry_at();
+        let rejoin_at = voice.rejoin_at();
         let chat_timeout = chat.next_timeout();
         let active = *settings.presence.activity.borrow_and_update();
         let alert_activation = &mut settings.alert_activation;
@@ -883,6 +884,7 @@ async fn watch_session(
                     Err(_) => sidebar.chat_notice = Some("Could not open the direct message. Try again."),
                 }
             }
+            _ = sleep_until(rejoin_at.unwrap_or_else(Instant::now)), if rejoin_at.is_some() => {}
             _ = sleep_until(retry_at.unwrap_or_else(Instant::now)), if retry_at.is_some() => {
                 voice.retry_presence();
                 refresh.fetch(client, Resource::Presence);
@@ -1317,11 +1319,11 @@ async fn watch_session(
             },
             update = voice.next_update() => match update {
                 VoiceUpdate::Media(report) => {
-                    if let Some(voice) = &mut sidebar.voice
-                        && !matches!(voice.status, VoiceStatus::Leaving)
+                    if let Some(view) = &mut sidebar.voice
+                        && view.status != VoiceStatus::Leaving
                     {
                         sidebar.devices = report.devices.clone();
-                        if voice.update_media(report) {
+                        if view.update_media(report) && voice.media_connected() {
                             settings.sounds.play(Sound::Join, true);
                         }
                     }
@@ -1341,11 +1343,10 @@ async fn watch_session(
                     voice.screen_report(&mut sidebar, settings, report);
                 }
                 VoiceUpdate::Finished(result) => {
-                    voice.finished();
                     if matches!(result, Err(VoiceIssue::Unauthorized)) {
                         break SessionEnd::Invalidated(SESSION_EXPIRED);
                     }
-                    if sidebar.finish_voice(result) {
+                    if voice.finished(&mut sidebar, result) {
                         settings.sounds.play(Sound::Leave, false);
                     }
                 }
@@ -1502,6 +1503,7 @@ async fn watch_session(
             }
         }
     };
+    voice.leave(&mut sidebar);
     if let Some(store) = &draft_store {
         if matches!(end, SessionEnd::Closed) {
             while let Ok(command) = commands.try_recv() {

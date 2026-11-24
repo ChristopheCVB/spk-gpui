@@ -49,6 +49,7 @@ pub enum Status {
 pub enum Issue {
     Unauthorized,
     Token,
+    TokenRejected,
     Endpoint,
     Socket,
     Acknowledgment,
@@ -62,7 +63,9 @@ impl Issue {
     pub fn message(self) -> &'static str {
         match self {
             Self::Unauthorized => "Your session expired. Sign in again.",
-            Self::Token => "SPK could not issue a voice token. Try joining again.",
+            Self::Token | Self::TokenRejected => {
+                "SPK could not issue a voice token. Try joining again."
+            }
             Self::Endpoint => {
                 "SPK returned a different LiveKit URL. Check the app's build configuration."
             }
@@ -283,6 +286,10 @@ impl Call {
         }
     }
 
+    pub fn awaiting_acknowledgment(&self) -> bool {
+        self.acknowledgment.is_some()
+    }
+
     pub fn sid(&self) -> &str {
         &self.join.sid
     }
@@ -395,6 +402,10 @@ impl Worker {
         let token = client.voice_token(channel_id).await.map_err(|error| {
             if error.unauthorized() {
                 Issue::Unauthorized
+            } else if matches!(error, Failure::Http(status)
+                if status.is_client_error() || status == reqwest::StatusCode::SERVICE_UNAVAILABLE)
+            {
+                Issue::TokenRejected
             } else {
                 Issue::Token
             }
