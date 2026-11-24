@@ -1,3 +1,5 @@
+mod rich_alerts;
+
 use super::*;
 
 #[tokio::test]

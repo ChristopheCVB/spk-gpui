@@ -1,5 +1,6 @@
 mod actions;
 mod attachments;
+mod embed;
 mod gifs;
 mod history;
 mod reaction_picker;
@@ -36,6 +37,13 @@ use crate::{
     reaction_artwork::reaction_artwork_path,
     session::{ChatView, Delivery, Pins},
 };
+
+struct RenderedChatMarkdown {
+    view: TextView,
+    source: SharedString,
+    spoiler_key: (String, u64),
+    hidden: Vec<usize>,
+}
 
 pub(super) const BOLD: (&str, &str) = ("**", "**");
 pub(super) const ITALIC: (&str, &str) = ("_", "_");
@@ -1113,27 +1121,22 @@ impl Spk {
             )
     }
 
-    fn chat_message(
+    fn chat_message_markdown(
         &self,
+        id: &'static str,
+        message_id: &str,
+        body: &str,
         sidebar: &Sidebar,
-        chat: &ChatView,
-        message: &ChatMessage,
-        starts_group: bool,
-        now: i64,
-        window: &Window,
         cx: &Context<Self>,
-    ) -> impl IntoElement {
-        let theme = cx.theme();
-        let channel = chat.channel_id.clone();
-        let message_id = message.id.clone();
-        let body = message.body.clone();
+    ) -> RenderedChatMarkdown {
         let mut hasher = DefaultHasher::new();
+        id.hash(&mut hasher);
         body.hash(&mut hasher);
-        let spoiler_key = (message_id.clone(), hasher.finish());
+        let spoiler_key = (message_id.to_owned(), hasher.finish());
         let reveals = self.chat_spoilers.get(&spoiler_key);
         let hidden = RefCell::new(Vec::new());
         let rendered = message_markdown(
-            &body,
+            body,
             |id| sidebar.message_author(id),
             |offset| {
                 let revealed = reveals.is_some_and(|offsets| offsets.contains(&offset));
@@ -1147,14 +1150,11 @@ impl Spk {
         .into_owned();
         let hidden = hidden.into_inner();
         let link_key = spoiler_key.clone();
-        let app = cx.weak_entity();
-        let link_app = app.clone();
+        let link_app = cx.weak_entity();
         let link_filter = self.chat_spoiler_link.clone();
         let link_prefix = self.chat_spoiler_link.clone();
-        let target = MessageTarget::new(&message.channel_id, &message.id);
-        let images = self.message_images(chat, target.clone(), &body, &rendered, cx);
-        let share_text = SharedString::from(rendered);
-        let text = TextView::markdown("message-body", share_text.clone())
+        let source = SharedString::from(rendered);
+        let view = TextView::markdown(id, source.clone())
             .markdown_extensions(
                 MarkdownExtensions::default()
                     .parser_revision(1)
@@ -1180,6 +1180,37 @@ impl Spk {
                     search::activate_chat_link(&link_app, url, cx);
                 }
             });
+        RenderedChatMarkdown {
+            view,
+            source,
+            spoiler_key,
+            hidden,
+        }
+    }
+
+    fn chat_message(
+        &self,
+        sidebar: &Sidebar,
+        chat: &ChatView,
+        message: &ChatMessage,
+        starts_group: bool,
+        now: i64,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        let channel = chat.channel_id.clone();
+        let message_id = message.id.clone();
+        let body = message.body.clone();
+        let RenderedChatMarkdown {
+            view: text,
+            source: share_text,
+            spoiler_key,
+            hidden,
+        } = self.chat_message_markdown("message-body", &message_id, &body, sidebar, cx);
+        let target = MessageTarget::new(&message.channel_id, &message.id);
+        let images = self.message_images(chat, target.clone(), &body, &share_text, cx);
+        let app = cx.weak_entity();
         let row_focus = self
             .chat_row_focus
             .borrow_mut()
@@ -1346,6 +1377,10 @@ impl Spk {
                 })
             })
             .when(!message.body.is_empty(), |row| row.child(text))
+            .when_some(
+                message.embed.as_ref().filter(|_| chat.webhook),
+                |row, embed| row.child(self.webhook_embed(embed, sidebar, &message.id, now, cx)),
+            )
             .child(images)
             .when(!message.attachments.is_empty(), |row| {
                 row.child(self.attachment_cards(message, cx))
