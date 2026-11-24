@@ -187,7 +187,13 @@ impl DeviceList {
     pub fn preferred(&self, saved: Option<&Device>) -> Option<&Device> {
         let saved = saved?;
         if !saved.id.starts_with("index:") {
-            return self.choices.iter().find(|device| device.id == saved.id);
+            return self.choices.iter().find(|device| {
+                device.id == saved.id
+                    || device
+                        .id
+                        .parse::<cpal::DeviceId>()
+                        .is_ok_and(|id| id.id() == saved.id)
+            });
         }
         let mut matches = self
             .choices
@@ -229,23 +235,20 @@ impl Devices {
     }
 
     fn read(audio: &PlatformAudio) -> Self {
-        let (default_input, media_outputs) = cpal_routes();
-        let mut microphones = list(
-            DeviceKind::Microphone,
-            audio.recording_devices().map(|device| {
-                (
-                    device.index,
-                    Device {
-                        id: device.id.as_str().into(),
-                        name: device.name,
-                    },
-                )
-            }),
-        );
-        if !cfg!(windows) {
-            // Capture uses CPAL. The LiveKit alias can stay unchanged when the input changes.
-            // shortcut: ALSA exposes its configured PCM alias, revisit when it exposes the routed endpoint.
-            microphones.default = default_input;
+        let (mut microphones, media_outputs) = cpal_routes();
+        if cfg!(windows) {
+            microphones = list(
+                DeviceKind::Microphone,
+                audio.recording_devices().map(|device| {
+                    (
+                        device.index,
+                        Device {
+                            id: device.id.as_str().into(),
+                            name: device.name,
+                        },
+                    )
+                }),
+            );
         }
         Self {
             microphones,
@@ -273,21 +276,26 @@ fn describe_cpal_device(device: cpal::Device) -> Option<Device> {
     })
 }
 
-fn cpal_routes() -> (Option<Device>, DeviceList) {
-    fn read(host: &cpal::Host) -> Result<(Option<Device>, DeviceList), cpal::Error> {
-        let choices = host.output_devices()?.filter_map(describe_cpal_device);
-        let default_input = if cfg!(windows) {
-            None
-        } else {
-            host.default_input_device().and_then(describe_cpal_device)
-        };
-        Ok((
-            default_input,
-            DeviceList {
-                default: host.default_output_device().and_then(describe_cpal_device),
-                choices: choices.collect(),
-            },
-        ))
+fn cpal_routes() -> (DeviceList, DeviceList) {
+    fn read(host: &cpal::Host) -> Result<(DeviceList, DeviceList), cpal::Error> {
+        let mut microphones = DeviceList::default();
+        let mut outputs = DeviceList::default();
+        for device in host.devices()? {
+            if let Some(description) = describe_cpal_device(device.clone()) {
+                if device.supports_output() {
+                    outputs.choices.push(description.clone());
+                }
+                if !cfg!(windows) && device.supports_input() {
+                    microphones.choices.push(description);
+                }
+            }
+        }
+        if !cfg!(windows) {
+            // shortcut: ALSA exposes its configured PCM alias, revisit when it exposes the routed endpoint.
+            microphones.default = host.default_input_device().and_then(describe_cpal_device);
+        }
+        outputs.default = host.default_output_device().and_then(describe_cpal_device);
+        Ok((microphones, outputs))
     }
 
     #[cfg(target_os = "linux")]
@@ -413,6 +421,7 @@ mod tests {
             let devices = Devices::enumerate();
             let active = devices.microphones.resolve(None).unwrap();
             assert_eq!(active.id, expected);
+            assert_eq!(devices.microphones.preferred(Some(active)), Some(active));
         }
     }
 

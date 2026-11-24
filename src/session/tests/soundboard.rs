@@ -4,6 +4,87 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 const CLIP: &str = "23456789-1111-4ccc-8aaa-123456789abc";
 
 #[tokio::test]
+async fn opening_soundboard_clears_the_new_clip_dot_and_refreshes_without_an_event() {
+    const NEW_CLIP: &str = "3456789a-1111-4ccc-8aaa-123456789abc";
+    let (opened, wait_for_open) = async_channel::bounded(1);
+    let end = voice_session(
+        Call::start_for_test,
+        async |sockets, requests, _| {
+            let mut desktop = accept_async(sockets.accept().await.unwrap().0)
+                .await
+                .unwrap();
+            desktop
+                .send(Message::text(
+                    value!({"type": "sound:new", "id": CLIP}).to_string(),
+                ))
+                .await
+                .unwrap();
+            let join = establish_voice(&requests, &mut desktop).await;
+
+            for (id, name) in [(CLIP, "Chime"), (NEW_CLIP, "New chime")] {
+                let request = requests.recv().await.unwrap();
+                assert_eq!(request.line, "GET /api/sounds HTTP/1.1");
+                request
+                    .respond(
+                        &[],
+                        &value!([{"id": id, "name": name, "icon": "bell", "durationMs": 1000}])
+                            .to_string(),
+                    )
+                    .await;
+            }
+            wait_for_open.recv().await.unwrap();
+
+            desktop
+                .send(Message::text(
+                    value!({"type": "sound:new", "id": CLIP}).to_string(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                receive_voice_frame(&mut desktop).await,
+                value!({"type":"voice:leave","sid":join["sid"]})
+            );
+        },
+        async |commands, views| {
+            let waiting = wait_for_sidebar(&views, |s| {
+                s.soundboard.has_new_clip
+                    && s.channels.is_some()
+                    && matches!(s.connection, Connection::Online)
+            })
+            .await;
+            assert!(waiting.voice.is_none());
+            assert!(waiting.soundboard.clips.is_none());
+            commands
+                .send(Command::JoinVoice("first".into()))
+                .await
+                .unwrap();
+            let joined = wait_for_sidebar(&views, shows_alice_speaking).await;
+            assert!(joined.soundboard.has_new_clip);
+
+            for id in [CLIP, NEW_CLIP] {
+                commands.send(Command::OpenSoundboard).await.unwrap();
+                let opened = wait_for_sidebar(&views, |s| {
+                    s.soundboard
+                        .clips
+                        .as_ref()
+                        .is_some_and(|clips| clips.iter().any(|clip| clip.id == id))
+                })
+                .await;
+                assert!(!opened.soundboard.has_new_clip);
+            }
+            opened.send(()).await.unwrap();
+
+            wait_for_sidebar(&views, |s| s.soundboard.has_new_clip).await;
+            commands.send(Command::LeaveVoice).await.unwrap();
+            let left = wait_for_sidebar(&views, |s| s.voice.is_none()).await;
+            assert!(left.soundboard.has_new_clip);
+        },
+    )
+    .await;
+    assert!(matches!(end, SessionEnd::Closed));
+}
+
+#[tokio::test]
 #[allow(
     clippy::result_large_err,
     reason = "Tungstenite defines the handshake callback type"
