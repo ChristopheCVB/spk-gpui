@@ -346,7 +346,10 @@ pub(super) fn mention_change(
     mut range: Range<usize>,
     token: &str,
 ) -> (Range<usize>, String, usize) {
-    let projection = Projection::parse(source);
+    // TipTap marks can begin before an @ where CommonMark punctuation would block them.
+    let mut marked = source.to_owned();
+    marked.replace_range(range.start..range.start + 1, "m");
+    let projection = Projection::parse(&marked);
     if let Some(block) = projection.covering(Format::CodeBlock, &range) {
         let end = block.close.end;
         let fence = if block.close.is_empty() {
