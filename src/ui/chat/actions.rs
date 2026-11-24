@@ -197,7 +197,9 @@ impl Spk {
             ActionForm::Edit { .. } => {
                 let input = self.message_action_input.read(cx);
                 let body = editor::edit_wire(input, &form.original_body);
-                if body == form.original_body || input.value() == form.original_body {
+                if body == form.original_body
+                    || input.value().as_ref() == form.original_body.as_str()
+                {
                     self.dismiss_message_action(window, cx);
                     return;
                 }

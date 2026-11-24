@@ -114,12 +114,10 @@ impl Spk {
             return true;
         }
         if editor && count == 0 && key_name == "escape" {
-            return self
-                .message_action_input
-                .read(cx)
-                .marked_text_range(window, cx)
-                .is_none()
-                && self.dismiss_message_action(window, cx);
+            let composing = self.message_action_input.update(cx, |input, cx| {
+                input.marked_text_range(window, cx).is_some()
+            });
+            return !composing && self.dismiss_message_action(window, cx);
         }
         if composer || editor {
             let input = if editor {
