@@ -19,6 +19,7 @@ const UNKNOWN_CLIP: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Default)]
 pub struct SoundboardView {
+    pub has_new_clip: bool,
     pub clips: Option<Arc<[SoundboardClip]>>,
     pub loading: bool,
     pub cooling: bool,
@@ -73,7 +74,10 @@ impl SoundboardSession {
                 sid: sid.map(str::to_owned),
                 ..Self::default()
             };
-            sidebar.soundboard = SoundboardView::default();
+            sidebar.soundboard = SoundboardView {
+                has_new_clip: sidebar.soundboard.has_new_clip,
+                ..SoundboardView::default()
+            };
         }
         if self.sid.is_none() {
             return;
@@ -212,7 +216,12 @@ impl SoundboardSession {
         }
         let board = &mut sidebar.soundboard;
         match command {
-            Command::LoadSoundboard => self.refresh(board, client),
+            Command::OpenSoundboard | Command::LoadSoundboard => {
+                if matches!(command, Command::OpenSoundboard) {
+                    board.has_new_clip = false;
+                }
+                self.refresh(board, client);
+            }
             command @ (Command::PlaySound(_) | Command::PreviewSound(_)) => {
                 let (id, preview) = match command {
                     Command::PlaySound(id) => (id, false),

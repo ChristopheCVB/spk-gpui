@@ -534,6 +534,8 @@ pub enum Frame {
     RadioUpdate(RadioSummary),
     #[serde(rename = "voice:sound", rename_all = "camelCase")]
     VoiceSound { user_id: String, sound_id: String },
+    #[serde(rename = "sound:new")]
+    SoundNew,
     #[serde(rename = "voice:radio:state", rename_all = "camelCase")]
     RadioState {
         sid: String,
