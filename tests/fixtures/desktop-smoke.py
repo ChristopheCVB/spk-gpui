@@ -860,32 +860,35 @@ class Desktop:
             wait_for("the playhead to advance from the nonzero trim start",
                      lambda: 6.4 < position() < 15.9)
 
-        def reset(start):
+        def reset(start, timeout=15):
             wait_for(f"the preview to stop and reset to {start:.3f} s",
                      lambda: abs(position() - start) < 0.001
-                     and self.find_node("Stop preview", "push button") is None)
+                     and self.find_node("Stop preview", "push button") is None, timeout=timeout)
 
         reset(6.1)
         play()
         self.screenshot(logs, "soundboard-preview-dark.png")
         self.check_preview_audio()
         self.click("Stop preview", "push button")
-        reset(6.1)
+        reset(6.1, timeout=3)
 
         play()
         reset(6.1)
 
         play()
-        self.tab_to("Trim start", "slider")
-        self.key("Right")
-        self.expect_sound_selection(6.2, 15.9)
-        reset(6.2)
+        handle = self.bounds("Trim end", "slider")
+        waveform = self.bounds("Source waveform")
+        self.drag_horizontal(handle.x + handle.width // 2, handle.y + handle.height // 2,
+                             waveform.x + waveform.width - 1)
+        self.expect_sound_selection(6.1, 16)
+        reset(6.1, timeout=3)
+        self.tab_to("Trim end", "slider")
         self.key("Left")
         self.expect_sound_selection(6.1, 15.9)
 
         play()
         self.replace_sound_field("Upload gain (%)", "125")
-        reset(6.1)
+        reset(6.1, timeout=3)
         self.replace_sound_field("Upload gain (%)", "150")
 
     def replace_sound_field(self, label, value):
@@ -965,8 +968,8 @@ class Desktop:
         self.enter("Search icons", "entry", SOUND_ICON)
         self.click("", "list item", within=("", "list"))
         wait_for("the icon picker to close", lambda: self.find_node("Search icons", "entry") is None)
-        self.screenshot(logs, "soundboard-waveform-dark.png")
         self.check_soundboard_preview(logs)
+        self.screenshot(logs, "soundboard-waveform-dark.png")
         self.click("Save", "push button")
         self.find(SOUND_NAME)
         wait_for("the saved waveform to clear", lambda: self.find_node("Source waveform") is None)
