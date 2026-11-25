@@ -480,12 +480,10 @@ class Desktop:
         self.click("Cancel", "push button")
         self.find("smoke-target", "push button", partial=True)
         self.click("smoke-target", "push button", partial=True, button=3)
-        self.click("Rename", "menu item")
-        self.click("Channel name", "entry")
-        self.key("ctrl+a")
-        self.type_text("smoke-renamed")
-        self.click("Save", "push button")
-        self.find("smoke-renamed", "push button", partial=True)
+        self.click("Move up", "menu item")
+        wait_for("the Text Channel to move above smoke-chat",
+                 lambda: self.bounds("smoke-target", "push button", partial=True).y
+                 < self.bounds("smoke-chat", "push button", partial=True).y)
 
         voice_action = self.channel_ellipsis(FIRST_VOICE)
         ellipsis = self.bounds(voice_action, "push button")
@@ -601,9 +599,6 @@ class Desktop:
 
     def enter(self, label, role, text):
         self.click(label, role)
-        self.type_text(text)
-
-    def type_text(self, text):
         subprocess.run(["xdotool", "type", "--clearmodifiers", "--", text], check=True)
 
     def key(self, name):
