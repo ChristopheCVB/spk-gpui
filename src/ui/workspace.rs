@@ -125,7 +125,7 @@ pub(super) fn navigation_target(
     scroll_on_focus: Option<&ScrollHandle>,
     window: &mut Window,
     cx: &mut App,
-) -> (Stateful<Div>, bool) {
+) -> (Stateful<Div>, bool, FocusHandle) {
     let focus = window.with_element_namespace(id.clone(), |window| {
         window
             .use_keyed_state("navigation-focus", cx, |_, cx| {
@@ -142,7 +142,7 @@ pub(super) fn navigation_target(
                 .child(reveal_in_vertical_scroll(scroll, px(0.)))
         },
     );
-    (target, focused)
+    (target, focused, focus)
 }
 
 fn vertical_reveal_delta(
@@ -827,7 +827,7 @@ impl Spk {
         &self,
         sidebar: &Sidebar,
         channel: &Channel,
-        (mut row, focused): (Stateful<Div>, bool),
+        (mut row, focused, _): (Stateful<Div>, bool, FocusHandle),
         actions: Option<channel_admin::ChannelActions>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1138,7 +1138,7 @@ impl Spk {
     ) -> Stateful<Div> {
         let id = channel.id.clone();
         let row_id = SharedString::from(format!("voice-{id}"));
-        let (mut row, focused) = navigation_target(row_id.clone(), scroll_on_focus, window, cx);
+        let (mut row, focused, _) = navigation_target(row_id.clone(), scroll_on_focus, window, cx);
         let row_menu = SidebarRowMenu::attach(&mut row, focused, window, cx);
         let theme = cx.theme();
         let switching_here = sidebar.switching_to() == Some(channel.id.as_str());
@@ -1292,7 +1292,8 @@ impl Spk {
                 let last = index + 1 == participant_count;
                 let row_id =
                     SharedString::from(format!("voice-{}-member-{}", channel.id, person.id));
-                let (row, focused) = navigation_target(row_id, scroll_on_focus, window, cx);
+                let (row, focused, row_focus) =
+                    navigation_target(row_id, scroll_on_focus, window, cx);
                 // Keep the focused control when clicking the participant row.
                 let mut row = row.on_any_mouse_down(|_, window, _| window.prevent_default());
                 let row_menu = SidebarRowMenu::attach(&mut row, focused, window, cx);
@@ -1310,6 +1311,7 @@ impl Spk {
                         &channel.id,
                         cx.weak_entity(),
                         participant_focus,
+                        row_focus,
                         channel_focus.clone(),
                     ),
                 );
@@ -1925,15 +1927,12 @@ impl Spk {
                         app.clone(),
                     ));
                     if let Some(destinations) = &destinations {
-                        add_voice_moderation_items(
-                            menu.separator(),
-                            window,
-                            cx,
-                            &app,
-                            &id,
-                            enabled.then_some(destinations.as_slice()),
-                            None,
-                        )
+                        VoiceModerationMenu {
+                            destinations,
+                            enabled,
+                            focus_fallback: None,
+                        }
+                        .add_items(menu.separator(), window, cx, &app, &id)
                     } else {
                         menu
                     }
@@ -2211,6 +2210,7 @@ fn sidebar_participant_items(
     channel_id: &str,
     app: WeakEntity<Spk>,
     participant_focus: FocusHandle,
+    row_focus: FocusHandle,
     channel_focus: FocusHandle,
 ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + use<> {
     let destinations = voice_moderation_destinations(sidebar, participant.id);
@@ -2309,15 +2309,12 @@ fn sidebar_participant_items(
                 },
             );
             let menu = menu.when_some(destinations.as_deref(), |menu, destinations| {
-                add_voice_moderation_items(
-                    menu,
-                    window,
-                    cx,
-                    &app,
-                    &user_id,
-                    (!moderation_pending).then_some(destinations),
-                    Some(&channel_focus),
-                )
+                VoiceModerationMenu {
+                    destinations,
+                    enabled: !moderation_pending,
+                    focus_fallback: Some((row_focus.clone(), channel_focus.clone())),
+                }
+                .add_items(menu, window, cx, &app, &user_id)
             });
             menu.when(can_ban, |menu| {
                 let app = app.clone();
@@ -2499,53 +2496,60 @@ fn confirm_sidebar_ban(
     });
 }
 
-fn add_voice_moderation_items(
-    mut menu: PopupMenu,
-    window: &mut Window,
-    cx: &mut Context<PopupMenu>,
-    app: &WeakEntity<Spk>,
-    user_id: &str,
-    destinations: Option<&[(String, String)]>,
-    channel_focus: Option<&FocusHandle>,
-) -> PopupMenu {
-    if let Some(destinations) = destinations.filter(|destinations| !destinations.is_empty()) {
-        let app = app.clone();
-        let user_id = user_id.to_owned();
-        let destinations = destinations.to_vec();
-        let channel_focus = channel_focus.cloned();
-        menu = menu.submenu_with_icon(
-            Some(Icon::new(IconName::MoveRight)),
-            "Move to",
-            window,
-            cx,
-            move |mut submenu, _, _| {
-                for (id, name) in &destinations {
-                    submenu = submenu.item(
-                        voice_moderation_item(
-                            name.clone(),
-                            app.clone(),
-                            user_id.clone(),
-                            VoiceModeration::Move(id.clone()),
-                            channel_focus.clone(),
-                        )
-                        .icon(IconName::Volume2),
-                    );
-                }
-                submenu
-            },
-        );
-    }
-    menu.item(
-        voice_moderation_item(
-            "Disconnect from voice",
-            app.clone(),
-            user_id.to_owned(),
-            VoiceModeration::Disconnect,
-            channel_focus.cloned(),
+struct VoiceModerationMenu<'a> {
+    destinations: &'a [(String, String)],
+    enabled: bool,
+    focus_fallback: Option<(FocusHandle, FocusHandle)>,
+}
+
+impl VoiceModerationMenu<'_> {
+    fn add_items(
+        self,
+        mut menu: PopupMenu,
+        window: &mut Window,
+        cx: &mut Context<PopupMenu>,
+        app: &WeakEntity<Spk>,
+        user_id: &str,
+    ) -> PopupMenu {
+        if self.enabled && !self.destinations.is_empty() {
+            let app = app.clone();
+            let user_id = user_id.to_owned();
+            let destinations = self.destinations.to_vec();
+            let fallback = self.focus_fallback.clone();
+            menu = menu.submenu_with_icon(
+                Some(Icon::new(IconName::MoveRight)),
+                "Move to",
+                window,
+                cx,
+                move |mut submenu, _, _| {
+                    for (id, name) in &destinations {
+                        submenu = submenu.item(
+                            voice_moderation_item(
+                                name.clone(),
+                                app.clone(),
+                                user_id.clone(),
+                                VoiceModeration::Move(id.clone()),
+                                fallback.clone(),
+                            )
+                            .icon(IconName::Volume2),
+                        );
+                    }
+                    submenu
+                },
+            );
+        }
+        menu.item(
+            voice_moderation_item(
+                "Disconnect from voice",
+                app.clone(),
+                user_id.to_owned(),
+                VoiceModeration::Disconnect,
+                self.focus_fallback,
+            )
+            .icon(IconName::PhoneOff)
+            .disabled(!self.enabled),
         )
-        .icon(IconName::PhoneOff)
-        .disabled(destinations.is_none()),
-    )
+    }
 }
 
 fn voice_moderation_item(
@@ -2553,23 +2557,28 @@ fn voice_moderation_item(
     app: WeakEntity<Spk>,
     user_id: String,
     action: VoiceModeration,
-    channel_focus: Option<FocusHandle>,
+    focus_fallback: Option<(FocusHandle, FocusHandle)>,
 ) -> PopupMenuItem {
     PopupMenuItem::new(label).on_click(move |_, window, cx| {
-        // Successful moderation can remove the row before the next key press.
-        if let Some(focus) = &channel_focus {
-            focus.focus(window, cx);
+        let app = app.clone();
+        let user_id = user_id.clone();
+        let action = action.clone();
+        let dispatch = move |cx: &mut App| {
+            let _ = app.update(cx, |app, cx| {
+                app.send(Command::ModerateVoice { user_id, action }, None, cx);
+            });
+        };
+        if let Some((row, channel)) = focus_fallback.clone() {
+            // Check restored focus before sending a request that can remove the row.
+            window.on_next_frame(move |window, cx| {
+                if row.contains_focused(window, cx) {
+                    channel.focus(window, cx);
+                }
+                dispatch(cx);
+            });
+        } else {
+            dispatch(cx);
         }
-        let _ = app.update(cx, |app, cx| {
-            app.send(
-                Command::ModerateVoice {
-                    user_id: user_id.clone(),
-                    action: action.clone(),
-                },
-                None,
-                cx,
-            );
-        });
     })
 }
 

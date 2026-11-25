@@ -480,7 +480,7 @@ fn screen_sources(
                 .children(sources.into_iter().map(|choice| {
                     let weak_app = app.downgrade();
                     let id = choice.id.clone();
-                    let (row, _) = super::workspace::navigation_target(
+                    let (row, ..) = super::workspace::navigation_target(
                         format!("screen-source-row-{id}").into(),
                         Some(&scroll),
                         window,

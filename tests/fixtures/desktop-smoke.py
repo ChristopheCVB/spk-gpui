@@ -471,18 +471,21 @@ class Desktop:
 
     def check_admin_menus(self, logs, admin, server):
         person = "Smoke Reader"
+
+        def check_text_menu():
+            self.menu_order("Mark read", "Mute notifications", "Rename", "Move up", "Move down", "Delete")
+            self.absent("Admin", None)
+
         self.find("smoke-target, 1 unread, 0 pings", "push button")
         self.click("smoke-target", "push button", partial=True, button=3)
-        self.menu_order("Mark read", "Mute notifications", "Rename", "Move up", "Move down", "Delete")
-        self.absent("Admin", None)
+        check_text_menu()
         self.check_disabled_menu_item("Move down")
         self.screenshot(logs, "text-channel-menu-dark.png")
         self.click("Mark read", "menu item")
         self.find("smoke-target", "push button")
         text_action = self.channel_ellipsis("smoke-target")
         self.click(text_action, "push button")
-        self.menu_order("Mark read", "Mute notifications", "Rename", "Move up", "Move down", "Delete")
-        self.absent("Admin", None)
+        check_text_menu()
         self.click("Delete", "menu item")
         self.visible_text("Delete channel")
         self.click("Cancel", "push button")
@@ -530,6 +533,15 @@ class Desktop:
                  lambda: self.bounds(person, "panel").y > self.bounds(SECOND_VOICE, "push button").y)
         wait_for("focus to stay with the source Voice Channel",
                  lambda: self.focused(voice_action, "push button"))
+        self.click("smoke-target", "push button")
+        self.enter("Write a message", "entry", "Draft before moving participant")
+        self.open_participant_menu(person, context=True)
+        self.click("Move to", "menu item")
+        self.click(FIRST_VOICE, "menu item")
+        wait_for("the participant to move back above the second channel",
+                 lambda: self.bounds(person, "panel").y < self.bounds(SECOND_VOICE, "push button").y)
+        wait_for("focus to stay with the Message Composer",
+                 lambda: self.focused("Write a message", "entry"))
         self.open_participant_menu(person)
         _, user_choice = self.role_choices()
         if not user_choice.get_state_set().contains(Atspi.StateType.CHECKED):
