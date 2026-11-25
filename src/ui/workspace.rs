@@ -739,7 +739,7 @@ impl Spk {
                         ),
                 )
                 .when(feeds.peek().is_none(), |card| {
-                    card.child(div().px_2().py_1().child(
+                    card.child(div().px_2().py_1().text_xs().child(
                         Label::new("No webhooks yet").text_color(cx.theme().muted_foreground),
                     ))
                 })

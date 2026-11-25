@@ -302,7 +302,7 @@ pub(super) fn unread_badges(counts: UnreadState, cx: &App) -> impl IntoElement {
         .when(counts.mentions > 0, |badges| {
             badges.child(
                 Label::new(format!("@{}", counts.mentions))
-                    .text_xs()
+                    .text_size(px(10.0))
                     .font_semibold()
                     .px_1()
                     .rounded_md()
@@ -313,7 +313,7 @@ pub(super) fn unread_badges(counts: UnreadState, cx: &App) -> impl IntoElement {
         .when(counts.unread > 0, |badges| {
             badges.child(
                 Label::new(counts.unread.to_string())
-                    .text_xs()
+                    .text_size(px(10.0))
                     .px_1()
                     .rounded_md()
                     .bg(theme.secondary)
