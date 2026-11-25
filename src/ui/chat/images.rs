@@ -16,14 +16,6 @@ pub(super) fn chat_image(image: Arc<ChatImage>) -> Div {
 
 struct AnimatedGif(Arc<ChatImage>);
 
-impl IntoElement for AnimatedGif {
-    type Element = Self;
-
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
 #[derive(Default)]
 struct Playback {
     elapsed: Duration,
