@@ -1,3 +1,5 @@
+use gpui_kit::base::actions::Cancel;
+
 use super::*;
 
 #[derive(Clone)]
@@ -65,17 +67,23 @@ impl SidebarRowMenu {
         let focus = self.state.focus;
         div()
             .flex_shrink_0()
+            .capture_action({
+                let open = open.clone();
+                let focus = focus.clone();
+                move |_: &Cancel, window, cx| {
+                    // Move focus before the popup handles Escape and restores its saved focus.
+                    if open.get() {
+                        focus.focus(window, cx);
+                    }
+                }
+            })
             .child(
                 button
                     .disabled(!enabled)
                     .track_focus(&focus)
                     .dropdown_menu_with_anchor(anchor, items)
-                    .on_open_change(move |is_open, window, cx| {
+                    .on_open_change(move |is_open, window, _| {
                         open.set(*is_open);
-                        // Mouse opening can leave the popover's saved focus on another control.
-                        if !*is_open && window.last_input_was_keyboard() {
-                            focus.focus(window, cx);
-                        }
                         window.refresh();
                     }),
             )

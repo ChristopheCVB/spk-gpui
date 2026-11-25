@@ -733,13 +733,13 @@ impl Spk {
                     ))
                 })
                 .children(feeds.map(|channel| {
-                    let (target, focused) = navigation_target(
+                    let target = navigation_target(
                         format!("webhook-{}", channel.id).into(),
                         scroll_on_focus,
                         window,
                         cx,
                     );
-                    self.chat_channel_row(sidebar, channel, (target, focused), None, window, cx)
+                    self.chat_channel_row(sidebar, channel, target, None, window, cx)
                 }));
 
         let destinations = div()
@@ -863,6 +863,7 @@ impl Spk {
         row.flex()
             .items_center()
             .pr_1()
+            .children(actions)
             .child(
                 control_button("select")
                     .ghost()
@@ -917,7 +918,6 @@ impl Spk {
                         this.send(command, None, cx);
                     })),
             )
-            .children(actions)
             .context_menu(move |menu, _, cx| {
                 if let Some(webhook_menu) = &webhook_menu {
                     webhook_menu.items(menu, None, cx)
@@ -1119,8 +1119,8 @@ impl Spk {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let id = channel.id.clone();
-        let (mut row, focused) =
-            navigation_target(format!("voice-{id}").into(), scroll_on_focus, window, cx);
+        let row_id = SharedString::from(format!("voice-{id}"));
+        let (mut row, focused) = navigation_target(row_id.clone(), scroll_on_focus, window, cx);
         let actions = actions
             .map(|actions| actions.render(SidebarRowMenu::attach(&mut row, focused, window, cx)));
         let theme = cx.theme();
@@ -1141,7 +1141,7 @@ impl Spk {
             format!("Join {name}")
         };
         div()
-            .id(SharedString::from(format!("voice-{id}")))
+            .id(row_id)
             .child(
                 row.group("voice-channel")
                     .flex()
@@ -1152,6 +1152,7 @@ impl Spk {
                     .when(active, |row| row.bg(theme.primary.opacity(0.10)))
                     .when(!active && focused, |row| row.bg(theme.accent))
                     .when(!active, |row| row.hover(|row| row.bg(theme.accent)))
+                    .children(actions)
                     .child(
                         control_button("select")
                             .ghost()
@@ -1182,7 +1183,6 @@ impl Spk {
                             .px_1()
                             .child(themed_icon(IconName::Radio, theme.primary, 14.0))
                     }))
-                    .children(actions)
                     .children(call.and_then(|call| {
                         self.leave_voice("leave", call, switching_here, false, cx)
                     }))
