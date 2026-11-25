@@ -14,7 +14,7 @@ use unicode_segmentation::UnicodeSegmentation as _;
 use super::*;
 use crate::chat_markdown::{apply_edits, escape_markdown, markdown_escaped, parse_options};
 
-const EMOJI_URL: &str = "spk-emoji:";
+pub(super) const EMOJI_URL: &str = "spk-emoji:";
 
 pub(super) fn emoji_only(body: &str) -> bool {
     let mut count = 0;

@@ -1,11 +1,137 @@
 use super::*;
 use crate::api::{ChatEmbed, EmbedColor};
+use gpui_kit::base::text::{InlineElement, InlineRenderContext};
+use markdown::mdast::Node;
+use url::Url;
+
+pub(super) struct EmbedLinks {
+    pub app: WeakEntity<Spk>,
+    pub max_width: Pixels,
+}
+
+enum LinkLabel {
+    Code(String),
+    Text(Vec<LinkLabelPart>),
+}
+
+enum LinkLabelPart {
+    Text(String),
+    Emoji { label: String, path: String },
+}
+
+impl MarkdownPlugin for EmbedLinks {
+    fn name(&self) -> &str {
+        "spk-embed-link"
+    }
+
+    fn parse(&self, node: &Node, context: &MarkdownParseContext<'_>) -> Option<MarkdownNode> {
+        let Node::Link(link) = node else {
+            return None;
+        };
+        let url = safe_link(&link.url)?;
+        let (label, content) = if let [Node::InlineCode(code)] = link.children.as_slice() {
+            (code.value.clone(), LinkLabel::Code(code.value.clone()))
+        } else {
+            let mut label = String::new();
+            let mut parts = Vec::new();
+            for child in &link.children {
+                match child {
+                    Node::Text(text) => {
+                        label.push_str(&text.value);
+                        parts.push(LinkLabelPart::Text(text.value.clone()));
+                    }
+                    Node::Image(image) if image.url == emoji::EMOJI_URL => {
+                        label.push_str(&image.alt);
+                        parts.push(LinkLabelPart::Emoji {
+                            path: reaction_artwork_path(&image.alt)?,
+                            label: image.alt.clone(),
+                        });
+                    }
+                    _ => return None,
+                }
+            }
+            (label, LinkLabel::Text(parts))
+        };
+        if label.is_empty() {
+            return None;
+        }
+        Some(
+            MarkdownNode::new(self.name(), (url, content))
+                .text(label)
+                .markdown(context.node_source(node)?.to_owned()),
+        )
+    }
+
+    fn render_inline(
+        &self,
+        node: &MarkdownNode,
+        context: &InlineRenderContext,
+        _: &mut Window,
+        cx: &mut App,
+    ) -> Option<InlineElement> {
+        let (url, content) = node.data::<(Url, LinkLabel)>()?;
+        let url = url.clone();
+        let label = node.as_text().to_owned();
+        let offset = node.source_range()?.start;
+        let app = self.app.clone();
+        let font_size = context.font_size();
+        let content = match content {
+            LinkLabel::Code(code) => div()
+                .font_family(
+                    gpui_kit::base::Theme::global(cx)
+                        .tokens
+                        .typography
+                        .mono
+                        .clone(),
+                )
+                .child(code.clone()),
+            LinkLabel::Text(parts) => {
+                div()
+                    .flex()
+                    .items_center()
+                    .children(parts.iter().enumerate().map(|(index, part)| {
+                        match part {
+                            LinkLabelPart::Text(text) => div()
+                                .min_w_0()
+                                .whitespace_normal()
+                                .child(text.clone())
+                                .into_any_element(),
+                            LinkLabelPart::Emoji { label, path } => div()
+                                .id(("embed-link-emoji", index))
+                                .role(Role::Image)
+                                .flex_shrink_0()
+                                .aria_label(label.clone())
+                                .child(img(path.clone()).size(font_size * 1.2))
+                                .into_any_element(),
+                        }
+                    }))
+            }
+        };
+        Some(InlineElement::new(
+            Button::new(("embed-description-link", offset))
+                .link()
+                .tab_stop(true)
+                .max_w(self.max_width)
+                .h_auto()
+                .p_0()
+                .text_color(cx.theme().primary)
+                .accessibility_label(label)
+                .child(
+                    content
+                        .text_size(font_size)
+                        .line_height(context.line_height()),
+                )
+                .on_click(move |_, _, cx| search::activate_chat_link(&app, url.clone(), cx)),
+        ))
+    }
+}
 
 impl Spk {
     pub(super) fn webhook_embed(
         &self,
         embed: &ChatEmbed,
         description: Option<TextView>,
+        avatar: Option<Arc<RenderImage>>,
         now: i64,
         window: &Window,
         cx: &Context<Self>,
@@ -136,7 +262,47 @@ impl Spk {
                                 .text_color(theme.muted_foreground),
                         ),
                 )
-            });
+            })
+            .when_some(
+                embed
+                    .author
+                    .as_ref()
+                    .filter(|author| !author.name.trim().is_empty()),
+                |card, author| {
+                    let name = author.name.clone();
+                    let mut line = div().h(px(20.)).flex().items_center().gap_1p5();
+                    if let Some(avatar) = avatar {
+                        line = line.child(
+                            img(avatar)
+                                .size(px(20.))
+                                .flex_shrink_0()
+                                .rounded_full()
+                                .object_fit(ObjectFit::Cover),
+                        );
+                    }
+                    if let Some(url) = author.link() {
+                        let app = cx.weak_entity();
+                        line = line.child(
+                            Button::new("embed-author")
+                                .link()
+                                .tab_stop(true)
+                                .min_w_0()
+                                .h_auto()
+                                .p_0()
+                                .text_xs()
+                                .font_semibold()
+                                .accessibility_label(name.clone())
+                                .child(Label::new(name).text_color(theme.primary))
+                                .on_click(move |_, _, cx| {
+                                    search::activate_chat_link(&app, url.clone(), cx);
+                                }),
+                        );
+                    } else {
+                        line = line.child(Label::new(name).text_xs().font_semibold());
+                    }
+                    card.child(line)
+                },
+            );
 
         div()
             .mt_1()

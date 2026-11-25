@@ -238,6 +238,7 @@ pub struct ChatEmbed {
     pub title: Option<String>,
     pub description: Option<String>,
     url: Option<String>,
+    pub author: Option<EmbedAuthor>,
     pub color: Option<EmbedColor>,
     #[serde(default)]
     pub fields: Vec<EmbedField>,
@@ -249,6 +250,25 @@ impl ChatEmbed {
     pub fn title_link(&self) -> Option<Url> {
         let url = Url::parse(self.url.as_deref()?).ok()?;
         matches!(url.scheme(), "http" | "https").then_some(url)
+    }
+}
+
+#[derive(Clone, Deserialize)]
+pub struct EmbedAuthor {
+    pub name: String,
+    url: Option<String>,
+    icon: Option<String>,
+}
+
+impl EmbedAuthor {
+    pub fn avatar_url(&self) -> Option<&str> {
+        let icon = self.icon.as_deref()?;
+        (!self.name.trim().is_empty() && gifs::gif_media_url(icon).is_some()).then_some(icon)
+    }
+
+    pub fn link(&self) -> Option<Url> {
+        embed_link(self.url.as_deref()?)
+            .filter(|url| url.username().is_empty() && url.password().is_none())
     }
 }
 
@@ -273,18 +293,21 @@ pub struct EmbedField {
 
 impl EmbedField {
     pub fn link(&self) -> Option<Url> {
-        let (scheme, authority) = self.value.split_once("://")?;
-        if !(scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
-            || authority.starts_with('/')
-            || self
-                .value
-                .chars()
-                .any(|c| c == '\\' || c.is_whitespace() || c.is_control())
-        {
-            return None;
-        }
-        Url::parse(&self.value).ok()
+        embed_link(&self.value)
     }
+}
+
+fn embed_link(raw: &str) -> Option<Url> {
+    let (scheme, authority) = raw.split_once("://")?;
+    if !(scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+        || authority.starts_with('/')
+        || raw
+            .chars()
+            .any(|c| c == '\\' || c.is_whitespace() || c.is_control())
+    {
+        return None;
+    }
+    Url::parse(raw).ok()
 }
 
 #[derive(Clone, Deserialize)]

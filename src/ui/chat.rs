@@ -51,6 +51,8 @@ use crate::{
     session::{ChatImage, ChatView, Delivery, Pins},
 };
 
+const EMBED_DESCRIPTION: &str = "embed-description";
+
 struct RenderedChatMarkdown {
     view: TextView,
     source: SharedString,
@@ -1232,6 +1234,12 @@ impl Spk {
         let mut extensions = MarkdownExtensions::default()
             .plugin(MessageMention)
             .plugin(emoji);
+        if id == EMBED_DESCRIPTION {
+            extensions = extensions.plugin(embed::EmbedLinks {
+                app: cx.weak_entity(),
+                max_width,
+            });
+        }
         if !spoilers.is_empty() {
             let definitions = crate::chat_markdown::spoiler_link_definitions(body);
             let contents = spoilers
@@ -1326,7 +1334,7 @@ impl Spk {
             .and_then(|embed| embed.description.as_deref())
             .map(|description| {
                 self.chat_message_markdown(
-                    "embed-description",
+                    EMBED_DESCRIPTION,
                     &message_id,
                     description,
                     emoji::MessageEmoji::new(false),
@@ -1546,9 +1554,15 @@ impl Spk {
                 row.children(self.message_action_form(chat, message, window, cx))
             })
             .when_some(embed, |row, embed| {
+                let avatar = embed
+                    .author
+                    .as_ref()
+                    .and_then(|author| author.avatar_url())
+                    .and_then(|icon| chat.preview_images.avatar(&message.id, icon));
                 row.child(self.webhook_embed(
                     embed,
                     description.map(|markdown| markdown.view),
+                    avatar,
                     now,
                     window,
                     cx,

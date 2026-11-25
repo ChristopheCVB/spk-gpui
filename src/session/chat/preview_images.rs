@@ -13,7 +13,13 @@ use url::Url;
 
 pub(in crate::session) type PreviewImage = Option<Arc<ChatImage>>;
 
-type PreviewKey = (String, String);
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+pub(in crate::session) enum PreviewSource {
+    Link,
+    EmbedAvatar,
+}
+
+type PreviewKey = (String, String, PreviewSource);
 pub(in crate::session) type PreviewResult = (PreviewKey, Result<Arc<RenderImage>, Failure>);
 
 #[derive(Clone, Default)]
@@ -21,7 +27,17 @@ pub struct PreviewImages(Arc<HashMap<PreviewKey, Option<Arc<RenderImage>>>>);
 
 impl PreviewImages {
     pub fn get(&self, message: &str, url: &str) -> Option<Arc<RenderImage>> {
-        self.0.get(&(message.to_owned(), url.to_owned()))?.clone()
+        self.image(message, url, PreviewSource::Link)
+    }
+
+    pub fn avatar(&self, message: &str, url: &str) -> Option<Arc<RenderImage>> {
+        self.image(message, url, PreviewSource::EmbedAvatar)
+    }
+
+    fn image(&self, message: &str, url: &str, source: PreviewSource) -> Option<Arc<RenderImage>> {
+        self.0
+            .get(&(message.to_owned(), url.to_owned(), source))?
+            .clone()
     }
 
     pub fn images(&self) -> impl Iterator<Item = &Arc<RenderImage>> {
@@ -39,14 +55,20 @@ impl ChatSession {
             return;
         };
         for message in view.messages.iter().rev() {
-            for preview in message.previews.iter().filter(|card| card.image) {
+            let avatar = view.webhook.then(|| webhook_avatar(message)).flatten();
+            let previews = message
+                .previews
+                .iter()
+                .filter(|card| card.image && card.link().is_some())
+                .map(|card| (card.url.as_str(), PreviewSource::Link));
+            let avatar = avatar
+                .into_iter()
+                .map(|url| (url, PreviewSource::EmbedAvatar));
+            for (url, source) in avatar.chain(previews) {
                 if self.preview_tasks.len() >= 4 {
                     return;
                 }
-                if preview.link().is_none() {
-                    continue;
-                }
-                let key = (message.id.clone(), preview.url.clone());
+                let key = (message.id.clone(), url.to_owned(), source);
                 if view.preview_images.0.contains_key(&key) {
                     continue;
                 }
@@ -54,11 +76,18 @@ impl ChatSession {
                 Arc::make_mut(&mut view.preview_images.0).insert(key.clone(), None);
                 let client = client.clone();
                 self.preview_tasks.spawn(async move {
-                    let result = match client.preview_image(&key.0, &key.1).await {
-                        Ok(bytes) => tokio::task::spawn_blocking(move || decode(bytes))
+                    let result = if source == PreviewSource::EmbedAvatar {
+                        load_image(&client, &key.1, size(40, 40))
                             .await
-                            .unwrap_or(Err(Failure::InvalidResponse)),
-                        Err(error) => Err(error),
+                            .map(|image| image.pixels.clone())
+                            .ok_or(Failure::InvalidResponse)
+                    } else {
+                        match client.preview_image(&key.0, &key.1).await {
+                            Ok(bytes) => tokio::task::spawn_blocking(move || decode(bytes))
+                                .await
+                                .unwrap_or(Err(Failure::InvalidResponse)),
+                            Err(error) => Err(error),
+                        }
                     };
                     (key, result)
                 });
@@ -81,13 +110,18 @@ impl ChatSession {
         if view.preview_images.0.is_empty() {
             return;
         }
-        Arc::make_mut(&mut view.preview_images.0).retain(|(id, url), _| {
+        Arc::make_mut(&mut view.preview_images.0).retain(|(id, url, source), _| {
             view.messages.iter().any(|message| {
                 message.id == *id
-                    && message
-                        .previews
-                        .iter()
-                        .any(|card| card.image && card.url == *url)
+                    && match source {
+                        PreviewSource::EmbedAvatar => {
+                            view.webhook && webhook_avatar(message) == Some(url)
+                        }
+                        PreviewSource::Link => message
+                            .previews
+                            .iter()
+                            .any(|card| card.image && card.url == *url),
+                    }
             })
         });
     }
@@ -124,6 +158,10 @@ impl ChatSession {
             }
         });
     }
+}
+
+fn webhook_avatar(message: &ChatMessage) -> Option<&str> {
+    message.embed.as_ref()?.author.as_ref()?.avatar_url()
 }
 
 fn decode(bytes: Vec<u8>) -> Result<Arc<RenderImage>, Failure> {

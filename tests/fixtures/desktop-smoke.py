@@ -31,6 +31,25 @@ WEB_REPO = "https://github.com/meeehdi-dev/spk.git"
 WEB_REVISION = "43613954d119eae4fd30e25a1f969b4327c58e89"
 EMAIL = "reader@spk.test"
 PASSWORD = "fixture-password-42"
+GITHUB = "https://github.com"
+PUSH_REPO = f"{GITHUB}/spk-smoke/demo"
+PUSH_SENDER = {"login": "Push Sender", "html_url": f"{GITHUB}/push-sender"}
+PUSH_COMMITS = (
+    {"id": "8a072c0", "url": f"{PUSH_REPO}/commit/8a072c0", "message": "Add tests",
+     "author": {"name": "Alice Author", "username": "alice-author"}},
+    {"id": "c9407ec", "url": f"{PUSH_REPO}/commit/c9407ec", "message": "Clean up",
+     "author": {"name": "Bob 🚀 Author", "username": "bob-author"}},
+    {"id": "d651c1e", "url": f"{PUSH_REPO}/commit/d651c1e", "message": "Update comments",
+     "author": {"name": "Local Author"}},
+)
+PUSH_LINKS = (
+    ("8a072c0", f"{PUSH_REPO}/commit/8a072c0"),
+    ("Alice Author", f"{GITHUB}/alice-author"),
+    ("c9407ec", f"{PUSH_REPO}/commit/c9407ec"),
+    ("Bob 🚀 Author", f"{GITHUB}/bob-author"),
+    ("d651c1e", f"{PUSH_REPO}/commit/d651c1e"),
+    ("Push Sender", PUSH_SENDER["html_url"]),
+)
 
 
 def wait_for(description, probe, timeout=15):
@@ -175,6 +194,29 @@ def seed(origin, database, log, process):
         "content": "Smoke webhook body 🧪",
         "embeds": [{"title": "Smoke deploy alert", "description": "Smoke embed body 🔔"}],
     })
+    admin(endpoint.path, {"embeds": [{
+        "title": "Smoke alert with no profile",
+        "author": {"name": "Unlinked Author", "url": "javascript:alert(1)"},
+    }]})
+    repository = {"name": "demo", "full_name": "spk-smoke/demo", "html_url": PUSH_REPO}
+    sender = PUSH_SENDER.copy()
+    if avatar := os.environ.get("SPK_SMOKE_WEBHOOK_AVATAR"):
+        sender["avatar_url"] = avatar
+    admin(endpoint.path, {
+        "repository": repository, "ref": "refs/heads/main", "sender": sender,
+        "head_commit": {"timestamp": "2026-11-24T09:15:00Z"},
+        "commits": PUSH_COMMITS,
+    }, {"X-GitHub-Event": "push"})
+
+    def post_live_alert(event, field, login, url):
+        admin(endpoint.path, {
+            "repository": repository, "action": "opened", "sender": sender,
+            field: {"number": 12, "title": "Check webhook links", "user": {
+                "login": login, "html_url": url,
+            }},
+        }, {"X-GitHub-Event": event})
+
+    return post_live_alert
 
 
 def walk(node):
@@ -188,6 +230,7 @@ class Desktop:
     def __init__(self, process, launches):
         self.process = process
         self.launches = launches
+        self.checked_launches = []
 
     def nodes(self):
         for index in range(Atspi.get_desktop(0).get_child_count()):
@@ -195,9 +238,13 @@ class Desktop:
             if app and app.get_process_id() == self.process.pid:
                 yield from walk(app)
 
+    def ensure_launches_checked(self):
+        launches = self.launches.read_text().splitlines()
+        if launches != self.checked_launches:
+            raise RuntimeError(f"Unexpected external launches: {launches[len(self.checked_launches):]}")
+
     def ensure_running(self):
-        if self.launches.stat().st_size:
-            raise RuntimeError(f"Attempted an external launch: {self.launches.read_text().strip()}")
+        self.ensure_launches_checked()
         if self.process.poll() is not None:
             raise RuntimeError("SPK desktop exited during the smoke test")
 
@@ -351,7 +398,15 @@ class Desktop:
         wait_for("Enter to restore the focus from before the mouse-opened menu",
                  lambda: focused(prior_focus))
 
-    def check(self):
+    def external_link(self, url, activate):
+        self.ensure_running()
+        activate()
+        launches = wait_for(url, lambda: self.launches.read_text().splitlines()[len(self.checked_launches):])
+        if len(launches) != 1 or launches[0].split(maxsplit=1)[-1] != url:
+            raise RuntimeError(f"Expected one launch of {url}, got {launches}")
+        self.checked_launches.extend(launches)
+
+    def check(self, post_live_alert, logs):
         self.find("Sign in to SPK")
         self.window = subprocess.check_output(["xdotool", "search", "--name", "^SPK$"], text=True).strip()
         subprocess.run(["xdotool", "windowfocus", self.window], check=True)
@@ -369,6 +424,30 @@ class Desktop:
         self.find("🧪")
         self.find("🔔")
         self.check_webhook_actions()
+        self.find("Unlinked Author", "label")
+        self.visible_text("Local Author", "spk-smoke/demo")
+        for name, url in PUSH_LINKS:
+            self.external_link(url, lambda: self.click(name, "link"))
+        for name, url in PUSH_LINKS:
+            node = self.find(name, "link")
+            for _ in range(50):
+                if node.get_state_set().contains(Atspi.StateType.FOCUSED):
+                    break
+                subprocess.run(["xdotool", "key", "Tab"], check=True)
+                time.sleep(0.07)
+            else:
+                raise RuntimeError(f"Tab never focused {name}")
+            self.external_link(url, lambda: subprocess.run(["xdotool", "key", "Return"], check=True))
+        for event, field, name, handle in (
+            ("issues", "issue", "Issue Author", "issue-author"),
+            ("pull_request", "pull_request", "PR Author", "pr-author"),
+        ):
+            url = f"{GITHUB}/{handle}"
+            post_live_alert(event, field, name, url)
+            self.external_link(url, lambda: self.click(name, "link"))
+        if os.environ.get("SPK_SMOKE_WEBHOOK_AVATAR"):
+            subprocess.run(["import", "-window", self.window, str(logs / "webhook-dark.png")],
+                           timeout=10, check=True)
         self.click("smoke-chat", "push button", partial=True)
         self.visible_text("Smoke bold", "Smoke italic", "smoke code", "Smoke link", "@Smoke Reader")
         for emoji in ("👍🏽", "🇫🇷", "1️⃣"):
@@ -481,12 +560,12 @@ def main(work, artifacts):
     Atspi.init()
     with service(["node", "node_modules/nuxt/bin/nuxt.mjs", "dev", "--host", "127.0.0.1",
                   "--port", str(port)], server_log, web, web_env) as server:
-        seed(origin, database, server_log, server)
+        post_live_alert = seed(origin, database, server_log, server)
         binary = desktop_binary(work, logs, desktop_env)
         with service([binary], logs / "desktop.log", ROOT, client_env) as client:
             desktop = Desktop(client, launches)
             try:
-                desktop.check()
+                desktop.check(post_live_alert, logs)
             except Exception:
                 with suppress(OSError, subprocess.SubprocessError):
                     subprocess.run(["import", "-window", "root", str(logs / "failure.png")],
@@ -495,8 +574,7 @@ def main(work, artifacts):
                     for node in desktop.nodes():
                         print(node.get_role_name(), repr(node.get_name()), file=tree)
                 raise
-    if launches.stat().st_size:
-        raise RuntimeError(f"Attempted an external launch. See {launches}")
+    desktop.ensure_launches_checked()
     print("SPK desktop smoke test passed")
 
 
