@@ -602,7 +602,7 @@ fn microphone_controls(
         .child(Label::new("Sensitivity").font_semibold())
         .child(
             Label::new("Higher picks up quieter speech.")
-                .text_xs()
+                .text_sm()
                 .text_color(cx.theme().muted_foreground),
         )
         .child(
@@ -971,8 +971,13 @@ fn connection_diagnostics_popover(trigger: Button, cx: &Context<Spk>) -> Popover
                         .flex()
                         .justify_between()
                         .gap_2()
-                        .child(Label::new(label).text_color(cx.theme().muted_foreground))
-                        .child(Label::new(value))
+                        .text_xs()
+                        .child(
+                            Label::new(label)
+                                .line_height(px(16.0))
+                                .text_color(cx.theme().muted_foreground),
+                        )
+                        .child(Label::new(value).line_height(px(16.0)))
                 }),
             )
     })
