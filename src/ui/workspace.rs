@@ -448,6 +448,7 @@ impl Spk {
                                 .child(stage_icon.text_color(theme.muted_foreground).size(px(16.0)))
                                 .child(
                                     Label::new(stage_name.to_owned())
+                                        .text_sm()
                                         .font_semibold()
                                         .min_w_0()
                                         .truncate(),

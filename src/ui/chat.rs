@@ -1153,6 +1153,7 @@ impl Spk {
             .children(self.suggestion_menu(false, window, cx))
             .child(
                 editor::textarea(&self.chat_input)
+                    .text_base()
                     .flex_shrink_0()
                     .bg(if focused {
                         theme.secondary_hover.opacity(0.35)
@@ -1427,7 +1428,7 @@ impl Spk {
                     .when(starts_group, |header| {
                         let label = div()
                             .id("message-author")
-                            .child(Label::new(author.to_owned()).font_semibold());
+                            .child(Label::new(author.to_owned()).text_sm().font_semibold());
                         header.child(match user_menu {
                             Some((id, app)) => label
                                 .context_menu(move |menu, _, _| {
@@ -1478,7 +1479,7 @@ impl Spk {
                         |row| {
                             row.child(
                                 Label::new("(edited)")
-                                    .text_xs()
+                                    .text_size(px(10.))
                                     .text_color(theme.muted_foreground),
                             )
                         },
@@ -1551,7 +1552,9 @@ impl Spk {
                         .into_any_element()
                 })
             })
-            .when(!message.body.is_empty() && !editing, |row| row.child(text))
+            .when(!message.body.is_empty() && !editing, |row| {
+                row.child(text.text_base())
+            })
             .when(editing, |row| {
                 row.children(self.message_action_form(chat, message, window, cx))
             })
