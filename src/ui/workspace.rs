@@ -131,7 +131,21 @@ pub(super) fn sidebar_row_button(id: &'static str, selected: bool, cx: &App) -> 
         .h_8()
 }
 
-pub(super) fn sidebar_row_hover(highlighted: bool, cx: &App) -> Hsla {
+pub(super) fn sidebar_chat_row(
+    row: Stateful<Div>,
+    highlighted: bool,
+    hover_highlighted: bool,
+    cx: &App,
+) -> Stateful<Div> {
+    let hover = sidebar_row_hover(hover_highlighted, cx);
+    row.flex()
+        .items_center()
+        .rounded_md()
+        .when(highlighted, |row| row.bg(cx.theme().primary.opacity(0.10)))
+        .hover(|row| row.bg(hover))
+}
+
+fn sidebar_row_hover(highlighted: bool, cx: &App) -> Hsla {
     let theme = cx.theme();
     if highlighted {
         theme.primary.opacity(0.15)
@@ -899,7 +913,6 @@ impl Spk {
             unread_label(&name, counts)
         };
         let highlighted = active || counts.mentions > 0;
-        let hover = sidebar_row_hover(highlighted, cx);
         let select = sidebar_row_button("select", active, cx)
             .accessibility_label(label)
             .flex_1()
@@ -944,13 +957,7 @@ impl Spk {
                 };
                 this.send(command, None, cx);
             }));
-        let row = row
-            .flex()
-            .items_center()
-            .rounded_md()
-            .pr_1()
-            .when(highlighted, |row| row.bg(primary.opacity(0.10)))
-            .hover(|row| row.bg(hover));
+        let row = sidebar_chat_row(row.pr_1(), highlighted, highlighted, cx);
         if webhook {
             let webhook_menu = webhooks::WebhookRowMenu {
                 id: menu_id,

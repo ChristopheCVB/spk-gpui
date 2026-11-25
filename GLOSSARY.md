@@ -42,7 +42,7 @@ A moderation action that removes an account’s access to the instance while kee
 
 **Sidebar**
 
-The desktop navigation panel for channels and direct messages. In narrow windows, the same navigation appears in a full-width drawer.
+The desktop navigation panel for channels and direct messages.
 
 **Channel**
 

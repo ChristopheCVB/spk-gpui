@@ -12,7 +12,7 @@ use crate::{api::UserPresence, session::UserStatus};
 
 use super::{
     chat::{mark_read_item, unread_badges, unread_label},
-    workspace::{sidebar_row_button, sidebar_row_hover},
+    workspace::{sidebar_chat_row, sidebar_row_button},
     *,
 };
 
@@ -214,20 +214,13 @@ impl Spk {
             .as_ref()
             .is_some_and(|chat| chat.direct_message_peer.as_deref() == Some(id));
         let app = cx.weak_entity();
-        let theme = cx.theme();
         let status = sidebar.user_presence(id);
-        let hover = sidebar_row_hover(active || counts.unread > 0, cx);
-        div()
-            .id(SharedString::from(format!("person-{id}")))
-            .flex()
-            .items_center()
+        let row = div().id(SharedString::from(format!("person-{id}")));
+        let highlighted = active || counts.mentions > 0;
+        let hover_highlighted = active || counts.unread > 0;
+        sidebar_chat_row(row, highlighted, hover_highlighted, cx)
             .h_8()
             .gap_1()
-            .rounded_md()
-            .when(active || counts.mentions > 0, |row| {
-                row.bg(theme.primary.opacity(0.10))
-            })
-            .hover(|row| row.bg(hover))
             .child(
                 sidebar_row_button("open-direct-message", active, cx)
                     .accessibility_label(unread_label(
