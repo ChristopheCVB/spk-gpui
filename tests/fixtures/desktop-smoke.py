@@ -844,7 +844,7 @@ class Desktop:
         if not self.focused(previews, "toggle button"):
             raise RuntimeError("The toast took focus from the Settings control")
         started = time.monotonic()
-        time.sleep(2.5)
+        time.sleep(3.2)
         self.key("space")
         time.sleep(max(0, started + 5.5 - time.monotonic()))
         if sum(node.get_name() == notification_result for node in self.nodes()) != 1:
@@ -853,10 +853,14 @@ class Desktop:
         (config / "density").mkdir()
         self.click("Compact", "radio button")
         density_result = "Could not save your density preference."
-        toast = self.check_toast_position(density_result)
-        self.move(toast.x + toast.width // 2, toast.y + toast.height // 2)
-        self.check_toast_position(notification_result)
+        self.check_toast_position(density_result)
+        time.sleep(0.45)
+        newest = self.check_toast_position(density_result)
+        self.move(newest.x + newest.width // 2, newest.y + newest.height // 2)
         time.sleep(0.3)
+        previous = self.check_toast_position(notification_result)
+        if previous.y + previous.height > newest.y:
+            raise RuntimeError("Distinct action results should expand into separate toasts")
         self.screenshot(logs, "settings-toasts-dark.png")
         self.move(700, 30)
         wait_for("the five-second action toasts to expire",
