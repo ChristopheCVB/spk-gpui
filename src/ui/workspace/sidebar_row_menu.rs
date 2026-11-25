@@ -48,6 +48,33 @@ impl SidebarRowMenu {
         self.state.focus.clone()
     }
 
+    pub(super) fn triggers(
+        self,
+        button: Button,
+        anchor: Anchor,
+        items: impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static,
+    ) -> (
+        impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static,
+        AnyElement,
+    ) {
+        let items = Rc::new(items);
+        let right_click = items.clone();
+        let focus = self.focus();
+        (
+            move |menu, window, cx| {
+                let menu = if window.focused(cx).is_none() {
+                    menu.action_context(focus.clone())
+                } else {
+                    menu
+                };
+                right_click(menu, window, cx)
+            },
+            self.render(button, true, anchor, move |menu, window, cx| {
+                items(menu, window, cx)
+            }),
+        )
+    }
+
     pub(super) fn render(
         self,
         button: Button,
