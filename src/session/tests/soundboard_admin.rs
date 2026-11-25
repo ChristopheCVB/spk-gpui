@@ -145,6 +145,24 @@ async fn admin_soundboard_uploads_selected_audio_and_peer_refreshes_edits_and_de
         })
         .await;
 
+        let alice_socket = config.get_mut("session=alice").unwrap();
+        wait_for_sidebar(&alice_views, |view| {
+            view.channels.is_some() && matches!(view.connection, Connection::Online)
+        })
+        .await;
+        alice
+            .send(Command::JoinVoice("first".into()))
+            .await
+            .unwrap();
+        let join = receive_voice_frame(alice_socket).await;
+        confirm_voice_join(alice_socket, &join).await;
+        wait_for_sidebar(&alice_views, |view| {
+            view.voice
+                .as_ref()
+                .is_some_and(|voice| voice.is_participating())
+        })
+        .await;
+
         mutation(SoundboardAdminAction::Show);
         wait_for_sidebar(&alice_views, |view| view.admin_soundboard.clips.is_some()).await;
         mutation(SoundboardAdminAction::ChooseFile(invalid));
@@ -172,8 +190,37 @@ async fn admin_soundboard_uploads_selected_audio_and_peer_refreshes_edits_and_de
         mutation(SoundboardAdminAction::Gain(50));
         mutation(SoundboardAdminAction::Preview);
         wait_for_sidebar(&alice_views, |view| view.admin_soundboard.previewing).await;
+        mutation(SoundboardAdminAction::Trim(SoundboardTrim::Region, 0.004));
+        wait_for_sidebar(&alice_views, |view| {
+            !view.admin_soundboard.previewing
+                && view
+                    .admin_soundboard
+                    .selection
+                    .is_some_and(|selection| selection.start == 0.004 && selection.end == 0.012)
+        })
+        .await;
+        mutation(SoundboardAdminAction::Trim(SoundboardTrim::Region, 0.008));
+        mutation(SoundboardAdminAction::Preview);
+        wait_for_sidebar(&alice_views, |view| view.admin_soundboard.previewing).await;
+        mutation(SoundboardAdminAction::Gain(75));
+        wait_for_sidebar(&alice_views, |view| {
+            !view.admin_soundboard.previewing
+                && view
+                    .admin_soundboard
+                    .selection
+                    .is_some_and(|selection| selection.gain == 75)
+        })
+        .await;
+        mutation(SoundboardAdminAction::Gain(50));
+        mutation(SoundboardAdminAction::Preview);
+        wait_for_sidebar(&alice_views, |view| view.admin_soundboard.previewing).await;
         mutation(SoundboardAdminAction::StopPreview);
         wait_for_sidebar(&alice_views, |view| !view.admin_soundboard.previewing).await;
+        alice.send(Command::LeaveVoice).await.unwrap();
+        assert_eq!(
+            receive_voice_frame(alice_socket).await,
+            value!({"type":"voice:leave","sid":join["sid"]})
+        );
         mutation(add());
         let sidebar = wait_for_sidebar(&alice_views, |view| {
             view.admin_soundboard.error == Some("Could not save the sound. Try again.")

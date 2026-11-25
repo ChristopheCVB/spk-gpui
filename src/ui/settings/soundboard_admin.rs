@@ -168,6 +168,7 @@ impl Settings {
         let form = &self.soundboard;
         let busy = board.saving || board.decoding || board.loading || form.picker_open;
         let disabled = busy || board.previewing;
+        let selection_disabled = busy || board.previewing && board.preview_position.is_none();
         let theme = cx.theme();
         let error = form
             .picker_error
@@ -195,9 +196,12 @@ impl Settings {
                     let duration = waveform.duration;
                     div().w_full().flex().flex_col().gap_3()
                         .child(Label::new(format!("Source duration: {duration:.3} s")))
-                        .child(form.waveform(waveform, crop, disabled, cx))
+                        .child(form.waveform(
+                            waveform, crop, board.preview_position.unwrap_or(crop.start),
+                            selection_disabled, cx,
+                        ))
                         .child(waveform::timing(crop))
-                        .child(field("Upload gain (%)", &form.gain, disabled, cx))
+                        .child(field("Upload gain (%)", &form.gain, selection_disabled, cx))
                         .child(form.upload.render(disabled, cx))
                         .child(div().flex().gap_2()
                             .child(control_button("preview-crop").label("Play selection").tab_stop(true).disabled(disabled)

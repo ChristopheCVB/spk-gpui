@@ -27,6 +27,7 @@ impl SoundboardForm {
         &self,
         waveform: &SoundboardWaveform,
         crop: SoundboardCrop,
+        playhead: f64,
         disabled: bool,
         cx: &Context<Settings>,
     ) -> impl IntoElement {
@@ -135,7 +136,24 @@ impl SoundboardForm {
                         disabled,
                         &self.trim_focus[1],
                         cx,
-                    )),
+                    ))
+                    .child(
+                        div()
+                            .id("preview-playhead")
+                            .role(Role::ProgressIndicator)
+                            .aria_label("Preview playhead")
+                            .aria_value(format!("{playhead:.3} s"))
+                            .aria_numeric_value(playhead)
+                            .aria_min_numeric_value(crop.start)
+                            .aria_max_numeric_value(crop.end)
+                            .absolute()
+                            .left(relative((playhead / duration) as f32))
+                            .ml(px(-1.0))
+                            .top_0()
+                            .bottom_0()
+                            .w(px(2.0))
+                            .bg(theme.foreground),
+                    ),
             )
     }
 }

@@ -1376,6 +1376,7 @@ async fn watch_session(
                     break SessionEnd::Invalidated(SESSION_EXPIRED);
                 }
             }
+            () = AdminSoundboard::preview_changed(&mut admin_soundboard.preview_progress) => {}
             Some(Ok(result)) = admin_soundboard.tasks.join_next() => {
                 if admin_soundboard.complete(&mut sidebar.admin_soundboard, result).is_err() {
                     break SessionEnd::Invalidated(SESSION_EXPIRED);

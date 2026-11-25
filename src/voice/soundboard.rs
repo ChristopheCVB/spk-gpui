@@ -349,6 +349,7 @@ fn decode(bytes: &[u8]) -> Option<SamplesBuffer> {
 pub(crate) async fn play(
     bytes: Vec<u8>,
     mut settings: watch::Receiver<MediaOutput>,
+    progress: Option<watch::Sender<Duration>>,
 ) -> Result<(), ()> {
     let mut clip = spawn_blocking(move || decode(&bytes))
         .await
@@ -402,6 +403,15 @@ pub(crate) async fn play(
                         if ended.elapsed() >= Duration::from_millis(120) {
                             return Ok(());
                         }
+                    } else if let Some(progress) = &progress {
+                        let next = position + player.get_pos();
+                        progress.send_if_modified(|current| {
+                            if next <= *current {
+                                return false;
+                            }
+                            *current = next;
+                            true
+                        });
                     }
                 }
             }

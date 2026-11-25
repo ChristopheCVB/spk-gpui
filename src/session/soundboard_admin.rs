@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{future::pending, path::PathBuf, sync::Arc, time::Duration};
 
 use reqwest::StatusCode;
 use tokio::{
@@ -54,6 +54,7 @@ pub struct SoundboardAdminView {
     pub selection: Option<SoundboardCrop>,
     pub decoding: bool,
     pub previewing: bool,
+    pub preview_position: Option<f64>,
     pub saving: bool,
     pub revision: u64,
     pub error: Option<&'static str>,
@@ -89,6 +90,7 @@ pub(super) struct AdminSoundboard {
     open: bool,
     source: Option<Arc<SoundSource>>,
     preview_output: Option<watch::Sender<MediaOutput>>,
+    pub preview_progress: Option<watch::Receiver<Duration>>,
     pub tasks: JoinSet<Completion>,
     pub mutations: JoinSet<(Mutation, Result<(), WorkError>)>,
 }
@@ -108,13 +110,34 @@ impl AdminSoundboard {
                 true
             });
         }
+        let view = &mut sidebar.admin_soundboard;
+        if let (Some(progress), Some(crop)) = (&mut self.preview_progress, view.selection) {
+            view.preview_position =
+                Some((crop.start + progress.borrow_and_update().as_secs_f64()).min(crop.end));
+        }
+    }
+
+    pub async fn preview_changed(progress: &mut Option<watch::Receiver<Duration>>) {
+        if let Some(progress) = progress
+            && progress.changed().await.is_ok()
+        {
+            return;
+        }
+        pending().await
+    }
+
+    fn finish_preview(&mut self, view: &mut SoundboardAdminView) {
+        self.tasks = JoinSet::new();
+        self.preview_output = None;
+        self.preview_progress = None;
+        view.previewing = false;
+        view.preview_position = None;
     }
 
     fn close(&mut self, view: &mut SoundboardAdminView) {
         self.open = false;
-        self.tasks = JoinSet::new();
+        self.finish_preview(view);
         self.source = None;
-        self.preview_output = None;
         *view = SoundboardAdminView {
             saving: !self.mutations.is_empty(),
             ..Default::default()
@@ -160,12 +183,14 @@ impl AdminSoundboard {
             return;
         }
         if view.previewing {
-            if matches!(action, StopPreview) {
-                self.tasks = JoinSet::new();
-                self.preview_output = None;
-                view.previewing = false;
+            match action {
+                StopPreview => {
+                    self.finish_preview(view);
+                    return;
+                }
+                Trim(..) | NudgeTrim(..) | Gain(_) if self.preview_progress.is_some() => {}
+                _ => return,
             }
-            return;
         }
         view.error = None;
         view.notice = None;
@@ -190,6 +215,7 @@ impl AdminSoundboard {
             }
             Trim(target, seconds) | NudgeTrim(target, seconds) => {
                 if let (Some(source), Some(crop)) = (&self.source, &mut view.selection) {
+                    let previous = (crop.start, crop.end);
                     let seconds = if matches!(action, NudgeTrim(..)) {
                         seconds
                             + match target {
@@ -200,11 +226,17 @@ impl AdminSoundboard {
                         seconds
                     };
                     source.trim(crop, target, seconds);
+                    if previous != (crop.start, crop.end) && view.previewing {
+                        self.finish_preview(view);
+                    }
                 }
             }
             Gain(gain) => {
                 if let Some(crop) = &mut view.selection {
                     crop.gain = gain;
+                    if view.previewing {
+                        self.finish_preview(view);
+                    }
                 }
             }
             Preview => {
@@ -213,8 +245,11 @@ impl AdminSoundboard {
                     return;
                 };
                 let (sender, receiver) = watch::channel(output);
+                let (progress, positions) = watch::channel(Duration::ZERO);
                 self.preview_output = Some(sender);
+                self.preview_progress = Some(positions);
                 view.previewing = true;
+                view.preview_position = Some(crop.start);
                 self.tasks.spawn(async move {
                     Completion::Previewed(
                         async {
@@ -222,7 +257,7 @@ impl AdminSoundboard {
                                 .await
                                 .unwrap_or(Err("Could not prepare the selected audio."))
                                 .map_err(WorkError::Invalid)?;
-                            soundboard::play(clip.wav, receiver)
+                            soundboard::play(clip.wav, receiver, Some(progress))
                                 .await
                                 .map_err(|_| WorkError::Invalid("Could not preview this sound."))
                         }
@@ -240,7 +275,7 @@ impl AdminSoundboard {
                     Completion::Previewed(
                         async {
                             let wav = client.soundboard_file(id).await?;
-                            soundboard::play(wav, receiver)
+                            soundboard::play(wav, receiver, None)
                                 .await
                                 .map_err(|_| WorkError::Invalid("Could not preview this sound."))
                         }
@@ -296,8 +331,7 @@ impl AdminSoundboard {
                 }
             }
             Completion::Previewed(result) => {
-                self.preview_output = None;
-                view.previewing = false;
+                self.finish_preview(view);
                 if let Err(error) = result {
                     view.error = Some(message(error, "Could not preview this sound.")?);
                 }
