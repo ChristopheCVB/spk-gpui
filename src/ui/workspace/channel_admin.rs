@@ -182,7 +182,7 @@ impl ChannelActions {
             return menu;
         }
         let editable = !sidebar.channel_admin.pending;
-        let mut menu = menu.separator().label("Admin").item(channel_form_item(
+        let mut menu = menu.separator().item(channel_form_item(
             "Rename",
             IconName::Pencil,
             ChannelForm::Rename(id.clone(), name.clone()),

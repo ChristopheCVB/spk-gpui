@@ -29,6 +29,11 @@ pub(super) fn mute_item(channel_id: String, muted: bool, app: WeakEntity<Spk>) -
     } else {
         "Mute notifications"
     })
+    .icon(if muted {
+        IconName::Bell
+    } else {
+        IconName::BellOff
+    })
     .on_click(move |_, _, cx| {
         let _ = app.update(cx, |this, cx| {
             this.change_notifications(

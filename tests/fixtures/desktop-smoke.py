@@ -336,8 +336,7 @@ class Desktop:
         subprocess.run(["xdotool", "click", str(button)], check=True)
 
     def menu_order(self, *labels):
-        positions = [self.bounds(label, None if label == "Admin" else "menu item").y
-                     for label in labels]
+        positions = [self.bounds(label, "menu item").y for label in labels]
         if positions != sorted(set(positions)):
             raise RuntimeError(f"Menu items are out of order: {labels}")
 
@@ -379,7 +378,8 @@ class Desktop:
         else:
             self.click(self.channel_ellipsis(channel), "push button")
         if admin:
-            self.menu_order(action, "Admin", "Rename", "Move up", "Move down", "Delete")
+            self.menu_order(action, "Rename", "Move up", "Move down", "Delete")
+            self.absent("Admin", None)
         else:
             self.find(action, "menu item")
             self.absent("Rename", "menu item")
@@ -473,14 +473,16 @@ class Desktop:
         person = "Smoke Reader"
         self.find("smoke-target, 1 unread, 0 pings", "push button")
         self.click("smoke-target", "push button", partial=True, button=3)
-        self.menu_order("Mark read", "Mute notifications", "Admin", "Rename", "Move up", "Move down", "Delete")
+        self.menu_order("Mark read", "Mute notifications", "Rename", "Move up", "Move down", "Delete")
+        self.absent("Admin", None)
         self.check_disabled_menu_item("Move down")
         self.screenshot(logs, "text-channel-menu-dark.png")
         self.click("Mark read", "menu item")
         self.find("smoke-target", "push button")
         text_action = self.channel_ellipsis("smoke-target")
         self.click(text_action, "push button")
-        self.menu_order("Mark read", "Mute notifications", "Admin", "Rename", "Move up", "Move down", "Delete")
+        self.menu_order("Mark read", "Mute notifications", "Rename", "Move up", "Move down", "Delete")
+        self.absent("Admin", None)
         self.click("Delete", "menu item")
         self.visible_text("Delete channel")
         self.click("Cancel", "push button")
@@ -510,8 +512,9 @@ class Desktop:
             return next(user for user in admin("/api/users") if user["displayName"] == person)
 
         self.open_participant_menu(person, context=True)
-        self.menu_order("Profile", "Send DM", "Copy name", "Admin", "Change role", "Move to",
+        self.menu_order("Profile", "Send DM", "Copy name", "Change role", "Move to",
                         "Disconnect from voice", "Ban")
+        self.absent("Admin", None)
         self.click("Move to", "menu item")
         self.find(SECOND_VOICE, "menu item")
         self.absent(FIRST_VOICE, "menu item")

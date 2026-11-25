@@ -2277,13 +2277,14 @@ fn sidebar_participant_items(
                     }))
                     .item(
                         voice::participant_volume_item(user_id.clone(), name.clone(), app.clone())
-                            .icon(IconName::Settings2),
+                            .icon(IconName::SlidersHorizontal),
                     )
             });
         menu.when(is_admin, |menu| {
             let role_app = app.clone();
             let role_user = user_id.clone();
-            let menu = menu.separator().label("Admin").submenu(
+            let menu = menu.separator().submenu_with_icon(
+                Some(Icon::new(IconName::Shield)),
                 "Change role",
                 window,
                 cx,
@@ -2370,11 +2371,16 @@ fn add_participant_role_choices(
     id: &str,
     (current_role, enabled): (Option<AccountRole>, bool),
 ) -> PopupMenu {
-    for (label, role) in [("Admin", AccountRole::Admin), ("User", AccountRole::User)] {
+    menu = menu.check_side(gpui_kit::component::Side::Right);
+    for (label, role, icon) in [
+        ("Admin", AccountRole::Admin, IconName::ShieldCheck),
+        ("User", AccountRole::User, IconName::User),
+    ] {
         let app = app.clone();
         let id = id.to_owned();
         menu = menu.item(
             PopupMenuItem::new(label)
+                .icon(icon)
                 .checked(current_role == Some(role))
                 .disabled(!enabled)
                 .on_click(move |_, _, cx| {
@@ -2507,18 +2513,27 @@ fn add_voice_moderation_items(
         let user_id = user_id.to_owned();
         let destinations = destinations.to_vec();
         let channel_focus = channel_focus.cloned();
-        menu = menu.submenu("Move to", window, cx, move |mut submenu, _, _| {
-            for (id, name) in &destinations {
-                submenu = submenu.item(voice_moderation_item(
-                    name.clone(),
-                    app.clone(),
-                    user_id.clone(),
-                    VoiceModeration::Move(id.clone()),
-                    channel_focus.clone(),
-                ));
-            }
-            submenu
-        });
+        menu = menu.submenu_with_icon(
+            Some(Icon::new(IconName::MoveRight)),
+            "Move to",
+            window,
+            cx,
+            move |mut submenu, _, _| {
+                for (id, name) in &destinations {
+                    submenu = submenu.item(
+                        voice_moderation_item(
+                            name.clone(),
+                            app.clone(),
+                            user_id.clone(),
+                            VoiceModeration::Move(id.clone()),
+                            channel_focus.clone(),
+                        )
+                        .icon(IconName::Volume2),
+                    );
+                }
+                submenu
+            },
+        );
     }
     menu.item(
         voice_moderation_item(
@@ -2528,6 +2543,7 @@ fn add_voice_moderation_items(
             VoiceModeration::Disconnect,
             channel_focus.cloned(),
         )
+        .icon(IconName::PhoneOff)
         .disabled(destinations.is_none()),
     )
 }

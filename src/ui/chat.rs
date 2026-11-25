@@ -333,11 +333,13 @@ pub(super) fn unread_label(name: &str, counts: UnreadState) -> String {
 }
 
 pub(super) fn mark_read_item(channel_id: String, app: WeakEntity<Spk>) -> PopupMenuItem {
-    PopupMenuItem::new("Mark read").on_click(move |_, _, cx| {
-        let _ = app.update(cx, |this, cx| {
-            this.send(Command::MarkChatRead(channel_id.clone()), None, cx);
-        });
-    })
+    PopupMenuItem::new("Mark read")
+        .icon(IconName::CheckCheck)
+        .on_click(move |_, _, cx| {
+            let _ = app.update(cx, |this, cx| {
+                this.send(Command::MarkChatRead(channel_id.clone()), None, cx);
+            });
+        })
 }
 
 fn reaction_glyph(emoji: &str, size: Pixels) -> AnyElement {
