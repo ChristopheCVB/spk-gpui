@@ -69,7 +69,10 @@ impl AttachmentInput {
                 let mime = mime.essence_str().to_owned();
                 let preview =
                     if mime.starts_with("image/") && size <= MAX_ATTACHMENT_PREVIEW_BYTES as u64 {
-                        let preview = images::thumbnail(BufReader::new(&mut file), 768, 512);
+                        let preview = images::thumbnail(
+                            BufReader::new(&mut file),
+                            images::ATTACHMENT_PREVIEW_SIZE,
+                        );
                         file.rewind().map_err(|_| "Could not read file.")?;
                         preview
                     } else {

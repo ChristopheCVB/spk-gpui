@@ -11,7 +11,7 @@ pub use attachments::{AttachmentInput, UploadStatus};
 use attachments::{AttachmentWork, QueuedAttachment};
 pub(super) use drafts::DraftStore;
 pub use gifs::GifPickerView;
-use gifs::{GifPicker, StagedGif};
+use gifs::{GifPicker, StagedGif, StagedGifPreview};
 pub use images::{ChatImage, image_preview};
 use preview_images::{PreviewImages, PreviewResult};
 
@@ -200,6 +200,8 @@ pub(super) struct ChatSession {
     pub pin_tasks: JoinSet<Result<Vec<ChatMessage>, Failure>>,
     pub preview_tasks: JoinSet<PreviewResult>,
     pub message_preview: JoinSet<()>,
+    pub staged_gif_preview: JoinSet<StagedGifPreview>,
+    pending_staged_gif_preview: Option<(String, String)>,
     deleted_during_load: HashSet<String>,
     pub tasks: JoinSet<Result<MessagePage, Failure>>,
     pub(super) attachments: AttachmentWork,

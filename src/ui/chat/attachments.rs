@@ -1214,23 +1214,29 @@ fn open_extension(mime: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Access, AccessResult, Attachment, AttachmentCard, AttachmentKind, Preview, TextPreview,
-        finish_original, load_preview, stage_original,
+        Access, AccessResult, Attachment, AttachmentCard, AttachmentKind, ChatImage, Preview,
+        TextPreview, finish_original, load_preview, stage_original,
     };
     use rodio::Source;
     use std::{
         io::{Seek, Write},
+        sync::Arc,
         time::Duration,
     };
+
+    fn sent_image_preview(bytes: &[u8]) -> Arc<ChatImage> {
+        let Ok(AccessResult::Preview(Preview::Image(preview))) =
+            load_preview(AttachmentKind::Image, bytes.to_vec())
+        else {
+            panic!("expected an image preview for the sent attachment");
+        };
+        preview
+    }
 
     #[test]
     fn sent_gif_attachment_keeps_both_preview_frames() {
         let fixture = include_bytes!("../../../tests/fixtures/attachments/preview.gif");
-        let Ok(AccessResult::Preview(Preview::Image(preview))) =
-            load_preview(AttachmentKind::Image, fixture.to_vec())
-        else {
-            panic!("expected an image preview for the sent GIF");
-        };
+        let preview = sent_image_preview(fixture);
 
         assert_eq!(preview.pixels.frame_count(), 2);
         assert_eq!(&preview.pixels.as_bytes(0).unwrap()[..4], &[0, 0, 255, 255]);
@@ -1248,11 +1254,7 @@ mod tests {
         for extension_name in [b"NETSCAPE2.0", b"ANIMEXTS1.0"] {
             fixture[extension..extension + 11].copy_from_slice(extension_name);
             fixture[extension + 13] = 1;
-            let Ok(AccessResult::Preview(Preview::Image(preview))) =
-                load_preview(AttachmentKind::Image, fixture.clone())
-            else {
-                panic!("expected an image preview for the sent GIF");
-            };
+            let preview = sent_image_preview(&fixture);
 
             assert_eq!(preview.frame_at(Duration::from_millis(610)).0, 0);
             assert_eq!(preview.frame_at(Duration::from_millis(1220)), (1, None));
@@ -1268,11 +1270,7 @@ mod tests {
             .position(|data| data == b"\x0bNETSCAPE2.0")
             .unwrap();
         fixture.splice(extension..extension, *b"\x0bOTHERAPP1.0");
-        let Ok(AccessResult::Preview(Preview::Image(preview))) =
-            load_preview(AttachmentKind::Image, fixture)
-        else {
-            panic!("expected an image preview for the sent GIF");
-        };
+        let preview = sent_image_preview(&fixture);
 
         assert_eq!(preview.frame_at(Duration::from_millis(610)), (1, None));
     }
@@ -1291,11 +1289,7 @@ mod tests {
                 })
                 .unwrap();
         }
-        let Ok(AccessResult::Preview(Preview::Image(preview))) =
-            load_preview(AttachmentKind::Image, fixture)
-        else {
-            panic!("expected a static image preview for the single-frame GIF");
-        };
+        let preview = sent_image_preview(&fixture);
         assert_eq!(preview.pixels.frame_count(), 1);
     }
 

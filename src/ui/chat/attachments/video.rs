@@ -3,7 +3,9 @@ mod h264;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use gpui_kit::RenderImage;
-use image::{DynamicImage, Frame, RgbaImage};
+use image::{DynamicImage, RgbaImage};
+
+use crate::render_image::bgra_frame;
 use zvidlib_container::container::open_tracks;
 use zvidlib_core::{
     Limits,
@@ -183,13 +185,10 @@ fn vp_image(frame: VideoFrame) -> Result<Arc<RenderImage>, &'static str> {
 }
 
 fn preview_image(image: RgbaImage) -> Arc<RenderImage> {
-    let mut image = DynamicImage::ImageRgba8(image)
+    let image = DynamicImage::ImageRgba8(image)
         .thumbnail(384, 240)
         .into_rgba8();
-    for pixel in image.pixels_mut() {
-        pixel.0.swap(0, 2);
-    }
-    Arc::new(RenderImage::new(vec![Frame::new(image)]))
+    Arc::new(RenderImage::new(vec![bgra_frame(image)]))
 }
 
 #[cfg(test)]

@@ -8,8 +8,15 @@ use gif::{
     Extension, Repeat,
     streaming_decoder::{Block, Decoded, OutputBuffer, StreamingDecoder},
 };
-use gpui_kit::RenderImage;
-use image::{AnimationDecoder, Frame, ImageDecoder, ImageFormat, ImageReader, Limits, RgbaImage};
+use gpui_kit::{RenderImage, Size};
+use image::{AnimationDecoder, ImageDecoder, ImageFormat, ImageReader, Limits};
+
+use crate::render_image::bgra_frame;
+
+pub(super) const ATTACHMENT_PREVIEW_SIZE: Size<u32> = Size {
+    width: 768,
+    height: 512,
+};
 
 const MAX_GIF_FRAMES: usize = 512;
 const MAX_GIF_SOURCE_PIXELS: u64 = 64 * 1024 * 1024;
@@ -22,6 +29,10 @@ pub struct ChatImage {
 }
 
 impl ChatImage {
+    pub(super) fn pixel_bytes(&self) -> usize {
+        self.pixels.as_bytes(0).map_or(0, |frame| frame.len()) * self.pixels.frame_count()
+    }
+
     pub fn frame_at(&self, elapsed: Duration) -> (usize, Option<Duration>) {
         if self.frame_ends.len() <= 1 {
             return (0, None);
@@ -41,27 +52,23 @@ impl ChatImage {
 }
 
 pub fn image_preview(bytes: &[u8]) -> Option<Arc<ChatImage>> {
-    raster_thumbnail(bytes, 768, 512)
+    raster_thumbnail(bytes, ATTACHMENT_PREVIEW_SIZE)
 }
 
-pub(super) fn raster_thumbnail(bytes: &[u8], width: u32, height: u32) -> Option<Arc<ChatImage>> {
-    thumbnail(Cursor::new(bytes), width, height)
+pub(super) fn raster_thumbnail(bytes: &[u8], bounds: Size<u32>) -> Option<Arc<ChatImage>> {
+    thumbnail(Cursor::new(bytes), bounds)
 }
 
-pub(super) fn thumbnail(
-    reader: impl BufRead + Seek,
-    width: u32,
-    height: u32,
-) -> Option<Arc<ChatImage>> {
+pub(super) fn thumbnail(reader: impl BufRead + Seek, bounds: Size<u32>) -> Option<Arc<ChatImage>> {
     let reader = ImageReader::new(reader).with_guessed_format().ok()?;
     let mut limits = Limits::default();
     limits.max_image_width = Some(8192);
     limits.max_image_height = Some(8192);
     limits.max_alloc = Some(64 * 1024 * 1024);
     let preview = if reader.format() == Some(ImageFormat::Gif) {
-        gif_thumbnail(reader.into_inner(), limits, width, height)?
+        gif_thumbnail(reader.into_inner(), limits, bounds)?
     } else {
-        still_thumbnail(reader, limits, width, height)?
+        still_thumbnail(reader, limits, bounds)?
     };
     Some(Arc::new(preview))
 }
@@ -69,13 +76,16 @@ pub(super) fn thumbnail(
 fn still_thumbnail(
     mut reader: ImageReader<impl BufRead + Seek>,
     limits: Limits,
-    width: u32,
-    height: u32,
+    bounds: Size<u32>,
 ) -> Option<ChatImage> {
     reader.limits(limits);
-    let preview = reader.decode().ok()?.thumbnail(width, height).into_rgba8();
+    let preview = reader
+        .decode()
+        .ok()?
+        .thumbnail(bounds.width, bounds.height)
+        .into_rgba8();
     Some(ChatImage {
-        pixels: Arc::new(RenderImage::new(vec![preview_frame(preview)])),
+        pixels: Arc::new(RenderImage::new(vec![bgra_frame(preview)])),
         frame_ends: Vec::new(),
         repeat: Repeat::Finite(0),
     })
@@ -171,8 +181,7 @@ fn gif_metadata(reader: &mut impl BufRead, limits: &Limits) -> Option<GifMetadat
 fn gif_thumbnail(
     mut reader: impl BufRead + Seek,
     limits: Limits,
-    width: u32,
-    height: u32,
+    bounds: Size<u32>,
 ) -> Option<ChatImage> {
     // Read the frame budget and loop extension before allocating composited frames.
     let GifMetadata {
@@ -185,8 +194,7 @@ fn gif_thumbnail(
         return still_thumbnail(
             ImageReader::with_format(reader, ImageFormat::Gif),
             limits,
-            width,
-            height,
+            bounds,
         );
     }
 
@@ -201,9 +209,9 @@ fn gif_thumbnail(
             return None;
         }
         let source = frame.ok()?.into_buffer();
-        let preview = if dimensions.0 > width || dimensions.1 > height {
+        let preview = if dimensions.0 > bounds.width || dimensions.1 > bounds.height {
             image::DynamicImage::ImageRgba8(source)
-                .thumbnail(width, height)
+                .thumbnail(bounds.width, bounds.height)
                 .into_rgba8()
         } else {
             source
@@ -211,7 +219,7 @@ fn gif_thumbnail(
         if preview.as_raw().len() * frame_ends.len() > MAX_GIF_PREVIEW_BYTES {
             return None;
         }
-        frames.push(preview_frame(preview));
+        frames.push(bgra_frame(preview));
     }
     if frames.len() != frame_ends.len() {
         return None;
@@ -221,11 +229,4 @@ fn gif_thumbnail(
         frame_ends,
         repeat,
     })
-}
-
-fn preview_frame(mut preview: RgbaImage) -> Frame {
-    for pixel in preview.pixels_mut() {
-        pixel.0.swap(0, 2);
-    }
-    Frame::new(preview)
 }

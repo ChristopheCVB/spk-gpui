@@ -142,6 +142,7 @@ pub enum Command {
     },
     ShowGifs(bool),
     SearchGifs(String),
+    ShowGifPreviews(Vec<String>),
     ShowGifFavorites(bool),
     MoreGifs,
     RetryGifs,
@@ -732,6 +733,7 @@ async fn watch_session(
         unread.write_next(client);
         chat.fill_previews(client);
         chat.gifs.fill_previews(client);
+        chat.fill_staged_gif_preview(client);
         sidebar.chat = chat.view();
         search.retain_conversation(
             &mut sidebar.search,
@@ -843,6 +845,7 @@ async fn watch_session(
                 chat.gifs.favorites_complete(client, result);
             }
             Some(Ok(result)) = chat.gifs.previews.join_next() => chat.gifs.preview_complete(result),
+            Some(Ok(result)) = chat.staged_gif_preview.join_next() => chat.staged_gif_preview_complete(result),
             Some(_) = chat.message_preview.join_next() => {},
             Some(result) = chat.pin_tasks.join_next() => {
                 let result = result.unwrap_or(Err(Failure::Connection));
@@ -1037,6 +1040,7 @@ async fn watch_session(
                 Ok(Command::ShowGifs(true)) => chat.open_gifs(client),
                 Ok(Command::ShowGifs(false)) => chat.gifs.close(),
                 Ok(Command::SearchGifs(query)) => chat.gifs.search(client, query),
+                Ok(Command::ShowGifPreviews(urls)) => chat.gifs.show_previews(urls),
                 Ok(Command::ShowGifFavorites(show)) => chat.gifs.show_favorites(client, show),
                 Ok(Command::MoreGifs) => chat.gifs.more(client),
                 Ok(Command::RetryGifs) => chat.gifs.retry_browse(client),

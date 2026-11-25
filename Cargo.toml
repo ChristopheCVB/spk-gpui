@@ -64,7 +64,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 screencapturekit = { version = "=11.1.2", features = ["macos_15_0"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-ashpd = { version = "0.14.1", default-features = false, features = ["async-io", "screencast"] }
+ashpd = { version = "0.14.1", default-features = false, features = ["async-io", "screencast", "settings"] }
 cpal = { version = "0.18.2", features = ["pulseaudio"] }
 notify-rust = "=4.19.0"
 cxx = "1.0"

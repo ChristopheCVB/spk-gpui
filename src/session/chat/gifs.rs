@@ -3,14 +3,25 @@ use super::{
     *,
 };
 
+use gpui_kit::Size;
 use reqwest::StatusCode;
 
 use crate::api::{GifItem, GifPage};
+
+const PICKER_PREVIEW_SIZE: Size<u32> = Size {
+    width: 160,
+    height: 100,
+};
+// The viewport can show part of three rows of two thumbnails.
+const MAX_PICKER_PREVIEW_BYTES: usize = 192 * 1024 * 1024;
+
+pub(in crate::session) type StagedGifPreview = (String, String, PreviewImage);
 
 #[derive(Clone)]
 pub struct StagedGif {
     pub item: GifItem,
     pub image: Option<Arc<ChatImage>>,
+    preview_attempted: bool,
 }
 
 #[derive(Clone, Default)]
@@ -27,6 +38,7 @@ pub struct GifPickerView {
     pub favorites_error: Option<&'static str>,
     pub saving: bool,
     pub mutation_error: Option<&'static str>,
+    pub preview_urls: Vec<String>,
     images: Arc<HashMap<String, Option<Arc<ChatImage>>>>,
 }
 
@@ -70,6 +82,7 @@ pub(in crate::session) struct GifPicker {
     pub browsing: JoinSet<Result<GifPage, Failure>>,
     pub favorites: JoinSet<Result<FavoriteResult, Failure>>,
     pub previews: JoinSet<(String, PreviewImage)>,
+    loading_previews: HashSet<String>,
 }
 
 impl GifPicker {
@@ -85,6 +98,7 @@ impl GifPicker {
         self.view = None;
         self.browsing = JoinSet::new();
         self.previews = JoinSet::new();
+        self.loading_previews.clear();
     }
 
     pub fn show_favorites(&mut self, client: &SpkClient, show: bool) {
@@ -97,7 +111,9 @@ impl GifPicker {
         view.showing_favorites = show;
         self.browsing = JoinSet::new();
         self.previews = JoinSet::new();
+        self.loading_previews.clear();
         view.images = Arc::default();
+        view.preview_urls.clear();
         view.browse_loading = false;
         if !show {
             self.browse(client, 1, false);
@@ -145,8 +161,10 @@ impl GifPicker {
         self.browsing = JoinSet::new();
         if page == 1 {
             self.previews = JoinSet::new();
+            self.loading_previews.clear();
             view.items = Arc::default();
             view.images = Arc::default();
+            view.preview_urls.clear();
             view.has_next = false;
         }
         self.requested_page = page;
@@ -280,41 +298,56 @@ impl GifPicker {
         let item = view.visible().find(|gif| gif.id == id)?.clone();
         let image = view.image(&item.preview);
         self.close();
-        Some(StagedGif { item, image })
+        Some(StagedGif {
+            item,
+            image,
+            preview_attempted: false,
+        })
     }
 
-    pub fn fill_previews(&mut self, client: &SpkClient) {
+    pub fn show_previews(&mut self, mut urls: Vec<String>) {
         let Some(view) = &mut self.view else {
             return;
         };
-        let capacity = 4usize.saturating_sub(self.previews.len());
-        if capacity == 0 {
+        let eligible: HashSet<_> = view.visible().map(|gif| gif.preview.as_str()).collect();
+        urls.retain(|url| eligible.contains(url.as_str()));
+        if view.preview_urls == urls {
             return;
         }
-        let pending: Vec<_> = view
-            .visible()
-            .map(|gif| &gif.preview)
-            .filter(|url| !view.images.contains_key(*url))
-            .take(capacity)
-            .cloned()
-            .collect();
-        for url in pending {
-            if Arc::make_mut(&mut view.images)
-                .insert(url.clone(), None)
-                .is_some()
-            {
+        let visible: HashSet<_> = urls.iter().collect();
+        Arc::make_mut(&mut view.images).retain(|url, _| visible.contains(url));
+        view.preview_urls = urls;
+    }
+
+    pub fn fill_previews(&mut self, client: &SpkClient) {
+        let Some(view) = &self.view else {
+            return;
+        };
+        for url in &view.preview_urls {
+            if self.previews.len() >= 4 {
+                break;
+            }
+            if view.images.contains_key(url) || !self.loading_previews.insert(url.clone()) {
                 continue;
             }
+            let url = url.clone();
             let client = client.clone();
             self.previews.spawn(async move {
-                let image = load_image(&client, &url, 160, 100).await;
+                let image = load_image(&client, &url, PICKER_PREVIEW_SIZE).await;
                 (url, image)
             });
         }
     }
 
     pub fn preview_complete(&mut self, (url, image): (String, PreviewImage)) {
-        if let Some(view) = &mut self.view {
+        self.loading_previews.remove(&url);
+        let Some(view) = &mut self.view else {
+            return;
+        };
+        if view.preview_urls.contains(&url) {
+            let retained: usize = view.images().map(|image| image.pixel_bytes()).sum();
+            let image =
+                image.filter(|image| retained + image.pixel_bytes() <= MAX_PICKER_PREVIEW_BYTES);
             Arc::make_mut(&mut view.images).insert(url, image);
         }
     }
@@ -324,6 +357,39 @@ impl ChatSession {
     pub fn open_gifs(&mut self, client: &SpkClient) {
         if self.selected.as_ref().is_some_and(ChatView::can_send) {
             self.gifs.show(client);
+        }
+    }
+
+    pub fn fill_staged_gif_preview(&mut self, client: &SpkClient) {
+        let requested = self.selected.as_ref().and_then(|view| {
+            let gif = self.drafts.get(&view.channel_id)?.gif.as_ref()?;
+            (gif.image.is_none() && !gif.preview_attempted)
+                .then(|| (view.channel_id.clone(), gif.item.preview.clone()))
+        });
+        if requested == self.pending_staged_gif_preview {
+            return;
+        }
+        self.staged_gif_preview = JoinSet::new();
+        self.pending_staged_gif_preview = requested.clone();
+        if let Some((channel, url)) = requested {
+            let client = client.clone();
+            self.staged_gif_preview.spawn(async move {
+                let image = load_image(&client, &url, PICKER_PREVIEW_SIZE).await;
+                (channel, url, image)
+            });
+        }
+    }
+
+    pub fn staged_gif_preview_complete(&mut self, (channel, url, image): StagedGifPreview) {
+        self.pending_staged_gif_preview = None;
+        if let Some(gif) = self
+            .drafts
+            .get_mut(&channel)
+            .and_then(|draft| draft.gif.as_mut())
+            && gif.item.preview == url
+        {
+            gif.image = image;
+            gif.preview_attempted = true;
         }
     }
 

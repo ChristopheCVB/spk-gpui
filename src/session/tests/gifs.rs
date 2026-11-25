@@ -68,6 +68,8 @@ async fn gif_picker_searches_saves_and_shares_across_conversations() {
         let cat_url = "https://media.klipy.com/cat.gif";
         let cat = value!({"id":"cat","title":"Cat","url":cat_url,"preview":base.join("/cat.webp").unwrap().as_str(),"width":240,"height":160});
         let empty = r#"{"items":[],"hasNext":false}"#;
+        let preview_url = cat["preview"].as_str().unwrap();
+        let show_thumbnail = || send(Command::ShowGifPreviews(vec![preview_url.to_owned()]));
 
         wait_for_sidebar(&rx, |s| s.channels.is_some() && matches!(s.connection, Connection::Online)).await;
         open_chat("general", false).await;
@@ -91,16 +93,25 @@ async fn gif_picker_searches_saves_and_shares_across_conversations() {
         send(Command::SearchGifs(" cat ".into())).await;
         request("GET /api/gifs?q=cat&page=1").await.respond(&[], &value!({"items":[cat.clone()],"hasNext":true}).to_string()).await;
         wait_for_sidebar(&rx, |s| s.chat.as_ref().and_then(|chat| chat.gifs.as_ref()).is_some_and(|gifs| gifs.items.len() == 1 && gifs.has_next)).await;
+        show_thumbnail().await;
         let (line, thumbnail) = requests.recv().await.unwrap();
         assert_eq!(line, "GET /cat.webp HTTP/1.1");
         assert_eq!(thumbnail.header("cookie"), None);
         assert_eq!(thumbnail.header("origin"), None);
         thumbnail.respond_raw("200 OK", &[], ANIMATED_GIF).await;
-        let preview_url = cat["preview"].as_str().unwrap();
         let animated_thumbnail = |gifs: &GifPickerView| {
             gifs.image(preview_url).is_some_and(|image| image.pixels.frame_count() == 2)
         };
         wait_for_sidebar(&rx, |s| s.chat.as_ref().and_then(|chat| chat.gifs.as_ref()).is_some_and(animated_thumbnail)).await;
+        send(Command::ShowGifPreviews(vec![])).await;
+        wait_for_sidebar(&rx, |s| s.chat.as_ref().and_then(|chat| chat.gifs.as_ref())
+            .is_some_and(|gifs| gifs.preview_urls.is_empty() && gifs.image(preview_url).is_none())).await;
+        show_thumbnail().await;
+        let (line, thumbnail) = requests.recv().await.unwrap();
+        assert_eq!(line, "GET /cat.webp HTTP/1.1");
+        thumbnail.respond_raw("200 OK", &[], ANIMATED_GIF).await;
+        wait_for_sidebar(&rx, |s| s.chat.as_ref().and_then(|chat| chat.gifs.as_ref()).is_some_and(animated_thumbnail)).await;
+
         send(Command::MoreGifs).await;
         request("GET /api/gifs?q=cat&page=2").await.respond_raw("502 Bad Gateway", &[], b"").await;
         wait_for_sidebar(&rx, |s| s.chat.as_ref().and_then(|chat| chat.gifs.as_ref()).is_some_and(|gifs| gifs.items.len() == 1 && gifs.browse_error == Some("GIF service unavailable"))).await;
@@ -128,10 +139,21 @@ async fn gif_picker_searches_saves_and_shares_across_conversations() {
         }
         send(Command::ShowGifFavorites(true)).await;
         wait_for_sidebar(&rx, |s| s.chat.as_ref().and_then(|chat| chat.gifs.as_ref()).is_some_and(|gifs| gifs.favorites_ready && gifs.is_favorite("cat"))).await;
-        let (_, thumbnail) = requests.recv().await.unwrap();
-        thumbnail.respond_raw("200 OK", &[], ANIMATED_GIF).await;
-        wait_for_sidebar(&rx, |s| s.chat.as_ref().and_then(|chat| chat.gifs.as_ref()).is_some_and(animated_thumbnail)).await;
+        show_thumbnail().await;
+        let (line, pending_thumbnail) = requests.recv().await.unwrap();
+        assert_eq!(line, "GET /cat.webp HTTP/1.1");
         send(Command::PickGif("cat".into())).await;
+        wait_for_sidebar(&rx, |s| s.chat.as_ref().is_some_and(|chat| chat.gifs.is_none()
+            && chat.draft.gif.as_ref().is_some_and(|gif| gif.image.is_none()))).await;
+        drop(pending_thumbnail);
+        let (line, thumbnail) = timeout(Duration::from_secs(2), requests.recv()).await
+            .expect("the staged GIF must load its preview").unwrap();
+        assert_eq!(line, "GET /cat.webp HTTP/1.1");
+        assert_eq!(thumbnail.header("cookie"), None);
+        thumbnail.respond_raw("200 OK", &[], ANIMATED_GIF).await;
+        wait_for_sidebar(&rx, |s| s.chat.as_ref().is_some_and(|chat|
+            chat.draft.gif.as_ref().and_then(|gif| gif.image.as_ref())
+                .is_some_and(|image| image.pixels.frame_count() == 2))).await;
         send(Command::ShowGifs(true)).await;
         for _ in 0..2 {
             let (line, request) = requests.recv().await.unwrap();
@@ -143,6 +165,7 @@ async fn gif_picker_searches_saves_and_shares_across_conversations() {
         }
         send(Command::ShowGifFavorites(true)).await;
         wait_for_sidebar(&rx, |s| s.chat.as_ref().and_then(|chat| chat.gifs.as_ref()).is_some_and(|gifs| gifs.favorites_ready && gifs.is_favorite("cat"))).await;
+        show_thumbnail().await;
         let (_, thumbnail) = requests.recv().await.unwrap();
         thumbnail.respond_raw("404 Not Found", &[], b"").await;
         send(Command::ToggleGifFavorite("cat".into())).await;
