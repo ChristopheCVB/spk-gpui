@@ -150,6 +150,38 @@ pub(super) fn mention_user_item(id: String, app: WeakEntity<Spk>) -> PopupMenuIt
         })
 }
 
+pub(super) fn person_profile_item(id: String, app: WeakEntity<Spk>) -> PopupMenuItem {
+    PopupMenuItem::new("Profile").on_click(move |_, window, cx| {
+        let id = id.clone();
+        let app = app.clone();
+        window.defer(cx, move |window, cx| {
+            let _ = app.update(cx, |app, cx| app.open_person_profile(id, window, cx));
+        });
+    })
+}
+
+pub(super) fn send_dm_item(id: String, app: WeakEntity<Spk>) -> PopupMenuItem {
+    PopupMenuItem::new("Send DM").on_click(move |_, window, cx| {
+        let _ = app.update(cx, |app, cx| {
+            app.close_sidebar_drawer(window, cx);
+            app.open_direct_message(Command::StartDirectMessage(id.clone()), cx);
+        });
+    })
+}
+
+pub(super) fn copy_name_item(id: String, app: WeakEntity<Spk>) -> PopupMenuItem {
+    PopupMenuItem::new("Copy name").on_click(move |_, _, cx| {
+        if let Some(name) = app.upgrade().and_then(|app| {
+            let View::SignedIn(sidebar) = &app.read(cx).view else {
+                return None;
+            };
+            sidebar.person(&id)?.name().map(str::to_owned)
+        }) {
+            cx.write_to_clipboard(ClipboardItem::new_string(name));
+        }
+    })
+}
+
 impl Spk {
     pub(super) fn person_row(
         &self,
@@ -243,45 +275,14 @@ impl Spk {
                 })),
             )
             .context_menu(move |menu, _, _| {
-                let app = app.clone();
-                let id = menu_id.clone();
-                let message_app = app.clone();
-                let message_id = id.clone();
-                let copy_app = app.clone();
-                let copy_id = id.clone();
                 let read_app = app.clone();
                 let mut menu = menu
                     .when(can_mention, |menu| {
-                        menu.item(mention_user_item(id.clone(), app.clone()))
+                        menu.item(mention_user_item(menu_id.clone(), app.clone()))
                     })
-                    .item(
-                        PopupMenuItem::new("Profile").on_click(move |_, window, cx| {
-                            let _ = app.update(cx, |app, cx| {
-                                app.open_person_profile(id.clone(), window, cx)
-                            });
-                        }),
-                    )
-                    .item(
-                        PopupMenuItem::new("Send DM").on_click(move |_, window, cx| {
-                            let _ = message_app.update(cx, |app, cx| {
-                                app.close_sidebar_drawer(window, cx);
-                                app.open_direct_message(
-                                    Command::StartDirectMessage(message_id.clone()),
-                                    cx,
-                                );
-                            });
-                        }),
-                    )
-                    .item(PopupMenuItem::new("Copy name").on_click(move |_, _, cx| {
-                        if let Some(name) = copy_app.upgrade().and_then(|app| {
-                            let View::SignedIn(sidebar) = &app.read(cx).view else {
-                                return None;
-                            };
-                            sidebar.person(&copy_id)?.name().map(str::to_owned)
-                        }) {
-                            cx.write_to_clipboard(ClipboardItem::new_string(name));
-                        }
-                    }));
+                    .item(person_profile_item(menu_id.clone(), app.clone()))
+                    .item(send_dm_item(menu_id.clone(), app.clone()))
+                    .item(copy_name_item(menu_id.clone(), app.clone()));
                 if let Some(channel_id) = &read_id {
                     menu = menu
                         .item(mark_read_item(channel_id.clone(), read_app.clone()))

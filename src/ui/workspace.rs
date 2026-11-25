@@ -1216,26 +1216,19 @@ impl Spk {
                 let last = index + 1 == participant_count;
                 let row_id =
                     SharedString::from(format!("voice-{}-member-{}", channel.id, person.id));
-                let destinations = voice_moderation_destinations(sidebar, person.id);
-                let (mut row, focused) = if destinations.is_some() {
-                    let (row, focused) = navigation_target(row_id, scroll_on_focus, window, cx);
-                    // The row tracks focus for keyboard navigation through its buttons.
-                    (
-                        row.on_any_mouse_down(|_, window, _| window.prevent_default()),
-                        focused,
-                    )
-                } else {
-                    (div().id(row_id), false)
-                };
-                let moderation = destinations.map(|destinations| {
-                    voice_moderation_menu(
-                        &person,
-                        destinations,
-                        sidebar.voice_moderation_pending,
-                        SidebarRowMenu::attach(&mut row, focused, window, cx),
-                        cx,
-                    )
-                });
+                let (row, focused) = navigation_target(row_id, scroll_on_focus, window, cx);
+                // Keep the focused control when clicking the participant row.
+                let mut row = row.on_any_mouse_down(|_, window, _| window.prevent_default());
+                let (context_menu, menu_button) =
+                    SidebarRowMenu::attach(&mut row, focused, window, cx).triggers(
+                        tool_button(
+                            "participant-menu",
+                            IconName::Ellipsis,
+                            format!("Actions for {}", person.name),
+                        ),
+                        Anchor::TopLeft,
+                        sidebar_participant_items(sidebar, &person, &channel.id, cx.weak_entity()),
+                    );
                 let theme = cx.theme();
                 row.role(Role::Group)
                     .aria_label(person.name.to_owned())
@@ -1339,7 +1332,7 @@ impl Spk {
                             .items_center()
                             .flex_shrink_0()
                             .gap_1()
-                            .children(moderation)
+                            .child(menu_button)
                             .children(self.sidebar_watch_buttons(
                                 sidebar,
                                 &person,
@@ -1348,18 +1341,9 @@ impl Spk {
                                     || switching_here
                                     || call.is_some_and(|call| call.status != Status::Leaving),
                                 cx,
-                            ))
-                            .when(
-                                sidebar.profile.id.as_deref() != Some(person.id)
-                                    && call.is_some_and(|call| {
-                                        call.channel_id == channel.id && call.is_participating()
-                                    }),
-                                |actions| {
-                                    actions
-                                        .child(self.participant_volume_button(&person, sidebar, cx))
-                                },
-                            ),
+                            )),
                     )
+                    .context_menu(context_menu)
             }))
     }
 
@@ -1842,21 +1826,11 @@ impl Spk {
             .dropdown_menu_with_anchor(Anchor::TopRight, {
                 let app = app.clone();
                 move |menu, window, cx| {
-                    let menu = menu.item(PopupMenuItem::new("Volume…").on_click({
-                        let app = app.clone();
-                        let id = id.clone();
-                        let name = name.clone();
-                        move |_, window, cx| {
-                            let app = app.clone();
-                            let id = id.clone();
-                            let name = name.clone();
-                            window.defer(cx, move |window, cx| {
-                                let _ = app.update(cx, |this, cx| {
-                                    this.open_participant_volume(&id, &name, window, cx);
-                                });
-                            });
-                        }
-                    }));
+                    let menu = menu.item(voice::participant_volume_item(
+                        id.clone(),
+                        name.clone(),
+                        app.clone(),
+                    ));
                     if let Some(destinations) = &destinations {
                         add_voice_moderation_items(
                             menu.separator(),
@@ -2085,27 +2059,90 @@ fn voice_moderation_destinations(
     )
 }
 
-fn voice_moderation_menu(
+fn sidebar_participant_items(
+    sidebar: &Sidebar,
     participant: &Participant<'_>,
-    destinations: Vec<(String, String)>,
-    pending: bool,
-    row_menu: SidebarRowMenu,
-    cx: &Context<Spk>,
-) -> AnyElement {
+    channel_id: &str,
+    app: WeakEntity<Spk>,
+) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + use<> {
+    let destinations = voice_moderation_destinations(sidebar, participant.id);
+    let moderation_pending = sidebar.voice_moderation_pending;
+    let is_self = sidebar.profile.id.as_deref() == Some(participant.id);
+    let can_inspect = sidebar.inspect_person(participant.id).is_some();
+    let can_send_dm = sidebar.can_start_direct_message(participant.id)
+        && sidebar.person(participant.id).is_some();
+    let can_mention = sidebar.chat.as_ref().is_some_and(|chat| chat.can_send());
+    let can_adjust_volume = !is_self
+        && sidebar
+            .voice
+            .as_ref()
+            .is_some_and(|call| call.channel_id == channel_id && call.is_participating());
+    let muted = sidebar
+        .voice_intent
+        .preferred
+        .participant_volume(participant.id)
+        .muted;
     let user_id = participant.id.to_owned();
-    let app = cx.weak_entity();
-    row_menu.render(
-        tool_button(
-            "voice-moderation",
-            IconName::Ellipsis,
-            format!("Moderate {}", participant.name),
-        ),
-        !pending,
-        Anchor::TopLeft,
-        move |menu, window, cx| {
-            add_voice_moderation_items(menu, window, cx, &app, &user_id, &destinations, true)
-        },
-    )
+    let name = participant.name.to_owned();
+    move |menu, window, cx| {
+        let menu = menu
+            .when(can_inspect, |menu| {
+                menu.item(
+                    profile::person_profile_item(user_id.clone(), app.clone()).icon(IconName::User),
+                )
+            })
+            .when(can_send_dm, |menu| {
+                menu.item(
+                    profile::send_dm_item(user_id.clone(), app.clone())
+                        .icon(IconName::MessageCircle),
+                )
+            })
+            .when(can_mention, |menu| {
+                menu.item(profile::mention_user_item(user_id.clone(), app.clone()))
+            })
+            .item(profile::copy_name_item(user_id.clone(), app.clone()).icon(IconName::Copy))
+            .when(can_adjust_volume, |menu| {
+                let mute = if muted {
+                    PopupMenuItem::new("Unmute for me").icon(IconName::Volume2)
+                } else {
+                    PopupMenuItem::new("Mute for me").icon(IconName::VolumeX)
+                };
+                menu.separator()
+                    .item(mute.on_click({
+                        let app = app.clone();
+                        let user_id = user_id.clone();
+                        move |_, _, cx| {
+                            let _ = app.update(cx, |app, cx| {
+                                app.send(
+                                    Command::SetParticipantVolume(
+                                        user_id.clone(),
+                                        crate::voice::ParticipantVolumeChange::Muted(!muted),
+                                    ),
+                                    None,
+                                    cx,
+                                );
+                            });
+                        }
+                    }))
+                    .item(
+                        voice::participant_volume_item(user_id.clone(), name.clone(), app.clone())
+                            .icon(IconName::Settings2),
+                    )
+            });
+        if let Some(destinations) = &destinations {
+            add_voice_moderation_items(
+                menu.separator().label("Admin"),
+                window,
+                cx,
+                &app,
+                &user_id,
+                destinations,
+                !moderation_pending,
+            )
+        } else {
+            menu
+        }
+    }
 }
 
 fn add_voice_moderation_items(
