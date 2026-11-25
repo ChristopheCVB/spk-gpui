@@ -31,6 +31,25 @@ WEB_REPO = "https://github.com/meeehdi-dev/spk.git"
 WEB_REVISION = "43613954d119eae4fd30e25a1f969b4327c58e89"
 EMAIL = "reader@spk.test"
 PASSWORD = "fixture-password-42"
+GITHUB = "https://github.com"
+PUSH_REPO = f"{GITHUB}/spk-smoke/demo"
+PUSH_SENDER = {"login": "Push Sender", "html_url": f"{GITHUB}/push-sender"}
+PUSH_COMMITS = (
+    {"id": "8a072c0", "url": f"{PUSH_REPO}/commit/8a072c0", "message": "Add tests",
+     "author": {"name": "Alice $Team$ Smith", "username": "alice-author"}},
+    {"id": "c9407ec", "url": f"{PUSH_REPO}/commit/c9407ec", "message": "Clean up",
+     "author": {"name": "Bob 🚀 Author", "username": "bob-author"}},
+    {"id": "d651c1e", "url": f"{PUSH_REPO}/commit/d651c1e", "message": "Update comments",
+     "author": {"name": "Local Author"}},
+)
+PUSH_LINKS = (
+    ("8a072c0", f"{PUSH_REPO}/commit/8a072c0"),
+    ("Alice $Team$ Smith", f"{GITHUB}/alice-author"),
+    ("c9407ec", f"{PUSH_REPO}/commit/c9407ec"),
+    ("Bob 🚀 Author", f"{GITHUB}/bob-author"),
+    ("d651c1e", f"{PUSH_REPO}/commit/d651c1e"),
+    ("Push Sender", PUSH_SENDER["html_url"]),
+)
 
 
 def wait_for(description, probe, timeout=15):
@@ -175,6 +194,29 @@ def seed(origin, database, log, process):
         "content": "Smoke webhook body 🧪",
         "embeds": [{"title": "Smoke deploy alert", "description": "Smoke embed body 🔔"}],
     })
+    admin(endpoint.path, {"embeds": [{
+        "title": "Smoke alert with no profile",
+        "author": {"name": "Unlinked Author", "url": "javascript:alert(1)"},
+    }]})
+    repository = {"name": "demo", "full_name": "spk-smoke/demo", "html_url": PUSH_REPO}
+    sender = PUSH_SENDER.copy()
+    if avatar := os.environ.get("SPK_SMOKE_WEBHOOK_AVATAR"):
+        sender["avatar_url"] = avatar
+    admin(endpoint.path, {
+        "repository": repository, "ref": "refs/heads/main", "sender": sender,
+        "head_commit": {"timestamp": "2026-11-24T09:15:00Z"},
+        "commits": PUSH_COMMITS,
+    }, {"X-GitHub-Event": "push"})
+
+    def post_live_alert(event, field, login, url):
+        admin(endpoint.path, {
+            "repository": repository, "action": "opened", "sender": sender,
+            field: {"number": 12, "title": "Check webhook links", "user": {
+                "login": login, "html_url": url,
+            }},
+        }, {"X-GitHub-Event": event})
+
+    return post_live_alert
 
 
 def walk(node):
@@ -188,6 +230,7 @@ class Desktop:
     def __init__(self, process, launches):
         self.process = process
         self.launches = launches
+        self.checked_launches = []
 
     def nodes(self):
         for index in range(Atspi.get_desktop(0).get_child_count()):
@@ -195,9 +238,13 @@ class Desktop:
             if app and app.get_process_id() == self.process.pid:
                 yield from walk(app)
 
+    def ensure_launches_checked(self):
+        launches = self.launches.read_text().splitlines()
+        if launches != self.checked_launches:
+            raise RuntimeError(f"Unexpected external launches: {launches[len(self.checked_launches):]}")
+
     def ensure_running(self):
-        if self.launches.stat().st_size:
-            raise RuntimeError(f"Attempted an external launch: {self.launches.read_text().strip()}")
+        self.ensure_launches_checked()
         if self.process.poll() is not None:
             raise RuntimeError("SPK desktop exited during the smoke test")
 
@@ -272,6 +319,27 @@ class Desktop:
         self.click(label, role)
         subprocess.run(["xdotool", "type", "--clearmodifiers", "--", text], check=True)
 
+    def key(self, name):
+        subprocess.run(["xdotool", "key", "--clearmodifiers", "--delay", "50", name],
+                       check=True)
+
+    def focused(self, name, role, expected=True):
+        try:
+            node = self.find_node(name, role)
+            is_focused = node is not None and node.get_state_set().contains(Atspi.StateType.FOCUSED)
+            return is_focused == expected
+        except GLib.Error:
+            return False
+
+    def tab_to(self, name, role):
+        if self.focused(name, role):
+            return
+        for _ in range(50):
+            self.key("Tab")
+            if self.focused(name, role):
+                return
+        raise RuntimeError(f"Tab did not reach {name}")
+
     def check_webhook_actions(self):
         label = "Actions for Smoke Webhook"
 
@@ -279,30 +347,11 @@ class Desktop:
             subprocess.run(["xdotool", "mousemove", "--window", self.window, str(x), str(y)],
                            check=True)
 
-        def key(name):
-            subprocess.run(["xdotool", "key", "--clearmodifiers", "--delay", "50", name],
-                           check=True)
-
         def hidden():
             try:
                 return self.find_node(label, "push button") is None
             except GLib.Error:
                 return False
-
-        def focused(name=label, expected=True):
-            try:
-                node = self.find_node(name, "push button")
-                is_focused = node is not None and node.get_state_set().contains(Atspi.StateType.FOCUSED)
-                return is_focused == expected
-            except GLib.Error:
-                return False
-
-        def tab_to(name):
-            for _ in range(40):
-                key("Tab")
-                if focused(name):
-                    return
-            raise RuntimeError(f"Tab did not reach {name}")
 
         move(700, 30)
         wait_for("the selected webhook to hide its ellipsis while idle", hidden)
@@ -318,18 +367,20 @@ class Desktop:
         move(700, 30)
         wait_for("the webhook ellipsis to hide after hover", hidden)
 
-        tab_to(label)
-        key("Tab")
-        wait_for("focus to leave the webhook ellipsis", lambda: focused(expected=False))
-        key("shift+Tab")
-        wait_for("Shift+Tab to reach the webhook ellipsis", focused)
-        key("Return")
+        self.tab_to(label, "push button")
+        self.key("Tab")
+        wait_for("focus to leave the webhook ellipsis", lambda: self.focused(label, "push button", expected=False))
+        self.key("shift+Tab")
+        wait_for("Shift+Tab to reach the webhook ellipsis",
+                 lambda: self.focused(label, "push button"))
+        self.key("Return")
         self.find("Copy link", "menu item")
         self.find(label, "push button")
-        key("Escape")
-        wait_for("Escape to return focus to the visible webhook ellipsis", focused)
-        key("Tab")
-        wait_for("focus to leave the webhook ellipsis", lambda: focused(expected=False))
+        self.key("Escape")
+        wait_for("Escape to return focus to the visible webhook ellipsis",
+                 lambda: self.focused(label, "push button"))
+        self.key("Tab")
+        wait_for("focus to leave the webhook ellipsis", lambda: self.focused(label, "push button", expected=False))
 
         move(bounds.x + 8, bounds.y + bounds.height // 2)
         self.click(label, "push button")
@@ -337,21 +388,30 @@ class Desktop:
         item_bounds = item.get_component_iface().get_extents(Atspi.CoordType.WINDOW)
         move(item_bounds.x + item_bounds.width // 2, item_bounds.y + item_bounds.height // 2)
         self.find(label, "push button")
-        key("Escape")
-        wait_for("Escape to focus the ellipsis after opening with the mouse", focused)
+        self.key("Escape")
+        wait_for("Escape to focus the ellipsis after opening with the mouse",
+                 lambda: self.focused(label, "push button"))
 
         prior_focus = "New webhook"
-        tab_to(prior_focus)
+        self.tab_to(prior_focus, "push button")
         move(bounds.x + 8, bounds.y + bounds.height // 2)
         self.click(label, "push button")
         self.find("Copy link", "menu item")
         for _ in range(3):
-            key("Down")
-        key("Return")
+            self.key("Down")
+        self.key("Return")
         wait_for("Enter to restore the focus from before the mouse-opened menu",
-                 lambda: focused(prior_focus))
+                 lambda: self.focused(prior_focus, "push button"))
 
-    def check(self):
+    def external_link(self, url, activate):
+        self.ensure_running()
+        activate()
+        launches = wait_for(url, lambda: self.launches.read_text().splitlines()[len(self.checked_launches):])
+        if len(launches) != 1 or launches[0].split(maxsplit=1)[-1] != url:
+            raise RuntimeError(f"Expected one launch of {url}, got {launches}")
+        self.checked_launches.extend(launches)
+
+    def check(self, post_live_alert, logs):
         self.find("Sign in to SPK")
         self.window = subprocess.check_output(["xdotool", "search", "--name", "^SPK$"], text=True).strip()
         subprocess.run(["xdotool", "windowfocus", self.window], check=True)
@@ -369,6 +429,23 @@ class Desktop:
         self.find("🧪")
         self.find("🔔")
         self.check_webhook_actions()
+        self.find("Unlinked Author", "label")
+        self.visible_text("Local Author", "spk-smoke/demo")
+        for name, url in PUSH_LINKS:
+            self.external_link(url, lambda: self.click(name, "link"))
+        for name, url in PUSH_LINKS:
+            self.tab_to(name, "link")
+            self.external_link(url, lambda: self.key("Return"))
+        for event, field, name, handle in (
+            ("issues", "issue", "Issue Author", "issue-author"),
+            ("pull_request", "pull_request", "PR Author", "pr-author"),
+        ):
+            url = f"{GITHUB}/{handle}"
+            post_live_alert(event, field, name, url)
+            self.external_link(url, lambda: self.click(name, "link"))
+        if os.environ.get("SPK_SMOKE_WEBHOOK_AVATAR"):
+            subprocess.run(["import", "-window", self.window, str(logs / "webhook-dark.png")],
+                           timeout=10, check=True)
         self.click("smoke-chat", "push button", partial=True)
         self.visible_text("Smoke bold", "Smoke italic", "smoke code", "Smoke link", "@Smoke Reader")
         for emoji in ("👍🏽", "🇫🇷", "1️⃣"):
@@ -481,12 +558,12 @@ def main(work, artifacts):
     Atspi.init()
     with service(["node", "node_modules/nuxt/bin/nuxt.mjs", "dev", "--host", "127.0.0.1",
                   "--port", str(port)], server_log, web, web_env) as server:
-        seed(origin, database, server_log, server)
+        post_live_alert = seed(origin, database, server_log, server)
         binary = desktop_binary(work, logs, desktop_env)
         with service([binary], logs / "desktop.log", ROOT, client_env) as client:
             desktop = Desktop(client, launches)
             try:
-                desktop.check()
+                desktop.check(post_live_alert, logs)
             except Exception:
                 with suppress(OSError, subprocess.SubprocessError):
                     subprocess.run(["import", "-window", "root", str(logs / "failure.png")],
@@ -495,8 +572,7 @@ def main(work, artifacts):
                     for node in desktop.nodes():
                         print(node.get_role_name(), repr(node.get_name()), file=tree)
                 raise
-    if launches.stat().st_size:
-        raise RuntimeError(f"Attempted an external launch. See {launches}")
+    desktop.ensure_launches_checked()
     print("SPK desktop smoke test passed")
 
 
