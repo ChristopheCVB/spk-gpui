@@ -57,7 +57,8 @@ impl MarkdownPlugin for MessageSpoiler {
         let content = self.contents.get(&offset)?;
         let id: SharedString = format!("spoiler-{}-{}-{offset}", self.key.0, self.key.1).into();
         let app = self.app.clone();
-        let rich_text = TextView::markdown(id.clone(), content.formatted.clone())
+        let emoji = emoji::MessageEmoji::new(false);
+        let rich_text = TextView::markdown(id.clone(), emoji.display_markdown(&content.formatted))
             .style(chat_text_style(cx))
             .text_size(context.font_size())
             .line_height(context.line_height())
@@ -65,6 +66,7 @@ impl MarkdownPlugin for MessageSpoiler {
             .markdown_extensions(
                 MarkdownExtensions::default()
                     .plugin(MessageMention)
+                    .plugin(emoji)
                     .parser_revision(1)
                     .raw_html(false),
             )

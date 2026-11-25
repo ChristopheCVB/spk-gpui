@@ -155,9 +155,13 @@ def seed(origin, database, log, process):
                 ("rich", source, owner,
                  f"**Smoke bold** and *Smoke italic* with `smoke code`, "
                  f"[Smoke link](/c/{target}), and <@{reader}>.\n\n"
-                 f"||[Open smoke destination][destination]||\n\n"
+                 "||[Open smoke destination 👩🏽‍💻][destination]||\n\n"
+                 "**Artwork 👍🏽** beside 🇫🇷 and 1️⃣, with unsupported 😺‍🌵 and literal `🙂`.\n\n"
+                 "```\n🙂\n```\n\n"
                  f"[destination]: /c/{target}",
                  now - 1000),
+                ("large-emoji", source, owner, "  🔥 🔥 🔥 🔥 🔥 🔥  ", now - 900),
+                ("small-emoji", source, owner, "🥳🥳🥳🥳🥳🥳🥳", now - 800),
                 ("target", target, owner, "Smoke destination loaded", now),
             ],
         )
@@ -167,7 +171,10 @@ def seed(origin, database, log, process):
 
     webhook = admin("/api/webhooks", {"name": "Smoke Webhook", "icon": "webhook", "private": False})
     endpoint = urlsplit(webhook["url"])
-    admin(endpoint.path, {"embeds": [{"title": "Smoke deploy alert", "description": "Smoke embed body"}]})
+    admin(endpoint.path, {
+        "content": "Smoke webhook body 🧪",
+        "embeds": [{"title": "Smoke deploy alert", "description": "Smoke embed body 🔔"}],
+    })
 
 
 def walk(node):
@@ -359,9 +366,21 @@ class Desktop:
         self.click("Smoke Webhook", "push button", partial=True)
         self.find("Smoke deploy alert", partial=True)
         self.visible_text("Smoke embed body")
+        self.find("🧪")
+        self.find("🔔")
         self.check_webhook_actions()
         self.click("smoke-chat", "push button", partial=True)
         self.visible_text("Smoke bold", "Smoke italic", "smoke code", "Smoke link", "@Smoke Reader")
+        for emoji in ("👍🏽", "🇫🇷", "1️⃣"):
+            self.find(emoji)
+        mixed, seven, six = (
+            self.find(emoji).get_component_iface().get_extents(Atspi.CoordType.WINDOW).width
+            for emoji in ("👍🏽", "🥳", "🔥")
+        )
+        if not 0 < mixed < six or abs(mixed - seven) > 1:
+            raise RuntimeError("Posted emoji should use inline sizing except in messages of one to six emoji")
+        if any(node.get_name() in {"🙂", "😺‍🌵", "😺", "🌵", "👩🏽‍💻"} for node in self.nodes()):
+            raise RuntimeError("Code, unsupported sequences, and unrevealed spoilers should not expose artwork")
         self.click("Show all 2 pinned messages", "toggle button")
         for message in ("First pinned smoke message", "Second pinned smoke message"):
             self.find(f"Smoke Author · {message}", partial=True)
@@ -370,7 +389,8 @@ class Desktop:
         if link in self.text_positions((link,)):
             raise RuntimeError("The spoiler link is readable before reveal")
         self.click("Spoiler: click to reveal", "push button")
-        self.click_at(*self.visible_text(link)[link])
+        self.visible_text(link)
+        self.click("👩🏽‍💻")
         self.visible_text("Smoke destination loaded")
 
 

@@ -7764,6 +7764,7 @@ dependencies = [
  "embed-resource",
  "flate2",
  "futures",
+ "gif 0.14.2",
  "global-hotkey",
  "gpui-kit",
  "html5ever",

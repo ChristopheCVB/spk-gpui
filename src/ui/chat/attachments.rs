@@ -173,7 +173,7 @@ impl TextPreview {
 }
 
 enum Preview {
-    Image(Arc<RenderImage>),
+    Image(Arc<ChatImage>),
     Text(TextPreview),
     Audio(AudioClip),
     Video(VideoClip),
@@ -196,7 +196,7 @@ impl Preview {
     fn drop_images(self, window: &mut Window) {
         match self {
             Self::Image(image) => {
-                let _ = window.drop_image(image);
+                let _ = window.drop_image(image.pixels.clone());
             }
             Self::Video(clip) => {
                 for image in clip.images() {
@@ -425,12 +425,7 @@ impl Spk {
                         file.preview
                             .as_ref()
                             .filter(|_| !file.spoiler)
-                            .map(|image| {
-                                img(image.clone())
-                                    .w(px(56.))
-                                    .h(px(42.))
-                                    .object_fit(ObjectFit::Contain)
-                            }),
+                            .map(|image| chat_image(image.clone()).w(px(56.)).h(px(42.))),
                     )
                     .child(Label::new(file.filename.clone()).max_w_full().truncate())
                     .child(
@@ -651,11 +646,10 @@ impl Spk {
                                 .h_auto()
                                 .p_0()
                                 .child(
-                                    img(image.clone())
+                                    chat_image(image.clone())
                                         .max_w_full()
                                         .w(px(360.))
-                                        .h(px(240.))
-                                        .object_fit(ObjectFit::Contain),
+                                        .h(px(240.)),
                                 )
                                 .on_click(cx.listener(move |_, _, window, cx| {
                                     let (channel, message_id, file) =
@@ -1220,11 +1214,103 @@ fn open_extension(mime: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Access, AccessResult, Attachment, AttachmentCard, AttachmentKind, Preview, TextPreview,
-        finish_original, load_preview, stage_original,
+        Access, AccessResult, Attachment, AttachmentCard, AttachmentKind, ChatImage, Preview,
+        TextPreview, finish_original, load_preview, stage_original,
     };
     use rodio::Source;
-    use std::io::{Seek, Write};
+    use std::{
+        io::{Seek, Write},
+        sync::Arc,
+        time::Duration,
+    };
+
+    fn sent_image_preview(bytes: &[u8]) -> Arc<ChatImage> {
+        let Ok(AccessResult::Preview(Preview::Image(preview))) =
+            load_preview(AttachmentKind::Image, bytes.to_vec())
+        else {
+            panic!("expected an image preview for the sent attachment");
+        };
+        preview
+    }
+
+    #[test]
+    fn sent_gif_attachment_keeps_both_preview_frames() {
+        let fixture = include_bytes!("../../../tests/fixtures/attachments/preview.gif");
+        let preview = sent_image_preview(fixture);
+
+        assert_eq!(preview.pixels.frame_count(), 2);
+        assert_eq!(&preview.pixels.as_bytes(0).unwrap()[..4], &[0, 0, 255, 255]);
+        assert_eq!(&preview.pixels.as_bytes(1).unwrap()[..4], &[0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn sent_gif_preview_honors_finite_repeats() {
+        let mut fixture =
+            include_bytes!("../../../tests/fixtures/attachments/preview.gif").to_vec();
+        let extension = fixture
+            .windows(11)
+            .position(|data| data == b"NETSCAPE2.0")
+            .unwrap();
+        for extension_name in [b"NETSCAPE2.0", b"ANIMEXTS1.0"] {
+            fixture[extension..extension + 11].copy_from_slice(extension_name);
+            fixture[extension + 13] = 1;
+            let preview = sent_image_preview(&fixture);
+
+            assert_eq!(preview.frame_at(Duration::from_millis(610)).0, 0);
+            assert_eq!(preview.frame_at(Duration::from_millis(1220)), (1, None));
+        }
+    }
+
+    #[test]
+    fn gif_loop_identifier_in_unrelated_extension_payload_is_ignored() {
+        let mut fixture =
+            include_bytes!("../../../tests/fixtures/attachments/preview.gif").to_vec();
+        let extension = fixture
+            .windows(12)
+            .position(|data| data == b"\x0bNETSCAPE2.0")
+            .unwrap();
+        fixture.splice(extension..extension, *b"\x0bOTHERAPP1.0");
+        let preview = sent_image_preview(&fixture);
+
+        assert_eq!(preview.frame_at(Duration::from_millis(610)), (1, None));
+    }
+
+    #[test]
+    fn large_single_frame_gif_uses_the_static_preview_budget() {
+        let mut fixture = Vec::new();
+        {
+            let mut encoder = gif::Encoder::new(&mut fixture, 4096, 3072, &[255, 0, 0]).unwrap();
+            encoder
+                .write_frame(&gif::Frame {
+                    width: 1,
+                    height: 1,
+                    buffer: std::borrow::Cow::Borrowed(&[0]),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        let preview = sent_image_preview(&fixture);
+        assert_eq!(preview.pixels.frame_count(), 1);
+    }
+
+    #[test]
+    fn sent_gif_preview_rejects_truncated_and_oversized_animations() {
+        let mut fixture =
+            include_bytes!("../../../tests/fixtures/attachments/preview.gif").to_vec();
+        let fallback = "Image preview unavailable. Try downloading the file.";
+
+        assert_eq!(
+            load_preview(AttachmentKind::Image, fixture[..fixture.len() - 1].to_vec()).err(),
+            Some(fallback),
+        );
+        // A 6000-by-6000 canvas fits the source pixel budget for one frame.
+        fixture[6..8].copy_from_slice(&6000_u16.to_le_bytes());
+        fixture[8..10].copy_from_slice(&6000_u16.to_le_bytes());
+        assert_eq!(
+            load_preview(AttachmentKind::Image, fixture).err(),
+            Some(fallback)
+        );
+    }
 
     #[test]
     fn text_preview_expands_in_pages_and_restores_the_initial_excerpt() {

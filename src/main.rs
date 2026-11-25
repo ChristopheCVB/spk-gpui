@@ -4,6 +4,9 @@ mod api;
 mod chat_markdown;
 mod notifications;
 mod reaction_artwork;
+#[cfg(target_os = "linux")]
+mod reduce_motion;
+mod render_image;
 mod session;
 mod shortcuts;
 mod sounds;
@@ -42,6 +45,8 @@ fn main() -> std::process::ExitCode {
         .with_assets(reaction_artwork::DesktopAssets)
         .run(move |cx| {
             init(cx);
+            #[cfg(target_os = "linux")]
+            reduce_motion::follow_gtk_fallback(cx);
             load_fonts(cx);
             gpui_kit::base::Root::register_plugin(cx, |_, _| ui::ShortcutKeys);
             ThemeRegistry::global_mut(cx)

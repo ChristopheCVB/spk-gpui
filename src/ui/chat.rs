@@ -2,8 +2,10 @@ mod actions;
 mod attachments;
 pub(super) mod editor;
 mod embed;
+mod emoji;
 mod gifs;
 mod history;
+mod images;
 mod poll_composer;
 mod poll_results;
 mod reaction_picker;
@@ -38,13 +40,15 @@ use history::{
     history_rows, jump_highlight_opacity, message_row_background, relative_time,
 };
 
+use images::chat_image;
+
 use super::*;
 
 use crate::{
     api::{BOT_USER_ID, ChatMessage, MessageTarget, UnreadState},
     chat_markdown::{message_markdown, reply_preview, safe_link, styled_message_markdown},
     reaction_artwork::reaction_artwork_path,
-    session::{ChatView, Delivery, Pins},
+    session::{ChatImage, ChatView, Delivery, Pins},
 };
 
 struct RenderedChatMarkdown {
@@ -218,16 +222,19 @@ fn history_anchor<'a>(chat: &'a ChatView, scroll: &ScrollHandle) -> Option<(&'a 
 }
 
 fn chat_images(chat: &ChatView) -> impl Iterator<Item = &Arc<RenderImage>> {
-    chat.preview_images
-        .images()
-        .chain(chat.gifs.iter().flat_map(|picker| picker.images()))
-        .chain(chat.draft.gif.iter().filter_map(|gif| gif.image.as_ref()))
-        .chain(
-            chat.draft
-                .uploads
-                .iter()
-                .filter_map(|upload| upload.preview.as_ref()),
-        )
+    chat.preview_images.images().chain(
+        chat.gifs
+            .iter()
+            .flat_map(|picker| picker.images())
+            .chain(chat.draft.gif.iter().filter_map(|gif| gif.image.as_ref()))
+            .chain(
+                chat.draft
+                    .uploads
+                    .iter()
+                    .filter_map(|upload| upload.preview.as_ref()),
+            )
+            .map(|image| &image.pixels),
+    )
 }
 
 fn when_visible(row: Div, load: impl Fn(&mut Window, &mut App) + 'static) -> Div {
@@ -260,7 +267,7 @@ impl Spk {
 
 fn open_chat_image(
     title: String,
-    image: Arc<RenderImage>,
+    image: Arc<ChatImage>,
     original: impl Fn(&mut Window, &mut App) + 'static,
     window: &mut Window,
     cx: &mut Context<Spk>,
@@ -273,12 +280,7 @@ fn open_chat_image(
             .centered()
             .title(title.clone())
             .width((viewport.width * 0.9).min(px(960.)))
-            .child(
-                img(image.clone())
-                    .w_full()
-                    .h(viewport.height * 0.65)
-                    .object_fit(ObjectFit::Contain),
-            )
+            .child(chat_image(image.clone()).w_full().h(viewport.height * 0.65))
             .footer(
                 control_button("open-image-original")
                     .label("Open original")
@@ -1191,6 +1193,7 @@ impl Spk {
         id: &'static str,
         message_id: &str,
         body: &str,
+        emoji: emoji::MessageEmoji,
         sidebar: &Sidebar,
         max_width: Pixels,
         cx: &Context<Self>,
@@ -1225,7 +1228,10 @@ impl Spk {
         } else {
             (source.clone(), Vec::new())
         };
-        let mut extensions = MarkdownExtensions::default().plugin(MessageMention);
+        let display = emoji.display_markdown(&display);
+        let mut extensions = MarkdownExtensions::default()
+            .plugin(MessageMention)
+            .plugin(emoji);
         if !spoilers.is_empty() {
             let definitions = crate::chat_markdown::spoiler_link_definitions(body);
             let contents = spoilers
@@ -1310,6 +1316,7 @@ impl Spk {
             "message-body",
             &message_id,
             &body,
+            emoji::MessageEmoji::new(emoji::emoji_only(&body)),
             sidebar,
             measured_or_viewport_width(self.chat_content_width.get()),
             cx,
@@ -1322,6 +1329,7 @@ impl Spk {
                     "embed-description",
                     &message_id,
                     description,
+                    emoji::MessageEmoji::new(false),
                     sidebar,
                     measured_or_viewport_width(self.webhook_content_width.get()),
                     cx,

@@ -167,13 +167,15 @@ impl Spk {
                     })
                     .max_h(px(205.0))
                     .overflow_y_scroll()
-                    .child(
+                    .child(report_visible_previews(
                         div()
                             .flex()
                             .flex_wrap()
                             .gap_1()
                             .children(gifs.visible().map(|gif| self.gif_card(gif, gifs, cx))),
-                    )
+                        gifs,
+                        self.commands.clone(),
+                    ))
                     .when(
                         !favorites && gifs.has_next && gifs.browse_error.is_none(),
                         |list| {
@@ -231,14 +233,14 @@ impl Spk {
                             .flex()
                             .flex_col()
                             .items_center()
-                            .child(div().w_full().h(px(80.0)).when_some(
-                                gifs.image(&gif.preview),
-                                |thumbnail, image| {
-                                    thumbnail.child(
-                                        img(image).size_full().object_fit(ObjectFit::Contain),
-                                    )
-                                },
-                            ))
+                            .child(
+                                div().w_full().h(px(80.0)).when_some(
+                                    gifs.image(&gif.preview),
+                                    |thumbnail, image| {
+                                        thumbnail.child(chat_image(image).size_full())
+                                    },
+                                ),
+                            )
                             .child(Label::new(title).truncate()),
                     )
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -276,12 +278,7 @@ impl Spk {
                 .gap_2()
                 .pb_2()
                 .when_some(gif.image.clone(), |row, image| {
-                    row.child(
-                        img(image)
-                            .w(px(80.0))
-                            .h(px(50.0))
-                            .object_fit(ObjectFit::Contain),
-                    )
+                    row.child(chat_image(image).w(px(80.0)).h(px(50.0)))
                 })
                 .child(Label::new(format!("GIF · {}", gif_title(&gif.item))).truncate())
                 .child(
@@ -295,10 +292,131 @@ impl Spk {
     }
 }
 
+fn report_visible_previews(
+    grid: Div,
+    gifs: &GifPickerView,
+    commands: async_channel::Sender<Command>,
+) -> Div {
+    let gifs = gifs.clone();
+    grid.on_children_prepainted(move |cards, window, cx| {
+        let viewport = window.content_mask().bounds;
+        let visible: Vec<_> = cards
+            .into_iter()
+            .zip(gifs.visible())
+            .filter(|(card, _)| {
+                let visible = card.intersect(&viewport).size;
+                visible.width > px(0.) && visible.height > px(0.)
+            })
+            .map(|(_, gif)| gif.preview.clone())
+            .collect();
+        if visible != gifs.preview_urls {
+            let commands = commands.clone();
+            window.defer(cx, move |_, _| {
+                let _ = commands.try_send(Command::ShowGifPreviews(visible));
+            });
+        }
+    })
+}
+
 fn gif_title(gif: &GifItem) -> &str {
     if gif.title.is_empty() {
         "GIF"
     } else {
         &gif.title
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use std::{cell::Cell, rc::Rc, sync::Arc, time::Duration};
+
+    use gpui_kit::{
+        AppContext, Context, InteractiveElement, IntoElement, ParentElement, Render, ScrollHandle,
+        StatefulInteractiveElement, Styled, Window, WindowOptions, application, div, point, px,
+    };
+
+    use super::{Command, GifItem, GifPickerView, report_visible_previews};
+
+    #[test]
+    #[ignore = "requires a graphical session or Xvfb"]
+    fn gif_picker_reports_previews_from_the_scrolled_viewport() {
+        struct Grid {
+            gifs: GifPickerView,
+            commands: async_channel::Sender<Command>,
+            scroll: ScrollHandle,
+        }
+
+        impl Render for Grid {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .id("gif-viewport")
+                    .w(px(150.))
+                    .h(px(100.))
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
+                    .child(report_visible_previews(
+                        div().flex().flex_wrap().children(
+                            self.gifs
+                                .visible()
+                                .map(|_| div().w(px(100.)).h(px(50.)).flex_none()),
+                        ),
+                        &self.gifs,
+                        self.commands.clone(),
+                    ))
+            }
+        }
+
+        let outcome = Rc::new(Cell::new(None));
+        let result = outcome.clone();
+        application().run(move |cx| {
+            gpui_kit::init(cx);
+            let (commands, requests) = async_channel::unbounded();
+            let mut gifs = GifPickerView::default();
+            gifs.items = Arc::new(
+                (0..4)
+                    .map(|index| GifItem {
+                        id: index.to_string(),
+                        preview: format!("preview-{index}"),
+                        title: String::new(),
+                        url: String::new(),
+                        width: 100,
+                        height: 50,
+                    })
+                    .collect(),
+            );
+            let window = cx
+                .open_window(WindowOptions::default(), |_, cx| {
+                    cx.new(|_| Grid {
+                        gifs,
+                        commands,
+                        scroll: ScrollHandle::new(),
+                    })
+                })
+                .unwrap();
+            cx.spawn(async move |cx| {
+                let clock = cx.background_executor().clone();
+                clock.timer(Duration::from_millis(250)).await;
+                let before = requests.try_recv().ok();
+                while requests.try_recv().is_ok() {}
+                window
+                    .update(cx, |grid, _, cx| {
+                        grid.scroll.set_offset(point(px(0.), px(-100.)));
+                        cx.notify();
+                    })
+                    .unwrap();
+                clock.timer(Duration::from_millis(250)).await;
+                let after = requests.try_recv().ok();
+                result.set(Some((before, after)));
+                cx.update(|cx| cx.quit());
+            })
+            .detach();
+        });
+        let Some((Some(Command::ShowGifPreviews(before)), Some(Command::ShowGifPreviews(after)))) =
+            outcome.take()
+        else {
+            panic!("expected viewport updates before and after scrolling");
+        };
+        assert_eq!(before, ["preview-0", "preview-1"]);
+        assert_eq!(after, ["preview-2", "preview-3"]);
     }
 }
