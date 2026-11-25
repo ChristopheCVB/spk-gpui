@@ -448,6 +448,7 @@ impl Spk {
                                 .child(stage_icon.text_color(theme.muted_foreground).size(px(16.0)))
                                 .child(
                                     Label::new(stage_name.to_owned())
+                                        .text_sm()
                                         .font_semibold()
                                         .min_w_0()
                                         .truncate(),
@@ -739,7 +740,7 @@ impl Spk {
                         ),
                 )
                 .when(feeds.peek().is_none(), |card| {
-                    card.child(div().px_2().py_1().child(
+                    card.child(div().px_2().py_1().text_xs().child(
                         Label::new("No webhooks yet").text_color(cx.theme().muted_foreground),
                     ))
                 })

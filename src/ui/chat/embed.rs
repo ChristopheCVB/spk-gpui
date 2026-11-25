@@ -4,6 +4,8 @@ use gpui_kit::base::text::{InlineElement, InlineRenderContext};
 use markdown::mdast::Node;
 use url::Url;
 
+pub(super) const BODY_SIZE: Rems = rems(0.875);
+
 pub(super) struct EmbedLinks {
     pub app: WeakEntity<Spk>,
     pub max_width: Pixels,
@@ -82,6 +84,8 @@ impl MarkdownPlugin for EmbedLinks {
         let font_size = context.font_size();
         let content = match content {
             LinkLabel::Code(code) => div()
+                .min_w_0()
+                .whitespace_normal()
                 .font_family(
                     gpui_kit::base::Theme::global(cx)
                         .tokens
@@ -89,28 +93,24 @@ impl MarkdownPlugin for EmbedLinks {
                         .mono
                         .clone(),
                 )
+                .text_size(font_size * INLINE_CODE_SCALE)
                 .child(code.clone()),
-            LinkLabel::Text(parts) => {
-                div()
-                    .flex()
-                    .items_center()
-                    .children(parts.iter().enumerate().map(|(index, part)| {
-                        match part {
-                            LinkLabelPart::Text(text) => div()
-                                .min_w_0()
-                                .whitespace_normal()
-                                .child(text.clone())
-                                .into_any_element(),
-                            LinkLabelPart::Emoji { label, path } => div()
-                                .id(("embed-link-emoji", index))
-                                .role(Role::Image)
-                                .flex_shrink_0()
-                                .aria_label(label.clone())
-                                .child(img(path.clone()).size(font_size * 1.2))
-                                .into_any_element(),
-                        }
-                    }))
-            }
+            LinkLabel::Text(parts) => div().flex().items_center().text_size(font_size).children(
+                parts.iter().enumerate().map(|(index, part)| match part {
+                    LinkLabelPart::Text(text) => div()
+                        .min_w_0()
+                        .whitespace_normal()
+                        .child(text.clone())
+                        .into_any_element(),
+                    LinkLabelPart::Emoji { label, path } => div()
+                        .id(("embed-link-emoji", index))
+                        .role(Role::Image)
+                        .flex_shrink_0()
+                        .aria_label(label.clone())
+                        .child(img(path.clone()).size(font_size * 1.2))
+                        .into_any_element(),
+                }),
+            ),
         };
         Some(InlineElement::new(
             Button::new(("embed-description-link", offset))
@@ -121,11 +121,7 @@ impl MarkdownPlugin for EmbedLinks {
                 .p_0()
                 .text_color(cx.theme().primary)
                 .accessibility_label(label)
-                .child(
-                    content
-                        .text_size(font_size)
-                        .line_height(context.line_height()),
-                )
+                .child(content.line_height(context.line_height()))
                 .on_click(move |_, _, cx| search::activate_chat_link(&app, url.clone(), cx)),
         ))
     }
@@ -181,7 +177,12 @@ impl Spk {
                             .font_semibold()
                             .tab_stop(true)
                             .accessibility_label(title.to_owned())
-                            .child(Label::new(title.to_owned()).text_color(theme.primary))
+                            .child(
+                                Label::new(title.to_owned())
+                                    .min_w_0()
+                                    .whitespace_normal()
+                                    .text_color(theme.primary),
+                            )
                             .tooltip(title.to_owned())
                             .on_click(move |_, _, cx| {
                                 search::activate_chat_link(&app, link.clone(), cx);
@@ -270,7 +271,12 @@ impl Spk {
             })
             .when_some(embed.author(), |card, author| {
                 let name = author.name.clone();
-                let mut line = div().h(px(20.)).flex().items_center().gap_1p5();
+                let label = Label::new(name.clone())
+                    .min_w_0()
+                    .whitespace_normal()
+                    .text_xs()
+                    .font_semibold();
+                let mut line = div().min_h(px(20.)).flex().items_center().gap_1p5();
                 if let Some(avatar) = avatar {
                     line = line.child(
                         img(avatar)
@@ -289,16 +295,14 @@ impl Spk {
                             .min_w_0()
                             .h_auto()
                             .p_0()
-                            .text_xs()
-                            .font_semibold()
-                            .accessibility_label(name.clone())
-                            .child(Label::new(name).text_color(theme.primary))
+                            .accessibility_label(name)
+                            .child(label.text_color(theme.primary))
                             .on_click(move |_, _, cx| {
                                 search::activate_chat_link(&app, url.clone(), cx);
                             }),
                     );
                 } else {
-                    line = line.child(Label::new(name).text_xs().font_semibold());
+                    line = line.child(label);
                 }
                 card.child(line)
             });
@@ -313,7 +317,7 @@ impl Spk {
             .bg(theme.popover)
             .px_3()
             .py_2()
-            .text_sm()
+            .text_size(BODY_SIZE)
             .child(content)
     }
 }
