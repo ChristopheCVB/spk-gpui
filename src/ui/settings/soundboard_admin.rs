@@ -169,6 +169,7 @@ impl Settings {
         let busy = board.saving || board.decoding || board.loading || form.picker_open;
         let disabled = busy || board.previewing;
         let selection_disabled = busy || board.previewing_saved();
+        let upload_preview = board.preview_position.is_some();
         let theme = cx.theme();
         let error = form
             .picker_error
@@ -204,9 +205,12 @@ impl Settings {
                         .child(field("Upload gain (%)", &form.gain, selection_disabled, cx))
                         .child(form.upload.render(disabled, cx))
                         .child(div().flex().gap_2()
-                            .child(control_button("preview-crop").label("Play selection").tab_stop(true).disabled(disabled)
-                                .on_click(cx.listener(|settings, _, _, cx| {
-                                    settings.soundboard_action(Action::Preview, cx);
+                            .child(control_button("preview-crop")
+                                .label(if upload_preview { "Stop preview" } else { "Play selection" })
+                                .tab_stop(true).disabled(selection_disabled)
+                                .on_click(cx.listener(move |settings, _, _, cx| {
+                                    let action = if upload_preview { Action::StopPreview } else { Action::Preview };
+                                    settings.soundboard_action(action, cx);
                                 })))
                             .child(control_button("save-sound").label("Save").primary().tab_stop(true).disabled(disabled)
                                 .on_click(cx.listener(|settings, _, _, cx| {
@@ -216,7 +220,7 @@ impl Settings {
                             .child(control_button("discard-sound").label("Discard").ghost().tab_stop(true).disabled(disabled)
                                 .on_click(cx.listener(|settings, _, _, cx| settings.soundboard_action(Action::Discard, cx)))))
                 })), cx))
-            .children(board.previewing.then(|| control_button("stop-sound-preview").label("Stop preview").tab_stop(true)
+            .children(board.previewing_saved().then(|| control_button("stop-sound-preview").label("Stop preview").tab_stop(true)
                 .on_click(cx.listener(|settings, _, _, cx| settings.soundboard_action(Action::StopPreview, cx)))))
             .child(card("Sounds", div().flex().flex_col().gap_3()
                 .when(!board.loading && (board.clips.is_none() || board.error.is_some()), |body| body.child(
