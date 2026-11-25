@@ -538,7 +538,7 @@ class Desktop:
         time.sleep(0.45)
         open_workspace = background(self.check_toast_position(result))
         self.click("New text channel", "push button")
-        self.click("Channel name", "entry")
+        wait_for("Channel name to receive initial focus", lambda: self.focused("Channel name", "entry"))
         self.move(700, 30)
         time.sleep(0.25)
         if background(self.check_toast_position(result)) != open_workspace:
@@ -560,6 +560,26 @@ class Desktop:
         row_bounds = self.bounds(row, "push button", partial=True)
         if action.x < row_bounds.x + row_bounds.width:
             raise RuntimeError(f"The ellipsis must follow the name of {row}")
+        return label
+
+    def check_chat_channel_ellipsis_fill(self, channel):
+        label = self.channel_ellipsis(channel)
+        row = self.bounds(channel, "push button", partial=True)
+        action = self.bounds(label, "push button")
+        self.move(action.x + action.width // 2, action.y + action.height // 2)
+        time.sleep(0.15)
+
+        def fills_match():
+            left = row.x + 22
+            right = action.x + 6
+            crop = f"{right - left + 1}x1+{left}+{action.y + 24}"
+            pixels = subprocess.check_output(
+                ["import", "-window", self.window, "-crop", crop, "-depth", "8", "rgb:-"],
+                timeout=5,
+            )
+            return len(pixels) == (right - left + 1) * 3 and pixels[:3] == pixels[-3:]
+
+        wait_for(f"{channel} to share its hover fill with its ellipsis", fills_match, timeout=3)
         return label
 
     def open_participant_menu(self, person, context=False):
@@ -601,7 +621,7 @@ class Desktop:
         self.menu_order("Mark read", "Mute notifications")
         self.absent("Rename", "menu item")
         self.click("Mute notifications", "menu item")
-        target_action = self.channel_ellipsis(target)
+        target_action = self.check_chat_channel_ellipsis_fill(target)
         self.move(1000, 30)
         self.tab_to(target_action, "push button")
         self.key("Return")
@@ -610,6 +630,7 @@ class Desktop:
 
         self.click(target, "push button", partial=True)
         self.visible_text("Smoke destination loaded")
+        self.check_chat_channel_ellipsis_fill(target)
         self.move(1000, 30)
         watch_buttons = [f"Watch {person}’s {feed}" for feed in ("camera", "screen share")]
         for label in watch_buttons:
@@ -1104,7 +1125,7 @@ class Desktop:
                 return
         raise RuntimeError(f"Tab did not reach {name}")
 
-    def check_webhook_actions(self):
+    def check_webhook_actions(self, logs):
         label = "Actions for Smoke Webhook"
 
         def move(x, y):
@@ -1119,15 +1140,9 @@ class Desktop:
 
         move(700, 30)
         wait_for("the selected webhook to hide its ellipsis while idle", hidden)
-        row = self.find("Smoke Webhook", "push button", partial=True)
-        bounds = row.get_component_iface().get_extents(Atspi.CoordType.WINDOW)
-        move(bounds.x + 8, bounds.y + bounds.height // 2)
-        action = self.find(label, "push button")
-        action_bounds = action.get_component_iface().get_extents(Atspi.CoordType.WINDOW)
-        visible_row = self.find("Smoke Webhook", "push button")
-        visible_bounds = visible_row.get_component_iface().get_extents(Atspi.CoordType.WINDOW)
-        if action_bounds.x + action_bounds.width > visible_bounds.x:
-            raise RuntimeError("The webhook ellipsis must precede its primary button")
+        bounds = self.bounds("Smoke Webhook", "push button", partial=True)
+        self.check_chat_channel_ellipsis_fill("Smoke Webhook")
+        self.screenshot(logs, "webhook-actions-dark.png")
         move(700, 30)
         wait_for("the webhook ellipsis to hide after hover", hidden)
 
@@ -1215,6 +1230,45 @@ class Desktop:
             finally:
                 clipboard.terminate()
 
+    def check_sidebar_resize_retries_save(self, config):
+        def header_x():
+            return self.bounds("Hide sidebar", "push button").x
+
+        preference = config / "sidebar-width"
+        preference.mkdir()
+        initial = header_x()
+        destination = initial + 112
+        y = 240
+
+        def move_sidebar(x):
+            self.move(x - 12, y)
+            wait_for("the sidebar to follow the drag", lambda: abs(header_x() - x) <= 2)
+
+        self.move(initial - 14, y)
+        subprocess.run(["xdotool", "mousedown", "1"], check=True)
+        try:
+            self.move(initial + 32, y)
+            move_sidebar(destination)
+        finally:
+            subprocess.run(["xdotool", "mouseup", "1"], check=True)
+        self.find("Could not save sidebar width.")
+        preference.rmdir()
+
+        self.move(header_x() - 14, y)
+        subprocess.run(["xdotool", "mousedown", "1"], check=True)
+        try:
+            self.move(destination - 40, y)
+            move_sidebar(initial)
+            move_sidebar(destination)
+            if preference.exists():
+                raise RuntimeError("The sidebar width was saved before the drag ended")
+            subprocess.run(["xdotool", "click", "3"], check=True)
+            wait_for("the sidebar width to save on secondary-button release", preference.is_file)
+            if abs(float(preference.read_text()) - 400) > 2:
+                raise RuntimeError("The saved sidebar width does not match the resized width")
+        finally:
+            subprocess.run(["xdotool", "mouseup", "1"], check=True)
+
     def check_settings_toasts(self, logs, config, send_message, alerts, owner):
         notification_result = "Could not save notification settings."
         self.click("Settings", "push button")
@@ -1292,12 +1346,13 @@ class Desktop:
 
     def check(self, post_live_alert, logs):
         self.find("smoke-target", "push button", partial=True)
+        self.check_chat_channel_ellipsis_fill("Smoke Webhook")
         self.click("Smoke Webhook", "push button", partial=True)
         self.find("Smoke deploy alert", partial=True)
         self.visible_text("Smoke embed body")
         self.find("🧪")
         self.find("🔔")
-        self.check_webhook_actions()
+        self.check_webhook_actions(logs)
         self.find("Unlinked Author", "label")
         self.visible_text("Local Author", "spk-smoke/demo")
         for name, url in PUSH_LINKS:
@@ -1492,6 +1547,7 @@ def main(work, artifacts):
                 desktop.check_reader_menus(logs)
                 desktop.check_incoming_toast(logs, send_message, alerts, reader)
                 desktop.check_upload_recovery()
+                desktop.check_sidebar_resize_retries_save(Path(env["XDG_CONFIG_HOME"]) / "spk-gpui")
 
             admin_launches = logs / "admin-browser-launches.log"
             admin_launches.touch()
