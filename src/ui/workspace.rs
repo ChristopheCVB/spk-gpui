@@ -1155,6 +1155,7 @@ impl Spk {
             format!("Join {name}")
         };
         let focus = row_menu.focus();
+        let channel_focus = focus.clone();
         let app = cx.weak_entity();
         let menu_id = id.clone();
         let (right_click, ellipsis) = row_menu.triggers(
@@ -1294,16 +1295,24 @@ impl Spk {
                 let (row, focused) = navigation_target(row_id, scroll_on_focus, window, cx);
                 // Keep the focused control when clicking the participant row.
                 let mut row = row.on_any_mouse_down(|_, window, _| window.prevent_default());
-                let (context_menu, menu_button) =
-                    SidebarRowMenu::attach(&mut row, focused, window, cx).triggers(
-                        tool_button(
-                            "participant-menu",
-                            IconName::Ellipsis,
-                            format!("Actions for {}", person.name),
-                        ),
-                        Anchor::TopLeft,
-                        sidebar_participant_items(sidebar, &person, &channel.id, cx.weak_entity()),
-                    );
+                let row_menu = SidebarRowMenu::attach(&mut row, focused, window, cx);
+                let participant_focus = row_menu.focus();
+                let (context_menu, menu_button) = row_menu.triggers(
+                    tool_button(
+                        "participant-menu",
+                        IconName::Ellipsis,
+                        format!("Actions for {}", person.name),
+                    ),
+                    Anchor::TopLeft,
+                    sidebar_participant_items(
+                        sidebar,
+                        &person,
+                        &channel.id,
+                        cx.weak_entity(),
+                        participant_focus,
+                        channel_focus.clone(),
+                    ),
+                );
                 let theme = cx.theme();
                 row.role(Role::Group)
                     .aria_label(person.name.to_owned())
@@ -2167,12 +2176,15 @@ fn sidebar_participant_items(
     participant: &Participant<'_>,
     channel_id: &str,
     app: WeakEntity<Spk>,
+    participant_focus: FocusHandle,
+    channel_focus: FocusHandle,
 ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + use<> {
     let destinations = voice_moderation_destinations(sidebar, participant.id);
     let moderation_pending = sidebar.voice_moderation_pending;
     let account_pending = sidebar.admin_accounts.busy;
     let is_admin = sidebar.is_admin();
     let is_self = sidebar.profile.id.as_deref() == Some(participant.id);
+    let can_ban = can_ban_participant(sidebar, participant.id);
     let current_role = if is_self {
         Some(sidebar.profile.role.as_str())
     } else {
@@ -2284,7 +2296,7 @@ fn sidebar_participant_items(
                     menu
                 },
             );
-            menu.when_some(destinations.as_deref(), |menu, destinations| {
+            let menu = menu.when_some(destinations.as_deref(), |menu, destinations| {
                 add_voice_moderation_items(
                     menu,
                     window,
@@ -2294,9 +2306,131 @@ fn sidebar_participant_items(
                     destinations,
                     !moderation_pending,
                 )
+            });
+            menu.when(can_ban, |menu| {
+                let app = app.clone();
+                let user_id = user_id.clone();
+                let name = name.clone();
+                let participant_focus = participant_focus.clone();
+                let channel_focus = channel_focus.clone();
+                menu.item(
+                    PopupMenuItem::new("Ban")
+                        .icon(IconName::Ban)
+                        .disabled(account_pending)
+                        .on_click(move |_, window, cx| {
+                            let app = app.clone();
+                            let user_id = user_id.clone();
+                            let name = name.clone();
+                            let participant_focus = participant_focus.clone();
+                            let channel_focus = channel_focus.clone();
+                            // The menu dismisses before the dialog takes focus.
+                            window.defer(cx, move |window, cx| {
+                                participant_focus.focus(window, cx);
+                                confirm_sidebar_ban(app, user_id, name, channel_focus, window, cx);
+                            });
+                        }),
+                )
             })
         })
     }
+}
+
+fn can_ban_participant(sidebar: &Sidebar, id: &str) -> bool {
+    sidebar.is_admin() && sidebar.profile.id.as_deref() != Some(id) && sidebar.person(id).is_some()
+}
+
+fn confirm_sidebar_ban(
+    app: WeakEntity<Spk>,
+    id: String,
+    name: String,
+    channel_focus: FocusHandle,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(app) = app.upgrade() else {
+        return;
+    };
+    let can_submit = |app: &Spk, id: &str| {
+        matches!(&app.view, View::SignedIn(sidebar)
+            if can_ban_participant(sidebar, id) && !sidebar.admin_accounts.busy)
+    };
+    if !can_submit(app.read(cx), &id) {
+        return;
+    }
+
+    let reason = cx.new(|cx| InputState::new(window, cx));
+    let focus_once = Cell::new(true);
+    let title = format!("Ban {name}?");
+    window.open_dialog(cx, move |dialog, window, cx| {
+        if focus_once.replace(false) {
+            reason.focus_handle(cx).focus(window, cx);
+        }
+        let disabled = !can_submit(app.read(cx), &id);
+        let confirm = {
+            let app = app.clone();
+            let id = id.clone();
+            let reason = reason.clone();
+            let channel_focus = channel_focus.clone();
+            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                if !can_submit(app.read(cx), &id) {
+                    return;
+                }
+                let reason = reason.read(cx).value().to_string();
+                app.update(cx, |app, cx| {
+                    app.send(
+                        Command::ModerateAccount(AdminAccountAction::Ban {
+                            id: id.clone(),
+                            reason,
+                        }),
+                        None,
+                        cx,
+                    );
+                });
+                window.close_dialog(cx);
+                // The participant row can disappear once the server accepts the Ban.
+                channel_focus.focus(window, cx);
+            }
+        };
+        dialog
+            .centered()
+            .border_0()
+            .bg(cx.theme().popover)
+            .width((window.viewport_size().width * 0.9).min(px(440.)))
+            .title(title.clone())
+            .on_ok(|_, _, _| false)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(Label::new("They’ll be signed out and disconnected from voice. Their messages stay.").whitespace_normal())
+                    .child(Label::new("Reason (optional)"))
+                    .child(surface_input(&reason, cx.theme().background, cx).aria_label("Ban reason")),
+            )
+            .footer(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        control_button("cancel-sidebar-ban")
+                            .small()
+                            .ghost()
+                            .tab_stop(true)
+                            .label("Cancel")
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(
+                        control_button("confirm-sidebar-ban")
+                            .small()
+                            .danger()
+                            .tab_stop(true)
+                            .label("Ban")
+                            .disabled(disabled)
+                            .on_click(confirm),
+                    ),
+            )
+    });
 }
 
 fn add_voice_moderation_items(
