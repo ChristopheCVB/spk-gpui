@@ -339,7 +339,6 @@ impl Spk {
             sidebar.read_notice,
             sidebar.device_notice,
             sidebar.voice_moderation_notice,
-            self.form_error,
         ];
         let rejoin = sidebar
             .rejoin_channel()
@@ -804,13 +803,7 @@ impl Spk {
                     })),
             )
             .child(voice_card)
-            .child(webhook_card)
-            .when(sidebar.is_admin(), |nav| {
-                nav.children(channel_admin::channel_status(
-                    sidebar.channel_admin.result,
-                    cx,
-                ))
-            });
+            .child(webhook_card);
         div()
             .id("navigation-viewport")
             .relative()

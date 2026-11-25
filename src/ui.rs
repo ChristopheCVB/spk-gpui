@@ -37,7 +37,7 @@ use gpui_kit::{
 };
 
 use crate::{
-    session::{self, AccountLinkForm, AvatarPhoto, Command, Sidebar, View},
+    session::{self, AccountLinkForm, ActionResult, AvatarPhoto, Command, Sidebar, View},
     shortcuts::{Chord, Shortcuts},
     sounds::{Sound, SoundSetting, SoundSettings, VoiceSounds},
     voice::{DeviceKind, Status},
@@ -121,7 +121,6 @@ pub(super) struct Spk {
     sound_settings: tokio::sync::watch::Sender<SoundSettings>,
     cues: VoiceSounds,
     notification_preferences: crate::notifications::Preferences,
-    notification_error: bool,
     alert_activation: tokio::sync::watch::Sender<Option<crate::api::MessageTarget>>,
     signing_out: bool,
     last_activity: Instant,
@@ -522,7 +521,6 @@ impl Spk {
             sound_settings,
             cues,
             notification_preferences: Default::default(),
-            notification_error: false,
             alert_activation,
             signing_out: false,
             last_activity: Instant::now(),
@@ -565,12 +563,10 @@ impl Spk {
                     .as_deref()
                     .map(crate::notifications::Preferences::load)
                     .unwrap_or_default();
-                self.notification_error = false;
                 window.clear_notifications(cx);
             }
         } else {
             self.notification_preferences = Default::default();
-            self.notification_error = false;
         }
         if let View::SignedIn(previous) = &self.view {
             let next = match &view {
@@ -595,6 +591,9 @@ impl Spk {
                     .any(|channel| channel.id == *id && channel.kind == "voice")
             {
                 self.selected_voice_channel = None;
+            }
+            for result in std::mem::take(&mut sidebar.action_results) {
+                notifications::push_action_result(result, window, cx);
             }
             for alert in std::mem::take(&mut sidebar.alerts) {
                 self.show_alert(alert, sidebar, window, cx);
@@ -624,7 +623,11 @@ impl Spk {
                 | Command::RetryChatAttachment { .. }
         );
         if self.commands.try_send(command).is_err() {
-            self.form_error = Some("Could not reach the SPK connection. Try again.");
+            let message = "Could not reach the SPK connection. Try again.";
+            self.form_error = Some(message);
+            if matches!(self.view, View::SignedIn(_)) {
+                self.show_action_result(ActionResult::error(message), cx);
+            }
         } else {
             self.chat_draft_edited |= edits_draft;
             if signing_out {

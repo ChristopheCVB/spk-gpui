@@ -115,7 +115,7 @@ impl Spk {
             .detach();
             cx.observe_in(&app, window, |editor, app, window, cx| {
                 if !matches!(&app.read(cx).view, View::SignedIn(sidebar) if sidebar.is_admin())
-                    || editor.result(cx).is_some_and(|result| result.is_ok())
+                    || editor.succeeded(cx)
                 {
                     window.close_dialog(cx);
                     editor.restore_focus(window, cx);
@@ -250,23 +250,6 @@ fn channel_form_item(
         })
 }
 
-pub(super) fn channel_status(
-    status: Option<Result<&'static str, &'static str>>,
-    cx: &App,
-) -> Option<impl IntoElement> {
-    let theme = cx.theme();
-    status.map(|status| {
-        let (message, color) = match status {
-            Ok(message) => (message, theme.success),
-            Err(message) => (message, theme.danger),
-        };
-        div()
-            .id("channel-admin-status")
-            .role(Role::Status)
-            .child(Label::new(message).text_color(color).text_sm())
-    })
-}
-
 struct ChannelEditor {
     app: Entity<Spk>,
     form: ChannelForm,
@@ -290,23 +273,23 @@ impl ChannelEditor {
         }
     }
 
-    fn result(&self, cx: &App) -> Option<Result<&'static str, &'static str>> {
-        let app = self.app.read(cx);
-        let View::SignedIn(sidebar) = &app.view else {
+    fn completed(&self, cx: &App) -> Option<session::ChannelAdmin> {
+        let View::SignedIn(sidebar) = &self.app.read(cx).view else {
             return None;
         };
-        let revision = self.submitted_at?;
-        if revision == sidebar.channel_admin.revision {
-            app.form_error.map(Err)
-        } else {
-            sidebar.channel_admin.result
-        }
+        self.submitted_at
+            .filter(|revision| *revision + 1 == sidebar.channel_admin.revision)
+            .map(|_| sidebar.channel_admin)
+    }
+
+    fn succeeded(&self, cx: &App) -> bool {
+        self.completed(cx).is_some_and(|result| result.succeeded)
     }
 
     fn pending(&self, sidebar: &Sidebar, cx: &App) -> bool {
         sidebar.channel_admin.pending
             || (self.submitted_at == Some(sidebar.channel_admin.revision)
-                && self.result(cx).is_none())
+                && self.app.read(cx).form_error.is_none())
     }
 
     fn submit(&mut self, confirm_delete: bool, cx: &mut Context<Self>) {
@@ -362,7 +345,16 @@ impl Render for ChannelEditor {
             .flex_col()
             .gap_3()
             .child(body)
-            .children(channel_status(self.result(cx), cx))
+            .children(
+                self.completed(cx)
+                    .and_then(|result| result.validation)
+                    .map(|message| {
+                        div()
+                            .id("channel-name-validation")
+                            .role(Role::Status)
+                            .child(Label::new(message).text_color(cx.theme().danger))
+                    }),
+            )
             .child(
                 div()
                     .flex()

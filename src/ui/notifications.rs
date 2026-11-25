@@ -1,6 +1,6 @@
 use gpui_kit::component::{
     menu::PopupMenuItem,
-    notification::{Notification, NotificationDelivery},
+    notification::{Notification, NotificationDelivery, NotificationType},
 };
 use url::Url;
 
@@ -49,6 +49,15 @@ pub(super) fn mute_item(channel_id: String, muted: bool, app: WeakEntity<Spk>) -
 }
 
 impl Spk {
+    pub(super) fn show_action_result(&self, result: ActionResult, cx: &mut Context<Self>) {
+        let entity_id = cx.entity_id();
+        cx.defer(move |cx| {
+            cx.with_window(entity_id, |window, cx| {
+                push_action_result(result, window, cx)
+            });
+        });
+    }
+
     pub(super) fn change_notifications(
         &mut self,
         change: impl FnOnce(&mut notifications::Preferences),
@@ -58,8 +67,14 @@ impl Spk {
             return;
         };
         change(&mut self.notification_preferences);
-        self.notification_error = preferences_path(user_id)
-            .is_none_or(|path| self.notification_preferences.save(&path).is_err());
+        if preferences_path(user_id)
+            .is_none_or(|path| self.notification_preferences.save(&path).is_err())
+        {
+            self.show_action_result(
+                ActionResult::error("Could not save notification settings."),
+                cx,
+            );
+        }
         cx.notify();
     }
 
@@ -93,6 +108,7 @@ impl Spk {
                 window.push_notification(
                     Notification::new()
                         .delivery(NotificationDelivery::InApp)
+                        .placement(Anchor::BottomRight)
                         .title(alert.title)
                         .message(body)
                         .action(move |_, _, cx| {
@@ -157,6 +173,23 @@ impl Spk {
         }
         self.alert_activation.send_replace(Some(target));
     }
+}
+
+pub(super) fn push_action_result(result: ActionResult, window: &mut Window, cx: &mut App) {
+    let (severity, message) = match result {
+        ActionResult::Success(message) => (NotificationType::Success, message),
+        ActionResult::Info(message) => (NotificationType::Info, message),
+        ActionResult::Warning(message) => (NotificationType::Warning, message),
+        ActionResult::Error(message) => (NotificationType::Error, message),
+    };
+    let id = SharedString::from(format!("{severity:?}:{message}"));
+    window.push_notification(
+        Notification::from((severity, message))
+            .id1::<ActionResult>(id)
+            .delivery(NotificationDelivery::InApp)
+            .placement(Anchor::BottomRight),
+        cx,
+    );
 }
 
 #[cfg(target_os = "linux")]

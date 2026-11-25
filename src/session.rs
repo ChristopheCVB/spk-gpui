@@ -295,6 +295,32 @@ pub enum View {
     RetrySignOut,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActionResult {
+    Success(String),
+    Info(String),
+    Warning(String),
+    Error(String),
+}
+
+impl ActionResult {
+    pub fn success(message: impl Into<String>) -> Self {
+        Self::Success(message.into())
+    }
+
+    pub fn info(message: impl Into<String>) -> Self {
+        Self::Info(message.into())
+    }
+
+    pub fn warning(message: impl Into<String>) -> Self {
+        Self::Warning(message.into())
+    }
+
+    pub fn error(message: impl Into<String>) -> Self {
+        Self::Error(message.into())
+    }
+}
+
 #[derive(Clone)]
 pub struct Sidebar {
     pub profile: Profile,
@@ -314,6 +340,7 @@ pub struct Sidebar {
     pub draft_notice: Option<&'static str>,
     pub read_notice: Option<&'static str>,
     pub alerts: Vec<Alert>,
+    pub action_results: Vec<ActionResult>,
     unread: Arc<HashMap<String, UnreadState>>,
     pub voice: Option<VoiceView>,
     pub radio: RadioView,
@@ -355,6 +382,7 @@ impl Sidebar {
             draft_notice: None,
             read_notice: None,
             alerts: Vec::new(),
+            action_results: Vec::new(),
             unread: Arc::default(),
             voice: None,
             radio: RadioView::default(),
@@ -751,6 +779,7 @@ async fn watch_session(
         soundboard.sync(&mut sidebar, &voice);
         admin_soundboard.sync(&mut sidebar);
         voice.start_pending(&mut sidebar, client, &settings.start_call);
+        let action_results = std::mem::take(&mut sidebar.action_results);
         let mut next = sidebar.clone();
         if ChatNavigation::is_opening_alert(&chat_navigation) {
             // A retained alert can point to a conversation the account can no longer access.
@@ -761,6 +790,7 @@ async fn watch_session(
                 chat_navigation = None;
             }
         }
+        next.action_results = action_results;
         next.alerts = std::mem::take(&mut alerts.ready);
         if views.send(View::SignedIn(Box::new(next))).await.is_err() {
             break SessionEnd::Closed;
@@ -925,7 +955,8 @@ async fn watch_session(
                 Ok(Command::ManageChannel(action)) => {
                     if !sidebar.channel_admin.pending {
                         sidebar.channel_admin.revision += 1;
-                        sidebar.channel_admin.result = None;
+                        sidebar.channel_admin.succeeded = false;
+                        sidebar.channel_admin.validation = None;
                         match sidebar.channel_mutation(action) {
                             Ok((mutation, notice)) => {
                                 sidebar.channel_admin.pending = true;
@@ -934,7 +965,12 @@ async fn watch_session(
                                     client.mutate_channel(mutation).await.map(|()| notice)
                                 });
                             }
-                            Err(notice) => sidebar.channel_admin.result = Some(Err(notice)),
+                            Err(channel_admin::ChannelMutationError::Validation(message)) => {
+                                sidebar.channel_admin.validation = Some(message);
+                            }
+                            Err(channel_admin::ChannelMutationError::Action(message)) => {
+                                sidebar.action_results.push(ActionResult::error(message));
+                            }
                         }
                     }
                 }
@@ -1163,7 +1199,9 @@ async fn watch_session(
                     }
                     _ => {
                         sidebar.channel_admin.pending = false;
-                        sidebar.channel_admin.result = Some(notice);
+                        if let Err(message) = notice {
+                            sidebar.action_results.push(ActionResult::error(message));
+                        }
                     }
                 }
             }
@@ -1448,9 +1486,11 @@ async fn watch_session(
                     && let Some(result) = channel_mutation_result.take()
                 {
                     sidebar.channel_admin.pending = false;
-                    sidebar.channel_admin.result = Some(match (result, presence_loaded) {
-                        (Ok(_), false) => Ok("Channel updated. Refresh to reload the channel list."),
-                        _ => result,
+                    sidebar.channel_admin.succeeded = result.is_ok();
+                    sidebar.action_results.push(match (result, presence_loaded) {
+                        (Ok(message), true) => ActionResult::success(message),
+                        (Ok(_), false) => ActionResult::warning("Channel updated. Refresh to reload the channel list."),
+                        (Err(message), _) => ActionResult::error(message),
                     });
                 }
                 if resource == Resource::Channels
