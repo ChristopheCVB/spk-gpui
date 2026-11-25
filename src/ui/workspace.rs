@@ -832,20 +832,7 @@ impl Spk {
         let muted = self.notification_preferences.muted.contains(&id);
         let menu_id = id.clone();
         let app = cx.weak_entity();
-        let webhook_menu = webhook.then(|| webhooks::WebhookRowMenu {
-            id: id.clone(),
-            name: name.clone(),
-            muted,
-            app: app.clone(),
-        });
-        let actions = if let Some(webhook_menu) = webhook_menu.clone() {
-            let menu = SidebarRowMenu::attach(&mut row, focused, window, cx);
-            Some(webhook_menu.render(menu))
-        } else {
-            actions.map(|actions| {
-                actions.render(SidebarRowMenu::attach(&mut row, focused, window, cx))
-            })
-        };
+        let row_menu = SidebarRowMenu::attach(&mut row, focused, window, cx);
         let primary = cx.theme().primary;
         let muted_color = cx.theme().muted_foreground;
         let label = if webhook {
@@ -860,76 +847,96 @@ impl Spk {
         } else {
             unread_label(&name, counts)
         };
-        row.flex()
-            .items_center()
-            .pr_1()
-            .children(actions)
+        let select = control_button("select")
+            .ghost()
+            .small()
+            .tab_stop(true)
+            .selected(active)
+            .accessibility_label(label)
+            .flex_1()
+            .min_w_0()
+            .h_8()
+            .when(active || counts.mentions > 0, |button| {
+                button.bg(primary.opacity(0.10))
+            })
             .child(
-                control_button("select")
-                    .ghost()
-                    .small()
-                    .tab_stop(true)
-                    .selected(active)
-                    .accessibility_label(label)
-                    .flex_1()
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .w_full()
                     .min_w_0()
-                    .h_8()
-                    .when(active || counts.mentions > 0, |button| {
-                        button.bg(primary.opacity(0.10))
+                    .when(webhook, |row| {
+                        row.child(webhook_icon(channel.icon.as_deref()).size(px(16.0)))
                     })
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .w_full()
-                            .min_w_0()
-                            .when(webhook, |row| {
-                                row.child(webhook_icon(channel.icon.as_deref()).size(px(16.0)))
+                        Label::new(name.clone())
+                            .flex_1()
+                            .truncate()
+                            .when(active, |label| label.text_color(primary))
+                            .when(webhook && muted && !active, |label| {
+                                label.text_color(muted_color)
                             })
-                            .child(
-                                Label::new(name)
-                                    .flex_1()
-                                    .truncate()
-                                    .when(active, |label| label.text_color(primary))
-                                    .when(webhook && muted && !active, |label| {
-                                        label.text_color(muted_color)
-                                    })
-                                    .when(counts.unread > 0, |label| label.font_bold()),
-                            )
-                            .when(webhook && channel.private, |row| {
-                                row.child(
-                                    Icon::new(IconName::Bell)
-                                        .path("icons/lock.svg")
-                                        .size(px(12.0))
-                                        .text_color(muted_color),
-                                )
-                            })
-                            .child(unread_badges(counts, cx)),
+                            .when(counts.unread > 0, |label| label.font_bold()),
                     )
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.close_sidebar_drawer(window, cx);
-                        this.device_picker = None;
-                        let command = if webhook {
-                            Command::OpenWebhook(id.clone())
-                        } else {
-                            Command::OpenTextChannel(id.clone())
-                        };
-                        this.send(command, None, cx);
-                    })),
+                    .when(webhook && channel.private, |row| {
+                        row.child(
+                            Icon::new(IconName::Bell)
+                                .path("icons/lock.svg")
+                                .size(px(12.0))
+                                .text_color(muted_color),
+                        )
+                    })
+                    .child(unread_badges(counts, cx)),
             )
-            .context_menu(move |menu, _, cx| {
-                if let Some(webhook_menu) = &webhook_menu {
-                    webhook_menu.items(menu, None, cx)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.close_sidebar_drawer(window, cx);
+                this.device_picker = None;
+                let command = if webhook {
+                    Command::OpenWebhook(id.clone())
                 } else {
-                    menu.item(mark_read_item(menu_id.clone(), app.clone()))
-                        .item(notifications::mute_item(
-                            menu_id.clone(),
-                            muted,
-                            app.clone(),
-                        ))
+                    Command::OpenTextChannel(id.clone())
+                };
+                this.send(command, None, cx);
+            }));
+        let row = row.flex().items_center().pr_1();
+        if webhook {
+            let webhook_menu = webhooks::WebhookRowMenu {
+                id: menu_id,
+                name,
+                muted,
+                app,
+            };
+            let ellipsis = webhook_menu.clone().render(row_menu);
+            return row
+                .child(ellipsis)
+                .child(select)
+                .context_menu(move |menu, _, cx| webhook_menu.items(menu, None, cx));
+        }
+
+        let focus = row_menu.focus();
+        let (right_click, ellipsis) = row_menu.triggers(
+            tool_button(
+                "channel-actions",
+                IconName::Ellipsis,
+                format!("Actions for {name}"),
+            ),
+            Anchor::TopRight,
+            move |menu, _, cx| {
+                let menu = menu
+                    .item(mark_read_item(menu_id.clone(), app.clone()))
+                    .item(notifications::mute_item(
+                        menu_id.clone(),
+                        muted,
+                        app.clone(),
+                    ));
+                match &actions {
+                    Some(actions) => actions.items(menu, &focus, cx),
+                    None => menu,
                 }
-            })
+            },
+        );
+        row.child(select).child(ellipsis).context_menu(right_click)
     }
 
     fn navigation_footer(
@@ -1121,14 +1128,10 @@ impl Spk {
         let id = channel.id.clone();
         let row_id = SharedString::from(format!("voice-{id}"));
         let (mut row, focused) = navigation_target(row_id.clone(), scroll_on_focus, window, cx);
-        let actions = actions
-            .map(|actions| actions.render(SidebarRowMenu::attach(&mut row, focused, window, cx)));
+        let row_menu = SidebarRowMenu::attach(&mut row, focused, window, cx);
         let theme = cx.theme();
         let switching_here = sidebar.switching_to() == Some(channel.id.as_str());
-        let call = sidebar
-            .voice
-            .as_ref()
-            .filter(|call| switching_here || call.channel_id == channel.id);
+        let call = sidebar_voice_call(sidebar, &id, switching_here);
         let active = selected == Some(channel.id.as_str());
         let join_id = channel.id.clone();
         let name = channel_name(channel).to_owned();
@@ -1140,6 +1143,67 @@ impl Spk {
         } else {
             format!("Join {name}")
         };
+        let focus = row_menu.focus();
+        let app = cx.weak_entity();
+        let menu_id = id.clone();
+        let (right_click, ellipsis) = row_menu.triggers(
+            tool_button(
+                "channel-actions",
+                IconName::Ellipsis,
+                format!("Actions for {name}"),
+            ),
+            Anchor::TopRight,
+            move |menu, _, cx| {
+                let Some(workspace) = app.upgrade() else {
+                    return menu;
+                };
+                let View::SignedIn(sidebar) = &workspace.read(cx).view else {
+                    return menu;
+                };
+                let switching = sidebar.switching_to() == Some(menu_id.as_str());
+                let call = sidebar_voice_call(sidebar, &menu_id, switching);
+                let (icon, label, enabled) = match call {
+                    Some(call) => voice_leave_action(call.status, switching),
+                    None => (
+                        IconName::Phone,
+                        if sidebar.voice.is_some() {
+                            "Switch"
+                        } else {
+                            "Join"
+                        },
+                        sidebar.can_join_voice(&menu_id),
+                    ),
+                };
+                let menu = menu.item(
+                    PopupMenuItem::new(label)
+                        .icon(icon)
+                        .disabled(!enabled)
+                        .on_click({
+                            let app = app.clone();
+                            let id = menu_id.clone();
+                            let leave = call.is_some();
+                            move |_, window, cx| {
+                                let _ = app.update(cx, |this, cx| {
+                                    if !leave {
+                                        this.join_sidebar_voice_channel(&id, window, cx);
+                                    } else if let View::SignedIn(sidebar) = &this.view {
+                                        let switching = sidebar.switching_to() == Some(id.as_str());
+                                        if sidebar_voice_call(sidebar, &id, switching).is_some_and(
+                                            |call| call.status != Status::Leaving || switching,
+                                        ) {
+                                            this.leave_voice_session(cx);
+                                        }
+                                    }
+                                });
+                            }
+                        }),
+                );
+                match &actions {
+                    Some(actions) => actions.items(menu, &focus, cx),
+                    None => menu,
+                }
+            },
+        );
         div()
             .id(row_id)
             .child(
@@ -1152,7 +1216,6 @@ impl Spk {
                     .when(active, |row| row.bg(theme.primary.opacity(0.10)))
                     .when(!active && focused, |row| row.bg(theme.accent))
                     .when(!active, |row| row.hover(|row| row.bg(theme.accent)))
-                    .children(actions)
                     .child(
                         control_button("select")
                             .ghost()
@@ -1174,6 +1237,7 @@ impl Spk {
                                 this.select_voice_channel(&id, cx);
                             })),
                     )
+                    .child(ellipsis)
                     .children(sidebar.channel_radio.get(&channel.id).map(|station| {
                         div()
                             .id("radio-station")
@@ -1198,12 +1262,12 @@ impl Spk {
                                 })
                                 .child(tool_button("join", IconName::Phone, join_label).on_click(
                                     cx.listener(move |this, _, window, cx| {
-                                        this.close_sidebar_drawer(window, cx);
-                                        this.join_voice_channel(&join_id, cx);
+                                        this.join_sidebar_voice_channel(&join_id, window, cx);
                                     }),
                                 )),
                         )
-                    }),
+                    })
+                    .context_menu(right_click),
             )
             .children(participants.into_iter().enumerate().map(|(index, person)| {
                 let flags = person.flags;
@@ -1358,6 +1422,23 @@ impl Spk {
     fn join_voice_channel(&mut self, id: &str, cx: &mut Context<Self>) {
         self.select_voice_channel(id, cx);
         self.send(Command::JoinVoice(id.to_owned()), None, cx);
+    }
+
+    fn join_sidebar_voice_channel(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(&self.view, View::SignedIn(sidebar) if sidebar.can_join_voice(id)) {
+            self.close_sidebar_drawer(window, cx);
+            self.join_voice_channel(id, cx);
+        }
+    }
+
+    fn leave_voice_session(&mut self, cx: &mut Context<Self>) {
+        self.device_picker = None;
+        self.send(Command::LeaveVoice, None, cx);
     }
 
     fn sidebar_watch_buttons(
@@ -1779,13 +1860,8 @@ impl Spk {
         labeled: bool,
         cx: &Context<Self>,
     ) -> Option<Button> {
-        let (icon, label) = match call.status {
-            Status::Joining => (IconName::X, "Cancel join"),
-            Status::Leaving if switching => (IconName::X, "Cancel switch"),
-            Status::Leaving => return None,
-            _ => (IconName::PhoneOff, "Leave voice"),
-        };
-        Some(
+        let (icon, label, enabled) = voice_leave_action(call.status, switching);
+        enabled.then(|| {
             tool_button_with_label(
                 id,
                 Icon::new(icon).text_color(cx.theme().danger),
@@ -1793,11 +1869,8 @@ impl Spk {
                 labeled,
             )
             .when(labeled, |button| button.text_color(cx.theme().danger))
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.device_picker = None;
-                this.send(Command::LeaveVoice, None, cx);
-            })),
-        )
+            .on_click(cx.listener(|this, _, _, cx| this.leave_voice_session(cx)))
+        })
     }
 
     fn voice_tile_menu(
@@ -2043,6 +2116,25 @@ impl Spk {
                     VOICE_TILE_BORDER_WIDTH + SPEAKING_RING_WIDTH,
                 ))
             })
+    }
+}
+
+fn sidebar_voice_call<'a>(
+    sidebar: &'a Sidebar,
+    id: &str,
+    switching: bool,
+) -> Option<&'a VoiceView> {
+    sidebar
+        .voice
+        .as_ref()
+        .filter(|call| switching || call.channel_id == id)
+}
+
+fn voice_leave_action(status: Status, switching: bool) -> (IconName, &'static str, bool) {
+    match status {
+        Status::Joining => (IconName::X, "Cancel join", true),
+        Status::Leaving if switching => (IconName::X, "Cancel switch", true),
+        _ => (IconName::PhoneOff, "Leave voice", status != Status::Leaving),
     }
 }
 
