@@ -1437,17 +1437,17 @@ async fn watch_session(
                 }
             }
             Some(Ok((id, result))) = soundboard.tasks.join_next_with_id() => {
-                if soundboard.complete(&mut sidebar.soundboard, client, id, result).is_err_and(|error| error.unauthorized()) {
+                if soundboard.complete(&mut sidebar, client, id, result).is_err_and(|error| error.unauthorized()) {
                     break SessionEnd::Invalidated(SESSION_EXPIRED);
                 }
             }
             Some(Ok(result)) = admin_soundboard.tasks.join_next() => {
-                if admin_soundboard.complete(&mut sidebar.admin_soundboard, result).is_err() {
+                if admin_soundboard.complete(&mut sidebar, result).is_err() {
                     break SessionEnd::Invalidated(SESSION_EXPIRED);
                 }
             }
             Some(Ok((kind, result))) = admin_soundboard.mutations.join_next() => {
-                match admin_soundboard.mutated(&mut sidebar.admin_soundboard, client, kind, result) {
+                match admin_soundboard.mutated(&mut sidebar, client, kind, result) {
                     Ok(true) if sidebar.soundboard.clips.is_some() || sidebar.soundboard.loading => {
                         soundboard.refresh(&mut sidebar.soundboard, client);
                     }
