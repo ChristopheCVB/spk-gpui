@@ -253,6 +253,7 @@ fn channel_form_item(
 pub(super) fn editor_error(error: Option<&'static str>, cx: &App) -> Option<impl IntoElement> {
     error.map(|message| {
         div()
+            .id("editor-error")
             .role(Role::Status)
             .child(Label::new(message).text_color(cx.theme().danger).text_sm())
     })
