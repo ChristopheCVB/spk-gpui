@@ -25,12 +25,16 @@ import gi
 
 gi.require_version("Atspi", "2.0")
 from gi.repository import Atspi, GLib
+from livekit_fixture import livekit_server
 
 ROOT = Path(__file__).resolve().parents[2]
 WEB_REPO = "https://github.com/meeehdi-dev/spk.git"
 WEB_REVISION = "43613954d119eae4fd30e25a1f969b4327c58e89"
 EMAIL = "reader@spk.test"
+ADMIN_EMAIL = "author@spk.test"
 PASSWORD = "fixture-password-42"
+FIRST_VOICE = "Smoke Voice A"
+SECOND_VOICE = "Smoke Voice B"
 GITHUB = "https://github.com"
 PUSH_REPO = f"{GITHUB}/spk-smoke/demo"
 PUSH_SENDER = {"login": "Push Sender", "html_url": f"{GITHUB}/push-sender"}
@@ -111,8 +115,8 @@ def web_checkout(work, logs):
     return web
 
 
-def http(origin):
-    client = build_opener(ProxyHandler({}), HTTPCookieProcessor(CookieJar()))
+def http(origin, cookies=None):
+    client = build_opener(ProxyHandler({}), HTTPCookieProcessor(cookies))
 
     def request(path, data=None, headers=None):
         request = Request(
@@ -147,7 +151,7 @@ def seed(origin, database, log, process):
     token = wait_for("SPK Web health and first admin invite", first_invite, timeout=90)
     owner = admin(
         "/api/auth/sign-up/email",
-        {"name": "Smoke Author", "email": "author@spk.test", "password": PASSWORD},
+        {"name": "Smoke Author", "email": ADMIN_EMAIL, "password": PASSWORD},
         {"X-Invite-Token": token},
     )["user"]["id"]
     admin("/api/profile/nickname", {"displayName": "Smoke Author"})
@@ -159,8 +163,10 @@ def seed(origin, database, log, process):
     )["user"]["id"]
     source = admin("/api/admin/channels", {"name": "smoke-chat", "type": "text"})["id"]
     target = admin("/api/admin/channels", {"name": "smoke-target", "type": "text"})["id"]
-    for name in ("Smoke Voice A", "Smoke Voice B"):
-        admin("/api/admin/channels", {"name": name, "type": "voice"})
+    voice = {
+        name: admin("/api/admin/channels", {"name": name, "type": "voice"})["id"]
+        for name in (FIRST_VOICE, SECOND_VOICE)
+    }
 
     # Seed exact Markdown through the pinned schema so the fixture makes no link-preview requests.
     now = int(time.time() * 1000)
@@ -216,7 +222,44 @@ def seed(origin, database, log, process):
             }},
         }, {"X-GitHub-Event": event})
 
-    return post_live_alert
+    return post_live_alert, voice
+
+
+@contextmanager
+def voice_peer(origin, email, channel, web, log, env):
+    cookies = CookieJar()
+    account = http(origin, cookies)
+    account("/api/auth/sign-in/email", {"email": email, "password": PASSWORD})
+    cookie = "; ".join(f"{item.name}={item.value}" for item in cookies)
+    script = """
+const origin = process.env.PEER_ORIGIN;
+const channelId = process.env.PEER_CHANNEL;
+const sid = crypto.randomUUID();
+const url = origin.replace(/^http/, "ws") + "/_ws";
+const socket = new WebSocket(url, {headers: {Origin: origin, Cookie: process.env.PEER_COOKIE}});
+const send = frame => socket.send(JSON.stringify({...frame, sid}));
+socket.addEventListener("open", () => send({type: "voice:join", channelId, ready: true}));
+socket.addEventListener("message", event => {
+    const frame = JSON.parse(event.data);
+    if (frame.type === "voice:joined") {
+        send({type: "voice:state", cam: true, screen: true});
+        console.log("joined");
+    }
+});
+socket.addEventListener("error", event => {
+    console.error(event.message);
+    process.exit(1);
+});
+"""
+    env = {**env, "PEER_ORIGIN": origin, "PEER_CHANNEL": channel, "PEER_COOKIE": cookie}
+    with service(["node", "-e", script], log, web, env) as process:
+        def joined():
+            if process.poll() is not None:
+                raise RuntimeError(f"Voice peer exited. See {log}")
+            return "joined" in log.read_text()
+
+        wait_for("the SPK Web voice peer", joined)
+        yield
 
 
 def walk(node):
@@ -248,35 +291,247 @@ class Desktop:
         if self.process.poll() is not None:
             raise RuntimeError("SPK desktop exited during the smoke test")
 
-    def find_node(self, name, role=None, partial=False):
+    def find_node(self, name, role=None, partial=False, within=None):
         self.ensure_running()
-        for node in self.nodes():
+        nodes = walk(self.find_node(*within)) if within else self.nodes()
+        for node in nodes:
             label = node.get_name() or ""
             if (name in label if partial else name == label) and (
                 role is None or node.get_role_name() == role
             ):
                 return node
 
-    def find(self, name, role=None, partial=False):
+    def find(self, name, role=None, partial=False, within=None):
         def probe():
             try:
-                return self.find_node(name, role, partial)
+                return self.find_node(name, role, partial, within)
             except GLib.Error:
                 # A frame can replace part of the accessibility tree during traversal.
                 return None
 
         return wait_for(repr(name), probe)
 
-    def click(self, name, role=None, partial=False):
-        node = self.find(name, role, partial)
-        bounds = node.get_component_iface().get_extents(Atspi.CoordType.WINDOW)
+    def bounds(self, name, role=None, partial=False, within=None):
+        node = self.find(name, role, partial, within)
+        return node.get_component_iface().get_extents(Atspi.CoordType.WINDOW)
+
+    def click(self, name, role=None, partial=False, button=1, within=None):
+        bounds = self.bounds(name, role, partial, within)
         if bounds.width <= 0 or bounds.height <= 0:
             raise RuntimeError(f"Control is outside the window: {name}")
-        self.click_at(bounds.x + bounds.width // 2, bounds.y + bounds.height // 2)
+        self.click_at(bounds.x + bounds.width // 2, bounds.y + bounds.height // 2, button)
 
-    def click_at(self, x, y):
-        subprocess.run(["xdotool", "mousemove", "--window", self.window, str(x), str(y),
-                        "click", "1"], check=True)
+    def move(self, x, y):
+        subprocess.run(["xdotool", "mousemove", "--window", self.window, str(x), str(y)],
+                       check=True)
+
+    def click_at(self, x, y, button=1):
+        self.move(x, y)
+        subprocess.run(["xdotool", "click", str(button)], check=True)
+
+    def menu_order(self, *labels):
+        positions = [self.bounds(label, None if label == "Admin" else "menu item").y
+                     for label in labels]
+        if positions != sorted(set(positions)):
+            raise RuntimeError(f"Menu items are out of order: {labels}")
+
+    def absent(self, name, role):
+        if self.find_node(name, role) is not None:
+            raise RuntimeError(f"Unexpected {role}: {name}")
+
+    def check_disabled_menu_item(self, name):
+        # gpui-kit skips disabled items and leaves the popup open when clicked.
+        self.click(name, "menu item")
+        self.find(name, "menu item")
+
+    def screenshot(self, logs, filename):
+        subprocess.run(["import", "-window", self.window, str(logs / filename)],
+                       timeout=10, check=True)
+
+    def channel_ellipsis(self, row):
+        bounds = self.bounds(row, "push button", partial=True)
+        self.move(bounds.x + 8, bounds.y + bounds.height // 2)
+        label = f"Actions for {row}"
+        action = self.bounds(label, "push button")
+        row_bounds = self.bounds(row, "push button", partial=True)
+        if action.x < row_bounds.x + row_bounds.width:
+            raise RuntimeError(f"The ellipsis must follow the name of {row}")
+        return label
+
+    def open_participant_menu(self, person, context=False):
+        if context:
+            self.click(person, "panel", button=3)
+        else:
+            bounds = self.bounds(person, "panel")
+            self.move(bounds.x + bounds.width // 2, bounds.y + bounds.height // 2)
+            self.click(f"Actions for {person}", "push button", within=(person, "panel"))
+        self.find("Profile", "menu item")
+
+    def role_choices(self):
+        self.click("Change role", "menu item")
+        user = self.find("User", "menu item")
+        submenu = user.get_parent()
+        while submenu.get_role_name() != "menu":
+            submenu = submenu.get_parent()
+        admin = next(node for node in walk(submenu)
+                     if node.get_role_name() == "menu item" and node.get_name() == "Admin")
+        return admin, user
+
+    def check_reader_menus(self, logs):
+        target = "smoke-target"
+        person = "Smoke Author"
+        self.click(target, "push button", partial=True, button=3)
+        self.menu_order("Mark read", "Mute notifications")
+        self.absent("Rename", "menu item")
+        self.click("Mute notifications", "menu item")
+        target_action = self.channel_ellipsis(target)
+        self.move(1000, 30)
+        self.tab_to(target_action, "push button")
+        self.key("Return")
+        self.menu_order("Mark read", "Unmute notifications")
+        self.click("Unmute notifications", "menu item")
+
+        self.click(target, "push button", partial=True)
+        self.visible_text("Smoke destination loaded")
+        self.move(1000, 30)
+        watch_buttons = [f"Watch {person}’s {feed}" for feed in ("camera", "screen share")]
+        for label in watch_buttons:
+            self.find(label, "push button")
+        self.absent(f"Actions for {person}", "push button")
+        row = self.bounds(person, "panel")
+        self.move(row.x + row.width // 2, row.y + row.height // 2)
+        action = self.bounds(f"Actions for {person}", "push button")
+        if any(action.x + action.width > self.bounds(button, "push button").x
+               for button in watch_buttons):
+            raise RuntimeError("The participant ellipsis must precede the watch buttons")
+        self.open_participant_menu(person, context=True)
+        self.menu_order("Profile", "Send DM", "Mention", "Copy name")
+        self.absent("Disconnect from voice", "menu item")
+        self.absent("Volume…", "menu item")
+        self.click("Mention", "menu item")
+        self.visible_text("@Smoke Author")
+        self.open_participant_menu(person)
+        self.screenshot(logs, "participant-menu-dark.png")
+        self.click("Profile", "menu item")
+        self.find("Send DM", "push button")
+        self.key("Escape")
+        self.open_participant_menu(person, context=True)
+        self.click("Send DM", "menu item")
+        self.visible_text(f"Message @{person}")
+
+        self.click(FIRST_VOICE, "push button", button=3)
+        self.find("Join", "menu item")
+        self.absent("Rename", "menu item")
+        self.click("Join", "menu item")
+        self.find("Leave voice", "push button")
+        self.click(SECOND_VOICE, "push button", button=3)
+        self.find("Switch", "menu item")
+        self.key("Escape")
+        self.open_participant_menu(person)
+        self.menu_order("Profile", "Send DM", "Copy name", "Mute for me", "Volume…")
+        self.absent("Mention", "menu item")
+        self.click("Mute for me", "menu item")
+        self.open_participant_menu(person, context=True)
+        self.find("Unmute for me", "menu item")
+        self.click("Volume…", "menu item")
+        self.find("Mic volume", "slider")
+        self.find("Screen Share volume", "slider")
+        self.key("Escape")
+        person_action = f"Actions for {person}"
+        sidebar_row = (person, "panel")
+        self.tab_to(person_action, "push button", within=sidebar_row)
+        self.key("Return")
+        self.find("Unmute for me", "menu item")
+        self.key("Escape")
+        wait_for("focus to return to the participant ellipsis",
+                 lambda: self.focused(person_action, "push button", within=sidebar_row))
+        self.click(FIRST_VOICE, "push button", button=3)
+        self.click("Leave voice", "menu item")
+        self.find(f"Join {FIRST_VOICE}", "push button")
+
+    def check_admin_menus(self, logs, admin, server):
+        person = "Smoke Reader"
+        self.click("smoke-target", "push button", partial=True, button=3)
+        self.menu_order("Mark read", "Mute notifications", "Admin", "Rename", "Move up", "Move down", "Delete")
+        self.check_disabled_menu_item("Move down")
+        self.screenshot(logs, "text-channel-menu-dark.png")
+        self.click("Mark read", "menu item")
+        text_action = self.channel_ellipsis("smoke-target")
+        self.click(text_action, "push button")
+        self.menu_order("Mark read", "Mute notifications", "Admin", "Rename", "Move up", "Move down", "Delete")
+        self.click("Delete", "menu item")
+        self.visible_text("Delete channel")
+        self.click("Cancel", "push button")
+        self.find("smoke-target", "push button", partial=True)
+        self.click("smoke-target", "push button", partial=True, button=3)
+        self.click("Rename", "menu item")
+        self.click("Channel name", "entry")
+        self.key("ctrl+a")
+        self.type_text("smoke-renamed")
+        self.click("Save", "push button")
+        self.find("smoke-renamed", "push button", partial=True)
+
+        voice_action = self.channel_ellipsis(FIRST_VOICE)
+        ellipsis = self.bounds(voice_action, "push button")
+        phone = self.bounds(f"Join {FIRST_VOICE}", "push button")
+        if ellipsis.x + ellipsis.width > phone.x:
+            raise RuntimeError("The Voice Channel ellipsis must precede the phone button")
+        self.click(voice_action, "push button")
+        self.menu_order("Join", "Admin", "Rename", "Move up", "Move down", "Delete")
+        self.screenshot(logs, "voice-channel-menu-dark.png")
+        self.key("Escape")
+
+        def account():
+            return next(user for user in admin("/api/users") if user["displayName"] == person)
+
+        self.open_participant_menu(person, context=True)
+        self.menu_order("Profile", "Send DM", "Copy name", "Admin", "Change role", "Move to",
+                        "Disconnect from voice", "Ban")
+        self.click("Move to", "menu item")
+        self.find(SECOND_VOICE, "menu item")
+        self.absent(FIRST_VOICE, "menu item")
+        self.key("Escape")
+        self.key("Escape")
+        self.open_participant_menu(person)
+        admin_choice, user_choice = self.role_choices()
+        if not user_choice.get_state_set().contains(Atspi.StateType.CHECKED):
+            raise RuntimeError("The current User role is unchecked")
+        self.screenshot(logs, "change-role-dark.png")
+        bounds = admin_choice.get_component_iface().get_extents(Atspi.CoordType.WINDOW)
+        self.click_at(bounds.x + bounds.width // 2, bounds.y + bounds.height // 2)
+        wait_for("the sidebar promotion to reach SPK", lambda: account()["role"] == "admin")
+        self.visible_text("Role updated")
+        self.open_participant_menu(person, context=True)
+        admin_choice, _ = self.role_choices()
+        if not admin_choice.get_state_set().contains(Atspi.StateType.CHECKED):
+            raise RuntimeError("The updated Admin role is unchecked")
+        self.key("Escape")
+        self.key("Escape")
+
+        self.open_participant_menu(person, context=True)
+        self.click("Ban", "menu item")
+        self.visible_text(f"Ban {person}")
+        self.find("Ban reason", "entry")
+        self.screenshot(logs, "ban-participant-dark.png")
+        self.click("Cancel", "push button")
+        wait_for("focus to return from the Ban confirmation",
+                 lambda: self.focused(f"Actions for {person}", "push button",
+                                      within=(person, "panel")))
+        if account()["banned"]:
+            raise RuntimeError("Cancelling Ban changed the participant’s account")
+        self.open_participant_menu(person)
+        self.click("Ban", "menu item")
+        self.enter("Ban reason", "entry", "Smoke test confirmation")
+        self.click("Ban", "push button")
+        wait_for("the sidebar ban to reach SPK", lambda: account()["banned"])
+        self.visible_text("User banned")
+        wait_for("the banned participant to leave the sidebar",
+                 lambda: self.find_node(person, "panel") is None)
+
+        os.killpg(server.pid, signal.SIGTERM)
+        self.visible_text("Reconnecting to live updates")
+        self.click(FIRST_VOICE, "push button", button=3)
+        self.check_disabled_menu_item("Join")
 
     def text_positions(self, phrases):
         self.ensure_running()
@@ -317,26 +572,29 @@ class Desktop:
 
     def enter(self, label, role, text):
         self.click(label, role)
+        self.type_text(text)
+
+    def type_text(self, text):
         subprocess.run(["xdotool", "type", "--clearmodifiers", "--", text], check=True)
 
     def key(self, name):
         subprocess.run(["xdotool", "key", "--clearmodifiers", "--delay", "50", name],
                        check=True)
 
-    def focused(self, name, role, expected=True):
+    def focused(self, name, role, expected=True, within=None):
         try:
-            node = self.find_node(name, role)
+            node = self.find_node(name, role, within=within)
             is_focused = node is not None and node.get_state_set().contains(Atspi.StateType.FOCUSED)
             return is_focused == expected
         except GLib.Error:
             return False
 
-    def tab_to(self, name, role):
-        if self.focused(name, role):
+    def tab_to(self, name, role, within=None):
+        if self.focused(name, role, within=within):
             return
         for _ in range(50):
             self.key("Tab")
-            if self.focused(name, role):
+            if self.focused(name, role, within=within):
                 return
         raise RuntimeError(f"Tab did not reach {name}")
 
@@ -411,17 +669,20 @@ class Desktop:
             raise RuntimeError(f"Expected one launch of {url}, got {launches}")
         self.checked_launches.extend(launches)
 
-    def check(self, post_live_alert, logs):
+    def sign_in(self, email, nickname=None):
         self.find("Sign in to SPK")
         self.window = subprocess.check_output(["xdotool", "search", "--name", "^SPK$"], text=True).strip()
         subprocess.run(["xdotool", "windowfocus", self.window], check=True)
-        self.enter("Email", "entry", EMAIL)
+        self.enter("Email", "entry", email)
         self.enter("Password", "password text", PASSWORD)
         self.click("Sign in", "push button")
-        self.enter("Nickname", "entry", "Smoke Reader")
-        self.click("Continue", "push button")
-        for channel in ("Smoke Voice A", "Smoke Voice B"):
+        if nickname:
+            self.enter("Nickname", "entry", nickname)
+            self.click("Continue", "push button")
+        for channel in (FIRST_VOICE, SECOND_VOICE):
             self.find(channel, "push button")
+
+    def check(self, post_live_alert, logs):
         self.find("smoke-target", "push button", partial=True)
         self.click("Smoke Webhook", "push button", partial=True)
         self.find("Smoke deploy alert", partial=True)
@@ -444,8 +705,7 @@ class Desktop:
             post_live_alert(event, field, name, url)
             self.external_link(url, lambda: self.click(name, "link"))
         if os.environ.get("SPK_SMOKE_WEBHOOK_AVATAR"):
-            subprocess.run(["import", "-window", self.window, str(logs / "webhook-dark.png")],
-                           timeout=10, check=True)
+            self.screenshot(logs, "webhook-dark.png")
         self.click("smoke-chat", "push button", partial=True)
         self.visible_text("Smoke bold", "Smoke italic", "smoke code", "Smoke link", "@Smoke Reader")
         for emoji in ("👍🏽", "🇫🇷", "1️⃣"):
@@ -472,6 +732,7 @@ class Desktop:
 
 
 def isolated_env(directory, launches):
+    directory.mkdir(exist_ok=True)
     env = os.environ.copy()
     for name in ("WAYLAND_DISPLAY", "AT_SPI_BUS_ADDRESS", "PULSE_SINK", "PULSE_SOURCE"):
         env.pop(name, None)
@@ -487,17 +748,37 @@ def isolated_env(directory, launches):
     for name in ("powershell.exe", "wslview", "xdg-open", "gio", "gnome-open",
                  "kde-open6", "kde-open5", "kde-open"):
         (bin_dir / name).symlink_to(launcher)
-    alsa = directory / "alsa.conf"
-    alsa.write_text("pcm.!default { type null }\nctl.!default { type hw card -1 }\n")
     appearance = Path(env["XDG_CONFIG_HOME"]) / "spk-gpui" / "appearance"
     appearance.parent.mkdir()
     appearance.write_text("Dark")
     env.update(
         PATH=f"{bin_dir}:{env['PATH']}", BROWSER=str(launcher), SPK_SMOKE_LAUNCHES=str(launches),
-        XDG_SESSION_TYPE="x11", ALSA_CONFIG_PATH=str(alsa),
-        PULSE_SERVER=f"unix:{directory / 'silent-pulse'}", PIPEWIRE_REMOTE="spk-smoke-no-audio",
+        XDG_SESSION_TYPE="x11", PULSE_SERVER=f"unix:{directory / 'silent-pulse'}",
+        PIPEWIRE_REMOTE="spk-smoke-no-audio",
     )
     return env
+
+
+@contextmanager
+def silent_audio(directory, log, env):
+    config = directory / "smoke.pa"
+    config.write_text(
+        f"load-module module-native-protocol-unix socket={directory / 'silent-pulse'} auth-anonymous=1\n"
+        "load-module module-null-sink sink_name=spk_smoke rate=48000 channels=2\n"
+        "set-default-sink spk_smoke\n"
+        "set-default-source spk_smoke.monitor\n"
+    )
+    with service(["pulseaudio", "-n", "-F", config, "--daemonize=no",
+                  "--use-pid-file=no", "--exit-idle-time=-1"], log, directory, env) as server:
+        def ready():
+            if server.poll() is not None:
+                raise RuntimeError(f"The silent PulseAudio server exited. See {log}")
+            status = subprocess.run(["pactl", "get-default-sink"], env=env,
+                                    capture_output=True, text=True, timeout=3)
+            return status.stdout.strip() == "spk_smoke"
+
+        wait_for("the silent audio device", ready)
+        yield
 
 
 def desktop_binary(work, logs, env):
@@ -513,6 +794,25 @@ def desktop_binary(work, logs, env):
             stdout=output, stderr=subprocess.STDOUT, check=True,
         )
     return target / "debug" / "spk-gpui"
+
+
+@contextmanager
+def desktop_session(binary, launches, log, env):
+    client_env = {key: value for key, value in env.items()
+                  if key.lower() not in ("http_proxy", "https_proxy", "all_proxy")}
+    with service([binary], log, ROOT, client_env) as client:
+        desktop = Desktop(client, launches)
+        try:
+            yield desktop
+            desktop.ensure_launches_checked()
+        except Exception:
+            with suppress(OSError, subprocess.SubprocessError):
+                subprocess.run(["import", "-window", "root", str(log.with_suffix(".png"))],
+                               timeout=10, check=True)
+            with suppress(OSError, GLib.Error), log.with_suffix(".txt").open("w") as tree:
+                for node in desktop.nodes():
+                    print(node.get_role_name(), repr(node.get_name()), file=tree)
+            raise
 
 
 def main(work, artifacts):
@@ -546,9 +846,6 @@ def main(work, artifacts):
         "TMPDIR": str(attempt), "BETTER_AUTH_URL": origin,
         "BETTER_AUTH_SECRET": os.urandom(32).hex(), "NUXT_DATABASE_PATH": str(database),
     })
-    desktop_env = {**env, "SPK_URL": origin, "LIVEKIT_URL": "ws://127.0.0.1:7880"}
-    client_env = {key: value for key, value in desktop_env.items()
-                  if key.lower() not in ("http_proxy", "https_proxy", "all_proxy")}
     subprocess.run(["xset", "b", "off"], check=True)
     subprocess.run(
         ["gdbus", "call", "--session", "--dest", "org.a11y.Bus", "--object-path", "/org/a11y/bus",
@@ -556,23 +853,31 @@ def main(work, artifacts):
         check=True, stdout=subprocess.DEVNULL,
     )
     Atspi.init()
-    with service(["node", "node_modules/nuxt/bin/nuxt.mjs", "dev", "--host", "127.0.0.1",
-                  "--port", str(port)], server_log, web, web_env) as server:
-        post_live_alert = seed(origin, database, server_log, server)
-        binary = desktop_binary(work, logs, desktop_env)
-        with service([binary], logs / "desktop.log", ROOT, client_env) as client:
-            desktop = Desktop(client, launches)
-            try:
+    with (livekit_server(attempt, logs / "livekit.log") as (signaling, key, secret),
+          silent_audio(attempt, logs / "pulse.log", env)):
+        livekit = f"ws://127.0.0.1:{signaling}"
+        web_env.update(NUXT_LIVEKIT_API_KEY=key, NUXT_LIVEKIT_API_SECRET=secret,
+                       NUXT_PUBLIC_LIVEKIT_URL=livekit)
+        with service(["node", "node_modules/nuxt/bin/nuxt.mjs", "dev", "--host", "127.0.0.1",
+                      "--port", str(port)], server_log, web, web_env) as server:
+            post_live_alert, voice = seed(origin, database, server_log, server)
+            binary = desktop_binary(work, logs, {**env, "SPK_URL": origin, "LIVEKIT_URL": livekit})
+            with (voice_peer(origin, ADMIN_EMAIL, voice[FIRST_VOICE], web, logs / "author-peer.log", env),
+                  desktop_session(binary, launches, logs / "reader.log", env) as desktop):
+                desktop.sign_in(EMAIL, "Smoke Reader")
                 desktop.check(post_live_alert, logs)
-            except Exception:
-                with suppress(OSError, subprocess.SubprocessError):
-                    subprocess.run(["import", "-window", "root", str(logs / "failure.png")],
-                                   timeout=10, check=True)
-                with suppress(OSError, GLib.Error), (logs / "accessibility.txt").open("w") as tree:
-                    for node in desktop.nodes():
-                        print(node.get_role_name(), repr(node.get_name()), file=tree)
-                raise
-    desktop.ensure_launches_checked()
+                desktop.check_reader_menus(logs)
+
+            admin_launches = logs / "admin-browser-launches.log"
+            admin_launches.touch()
+            admin_env = isolated_env(attempt / "admin", admin_launches)
+            admin_env["PULSE_SERVER"] = env["PULSE_SERVER"]
+            admin = http(origin)
+            admin("/api/auth/sign-in/email", {"email": ADMIN_EMAIL, "password": PASSWORD})
+            with (voice_peer(origin, EMAIL, voice[FIRST_VOICE], web, logs / "reader-peer.log", env),
+                  desktop_session(binary, admin_launches, logs / "admin.log", admin_env) as desktop):
+                desktop.sign_in(ADMIN_EMAIL)
+                desktop.check_admin_menus(logs, admin, server)
     print("SPK desktop smoke test passed")
 
 
