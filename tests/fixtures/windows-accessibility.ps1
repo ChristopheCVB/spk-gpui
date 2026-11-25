@@ -76,6 +76,11 @@ public static class SpkAccessibilityFixture {
         PostMessage(hwnd, 0x0202, IntPtr.Zero, position);
     }
 
+    public static void PressKey(IntPtr hwnd, int key) {
+        PostMessage(hwnd, 0x0100, new IntPtr(key), new IntPtr(1));
+        PostMessage(hwnd, 0x0101, new IntPtr(key), new IntPtr(unchecked((int)0xc0000001)));
+    }
+
     public static void Type(IntPtr hwnd, string text) {
         foreach (char key in text) PostMessage(hwnd, 0x0102, new IntPtr(key), new IntPtr(1));
     }
@@ -150,6 +155,20 @@ function Assert-Rows([string[]]$Expected) {
     }
 }
 
+function Assert-TrimHandle([string]$Name, [double]$Seconds, [switch]$Focused) {
+    $null = Wait-For "$Name at $Seconds seconds" {
+        $handle = Get-Nodes $windowHandle | Where-Object {
+            $_.Current.Name -eq $Name -and
+            $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Slider -and
+            $_.Current.IsKeyboardFocusable
+        } | Select-Object -First 1
+        $range = $null
+        $handle -and (!$Focused -or $handle.Current.HasKeyboardFocus) -and
+            $handle.TryGetCurrentPattern([System.Windows.Automation.RangeValuePattern]::Pattern, [ref]$range) -and
+            [Math]::Abs($range.Current.Value - $Seconds) -lt 0.000001
+    }
+}
+
 try {
     $windowHandle = Wait-For 'the SPK window' { $client.MainWindowHandle.ToInt64() }
     Set-Input 'Email' 'alice@example.test'
@@ -176,9 +195,27 @@ try {
     Write-Host 'Changelog accessibility passed.'
 
     Invoke-Button 'Soundboard'
-    Invoke-Button 'Choose audio file'
+    Click-Control (Get-Control 'Choose audio file' ([System.Windows.Automation.ControlType]::Button))
     $null = Wait-For 'the audio picker' { [SpkAccessibilityFixture]::ChooseFile($client.Id, $Sound) }
-    Assert-Rows @('Start (seconds)', 'End (seconds)', 'Upload gain (%)')
+    Assert-Rows @('Start: 0.000 s', 'End: 1.000 s', 'Duration: 1.000 s', 'Upload gain (%)')
+    $null = Get-Control 'Upload gain (%)' ([System.Windows.Automation.ControlType]::Edit)
+    Assert-TrimHandle 'Trim start' 0.0
+    Assert-TrimHandle 'Trim end' 1.0
+
+    $choose = Get-Control 'Choose audio file' ([System.Windows.Automation.ControlType]::Button)
+    $choose.SetFocus()
+    $null = Wait-For 'Choose audio file focus' { $choose.Current.HasKeyboardFocus }
+    [SpkAccessibilityFixture]::PressKey($windowHandle, 0x09) # Tab
+    Assert-TrimHandle 'Trim start' 0.0 -Focused
+    [SpkAccessibilityFixture]::PressKey($windowHandle, 0x27) # Right
+    Assert-TrimHandle 'Trim start' 0.1 -Focused
+    Assert-Rows @('Start: 0.100 s', 'End: 1.000 s', 'Duration: 0.900 s')
+
+    [SpkAccessibilityFixture]::PressKey($windowHandle, 0x09) # Tab
+    Assert-TrimHandle 'Trim end' 1.0 -Focused
+    [SpkAccessibilityFixture]::PressKey($windowHandle, 0x25) # Left
+    Assert-TrimHandle 'Trim end' 0.9 -Focused
+    Assert-Rows @('Start: 0.100 s', 'End: 0.900 s', 'Duration: 0.800 s')
     Write-Host 'Soundboard upload accessibility passed.'
 
     Invoke-Button 'Close settings'

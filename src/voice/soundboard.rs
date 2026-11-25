@@ -4,6 +4,7 @@ use std::{
     num::NonZero,
     ops::Range,
     path::Path,
+    sync::Arc,
     time::Duration,
 };
 
@@ -17,6 +18,7 @@ use tokio::{sync::watch, task::spawn_blocking, time};
 use super::devices::{MediaOutput, open_media_output};
 
 pub(crate) const MAX_SECONDS: u32 = 10;
+const MAX_WAVEFORM_PEAKS: usize = 512;
 
 use crate::api::MAX_SOUND_BYTES;
 const MAX_SOURCE_BYTES: usize = 20 * 1024 * 1024;
@@ -30,6 +32,20 @@ pub struct Crop {
     pub gain: u16,
 }
 
+#[derive(Clone, Copy)]
+pub enum Trim {
+    Start,
+    End,
+    Region,
+}
+
+#[derive(Clone)]
+pub struct Waveform {
+    pub duration: f64,
+    pub peaks: Arc<[f32]>,
+    pub peak_width: f64,
+}
+
 pub(crate) struct PreparedSound {
     pub wav: Vec<u8>,
     pub duration_ms: u32,
@@ -40,6 +56,7 @@ pub(crate) struct SoundSource {
     rate: u32,
     channels: u16,
     frames: usize,
+    pub waveform: Waveform,
 }
 
 impl SoundSource {
@@ -63,26 +80,65 @@ impl SoundSource {
         if source.len() > MAX_SOURCE_BYTES {
             return Err("Source audio must be 20 MB or smaller.");
         }
-        let (rate, channels, frames) = read_audio(&source, None)?;
+        let mut peaks = Vec::with_capacity(MAX_WAVEFORM_PEAKS);
+        let mut frames_per_peak = 1;
+        let (rate, channels, frames) = read_audio(
+            &source,
+            AudioRead::Waveform(&mut peaks, &mut frames_per_peak),
+        )?;
         Ok(Self {
             source,
             rate,
             channels,
             frames,
+            waveform: Waveform {
+                duration: frames as f64 / f64::from(rate),
+                peaks: peaks.into(),
+                peak_width: frames_per_peak as f64 / frames as f64,
+            },
         })
     }
 
-    pub fn duration(&self) -> f64 {
-        self.frames as f64 / f64::from(self.rate)
+    pub fn initial_crop(&self) -> Crop {
+        Crop {
+            start: 0.0,
+            end: self.waveform.duration.min(f64::from(MAX_SECONDS)),
+            gain: 100,
+        }
+    }
+
+    pub fn trim(&self, crop: &mut Crop, target: Trim, seconds: f64) {
+        let minimum = (self.rate as usize).div_ceil(1000);
+        if self.frames < minimum || !seconds.is_finite() {
+            return;
+        }
+        let maximum = self.rate as usize * MAX_SECONDS as usize;
+        let mut start = self.frame(crop.start);
+        let mut end = self.frame(crop.end);
+        let value = self.frame(seconds);
+        match target {
+            Trim::Start => start = value.clamp(end.saturating_sub(maximum), end - minimum),
+            Trim::End => end = value.clamp(start + minimum, (start + maximum).min(self.frames)),
+            Trim::Region => {
+                let length = end - start;
+                start = value.min(self.frames - length);
+                end = start + length;
+            }
+        }
+        crop.start = start as f64 / f64::from(self.rate);
+        crop.end = end as f64 / f64::from(self.rate);
+    }
+
+    fn frame(&self, seconds: f64) -> usize {
+        (seconds * f64::from(self.rate)).round() as usize
     }
 
     pub fn crop(&self, crop: Crop) -> Result<PreparedSound, &'static str> {
         if !crop.start.is_finite()
             || !crop.end.is_finite()
             || crop.start < 0.0
-            || crop.end > self.duration()
+            || crop.end > self.waveform.duration
             || crop.end <= crop.start
-            || crop.end - crop.start > f64::from(MAX_SECONDS)
         {
             return Err(BAD_CROP);
         }
@@ -90,8 +146,8 @@ impl SoundSource {
             return Err("Upload gain must be between 0% and 200%.");
         }
         let rate = f64::from(self.rate);
-        let start = (crop.start * rate).round() as usize;
-        let end = (crop.end * rate).round() as usize;
+        let start = self.frame(crop.start);
+        let end = self.frame(crop.end);
         let frames = end - start;
         let duration_ms = (frames as f64 * 1000.0 / rate).round() as u32;
         if frames * 1000 < self.rate as usize || frames > self.rate as usize * MAX_SECONDS as usize
@@ -119,7 +175,7 @@ impl SoundSource {
             gain: f32::from(crop.gain) / 100.0,
             wav: &mut wav,
         };
-        read_audio(&self.source, Some(&mut selection))?;
+        read_audio(&self.source, AudioRead::Crop(&mut selection))?;
         if wav.len() != 44 + size {
             return Err(BAD_AUDIO);
         }
@@ -134,10 +190,12 @@ struct Selection<'a> {
     wav: &'a mut Vec<u8>,
 }
 
-fn read_audio(
-    source: &[u8],
-    mut selection: Option<&mut Selection<'_>>,
-) -> Result<(u32, u16, usize), &'static str> {
+enum AudioRead<'a> {
+    Waveform(&'a mut Vec<f32>, &'a mut usize),
+    Crop(&'a mut Selection<'a>),
+}
+
+fn read_audio(source: &[u8], mut read: AudioRead<'_>) -> Result<(u32, u16, usize), &'static str> {
     let mut format = symphonia::default::get_probe()
         .probe(
             &Hint::new(),
@@ -174,34 +232,62 @@ fn read_audio(
         }
         spec = Some((rate, channels));
         let next = frames + audio.frames();
-        if let Some(selection) = selection.as_deref_mut() {
-            let from = frames.max(selection.frames.start);
-            let to = next.min(selection.frames.end);
-            if from < to {
-                samples.resize(audio.samples_interleaved(), 0.0_f32);
-                audio.copy_to_slice_interleaved(&mut samples);
-                for sample in &samples[(from - frames) * channels..(to - frames) * channels] {
-                    let sample = sample * selection.gain;
-                    if !(-1.0..=1.0).contains(&sample) {
-                        return Err("Lower the upload gain to avoid clipping.");
+        let (from, to) = match &read {
+            AudioRead::Waveform(..) => (frames, next),
+            AudioRead::Crop(selection) => (
+                frames.max(selection.frames.start),
+                next.min(selection.frames.end),
+            ),
+        };
+        if from < to {
+            samples.resize(audio.samples_interleaved(), 0.0_f32);
+            audio.copy_to_slice_interleaved(&mut samples);
+            let samples = &samples[(from - frames) * channels..(to - frames) * channels];
+            match &mut read {
+                AudioRead::Waveform(peaks, frames_per_peak) => {
+                    for (index, frame) in samples.chunks_exact(channels).enumerate() {
+                        let frame_index = from + index;
+                        if frame_index / **frames_per_peak == MAX_WAVEFORM_PEAKS {
+                            // Merge neighboring bins as the decoded duration grows.
+                            for bin in 0..MAX_WAVEFORM_PEAKS / 2 {
+                                peaks[bin] = peaks[bin * 2].max(peaks[bin * 2 + 1]);
+                            }
+                            peaks.truncate(MAX_WAVEFORM_PEAKS / 2);
+                            **frames_per_peak *= 2;
+                        }
+                        let bin = frame_index / **frames_per_peak;
+                        if bin == peaks.len() {
+                            peaks.push(0.0);
+                        }
+                        for sample in frame {
+                            peaks[bin] = peaks[bin].max(sample.abs().min(1.0));
+                        }
                     }
-                    let scale = if sample < 0.0 {
-                        8_388_608.0
-                    } else {
-                        8_388_607.0
-                    };
-                    let pcm = (f64::from(sample) * scale).round() as i32;
-                    selection.wav.extend(&pcm.to_le_bytes()[..3]);
                 }
-            }
-            if next >= selection.frames.end {
-                break;
+                AudioRead::Crop(selection) => {
+                    for sample in samples {
+                        let sample = sample * selection.gain;
+                        if !(-1.0..=1.0).contains(&sample) {
+                            return Err("Lower the upload gain to avoid clipping.");
+                        }
+                        let scale = if sample < 0.0 {
+                            8_388_608.0
+                        } else {
+                            8_388_607.0
+                        };
+                        let pcm = (f64::from(sample) * scale).round() as i32;
+                        selection.wav.extend(&pcm.to_le_bytes()[..3]);
+                    }
+                }
             }
         }
         frames = next;
+        if matches!(&read, AudioRead::Crop(selection) if frames >= selection.frames.end) {
+            break;
+        }
     }
     let (rate, channels) = spec.ok_or(BAD_AUDIO)?;
-    if frames == 0 && selection.is_none() {
+    if frames == 0 {
         return Err(BAD_AUDIO);
     }
     Ok((rate, channels as u16, frames))

@@ -16,7 +16,9 @@ use crate::{
     },
 };
 
-pub use crate::voice::soundboard::Crop as SoundboardCrop;
+pub use crate::voice::soundboard::{
+    Crop as SoundboardCrop, Trim as SoundboardTrim, Waveform as SoundboardWaveform,
+};
 
 const ACCESS_REQUIRED: &str = "Admin access is required.";
 const CHOOSE_AUDIO: &str = "Choose an audio file first.";
@@ -26,11 +28,13 @@ pub enum SoundboardAdminAction {
     Close,
     ChooseFile(PathBuf),
     Discard,
-    Preview(SoundboardCrop),
+    Trim(SoundboardTrim, f64),
+    NudgeTrim(SoundboardTrim, f64),
+    Gain(u16),
+    Preview,
     PreviewSaved(String),
     StopPreview,
     Add {
-        crop: SoundboardCrop,
         name: String,
         icon: String,
     },
@@ -46,7 +50,8 @@ pub enum SoundboardAdminAction {
 pub struct SoundboardAdminView {
     pub clips: Option<Arc<[SoundboardClip]>>,
     pub loading: bool,
-    pub duration: Option<f64>,
+    pub waveform: Option<SoundboardWaveform>,
+    pub selection: Option<SoundboardCrop>,
     pub decoding: bool,
     pub previewing: bool,
     pub saving: bool,
@@ -167,7 +172,8 @@ impl AdminSoundboard {
         match action {
             ChooseFile(path) => {
                 self.source = None;
-                view.duration = None;
+                view.waveform = None;
+                view.selection = None;
                 view.decoding = true;
                 self.tasks.spawn(async move {
                     Completion::Selected(
@@ -179,10 +185,30 @@ impl AdminSoundboard {
             }
             Discard => {
                 self.source = None;
-                view.duration = None;
+                view.waveform = None;
+                view.selection = None;
             }
-            Preview(crop) => {
-                let Some(source) = self.source.clone() else {
+            Trim(target, seconds) | NudgeTrim(target, seconds) => {
+                if let (Some(source), Some(crop)) = (&self.source, &mut view.selection) {
+                    let seconds = if matches!(action, NudgeTrim(..)) {
+                        seconds
+                            + match target {
+                                SoundboardTrim::Start | SoundboardTrim::Region => crop.start,
+                                SoundboardTrim::End => crop.end,
+                            }
+                    } else {
+                        seconds
+                    };
+                    source.trim(crop, target, seconds);
+                }
+            }
+            Gain(gain) => {
+                if let Some(crop) = &mut view.selection {
+                    crop.gain = gain;
+                }
+            }
+            Preview => {
+                let (Some(source), Some(crop)) = (self.source.clone(), view.selection) else {
                     view.error = Some(CHOOSE_AUDIO);
                     return;
                 };
@@ -226,6 +252,7 @@ impl AdminSoundboard {
                 view.saving = true;
                 let source = self.source.clone();
                 let client = client.clone();
+                let crop = view.selection;
                 self.mutations.spawn(async move {
                     let kind = match &action {
                         Add { .. } => Mutation::Add,
@@ -233,7 +260,7 @@ impl AdminSoundboard {
                         Delete(_) => Mutation::Delete,
                         _ => unreachable!(),
                     };
-                    (kind, mutate(&client, source, action).await)
+                    (kind, mutate(&client, source, crop, action).await)
                 });
             }
             Show | Close | StopPreview => {}
@@ -260,7 +287,8 @@ impl AdminSoundboard {
                 view.decoding = false;
                 match result {
                     Ok(source) => {
-                        view.duration = Some(source.duration());
+                        view.waveform = Some(source.waveform.clone());
+                        view.selection = Some(source.initial_crop());
                         view.revision += 1;
                         self.source = Some(Arc::new(source));
                     }
@@ -292,7 +320,8 @@ impl AdminSoundboard {
                     let notice = match kind {
                         Mutation::Add => {
                             self.source = None;
-                            view.duration = None;
+                            view.waveform = None;
+                            view.selection = None;
                             "Sound added."
                         }
                         Mutation::Edit => "Sound updated.",
@@ -328,12 +357,15 @@ impl AdminSoundboard {
 async fn mutate(
     client: &SpkClient,
     source: Option<Arc<SoundSource>>,
+    crop: Option<SoundboardCrop>,
     action: SoundboardAdminAction,
 ) -> Result<(), WorkError> {
     match action {
-        SoundboardAdminAction::Add { crop, name, icon } => {
+        SoundboardAdminAction::Add { name, icon } => {
             let name = sound_name(&name, &icon)?;
-            let source = source.ok_or(WorkError::Invalid(CHOOSE_AUDIO))?;
+            let (Some(source), Some(crop)) = (source, crop) else {
+                return Err(WorkError::Invalid(CHOOSE_AUDIO));
+            };
             let clip = spawn_blocking(move || source.crop(crop))
                 .await
                 .unwrap_or(Err("Could not prepare the selected audio."))

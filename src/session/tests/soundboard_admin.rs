@@ -98,13 +98,7 @@ async fn admin_soundboard_uploads_selected_audio_and_peer_refreshes_edits_and_de
     std::fs::write(&sample, wav).unwrap();
     std::fs::write(&invalid, b"not audio").unwrap();
     let mutation = |action| alice.try_send(Command::AdminSoundboard(action)).unwrap();
-    let crop = SoundboardCrop {
-        start: 0.008,
-        end: 0.016,
-        gain: 50,
-    };
     let add = || SoundboardAdminAction::Add {
-        crop,
         name: " Ping ".into(),
         icon: "bell".into(),
     };
@@ -160,33 +154,48 @@ async fn admin_soundboard_uploads_selected_audio_and_peer_refreshes_edits_and_de
         .await;
         mutation(SoundboardAdminAction::ChooseFile(sample));
         wait_for_sidebar(&alice_views, |view| {
-            view.admin_soundboard.duration == Some(0.016)
+            view.admin_soundboard.waveform.is_some()
+                && view
+                    .admin_soundboard
+                    .selection
+                    .is_some_and(|selection| selection.start == 0.0 && selection.end == 0.016)
         })
         .await;
-        mutation(SoundboardAdminAction::Preview(SoundboardCrop {
-            end: 1.0,
-            ..crop
-        }));
+        mutation(SoundboardAdminAction::Trim(SoundboardTrim::Start, 0.008));
+        mutation(SoundboardAdminAction::Gain(201));
+        mutation(SoundboardAdminAction::Preview);
         wait_for_sidebar(&alice_views, |view| {
-            view.admin_soundboard.error.is_some() && !view.admin_soundboard.previewing
+            view.admin_soundboard.error == Some("Upload gain must be between 0% and 200%.")
+                && !view.admin_soundboard.previewing
         })
         .await;
-        mutation(SoundboardAdminAction::Preview(crop));
+        mutation(SoundboardAdminAction::Gain(50));
+        mutation(SoundboardAdminAction::Preview);
         wait_for_sidebar(&alice_views, |view| view.admin_soundboard.previewing).await;
         mutation(SoundboardAdminAction::StopPreview);
         wait_for_sidebar(&alice_views, |view| !view.admin_soundboard.previewing).await;
         mutation(add());
-        wait_for_sidebar(&alice_views, |view| {
+        let sidebar = wait_for_sidebar(&alice_views, |view| {
             view.admin_soundboard.error == Some("Could not save the sound. Try again.")
-                && view.admin_soundboard.duration == Some(0.016)
         })
         .await;
+        let selection = sidebar
+            .admin_soundboard
+            .selection
+            .expect("retain the failed selection");
+        assert_eq!(selection.start, 0.008);
+        assert_eq!(selection.end - selection.start, 0.008);
+        assert_eq!(selection.gain, 50);
+        assert!(sidebar.admin_soundboard.waveform.is_some());
         mutation(add());
         wait_for_sidebar(&alice_views, |view| {
-            view.admin_soundboard
-                .clips
-                .as_ref()
-                .is_some_and(|clips| clips.iter().any(|clip| clip.name == "Ping"))
+            view.admin_soundboard.waveform.is_none()
+                && view.admin_soundboard.selection.is_none()
+                && view
+                    .admin_soundboard
+                    .clips
+                    .as_ref()
+                    .is_some_and(|clips| clips.iter().any(|clip| clip.name == "Ping"))
         })
         .await;
         for expected in [Some("Ping"), Some("Bells"), None] {

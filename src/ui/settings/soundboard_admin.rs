@@ -1,9 +1,11 @@
+mod waveform;
+
 use gpui_kit::component::Disableable;
 
 use super::*;
 use crate::{
     api::SoundboardClip,
-    session::{SoundboardAdminAction as Action, SoundboardCrop},
+    session::SoundboardAdminAction as Action,
     ui::{
         icon_picker::{IconPicker, icon_picker, icon_picker_field},
         soundboard::clip_icon,
@@ -56,8 +58,8 @@ enum ClipAction {
 pub(super) struct SoundboardForm {
     upload: Metadata,
     edit: Metadata,
-    start: Entity<InputState>,
-    end: Entity<InputState>,
+    trim_focus: [FocusHandle; 2],
+    drag: Option<waveform::Drag>,
     gain: Entity<InputState>,
     picker_open: bool,
     picker_error: Option<&'static str>,
@@ -67,41 +69,25 @@ pub(super) struct SoundboardForm {
 
 impl SoundboardForm {
     pub(super) fn new(window: &mut Window, cx: &mut Context<Settings>) -> Self {
+        let gain = cx.new(|cx| InputState::new(window, cx).default_value("100"));
+        cx.subscribe(&gain, |settings, input, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                let gain = input.read(cx).value().trim().parse().unwrap_or(u16::MAX);
+                settings.soundboard_action(Action::Gain(gain), cx);
+            }
+        })
+        .detach();
         Self {
             upload: Metadata::new(window, cx),
             edit: Metadata::new(window, cx),
-            start: cx.new(|cx| InputState::new(window, cx).default_value("0")),
-            end: cx.new(|cx| InputState::new(window, cx).placeholder("End of selection")),
-            gain: cx.new(|cx| InputState::new(window, cx).default_value("100")),
+            trim_focus: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
+            drag: None,
+            gain,
             picker_open: false,
             picker_error: None,
             clip_action: None,
             revision: 0,
         }
-    }
-
-    fn crop(&self, duration: f64, cx: &App) -> SoundboardCrop {
-        let start = self
-            .start
-            .read(cx)
-            .value()
-            .trim()
-            .parse::<f64>()
-            .unwrap_or(f64::NAN);
-        let end = self.end.read(cx).value();
-        let end = if end.trim().is_empty() {
-            (start + 10.0).min(duration)
-        } else {
-            end.trim().parse().unwrap_or(f64::NAN)
-        };
-        let gain = self
-            .gain
-            .read(cx)
-            .value()
-            .trim()
-            .parse()
-            .unwrap_or(u16::MAX);
-        SoundboardCrop { start, end, gain }
     }
 }
 
@@ -117,6 +103,9 @@ impl Settings {
             let board = &sidebar.admin_soundboard;
             if self.soundboard.revision != board.revision && board.notice.is_some() {
                 self.soundboard.clip_action = None;
+            }
+            if board.waveform.is_none() || self.soundboard.revision != board.revision {
+                self.soundboard.drag = None;
             }
             self.soundboard.revision = board.revision;
         }
@@ -155,10 +144,6 @@ impl Settings {
                             form.upload
                                 .name
                                 .update(cx, |input, cx| input.set_value(name, window, cx));
-                            form.start
-                                .update(cx, |input, cx| input.set_value("0", window, cx));
-                            form.end
-                                .update(cx, |input, cx| input.set_value("", window, cx));
                             form.gain
                                 .update(cx, |input, cx| input.set_value("100", window, cx));
                             settings.soundboard_action(Action::ChooseFile(path), cx);
@@ -206,25 +191,23 @@ impl Settings {
                 ).tab_stop(true).disabled(disabled)
                     .on_click(cx.listener(|settings, _, window, cx| settings.choose_sound_file(window, cx))))
                 .child(Label::new("Choose a mono or stereo WAV, MP3, M4A, Ogg Vorbis, or FLAC file up to 20 MB. SPK receives only the selected audio.").text_color(theme.muted_foreground))
-                .children(board.duration.map(|duration| {
+                .children(board.waveform.as_ref().zip(board.selection).map(|(waveform, crop)| {
+                    let duration = waveform.duration;
                     div().w_full().flex().flex_col().gap_3()
-                        .child(Label::new(format!("Source duration {:.3} s. Select up to 10 seconds. Leave End empty for the longest selection.", duration)))
-                        .child(div().flex().gap_3()
-                            .child(field("Start (seconds)", &form.start, disabled, cx))
-                            .child(field("End (seconds)", &form.end, disabled, cx))
-                            .child(field("Upload gain (%)", &form.gain, disabled, cx)))
+                        .child(Label::new(format!("Source duration: {duration:.3} s")))
+                        .child(form.waveform(waveform, crop, disabled, cx))
+                        .child(waveform::timing(crop))
+                        .child(field("Upload gain (%)", &form.gain, disabled, cx))
                         .child(form.upload.render(disabled, cx))
                         .child(div().flex().gap_2()
                             .child(control_button("preview-crop").label("Play selection").tab_stop(true).disabled(disabled)
-                                .on_click(cx.listener(move |settings, _, _, cx| {
-                                    let crop = settings.soundboard.crop(duration, cx);
-                                    settings.soundboard_action(Action::Preview(crop), cx);
+                                .on_click(cx.listener(|settings, _, _, cx| {
+                                    settings.soundboard_action(Action::Preview, cx);
                                 })))
                             .child(control_button("save-sound").label("Save").primary().tab_stop(true).disabled(disabled)
-                                .on_click(cx.listener(move |settings, _, _, cx| {
-                                    let crop = settings.soundboard.crop(duration, cx);
+                                .on_click(cx.listener(|settings, _, _, cx| {
                                     let (name, icon) = settings.soundboard.upload.values(cx);
-                                    settings.soundboard_action(Action::Add { crop, name, icon }, cx);
+                                    settings.soundboard_action(Action::Add { name, icon }, cx);
                                 })))
                             .child(control_button("discard-sound").label("Discard").ghost().tab_stop(true).disabled(disabled)
                                 .on_click(cx.listener(|settings, _, _, cx| settings.soundboard_action(Action::Discard, cx)))))
