@@ -36,7 +36,7 @@ PUSH_REPO = f"{GITHUB}/spk-smoke/demo"
 PUSH_SENDER = {"login": "Push Sender", "html_url": f"{GITHUB}/push-sender"}
 PUSH_COMMITS = (
     {"id": "8a072c0", "url": f"{PUSH_REPO}/commit/8a072c0", "message": "Add tests",
-     "author": {"name": "Alice Author", "username": "alice-author"}},
+     "author": {"name": "Alice $Team$ Smith", "username": "alice-author"}},
     {"id": "c9407ec", "url": f"{PUSH_REPO}/commit/c9407ec", "message": "Clean up",
      "author": {"name": "Bob 🚀 Author", "username": "bob-author"}},
     {"id": "d651c1e", "url": f"{PUSH_REPO}/commit/d651c1e", "message": "Update comments",
@@ -44,7 +44,7 @@ PUSH_COMMITS = (
 )
 PUSH_LINKS = (
     ("8a072c0", f"{PUSH_REPO}/commit/8a072c0"),
-    ("Alice Author", f"{GITHUB}/alice-author"),
+    ("Alice $Team$ Smith", f"{GITHUB}/alice-author"),
     ("c9407ec", f"{PUSH_REPO}/commit/c9407ec"),
     ("Bob 🚀 Author", f"{GITHUB}/bob-author"),
     ("d651c1e", f"{PUSH_REPO}/commit/d651c1e"),
@@ -319,6 +319,27 @@ class Desktop:
         self.click(label, role)
         subprocess.run(["xdotool", "type", "--clearmodifiers", "--", text], check=True)
 
+    def key(self, name):
+        subprocess.run(["xdotool", "key", "--clearmodifiers", "--delay", "50", name],
+                       check=True)
+
+    def focused(self, name, role, expected=True):
+        try:
+            node = self.find_node(name, role)
+            is_focused = node is not None and node.get_state_set().contains(Atspi.StateType.FOCUSED)
+            return is_focused == expected
+        except GLib.Error:
+            return False
+
+    def tab_to(self, name, role):
+        if self.focused(name, role):
+            return
+        for _ in range(50):
+            self.key("Tab")
+            if self.focused(name, role):
+                return
+        raise RuntimeError(f"Tab did not reach {name}")
+
     def check_webhook_actions(self):
         label = "Actions for Smoke Webhook"
 
@@ -326,30 +347,11 @@ class Desktop:
             subprocess.run(["xdotool", "mousemove", "--window", self.window, str(x), str(y)],
                            check=True)
 
-        def key(name):
-            subprocess.run(["xdotool", "key", "--clearmodifiers", "--delay", "50", name],
-                           check=True)
-
         def hidden():
             try:
                 return self.find_node(label, "push button") is None
             except GLib.Error:
                 return False
-
-        def focused(name=label, expected=True):
-            try:
-                node = self.find_node(name, "push button")
-                is_focused = node is not None and node.get_state_set().contains(Atspi.StateType.FOCUSED)
-                return is_focused == expected
-            except GLib.Error:
-                return False
-
-        def tab_to(name):
-            for _ in range(40):
-                key("Tab")
-                if focused(name):
-                    return
-            raise RuntimeError(f"Tab did not reach {name}")
 
         move(700, 30)
         wait_for("the selected webhook to hide its ellipsis while idle", hidden)
@@ -365,18 +367,20 @@ class Desktop:
         move(700, 30)
         wait_for("the webhook ellipsis to hide after hover", hidden)
 
-        tab_to(label)
-        key("Tab")
-        wait_for("focus to leave the webhook ellipsis", lambda: focused(expected=False))
-        key("shift+Tab")
-        wait_for("Shift+Tab to reach the webhook ellipsis", focused)
-        key("Return")
+        self.tab_to(label, "push button")
+        self.key("Tab")
+        wait_for("focus to leave the webhook ellipsis", lambda: self.focused(label, "push button", expected=False))
+        self.key("shift+Tab")
+        wait_for("Shift+Tab to reach the webhook ellipsis",
+                 lambda: self.focused(label, "push button"))
+        self.key("Return")
         self.find("Copy link", "menu item")
         self.find(label, "push button")
-        key("Escape")
-        wait_for("Escape to return focus to the visible webhook ellipsis", focused)
-        key("Tab")
-        wait_for("focus to leave the webhook ellipsis", lambda: focused(expected=False))
+        self.key("Escape")
+        wait_for("Escape to return focus to the visible webhook ellipsis",
+                 lambda: self.focused(label, "push button"))
+        self.key("Tab")
+        wait_for("focus to leave the webhook ellipsis", lambda: self.focused(label, "push button", expected=False))
 
         move(bounds.x + 8, bounds.y + bounds.height // 2)
         self.click(label, "push button")
@@ -384,19 +388,20 @@ class Desktop:
         item_bounds = item.get_component_iface().get_extents(Atspi.CoordType.WINDOW)
         move(item_bounds.x + item_bounds.width // 2, item_bounds.y + item_bounds.height // 2)
         self.find(label, "push button")
-        key("Escape")
-        wait_for("Escape to focus the ellipsis after opening with the mouse", focused)
+        self.key("Escape")
+        wait_for("Escape to focus the ellipsis after opening with the mouse",
+                 lambda: self.focused(label, "push button"))
 
         prior_focus = "New webhook"
-        tab_to(prior_focus)
+        self.tab_to(prior_focus, "push button")
         move(bounds.x + 8, bounds.y + bounds.height // 2)
         self.click(label, "push button")
         self.find("Copy link", "menu item")
         for _ in range(3):
-            key("Down")
-        key("Return")
+            self.key("Down")
+        self.key("Return")
         wait_for("Enter to restore the focus from before the mouse-opened menu",
-                 lambda: focused(prior_focus))
+                 lambda: self.focused(prior_focus, "push button"))
 
     def external_link(self, url, activate):
         self.ensure_running()
@@ -429,15 +434,8 @@ class Desktop:
         for name, url in PUSH_LINKS:
             self.external_link(url, lambda: self.click(name, "link"))
         for name, url in PUSH_LINKS:
-            node = self.find(name, "link")
-            for _ in range(50):
-                if node.get_state_set().contains(Atspi.StateType.FOCUSED):
-                    break
-                subprocess.run(["xdotool", "key", "Tab"], check=True)
-                time.sleep(0.07)
-            else:
-                raise RuntimeError(f"Tab never focused {name}")
-            self.external_link(url, lambda: subprocess.run(["xdotool", "key", "Return"], check=True))
+            self.tab_to(name, "link")
+            self.external_link(url, lambda: self.key("Return"))
         for event, field, name, handle in (
             ("issues", "issue", "Issue Author", "issue-author"),
             ("pull_request", "pull_request", "PR Author", "pr-author"),

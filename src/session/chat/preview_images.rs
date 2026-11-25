@@ -161,7 +161,7 @@ impl ChatSession {
 }
 
 fn webhook_avatar(message: &ChatMessage) -> Option<&str> {
-    message.embed.as_ref()?.author.as_ref()?.avatar_url()
+    message.embed.as_ref()?.avatar_url()
 }
 
 fn decode(bytes: Vec<u8>) -> Result<Arc<RenderImage>, Failure> {

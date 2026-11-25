@@ -35,19 +35,24 @@ impl MarkdownPlugin for EmbedLinks {
             let mut label = String::new();
             let mut parts = Vec::new();
             for child in &link.children {
-                match child {
-                    Node::Text(text) => {
-                        label.push_str(&text.value);
-                        parts.push(LinkLabelPart::Text(text.value.clone()));
-                    }
+                let text = match child {
+                    Node::Text(text) => text.value.as_str(),
+                    Node::InlineMath(_) => context.node_source(child)?,
                     Node::Image(image) if image.url == emoji::EMOJI_URL => {
                         label.push_str(&image.alt);
                         parts.push(LinkLabelPart::Emoji {
                             path: reaction_artwork_path(&image.alt)?,
                             label: image.alt.clone(),
                         });
+                        continue;
                     }
                     _ => return None,
+                };
+                label.push_str(text);
+                if let Some(LinkLabelPart::Text(previous)) = parts.last_mut() {
+                    previous.push_str(text);
+                } else {
+                    parts.push(LinkLabelPart::Text(text.to_owned()));
                 }
             }
             (label, LinkLabel::Text(parts))
@@ -263,46 +268,40 @@ impl Spk {
                         ),
                 )
             })
-            .when_some(
-                embed
-                    .author
-                    .as_ref()
-                    .filter(|author| !author.name.trim().is_empty()),
-                |card, author| {
-                    let name = author.name.clone();
-                    let mut line = div().h(px(20.)).flex().items_center().gap_1p5();
-                    if let Some(avatar) = avatar {
-                        line = line.child(
-                            img(avatar)
-                                .size(px(20.))
-                                .flex_shrink_0()
-                                .rounded_full()
-                                .object_fit(ObjectFit::Cover),
-                        );
-                    }
-                    if let Some(url) = author.link() {
-                        let app = cx.weak_entity();
-                        line = line.child(
-                            Button::new("embed-author")
-                                .link()
-                                .tab_stop(true)
-                                .min_w_0()
-                                .h_auto()
-                                .p_0()
-                                .text_xs()
-                                .font_semibold()
-                                .accessibility_label(name.clone())
-                                .child(Label::new(name).text_color(theme.primary))
-                                .on_click(move |_, _, cx| {
-                                    search::activate_chat_link(&app, url.clone(), cx);
-                                }),
-                        );
-                    } else {
-                        line = line.child(Label::new(name).text_xs().font_semibold());
-                    }
-                    card.child(line)
-                },
-            );
+            .when_some(embed.author(), |card, author| {
+                let name = author.name.clone();
+                let mut line = div().h(px(20.)).flex().items_center().gap_1p5();
+                if let Some(avatar) = avatar {
+                    line = line.child(
+                        img(avatar)
+                            .size(px(20.))
+                            .flex_shrink_0()
+                            .rounded_full()
+                            .object_fit(ObjectFit::Cover),
+                    );
+                }
+                if let Some(url) = author.link() {
+                    let app = cx.weak_entity();
+                    line = line.child(
+                        Button::new("embed-author")
+                            .link()
+                            .tab_stop(true)
+                            .min_w_0()
+                            .h_auto()
+                            .p_0()
+                            .text_xs()
+                            .font_semibold()
+                            .accessibility_label(name.clone())
+                            .child(Label::new(name).text_color(theme.primary))
+                            .on_click(move |_, _, cx| {
+                                search::activate_chat_link(&app, url.clone(), cx);
+                            }),
+                    );
+                } else {
+                    line = line.child(Label::new(name).text_xs().font_semibold());
+                }
+                card.child(line)
+            });
 
         div()
             .mt_1()

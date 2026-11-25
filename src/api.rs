@@ -238,7 +238,7 @@ pub struct ChatEmbed {
     pub title: Option<String>,
     pub description: Option<String>,
     url: Option<String>,
-    pub author: Option<EmbedAuthor>,
+    author: Option<EmbedAuthor>,
     pub color: Option<EmbedColor>,
     #[serde(default)]
     pub fields: Vec<EmbedField>,
@@ -247,6 +247,17 @@ pub struct ChatEmbed {
 }
 
 impl ChatEmbed {
+    pub fn author(&self) -> Option<&EmbedAuthor> {
+        self.author
+            .as_ref()
+            .filter(|author| !author.name.trim().is_empty())
+    }
+
+    pub fn avatar_url(&self) -> Option<&str> {
+        let icon = self.author()?.icon.as_deref()?;
+        gifs::gif_media_url(icon).map(|_| icon)
+    }
+
     pub fn title_link(&self) -> Option<Url> {
         let url = Url::parse(self.url.as_deref()?).ok()?;
         matches!(url.scheme(), "http" | "https").then_some(url)
@@ -261,11 +272,6 @@ pub struct EmbedAuthor {
 }
 
 impl EmbedAuthor {
-    pub fn avatar_url(&self) -> Option<&str> {
-        let icon = self.icon.as_deref()?;
-        (!self.name.trim().is_empty() && gifs::gif_media_url(icon).is_some()).then_some(icon)
-    }
-
     pub fn link(&self) -> Option<Url> {
         embed_link(self.url.as_deref()?)
             .filter(|url| url.username().is_empty() && url.password().is_none())

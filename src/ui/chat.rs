@@ -1555,9 +1555,7 @@ impl Spk {
             })
             .when_some(embed, |row, embed| {
                 let avatar = embed
-                    .author
-                    .as_ref()
-                    .and_then(|author| author.avatar_url())
+                    .avatar_url()
                     .and_then(|icon| chat.preview_images.avatar(&message.id, icon));
                 row.child(self.webhook_embed(
                     embed,

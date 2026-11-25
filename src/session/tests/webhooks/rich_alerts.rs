@@ -84,7 +84,7 @@ async fn signed_in_reader_receives_plain_and_rich_alerts_in_history_and_live() {
         let embed = card.embed.as_ref().unwrap();
         assert_eq!(embed.title.as_deref(), Some("Build succeeded"));
         assert_eq!(embed.title_link().unwrap().as_str(), link);
-        let author = embed.author.as_ref().unwrap();
+        let author = embed.author().unwrap();
         assert_eq!(author.name, "Push Sender");
         assert_eq!(
             author.link().unwrap().as_str(),
@@ -109,7 +109,7 @@ async fn signed_in_reader_receives_plain_and_rich_alerts_in_history_and_live() {
         let embed = combined.embed.as_ref().unwrap();
         assert_eq!(embed.title.as_deref(), Some("Review deployment"));
         assert!(embed.title_link().is_none());
-        let author = embed.author.as_ref().unwrap();
+        let author = embed.author().unwrap();
         assert_eq!(author.name, "Deployment Author");
         assert!(author.link().is_none());
     };
