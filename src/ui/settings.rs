@@ -20,6 +20,7 @@ use gpui_kit::component::{
     slider::{SliderEvent, SliderState, SliderValue},
 };
 
+use super::workspace::{SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH};
 use super::*;
 use crate::{
     session::{AdminAccountAction, View, VoiceProcessingSetting},
@@ -93,6 +94,25 @@ fn save_preference(path: Option<PathBuf>, value: &str) -> io::Result<()> {
     file.write_all(value.as_bytes())?;
     file.persist(path)?;
     Ok(())
+}
+
+pub(super) fn load_sidebar_width() -> Pixels {
+    sidebar_width_from(preference_path("sidebar-width"))
+}
+
+fn sidebar_width_from(path: Option<PathBuf>) -> Pixels {
+    load_preference(path)
+        .and_then(|value| value.parse::<f32>().ok())
+        .map(px)
+        .filter(|width| (SIDEBAR_MIN_WIDTH..=SIDEBAR_MAX_WIDTH).contains(width))
+        .unwrap_or(SIDEBAR_WIDTH)
+}
+
+pub(super) fn save_sidebar_width(width: Pixels) -> io::Result<()> {
+    save_preference(
+        preference_path("sidebar-width"),
+        &f32::from(width).to_string(),
+    )
 }
 
 #[derive(Clone, Copy, Default, Eq, PartialEq)]
@@ -671,7 +691,22 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
-    use super::{Appearance, Density};
+    use super::{Appearance, Density, px, save_preference, sidebar_width_from};
+
+    #[test]
+    fn sidebar_width_restores_a_valid_preference_or_uses_the_default() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sidebar-width");
+        assert_eq!(sidebar_width_from(Some(path.clone())), px(288.0));
+        for width in [248.0, 400.5, 500.0] {
+            save_preference(Some(path.clone()), &width.to_string()).unwrap();
+            assert_eq!(sidebar_width_from(Some(path.clone())), px(width));
+        }
+        for value in ["247", "501", "NaN", "inf", "invalid"] {
+            std::fs::write(&path, value).unwrap();
+            assert_eq!(sidebar_width_from(Some(path.clone())), px(288.0));
+        }
+    }
 
     #[test]
     fn density_defaults_to_comfortable_and_restores_saved_choices() {

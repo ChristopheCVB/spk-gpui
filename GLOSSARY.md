@@ -40,6 +40,10 @@ A moderation action that removes an account’s access to the instance while kee
 
 ### Channels and chat
 
+**Sidebar**
+
+The desktop navigation panel for channels and direct messages. In narrow windows, the same navigation appears in a full-width drawer.
+
 **Channel**
 
 A named, shared destination in an SPK instance for text chat or live audio and video.

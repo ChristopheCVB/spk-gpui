@@ -1104,7 +1104,7 @@ class Desktop:
                 return
         raise RuntimeError(f"Tab did not reach {name}")
 
-    def check_webhook_actions(self):
+    def check_webhook_actions(self, logs):
         label = "Actions for Smoke Webhook"
 
         def move(x, y):
@@ -1126,8 +1126,9 @@ class Desktop:
         action_bounds = action.get_component_iface().get_extents(Atspi.CoordType.WINDOW)
         visible_row = self.find("Smoke Webhook", "push button")
         visible_bounds = visible_row.get_component_iface().get_extents(Atspi.CoordType.WINDOW)
-        if action_bounds.x + action_bounds.width > visible_bounds.x:
-            raise RuntimeError("The webhook ellipsis must precede its primary button")
+        if visible_bounds.x + visible_bounds.width > action_bounds.x:
+            raise RuntimeError("The webhook ellipsis must follow its primary button")
+        self.screenshot(logs, "webhook-actions-dark.png")
         move(700, 30)
         wait_for("the webhook ellipsis to hide after hover", hidden)
 
@@ -1215,6 +1216,45 @@ class Desktop:
             finally:
                 clipboard.terminate()
 
+    def check_sidebar_resize_retries_save(self, config):
+        def header_x():
+            return self.bounds("Hide sidebar", "push button").x
+
+        preference = config / "sidebar-width"
+        preference.mkdir()
+        initial = header_x()
+        destination = initial + 112
+        y = 240
+
+        def move_sidebar(x):
+            self.move(x - 12, y)
+            wait_for("the sidebar to follow the drag", lambda: abs(header_x() - x) <= 2)
+
+        self.move(initial - 14, y)
+        subprocess.run(["xdotool", "mousedown", "1"], check=True)
+        try:
+            self.move(initial + 32, y)
+            move_sidebar(destination)
+        finally:
+            subprocess.run(["xdotool", "mouseup", "1"], check=True)
+        self.find("Could not save sidebar width.")
+        preference.rmdir()
+
+        self.move(header_x() - 14, y)
+        subprocess.run(["xdotool", "mousedown", "1"], check=True)
+        try:
+            self.move(destination - 40, y)
+            move_sidebar(initial)
+            move_sidebar(destination)
+            if preference.exists():
+                raise RuntimeError("The sidebar width was saved before the drag ended")
+            subprocess.run(["xdotool", "click", "3"], check=True)
+            wait_for("the sidebar width to save on secondary-button release", preference.is_file)
+            if abs(float(preference.read_text()) - 400) > 2:
+                raise RuntimeError("The saved sidebar width does not match the resized width")
+        finally:
+            subprocess.run(["xdotool", "mouseup", "1"], check=True)
+
     def check_settings_toasts(self, logs, config, send_message, alerts, owner):
         notification_result = "Could not save notification settings."
         self.click("Settings", "push button")
@@ -1297,7 +1337,7 @@ class Desktop:
         self.visible_text("Smoke embed body")
         self.find("🧪")
         self.find("🔔")
-        self.check_webhook_actions()
+        self.check_webhook_actions(logs)
         self.find("Unlinked Author", "label")
         self.visible_text("Local Author", "spk-smoke/demo")
         for name, url in PUSH_LINKS:
@@ -1492,6 +1532,7 @@ def main(work, artifacts):
                 desktop.check_reader_menus(logs)
                 desktop.check_incoming_toast(logs, send_message, alerts, reader)
                 desktop.check_upload_recovery()
+                desktop.check_sidebar_resize_retries_save(Path(env["XDG_CONFIG_HOME"]) / "spk-gpui")
 
             admin_launches = logs / "admin-browser-launches.log"
             admin_launches.touch()

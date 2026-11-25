@@ -7,6 +7,7 @@ use gpui_kit::{
     base::FocusTrapElement,
     component::{
         Disableable,
+        button::ButtonCustomVariant,
         menu::{ContextMenu, ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem},
         resizable::{HandleEdge, resize_handle},
         tooltip::Tooltip,
@@ -28,7 +29,8 @@ use sidebar_row_menu::SidebarRowMenu;
 use voice_session_layout::{VOICE_SESSION_INSET, VoiceSessionLayout, VoiceSessionPlacement};
 
 pub(super) const SIDEBAR_WIDTH: Pixels = px(288.0);
-const SIDEBAR_MAX_WIDTH: Pixels = px(500.0);
+pub(super) const SIDEBAR_MIN_WIDTH: Pixels = px(248.0);
+pub(super) const SIDEBAR_MAX_WIDTH: Pixels = px(500.0);
 const VOICE_TILE_BORDER_WIDTH: Pixels = px(2.0);
 
 pub(super) const PANEL_DURATION: Duration = Duration::from_millis(200);
@@ -118,6 +120,26 @@ fn navigation_card(title: &'static str, cx: &App) -> Stateful<Div> {
         .p_1()
         .pr(OVERLAY_SCROLLBAR_WIDTH)
         .bg(cx.theme().background)
+}
+
+pub(super) fn sidebar_row_button(id: &'static str, selected: bool, cx: &App) -> Button {
+    control_button(id)
+        .custom(ButtonCustomVariant::new(cx))
+        .small()
+        .tab_stop(true)
+        .selected(selected)
+        .h_8()
+}
+
+pub(super) fn sidebar_row_hover(highlighted: bool, cx: &App) -> Hsla {
+    let theme = cx.theme();
+    if highlighted {
+        theme.primary.opacity(0.15)
+    } else if theme.mode.is_dark() {
+        theme.secondary_hover
+    } else {
+        theme.secondary
+    }
 }
 
 pub(super) fn navigation_target(
@@ -290,6 +312,39 @@ impl Spk {
             .or_else(|| voice_channels(sidebar).next())
     }
 
+    fn sidebar_resize_events(cx: &Context<Self>) -> impl IntoElement {
+        let app = cx.weak_entity();
+        canvas(
+            |_, _, _| (),
+            move |_, (), window, _| {
+                let sidebar = app.clone();
+                window.on_mouse_event(move |event: &MouseDownEvent, phase, _, cx| {
+                    if phase.capture() && event.button == MouseButton::Left && !cx.has_active_drag()
+                    {
+                        let _ = sidebar.update(cx, |app, _| app.sidebar_resizing = false);
+                    }
+                });
+                let sidebar = app.clone();
+                window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                    // GPUI ends an active drag on any mouse-button release.
+                    if phase.capture() && cx.has_active_drag() {
+                        let _ = sidebar.update(cx, |app, cx| {
+                            if std::mem::take(&mut app.sidebar_resizing)
+                                && settings::save_sidebar_width(app.sidebar_width).is_err()
+                            {
+                                app.show_action_result(
+                                    ActionResult::error("Could not save sidebar width."),
+                                    cx,
+                                );
+                            }
+                        });
+                    }
+                });
+            },
+        )
+        .absolute()
+    }
+
     pub(super) fn workspace(
         &self,
         sidebar: &Sidebar,
@@ -351,11 +406,13 @@ impl Spk {
             .relative()
             .flex()
             .overflow_hidden()
+            .child(Self::sidebar_resize_events(cx))
             .when_some(navigation, |page, navigation| {
                 page.on_drag_move(cx.listener(
                     |this, drag: &DragMoveEvent<SidebarResize>, _, cx| {
+                        this.sidebar_resizing = true;
                         this.sidebar_width = (drag.event.position.x - drag.bounds.left())
-                            .clamp(px(248.0), SIDEBAR_MAX_WIDTH);
+                            .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
                         cx.notify();
                     },
                 ))
@@ -841,18 +898,12 @@ impl Spk {
         } else {
             unread_label(&name, counts)
         };
-        let select = control_button("select")
-            .ghost()
-            .small()
-            .tab_stop(true)
-            .selected(active)
+        let highlighted = active || counts.mentions > 0;
+        let hover = sidebar_row_hover(highlighted, cx);
+        let select = sidebar_row_button("select", active, cx)
             .accessibility_label(label)
             .flex_1()
             .min_w_0()
-            .h_8()
-            .when(active || counts.mentions > 0, |button| {
-                button.bg(primary.opacity(0.10))
-            })
             .child(
                 div()
                     .flex()
@@ -893,7 +944,13 @@ impl Spk {
                 };
                 this.send(command, None, cx);
             }));
-        let row = row.flex().items_center().pr_1();
+        let row = row
+            .flex()
+            .items_center()
+            .rounded_md()
+            .pr_1()
+            .when(highlighted, |row| row.bg(primary.opacity(0.10)))
+            .hover(|row| row.bg(hover));
         if webhook {
             let webhook_menu = webhooks::WebhookRowMenu {
                 id: menu_id,
@@ -903,8 +960,8 @@ impl Spk {
             };
             let ellipsis = webhook_menu.clone().render(row_menu);
             return row
-                .child(ellipsis)
                 .child(select)
+                .child(ellipsis)
                 .context_menu(move |menu, _, cx| webhook_menu.items(menu, None, cx));
         }
 
@@ -1171,6 +1228,7 @@ impl Spk {
             }
         };
         let add_items = Rc::new(add_items);
+        let hover = sidebar_row_hover(false, cx);
         let app = cx.weak_entity();
         let menu_id = id.clone();
         let (right_click, ellipsis) = row_menu.triggers(
@@ -1210,18 +1268,12 @@ impl Spk {
                     .pr_1()
                     .when(active, |row| row.bg(theme.primary.opacity(0.10)))
                     .when(!active && focused, |row| row.bg(theme.accent))
-                    .when(!active, |row| row.hover(|row| row.bg(theme.accent)))
+                    .when(!active, |row| row.hover(|row| row.bg(hover)))
                     .child(
-                        control_button("select")
-                            .ghost()
-                            .small()
-                            .tab_stop(true)
-                            .selected(active)
+                        sidebar_row_button("select", active, cx)
                             .accessibility_label(name.clone())
                             .flex_1()
                             .min_w_0()
-                            .h_8()
-                            .bg(theme.transparent)
                             .child(Label::new(name).w_full().truncate().text_color(if active {
                                 theme.primary
                             } else {
@@ -1320,8 +1372,8 @@ impl Spk {
                             .w_2()
                             .h_4()
                             .rounded_bl_sm()
-                            .border_l_1()
-                            .border_b_1()
+                            .border_l_2()
+                            .border_b_2()
                             .border_color(theme.muted_foreground.opacity(0.35)),
                     )
                     .when(!last, |row| {
@@ -1331,7 +1383,7 @@ impl Spk {
                                 .top_4()
                                 .bottom_0()
                                 .left_4()
-                                .border_l_1()
+                                .border_l_2()
                                 .border_color(theme.muted_foreground.opacity(0.35)),
                         )
                     })

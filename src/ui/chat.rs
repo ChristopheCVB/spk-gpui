@@ -1119,7 +1119,6 @@ impl Spk {
     ) -> impl IntoElement {
         let theme = cx.theme();
         let disabled = !chat.can_send();
-        let focused = !disabled && self.chat_input.focus_handle(cx).is_focused(window);
         let can_send = !disabled
             && !self.chat_submitting
             && chat.draft.can_send(&editor::wire(self.chat_input.read(cx)));
@@ -1152,11 +1151,7 @@ impl Spk {
                 editor::textarea(&self.chat_input)
                     .text_base()
                     .flex_shrink_0()
-                    .bg(if focused {
-                        theme.secondary_hover.opacity(0.35)
-                    } else {
-                        transparent_black()
-                    })
+                    .bg(transparent_black())
                     .bordered(false)
                     .aria_label("Write a message")
                     .on_paste(move |item, window, cx| {
