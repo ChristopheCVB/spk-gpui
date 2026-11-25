@@ -521,8 +521,12 @@ class Desktop:
                  lambda: self.role_choices(open_submenu=False)[0].get_state_set().contains(Atspi.StateType.CHECKED))
         self.click("User", "menu item")
         wait_for("the open role menu to accept the new role choice", lambda: account()["role"] == "user")
+        self.visible_text("Role updated")
         self.open_participant_menu(person)
-        admin_choice, _ = self.role_choices()
+        self.role_choices()
+        wait_for("the menu to show the restored User role",
+                 lambda: self.role_choices(open_submenu=False)[1].get_state_set().contains(Atspi.StateType.CHECKED))
+        admin_choice, _ = self.role_choices(open_submenu=False)
         self.screenshot(logs, "change-role-dark.png")
         bounds = admin_choice.get_component_iface().get_extents(Atspi.CoordType.WINDOW)
         self.click_at(bounds.x + bounds.width // 2, bounds.y + bounds.height // 2)
