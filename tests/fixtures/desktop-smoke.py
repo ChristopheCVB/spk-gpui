@@ -767,6 +767,54 @@ class Desktop:
         if not 0 < painted_height(12) < painted_height(15.25):
             raise RuntimeError("The source waveform did not show its louder section after 15 seconds")
 
+    def check_soundboard_preview(self, logs):
+        def position():
+            try:
+                node = self.find_node("Preview playhead")
+                if node is not None:
+                    return node.get_value_iface().get_current_value()
+            except GLib.Error:
+                # Playback updates can replace part of the tree during a query.
+                pass
+            return -1
+
+        def play():
+            self.click("Play selection", "push button")
+            wait_for("the playhead to advance from the nonzero trim start",
+                     lambda: 6.4 < position() < 15.9)
+
+        def reset(start):
+            wait_for(f"the preview to stop and reset to {start:.3f} s",
+                     lambda: abs(position() - start) < 0.001
+                     and self.find_node("Stop preview", "push button") is None)
+
+        reset(6.1)
+        play()
+        self.screenshot(logs, "soundboard-preview-dark.png")
+        self.click("Stop preview", "push button")
+        reset(6.1)
+
+        play()
+        reset(6.1)
+
+        play()
+        self.tab_to("Trim start", "slider")
+        self.key("Right")
+        self.expect_sound_selection(6.2, 15.9)
+        reset(6.2)
+        self.key("Left")
+        self.expect_sound_selection(6.1, 15.9)
+
+        play()
+        self.replace_sound_field("Upload gain (%)", "125")
+        reset(6.1)
+        self.replace_sound_field("Upload gain (%)", "150")
+
+    def replace_sound_field(self, label, value):
+        self.click(label, "entry")
+        self.key("ctrl+a")
+        subprocess.run(["xdotool", "type", "--clearmodifiers", "--", value], check=True)
+
     def check_soundboard_upload(self, sources, logs, admin):
         self.click("Settings", "push button")
         self.click("Soundboard", "push button")
@@ -816,14 +864,13 @@ class Desktop:
         self.tab_to(end, slider)
         self.key("Left")
         self.expect_sound_selection(6.1, 15.9)
-        for label, value in (("Name", SOUND_NAME), ("Upload gain (%)", "150")):
-            self.click(label, "entry")
-            self.key("ctrl+a")
-            subprocess.run(["xdotool", "type", "--clearmodifiers", "--", value], check=True)
+        self.replace_sound_field("Name", SOUND_NAME)
+        self.replace_sound_field("Upload gain (%)", "150")
         self.click("Icon", "combo box")
         self.enter("Search icons", "entry", SOUND_ICON)
         self.click(SOUND_ICON)
         self.screenshot(logs, "soundboard-waveform-dark.png")
+        self.check_soundboard_preview(logs)
         self.click("Save", "push button")
         self.find(SOUND_NAME)
         wait_for("the saved waveform to clear", lambda: self.find_node("Source waveform") is None)
