@@ -308,6 +308,8 @@ impl Spk {
             let active = window.is_window_active();
             window_activation.send_replace(active);
             if active {
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
+                gpui_kit::base::apply_system_reduce_motion(cx);
                 this.record_activity(window);
                 this.read_visible_chat(window);
             } else {

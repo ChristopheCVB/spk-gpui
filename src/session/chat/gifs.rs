@@ -3,7 +3,6 @@ use super::{
     *,
 };
 
-use gpui_kit::RenderImage;
 use reqwest::StatusCode;
 
 use crate::api::{GifItem, GifPage};
@@ -11,7 +10,7 @@ use crate::api::{GifItem, GifPage};
 #[derive(Clone)]
 pub struct StagedGif {
     pub item: GifItem,
-    pub image: Option<Arc<RenderImage>>,
+    pub image: Option<Arc<ChatImage>>,
 }
 
 #[derive(Clone, Default)]
@@ -28,7 +27,7 @@ pub struct GifPickerView {
     pub favorites_error: Option<&'static str>,
     pub saving: bool,
     pub mutation_error: Option<&'static str>,
-    images: Arc<HashMap<String, Option<Arc<RenderImage>>>>,
+    images: Arc<HashMap<String, Option<Arc<ChatImage>>>>,
 }
 
 impl GifPickerView {
@@ -48,11 +47,11 @@ impl GifPickerView {
             .filter(move |gif| !self.showing_favorites || gif.title.to_lowercase().contains(&query))
     }
 
-    pub fn image(&self, url: &str) -> Option<Arc<RenderImage>> {
+    pub fn image(&self, url: &str) -> Option<Arc<ChatImage>> {
         self.images.get(url)?.clone()
     }
 
-    pub fn images(&self) -> impl Iterator<Item = &Arc<RenderImage>> {
+    pub fn images(&self) -> impl Iterator<Item = &Arc<ChatImage>> {
         self.images.values().filter_map(Option::as_ref)
     }
 }

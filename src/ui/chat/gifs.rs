@@ -231,14 +231,14 @@ impl Spk {
                             .flex()
                             .flex_col()
                             .items_center()
-                            .child(div().w_full().h(px(80.0)).when_some(
-                                gifs.image(&gif.preview),
-                                |thumbnail, image| {
-                                    thumbnail.child(
-                                        img(image).size_full().object_fit(ObjectFit::Contain),
-                                    )
-                                },
-                            ))
+                            .child(
+                                div().w_full().h(px(80.0)).when_some(
+                                    gifs.image(&gif.preview),
+                                    |thumbnail, image| {
+                                        thumbnail.child(chat_image(image).size_full())
+                                    },
+                                ),
+                            )
                             .child(Label::new(title).truncate()),
                     )
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -276,12 +276,7 @@ impl Spk {
                 .gap_2()
                 .pb_2()
                 .when_some(gif.image.clone(), |row, image| {
-                    row.child(
-                        img(image)
-                            .w(px(80.0))
-                            .h(px(50.0))
-                            .object_fit(ObjectFit::Contain),
-                    )
+                    row.child(chat_image(image).w(px(80.0)).h(px(50.0)))
                 })
                 .child(Label::new(format!("GIF · {}", gif_title(&gif.item))).truncate())
                 .child(

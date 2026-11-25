@@ -61,7 +61,7 @@ pub use {
     avatars::AvatarPhoto,
     channel_admin::{ChannelAction, ChannelAdmin, ChannelKind},
     chat::{
-        AttachmentInput, ChatView, Delivery, GifPickerView, Outgoing, POLL_MAX_OPTIONS,
+        AttachmentInput, ChatImage, ChatView, Delivery, GifPickerView, Outgoing, POLL_MAX_OPTIONS,
         POLL_MIN_OPTIONS, POLL_OPTION_LIMIT, POLL_QUESTION_LIMIT, Pins, PollEditOutcome,
         PollEditReply, UploadStatus, image_preview, trim_poll_text, validate_poll,
     },
@@ -153,7 +153,7 @@ pub enum Command {
         target: crate::api::MessageTarget,
         url: url::Url,
         body: String,
-        reply: oneshot::Sender<Option<Arc<RenderImage>>>,
+        reply: oneshot::Sender<Option<Arc<ChatImage>>>,
     },
     AddChatAttachments {
         channel_id: String,

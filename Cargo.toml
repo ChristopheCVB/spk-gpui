@@ -14,10 +14,11 @@ dfn3_rs = "=0.1.2"
 dirs = "7"
 flate2 = "1"
 futures = "0.3"
+gif = "0.14"
 global-hotkey = "=0.10.0"
 html5ever = "0.27"
 gpui-kit = "=0.10.0"
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg"] }
 image-webp = "0.2.4"
 icu_normalizer = { version = "2.4", default-features = false, features = ["compiled_data"] }
 icu_properties = { version = "2.4", default-features = false, features = ["compiled_data"] }

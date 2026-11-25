@@ -2,15 +2,17 @@ mod actions;
 mod attachments;
 mod drafts;
 mod gifs;
+mod images;
 mod preview_images;
 
 use actions::{ActionOutcome, PendingAction, VoteResult, change_message};
 pub use actions::{Pins, PollEditOutcome, PollEditReply};
-pub use attachments::{AttachmentInput, UploadStatus, image_preview};
+pub use attachments::{AttachmentInput, UploadStatus};
 use attachments::{AttachmentWork, QueuedAttachment};
 pub(super) use drafts::DraftStore;
 pub use gifs::GifPickerView;
 use gifs::{GifPicker, StagedGif};
+pub use images::{ChatImage, image_preview};
 use preview_images::{PreviewImages, PreviewResult};
 
 use std::{

@@ -1,12 +1,10 @@
 use std::{
     fs::File,
-    io::{BufRead, BufReader, Cursor, Seek},
+    io::{BufReader, Cursor, Seek},
     path::PathBuf,
 };
 
 use bytes::Bytes;
-use gpui_kit::RenderImage;
-use image::{Frame, ImageReader, Limits};
 use tempfile::NamedTempFile;
 use tokio::{io::AsyncRead, sync::oneshot};
 use uuid::Uuid;
@@ -71,7 +69,7 @@ impl AttachmentInput {
                 let mime = mime.essence_str().to_owned();
                 let preview =
                     if mime.starts_with("image/") && size <= MAX_ATTACHMENT_PREVIEW_BYTES as u64 {
-                        let preview = thumbnail(BufReader::new(&mut file), 768, 512);
+                        let preview = images::thumbnail(BufReader::new(&mut file), 768, 512);
                         file.rewind().map_err(|_| "Could not read file.")?;
                         preview
                     } else {
@@ -105,7 +103,7 @@ impl AttachmentInput {
 struct PreparedUpload {
     mime: String,
     size: u64,
-    preview: Option<Arc<RenderImage>>,
+    preview: Option<Arc<ChatImage>>,
     input: Box<dyn AsyncRead + Unpin + Send>,
 }
 
@@ -123,7 +121,7 @@ pub struct QueuedAttachment {
     pub filename: String,
     pub status: UploadStatus,
     pub spoiler: bool,
-    pub preview: Option<Arc<RenderImage>>,
+    pub preview: Option<Arc<ChatImage>>,
 }
 
 #[derive(Clone)]
@@ -135,7 +133,7 @@ pub enum UploadStatus {
 
 pub(super) enum UploadUpdate {
     Progress(u8),
-    Preview(Arc<RenderImage>),
+    Preview(Arc<ChatImage>),
     Finished(Result<String, &'static str>),
 }
 
@@ -477,25 +475,23 @@ async fn upload_attachment(
     expired
 }
 
-// shortcut: previews are still raster thumbnails, add animation when the chat renderer supports it.
-pub fn image_preview(bytes: &[u8]) -> Option<Arc<RenderImage>> {
-    raster_thumbnail(bytes, 768, 512)
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-pub(super) fn raster_thumbnail(bytes: &[u8], width: u32, height: u32) -> Option<Arc<RenderImage>> {
-    thumbnail(Cursor::new(bytes), width, height)
-}
+    #[test]
+    fn queued_gif_attachment_keeps_both_preview_frames() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/attachments/preview.gif");
+        let preview = AttachmentInput::Path(path)
+            .prepare()
+            .unwrap()
+            .preview
+            .unwrap();
 
-fn thumbnail(reader: impl BufRead + Seek, width: u32, height: u32) -> Option<Arc<RenderImage>> {
-    let mut reader = ImageReader::new(reader).with_guessed_format().ok()?;
-    let mut limits = Limits::default();
-    limits.max_image_width = Some(8192);
-    limits.max_image_height = Some(8192);
-    limits.max_alloc = Some(64 * 1024 * 1024);
-    reader.limits(limits);
-    let mut preview = reader.decode().ok()?.thumbnail(width, height).into_rgba8();
-    for pixel in preview.pixels_mut() {
-        pixel.0.swap(0, 2);
+        assert_eq!(preview.frame_at(Duration::from_millis(179)).0, 0);
+        assert_eq!(preview.frame_at(Duration::from_millis(180)).0, 1);
+        assert_eq!(preview.frame_at(Duration::from_millis(609)).0, 1);
+        assert_eq!(preview.frame_at(Duration::from_millis(610)).0, 0);
     }
-    Some(Arc::new(RenderImage::new(vec![Frame::new(preview)])))
 }

@@ -11,7 +11,7 @@ use crate::{
 };
 use url::Url;
 
-pub(in crate::session) type PreviewImage = Option<Arc<RenderImage>>;
+pub(in crate::session) type PreviewImage = Option<Arc<ChatImage>>;
 
 type PreviewKey = (String, String);
 pub(in crate::session) type PreviewResult = (PreviewKey, Result<Arc<RenderImage>, Failure>);
@@ -152,7 +152,7 @@ pub(super) async fn load_image(
                 | image::ImageFormat::Png
                 | image::ImageFormat::Jpeg
         ) {
-            return attachments::raster_thumbnail(&bytes, width, height);
+            return images::raster_thumbnail(&bytes, width, height);
         }
         None
     })
