@@ -2,6 +2,7 @@ mod actions;
 mod attachments;
 pub(super) mod editor;
 mod embed;
+mod emoji;
 mod gifs;
 mod history;
 mod images;
@@ -1226,7 +1227,11 @@ impl Spk {
         } else {
             (source.clone(), Vec::new())
         };
-        let mut extensions = MarkdownExtensions::default().plugin(MessageMention);
+        let emoji = emoji::MessageEmoji::new(id == "message-body" && emoji::emoji_only(body));
+        let display = emoji.display_markdown(&display);
+        let mut extensions = MarkdownExtensions::default()
+            .plugin(MessageMention)
+            .plugin(emoji);
         if !spoilers.is_empty() {
             let definitions = crate::chat_markdown::spoiler_link_definitions(body);
             let contents = spoilers
