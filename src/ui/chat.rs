@@ -846,7 +846,15 @@ impl Spk {
                 }
             });
         let status = if chat.unavailable() {
-            (chat.webhook && !chat.jump_failed).then_some("Webhook feed unavailable.")
+            if chat.jump_failed {
+                None
+            } else if chat.webhook {
+                Some("Webhook feed unavailable.")
+            } else {
+                chat.direct_message_peer
+                    .as_ref()
+                    .map(|_| "Direct message unavailable.")
+            }
         } else if chat.history_failed() {
             Some("Could not load message history.")
         } else if chat.loading() {

@@ -175,6 +175,7 @@ enum HistoryRequest {
     Newer(String),
     Around(String),
     Latest,
+    OpenDirectMessage,
 }
 
 #[derive(Default)]
@@ -264,6 +265,7 @@ impl ChatSession {
                 Some(
                     HistoryRequest::Refresh { .. }
                         | HistoryRequest::Latest
+                        | HistoryRequest::OpenDirectMessage
                         | HistoryRequest::Around(_)
                 )
             )
@@ -319,13 +321,21 @@ impl ChatSession {
             }
             return false;
         }
-        self.load(client, HistoryRequest::Refresh { load_newer: false });
+        let request = if channel.kind == "dm" {
+            HistoryRequest::OpenDirectMessage
+        } else {
+            HistoryRequest::Refresh { load_newer: false }
+        };
+        self.load(client, request);
         true
     }
 
     pub fn open_conversation_target(&mut self, client: &SpkClient, channel: &Channel) {
-        self.select(channel);
-        self.latest(client);
+        if self.select(channel) && channel.kind == "dm" {
+            self.load(client, HistoryRequest::OpenDirectMessage);
+        } else {
+            self.latest(client);
+        }
     }
 
     pub fn open_target(&mut self, client: &SpkClient, channel: &Channel, message_id: String) {
@@ -409,7 +419,11 @@ impl ChatSession {
         self.socket = Some(socket);
         if matches!(
             self.history,
-            Some(HistoryRequest::Around(_) | HistoryRequest::Latest)
+            Some(
+                HistoryRequest::Around(_)
+                    | HistoryRequest::Latest
+                    | HistoryRequest::OpenDirectMessage
+            )
         ) && self.selected.as_ref().is_some_and(ChatView::loading)
         {
             return;
@@ -524,7 +538,9 @@ impl ChatSession {
                     }
                     Ok(page)
                 }
-                HistoryRequest::Latest => client.messages(&channel, None).await,
+                HistoryRequest::Latest | HistoryRequest::OpenDirectMessage => {
+                    client.messages(&channel, None).await
+                }
             }
         });
     }
@@ -589,7 +605,9 @@ impl ChatSession {
                 view.history = History::Ready;
                 if matches!(
                     request,
-                    HistoryRequest::Refresh { .. } | HistoryRequest::Latest
+                    HistoryRequest::Refresh { .. }
+                        | HistoryRequest::Latest
+                        | HistoryRequest::OpenDirectMessage
                 ) || matches!(view.pins, Some(Pins::Loading))
                 {
                     self.refresh_pins(client);
@@ -600,6 +618,14 @@ impl ChatSession {
                 let jump = matches!(request, HistoryRequest::Around(_));
                 if jump {
                     action_results.push(ActionResult::error("Message unavailable."));
+                } else if matches!(request, HistoryRequest::OpenDirectMessage) {
+                    let message = match error {
+                        Failure::Http(
+                            reqwest::StatusCode::FORBIDDEN | reqwest::StatusCode::NOT_FOUND,
+                        ) => "Direct message unavailable.",
+                        _ => "Could not open the direct message. Try again.",
+                    };
+                    action_results.push(ActionResult::error(message));
                 }
                 if jump && matches!(error, Failure::Http(reqwest::StatusCode::NOT_FOUND)) {
                     view.history = History::Ready;
@@ -629,9 +655,6 @@ impl ChatSession {
                     view.has_more_before = false;
                     view.has_more_after = false;
                     if view.direct_message_peer.is_some() {
-                        if !jump {
-                            action_results.push(ActionResult::error("Direct message unavailable."));
-                        }
                         self.outgoing
                             .retain(|outgoing| outgoing.channel_id != view.channel_id);
                         if let Some(draft) = self.drafts.remove(&view.channel_id) {
@@ -1004,6 +1027,7 @@ impl ChatSession {
                     HistoryRequest::Refresh { .. }
                         | HistoryRequest::Around(_)
                         | HistoryRequest::Latest
+                        | HistoryRequest::OpenDirectMessage
                         | HistoryRequest::Newer(_)
                 )
             ) && view.history != History::Ready
@@ -1014,7 +1038,11 @@ impl ChatSession {
                 if view.direct_message_peer.is_some()
                     && matches!(
                         self.history,
-                        Some(HistoryRequest::Refresh { .. } | HistoryRequest::Latest)
+                        Some(
+                            HistoryRequest::Refresh { .. }
+                                | HistoryRequest::Latest
+                                | HistoryRequest::OpenDirectMessage
+                        )
                     )
                 {
                     return;

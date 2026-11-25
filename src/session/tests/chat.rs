@@ -957,6 +957,14 @@ async fn direct_message_history_is_visible_only_to_a_participant_even_for_admins
         let (line, request) = history.recv().await.unwrap();
         assert_eq!(line, "GET /api/channels/private/messages?unread=1 HTTP/1.1");
         assert_eq!(request.header("cookie"), Some("session=alice"));
+        request.respond_raw("503 Service Unavailable", &[], b"").await;
+        let failed = wait_for_sidebar(&views, |view| {
+            view.chat.as_ref().is_some_and(ChatView::history_failed)
+        }).await;
+        assert_eq!(failed.action_results, [ActionResult::error("Could not open the direct message. Try again.")]);
+        commands.send(Command::RetryChatHistory).await.unwrap();
+        let (line, request) = history.recv().await.unwrap();
+        assert_eq!(line, "GET /api/channels/private/messages?unread=1 HTTP/1.1");
         let message = value!({"id":"private-2","channelId":"private","userId":"bob","body":"Private content","createdAt":2});
         page(request, std::slice::from_ref(&message), true).await;
         wait_for_messages(&views, &["private-2"]).await;
@@ -1002,6 +1010,7 @@ async fn direct_message_history_is_visible_only_to_a_participant_even_for_admins
         })
         .await;
         assert!(denied.chat.unwrap().messages.is_empty());
+        assert!(denied.action_results.is_empty());
         commands.close();
         outsider.close();
         assert!(matches!(alice.await.unwrap(), SessionEnd::Closed));

@@ -246,25 +246,17 @@ impl PollComposer {
                     completed,
                 },
                 Either::Right(async move {
-                    Ok(result
-                        .await
-                        .unwrap_or(Err(CONNECTION_ERROR))
-                        .map(|()| PollEditOutcome::Saved)
-                        .map_err(PollEditError::Validation))
+                    result.await.map_err(|_| CONNECTION_ERROR).map(|result| {
+                        result
+                            .map(|()| PollEditOutcome::Saved)
+                            .map_err(PollEditError::Validation)
+                    })
                 }),
             )
         };
         self.error = None;
         if self.commands.try_send(command).is_err() {
-            if self.message_id.is_some() {
-                notifications::push_action_result(
-                    ActionResult::error(CONNECTION_ERROR),
-                    window,
-                    cx,
-                );
-            } else {
-                self.error = Some(CONNECTION_ERROR);
-            }
+            notifications::push_action_result(ActionResult::error(CONNECTION_ERROR), window, cx);
             cx.notify();
             return;
         }

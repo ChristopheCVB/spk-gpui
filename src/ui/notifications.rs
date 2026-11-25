@@ -182,6 +182,42 @@ impl Spk {
     }
 }
 
+#[derive(Default)]
+struct ActionToasts(Vec<WeakEntity<Notification>>);
+
+impl Global for ActionToasts {}
+
+pub(super) fn dismiss_action_toasts(
+    event: &KeystrokeEvent,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    if !window.is_window_active()
+        || event.input_preference == InputPreference::CharacterInput
+        || event.keystroke.key != "f8"
+    {
+        return false;
+    }
+    let mut modifiers = event.keystroke.modifiers;
+    modifiers.shift |= window.modifiers().shift;
+    if !modifiers.secondary(cx) || !modifiers.shift || modifiers.number_of_modifiers() != 2 {
+        return false;
+    }
+    let visible = window.notifications(cx);
+    let tracked = &mut cx.default_global::<ActionToasts>().0;
+    let before = tracked.len();
+    tracked.retain(|toast| {
+        !visible
+            .iter()
+            .any(|note| note.entity_id() == toast.entity_id())
+    });
+    if tracked.len() == before {
+        return false;
+    }
+    window.remove_notification::<ActionResult>(cx);
+    true
+}
+
 pub(super) fn push_action_result(result: ActionResult, window: &mut Window, cx: &mut App) {
     let (severity, message) = match result {
         ActionResult::Success(message) => (NotificationType::Success, message),
@@ -191,6 +227,7 @@ pub(super) fn push_action_result(result: ActionResult, window: &mut Window, cx: 
     };
     let id = SharedString::from(format!("{severity:?}:{message}"));
     let message = SharedString::from(message);
+    let existing = window.notifications(cx);
     window.push_notification(
         Notification::new()
             .with_type(severity)
@@ -200,6 +237,15 @@ pub(super) fn push_action_result(result: ActionResult, window: &mut Window, cx: 
             .placement(Anchor::BottomRight),
         cx,
     );
+    if let Some(added) = window
+        .notifications(cx)
+        .iter()
+        .find(|note| !existing.contains(note))
+    {
+        let tracked = &mut cx.default_global::<ActionToasts>().0;
+        tracked.retain(|toast| toast.upgrade().is_some());
+        tracked.push(added.downgrade());
+    }
 }
 
 #[cfg(target_os = "linux")]

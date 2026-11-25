@@ -24,10 +24,6 @@ impl Spk {
         if event.input_preference == InputPreference::CharacterInput {
             return false;
         }
-        if primary && modifiers.shift && count == 2 && key_name == "f8" {
-            window.remove_notification::<ActionResult>(cx);
-            return true;
-        }
         let View::SignedIn(sidebar) = &self.view else {
             return false;
         };

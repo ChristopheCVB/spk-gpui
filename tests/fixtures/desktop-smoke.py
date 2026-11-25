@@ -861,6 +861,19 @@ class Desktop:
         wait_for("the five-second action toasts to expire",
                  lambda: self.find_node(density_result) is None
                  and self.find_node(notification_result) is None, timeout=7)
+        self.click("Shortcuts", "push button")
+        self.click("Record shortcut for toggle mute", "push button")
+        self.key("ctrl+shift+F8")
+        self.find("Ctrl + Shift + F8")
+        (config / "voice-preferences.json").mkdir()
+        self.click("Save shortcut", "push button")
+        shortcut_result = "Could not save voice preferences."
+        self.check_toast_position(shortcut_result)
+        self.key("ctrl+shift+F8")
+        wait_for("the keyboard to dismiss the shortcut save failure",
+                 lambda: self.find_node(shortcut_result) is None, timeout=2)
+        self.find("Ctrl + Shift + F8")
+        self.find("Save shortcut", "push button")
         self.click("Close settings", "push button")
         self.click("smoke-chat", "push button", partial=True)
         self.find("Show all 2 pinned messages", "toggle button")

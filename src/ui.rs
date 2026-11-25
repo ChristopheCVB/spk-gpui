@@ -291,7 +291,10 @@ impl Spk {
             if window.window_handle().window_id() == window_id {
                 let _ = app.update(cx, |this, cx| {
                     this.record_activity(window);
-                    if this.shortcuts.editor.is_some() {
+                    if notifications::dismiss_action_toasts(event, window, cx) {
+                        cx.stop_propagation();
+                        window.prevent_default();
+                    } else if this.shortcuts.editor.is_some() {
                         this.capture_shortcut(event, window, cx);
                     } else if this.workspace_key(event, window, cx) {
                         cx.stop_propagation();
