@@ -25,7 +25,7 @@ use gpui_kit::{
     assets::IconName,
     base::{Scrollbar, ScrollbarHandle, ScrollbarMode, StyledExt},
     component::{
-        ActiveTheme, Disableable, Icon, Selectable, Sizable, WindowExt,
+        ActiveTheme, Icon, Selectable, Sizable, WindowExt,
         avatar::Avatar,
         button::{Button, ButtonVariants},
         input::{Input, InputContentType, InputEvent, InputState, Textarea, TextareaState},
