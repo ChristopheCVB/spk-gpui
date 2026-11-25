@@ -456,7 +456,7 @@ impl Render for WebhookEditor {
                     ),
             )
         })
-        .children(channel_admin::channel_status(self.error.map(Err), cx))
+        .children(channel_admin::editor_error(self.error, cx))
         .child(
             div()
                 .flex()

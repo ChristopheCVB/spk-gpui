@@ -2,8 +2,8 @@ use super::*;
 use crate::{
     api::PollEditOption,
     session::{
-        POLL_MAX_OPTIONS, POLL_MIN_OPTIONS, POLL_OPTION_LIMIT, POLL_QUESTION_LIMIT, PollEditError,
-        PollEditOutcome, trim_poll_text, validate_poll,
+        POLL_MAX_OPTIONS, POLL_MIN_OPTIONS, POLL_OPTION_LIMIT, POLL_QUESTION_LIMIT,
+        PollEditOutcome, PollFormError, trim_poll_text, validate_poll,
     },
 };
 use futures::future::Either;
@@ -246,11 +246,10 @@ impl PollComposer {
                     completed,
                 },
                 Either::Right(async move {
-                    result.await.map_err(|_| CONNECTION_ERROR).map(|result| {
-                        result
-                            .map(|()| PollEditOutcome::Saved)
-                            .map_err(PollEditError::Validation)
-                    })
+                    result
+                        .await
+                        .map_err(|_| CONNECTION_ERROR)
+                        .map(|result| result.map(|()| PollEditOutcome::Saved))
                 }),
             )
         };
@@ -273,8 +272,8 @@ impl PollComposer {
                     Ok(Ok(PollEditOutcome::ConfirmVoteChange)) => {
                         form.confirm_vote_change(window, cx);
                     }
-                    Ok(Err(PollEditError::Validation(error))) => form.error = Some(error),
-                    Ok(Err(PollEditError::Action(_))) => {}
+                    Ok(Err(PollFormError::Validation(error))) => form.error = Some(error),
+                    Ok(Err(PollFormError::Action(_))) => {}
                     Err(error) => {
                         notifications::push_action_result(ActionResult::error(error), window, cx);
                     }

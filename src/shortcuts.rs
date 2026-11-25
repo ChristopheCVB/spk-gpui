@@ -598,6 +598,25 @@ impl Shortcuts {
         }
     }
 
+    pub fn action_toast_key(&self, is_mac: bool) -> &'static str {
+        let modifiers = Modifiers {
+            control: !is_mac,
+            platform: is_mac,
+            shift: true,
+            ..Modifiers::default()
+        };
+        ["f8", "f9", "f10"]
+            .into_iter()
+            .find(|key| {
+                !self.owns_chord(&Chord {
+                    key: (*key).into(),
+                    modifiers,
+                    mac_key: None,
+                })
+            })
+            .expect("SPK has only two configurable voice shortcuts")
+    }
+
     pub fn owns_chord(&self, chord: &Chord) -> bool {
         Action::ALL.into_iter().any(|action| {
             self.binding(action)

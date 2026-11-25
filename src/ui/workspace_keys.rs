@@ -266,7 +266,15 @@ pub(super) fn shortcut_reference(
                 ),
                 ("Show or hide sidebar", format!("{primary}+B")),
                 ("Show keyboard shortcuts", "?".into()),
-                ("Dismiss action toasts", format!("{primary}+Shift+F8")),
+                (
+                    "Dismiss action toasts",
+                    format!(
+                        "{primary}+Shift+{}",
+                        shortcuts
+                            .action_toast_key(cx.platform_info().is_mac())
+                            .to_ascii_uppercase()
+                    ),
+                ),
             ],
         ),
         (

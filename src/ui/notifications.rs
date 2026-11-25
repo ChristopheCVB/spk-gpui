@@ -189,18 +189,19 @@ impl Global for ActionToasts {}
 
 pub(super) fn dismiss_action_toasts(
     event: &KeystrokeEvent,
+    shortcuts: &Shortcuts,
     window: &mut Window,
     cx: &mut App,
 ) -> bool {
-    if !window.is_window_active()
-        || event.input_preference == InputPreference::CharacterInput
-        || event.keystroke.key != "f8"
-    {
+    if !window.is_window_active() || event.input_preference == InputPreference::CharacterInput {
         return false;
     }
     let mut modifiers = event.keystroke.modifiers;
     modifiers.shift |= window.modifiers().shift;
     if !modifiers.secondary(cx) || !modifiers.shift || modifiers.number_of_modifiers() != 2 {
+        return false;
+    }
+    if event.keystroke.key != shortcuts.action_toast_key(cx.platform_info().is_mac()) {
         return false;
     }
     let visible = window.notifications(cx);

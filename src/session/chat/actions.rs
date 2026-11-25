@@ -41,12 +41,12 @@ pub enum PollEditOutcome {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum PollEditError {
+pub enum PollFormError {
     Validation(&'static str),
     Action(&'static str),
 }
 
-pub type PollEditReply = tokio::sync::oneshot::Sender<Result<PollEditOutcome, PollEditError>>;
+pub type PollEditReply = tokio::sync::oneshot::Sender<Result<PollEditOutcome, PollFormError>>;
 
 pub(in crate::session) type VoteResult = (String, String, Result<MessageChange, Failure>);
 
@@ -182,31 +182,31 @@ impl ChatSession {
         question: &str,
         mut options: Vec<PollEditOption>,
         reset_votes: Option<bool>,
-    ) -> Result<Option<MessageAction>, PollEditError> {
+    ) -> Result<Option<MessageAction>, PollFormError> {
         let view = self
             .selected
             .as_ref()
             .filter(|view| view.channel_id == channel_id && view.can_send())
-            .ok_or(PollEditError::Action("This conversation is unavailable."))?;
+            .ok_or(PollFormError::Action("This conversation is unavailable."))?;
         let message = view
             .message(message_id)
-            .ok_or(PollEditError::Action("This message is unavailable."))?;
+            .ok_or(PollFormError::Action("This message is unavailable."))?;
         if sidebar.profile.id.as_deref() != Some(message.user_id.as_str()) {
-            return Err(PollEditError::Action(CHANGE_DENIED));
+            return Err(PollFormError::Action(CHANGE_DENIED));
         }
         let poll = message
             .poll
             .as_ref()
-            .ok_or(PollEditError::Action("This poll is unavailable."))?;
+            .ok_or(PollFormError::Action("This poll is unavailable."))?;
         if self.pending_action.is_some() {
-            return Err(PollEditError::Action(
+            return Err(PollFormError::Action(
                 "A message change is in progress. Try again.",
             ));
         }
 
         let (body, labels) =
             validate_poll(question, options.iter().map(|option| option.label.as_str()))
-                .map_err(PollEditError::Validation)?;
+                .map_err(PollFormError::Validation)?;
         let changed = poll.options.len() != options.len()
             || poll.options.iter().zip(options.iter().zip(&labels)).any(
                 |(existing, (option, label))| {
@@ -300,9 +300,9 @@ impl ChatSession {
         if let Some(reply) = pending.poll_edit_reply {
             let _ = reply.send(error.map_or(Ok(PollEditOutcome::Saved), |message| {
                 Err(if field_error {
-                    PollEditError::Validation(message)
+                    PollFormError::Validation(message)
                 } else {
-                    PollEditError::Action(message)
+                    PollFormError::Action(message)
                 })
             }));
         }

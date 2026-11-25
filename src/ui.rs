@@ -291,7 +291,19 @@ impl Spk {
             if window.window_handle().window_id() == window_id {
                 let _ = app.update(cx, |this, cx| {
                     this.record_activity(window);
-                    if notifications::dismiss_action_toasts(event, window, cx) {
+                    if this
+                        .shortcuts
+                        .editor
+                        .as_ref()
+                        .is_some_and(|editor| editor.recording)
+                    {
+                        this.capture_shortcut(event, window, cx);
+                    } else if notifications::dismiss_action_toasts(
+                        event,
+                        &this.shortcuts,
+                        window,
+                        cx,
+                    ) {
                         cx.stop_propagation();
                         window.prevent_default();
                     } else if this.shortcuts.editor.is_some() {
@@ -441,6 +453,7 @@ impl Spk {
                     View::SignIn {
                         message: Some("The SPK connection stopped. Close and reopen the app."),
                         retry_restore: false,
+                        draft_save_error: None,
                     },
                     window,
                     cx,
@@ -603,6 +616,13 @@ impl Spk {
             self.video_stage.sidebar_watch = None;
             window.clear_notifications(cx);
         }
+        if let View::SignIn {
+            draft_save_error, ..
+        } = &mut view
+            && let Some(message) = draft_save_error.take()
+        {
+            notifications::push_action_result(ActionResult::error(message), window, cx);
+        }
         self.view = view;
         self.update_screen_picker(window, cx);
     }
@@ -723,6 +743,7 @@ impl Render for Spk {
             View::SignIn {
                 message,
                 retry_restore,
+                ..
             } => self
                 .login(*message, *retry_restore, window, cx)
                 .into_any_element(),

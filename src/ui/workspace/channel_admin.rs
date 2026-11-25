@@ -250,20 +250,11 @@ fn channel_form_item(
         })
 }
 
-pub(super) fn channel_status(
-    status: Option<Result<&'static str, &'static str>>,
-    cx: &App,
-) -> Option<impl IntoElement> {
-    let theme = cx.theme();
-    status.map(|status| {
-        let (message, color) = match status {
-            Ok(message) => (message, theme.success),
-            Err(message) => (message, theme.danger),
-        };
+pub(super) fn editor_error(error: Option<&'static str>, cx: &App) -> Option<impl IntoElement> {
+    error.map(|message| {
         div()
-            .id("channel-admin-status")
             .role(Role::Status)
-            .child(Label::new(message).text_color(color).text_sm())
+            .child(Label::new(message).text_color(cx.theme().danger).text_sm())
     })
 }
 
@@ -362,10 +353,8 @@ impl Render for ChannelEditor {
             .flex_col()
             .gap_3()
             .child(body)
-            .children(channel_status(
-                self.completed(cx)
-                    .and_then(|result| result.validation)
-                    .map(Err),
+            .children(editor_error(
+                self.completed(cx).and_then(|result| result.validation),
                 cx,
             ))
             .child(

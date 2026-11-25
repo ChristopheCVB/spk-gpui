@@ -393,7 +393,7 @@ async fn channel_refresh_discards_revoked_webhook_history_and_in_flight_pages() 
         assert_eq!(after.chat_notice, Some("Webhook feed unavailable."));
 
         commands.send(Command::SignOut).await.unwrap();
-        assert!(matches!(session.await.unwrap(), SessionEnd::SignOut));
+        assert!(matches!(session.await.unwrap(), SessionEnd::SignOut(None)));
     }).await.expect("webhook access revocation timed out");
     assert!(!http.is_finished());
     http.abort();
@@ -469,7 +469,7 @@ async fn late_search_omits_revoked_feed_never_listed_to_reader() {
         assert_eq!(done.search.next_cursor.as_deref(), Some("20"));
 
         commands.send(Command::SignOut).await.unwrap();
-        assert!(matches!(session.await.unwrap(), SessionEnd::SignOut));
+        assert!(matches!(session.await.unwrap(), SessionEnd::SignOut(None)));
     }).await.expect("late webhook search timed out");
     assert!(!http.is_finished());
     http.abort();
@@ -530,7 +530,7 @@ async fn newly_visible_webhook_loads_existing_unread_alert_count() {
         assert!(updated.alerts.is_empty());
 
         commands.send(Command::SignOut).await.unwrap();
-        assert!(matches!(session.await.unwrap(), SessionEnd::SignOut));
+        assert!(matches!(session.await.unwrap(), SessionEnd::SignOut(None)));
     })
     .await
     .expect("newly visible webhook unread count timed out");
@@ -631,7 +631,7 @@ mod creation {
                 .respond(&[], &value!([feed()]).to_string())
                 .await;
             commands.send(Command::SignOut).await.unwrap();
-            assert!(matches!(session.await.unwrap(), SessionEnd::SignOut));
+            assert!(matches!(session.await.unwrap(), SessionEnd::SignOut(None)));
         })
         .await
         .expect("webhook creation timed out");
@@ -737,7 +737,7 @@ mod creation {
             commands.send(Command::SignOut).await.unwrap();
             assert!(signed_out.await.is_err());
             drop(pending);
-            assert!(matches!(session.await.unwrap(), SessionEnd::SignOut));
+            assert!(matches!(session.await.unwrap(), SessionEnd::SignOut(None)));
         })
         .await
         .expect("webhook failure handling timed out");

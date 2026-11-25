@@ -62,8 +62,8 @@ pub use {
     channel_admin::{ChannelAction, ChannelAdmin, ChannelKind},
     chat::{
         AttachmentInput, ChatImage, ChatView, Delivery, GifPickerView, Outgoing, POLL_MAX_OPTIONS,
-        POLL_MIN_OPTIONS, POLL_OPTION_LIMIT, POLL_QUESTION_LIMIT, Pins, PollEditError,
-        PollEditOutcome, PollEditReply, UploadStatus, image_preview, trim_poll_text, validate_poll,
+        POLL_MIN_OPTIONS, POLL_OPTION_LIMIT, POLL_QUESTION_LIMIT, Pins, PollEditOutcome,
+        PollEditReply, PollFormError, UploadStatus, image_preview, trim_poll_text, validate_poll,
     },
     presence::Participant,
     profiles::ProfileEdit,
@@ -138,7 +138,7 @@ pub enum Command {
         channel_id: String,
         question: String,
         options: Vec<String>,
-        completed: oneshot::Sender<Result<(), &'static str>>,
+        completed: oneshot::Sender<Result<(), PollFormError>>,
     },
     ShowGifs(bool),
     SearchGifs(String),
@@ -282,6 +282,7 @@ pub enum View {
     SignIn {
         message: Option<&'static str>,
         retry_restore: bool,
+        draft_save_error: Option<&'static str>,
     },
     AccountLink {
         form: AccountLinkForm,
@@ -604,6 +605,7 @@ async fn run_session(
             _ => return,
         };
 
+        let mut draft_save_error = None;
         let (message, retry_restore) = match auth {
             Ok(Some((client, profile))) => {
                 let notice = saved.save(&client).await.err();
@@ -634,7 +636,8 @@ async fn run_session(
                         }
                         Some(saved.clear().await.err().unwrap_or(reason))
                     }
-                    SessionEnd::SignOut => {
+                    SessionEnd::SignOut(error) => {
+                        draft_save_error = error;
                         let Some(warning) = sign_out(&client, &mut saved, &commands, &views).await
                         else {
                             return;
@@ -648,7 +651,9 @@ async fn run_session(
             Err((retry_restore, message)) => (Some(message), retry_restore),
         };
         sign_in_prompt = message.map(|message| (retry_restore, message));
-        let Some(command) = login(&commands, &views, message, retry_restore).await else {
+        let Some(command) =
+            login(&commands, &views, message, retry_restore, draft_save_error).await
+        else {
             return;
         };
         next = command;
@@ -657,7 +662,7 @@ async fn run_session(
 
 enum SessionEnd {
     Closed,
-    SignOut,
+    SignOut(Option<&'static str>),
     Invalidated(&'static str),
 }
 
@@ -749,7 +754,7 @@ async fn watch_session(
     let mut account_admin = AccountAdmin::default();
     let mut draft_save_at = None;
     let mut draft_save_failed = false;
-    let end = loop {
+    let mut end = loop {
         if commands.is_closed() {
             break SessionEnd::Closed;
         }
@@ -949,7 +954,7 @@ async fn watch_session(
                 }
             } => match command {
                 Err(_) => break SessionEnd::Closed,
-                Ok(Command::SignOut) => break SessionEnd::SignOut,
+                Ok(Command::SignOut) => break SessionEnd::SignOut(None),
                 Ok(Command::SetUserStatus(status)) => {
                     sidebar.user_status = status;
                     if let Err(message) = settings.presence.save(status).await {
@@ -1092,7 +1097,11 @@ async fn watch_session(
                 Ok(Command::SetChatReply { channel_id, message_id }) => chat.set_reply(&channel_id, message_id.as_deref()),
                 Ok(Command::SendChatMessage { channel_id, body }) => chat.send(channel_id, body),
                 Ok(Command::SendChatPoll { channel_id, question, options, completed }) => {
-                    let _ = completed.send(chat.send_poll(channel_id, &question, &options));
+                    let result = chat.send_poll(channel_id, &question, &options);
+                    if let Err(PollFormError::Action(message)) = &result {
+                        sidebar.action_results.push(ActionResult::error(*message));
+                    }
+                    let _ = completed.send(result);
                 }
                 Ok(Command::ShowGifs(true)) => chat.open_gifs(client),
                 Ok(Command::ShowGifs(false)) => chat.gifs.close(),
@@ -1163,7 +1172,7 @@ async fn watch_session(
                         Ok(Some(action)) => chat.start_message_action(client, &channel_id, message_id, action, Some(completed)),
                         Ok(None) => { let _ = completed.send(Ok(PollEditOutcome::ConfirmVoteChange)); }
                         Err(error) => {
-                            if let PollEditError::Action(message) = error {
+                            if let PollFormError::Action(message) = error {
                                 sidebar.action_results.push(ActionResult::error(message));
                             }
                             let _ = completed.send(Err(error));
@@ -1585,14 +1594,18 @@ async fn watch_session(
                 }
             }
         }
+        let mut error = None;
         if let Some(result) = chat.draft_writes.join_next().await {
-            let _ = chat.draft_save_completed(result);
+            error = chat.draft_save_completed(result).err();
         }
         if chat.drafts_to_save() {
             chat.save_drafts(store);
             if let Some(result) = chat.draft_writes.join_next().await {
-                let _ = chat.draft_save_completed(result);
+                error = chat.draft_save_completed(result).err();
             }
+        }
+        if matches!(end, SessionEnd::SignOut(_)) {
+            end = SessionEnd::SignOut(error);
         }
     }
     if matches!(end, SessionEnd::Invalidated(SESSION_EXPIRED))

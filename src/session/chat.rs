@@ -6,7 +6,7 @@ mod images;
 mod preview_images;
 
 use actions::{ActionOutcome, PendingAction, VoteResult, change_message};
-pub use actions::{Pins, PollEditError, PollEditOutcome, PollEditReply};
+pub use actions::{Pins, PollEditOutcome, PollEditReply, PollFormError};
 pub use attachments::{AttachmentInput, UploadStatus};
 use attachments::{AttachmentWork, QueuedAttachment};
 pub(super) use drafts::DraftStore;
@@ -331,8 +331,13 @@ impl ChatSession {
     }
 
     pub fn open_conversation_target(&mut self, client: &SpkClient, channel: &Channel) {
-        if self.select(channel) && channel.kind == "dm" {
+        let changed = self.select(channel);
+        if channel.kind == "dm" {
             self.load(client, HistoryRequest::OpenDirectMessage);
+            if let Some(view) = &mut self.selected {
+                view.jump = None;
+                view.opening_latest = !changed;
+            }
         } else {
             self.latest(client);
         }
@@ -862,20 +867,21 @@ impl ChatSession {
         channel_id: String,
         question: &str,
         options: &[String],
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), PollFormError> {
         let Some(view) = self
             .selected
             .as_mut()
             .filter(|view| view.channel_id == channel_id && !view.unavailable())
         else {
-            return Err("This conversation is unavailable.");
+            return Err(PollFormError::Action("This conversation is unavailable."));
         };
-        let (question, options) = validate_poll(question, options.iter().map(String::as_str))?;
+        let (question, options) = validate_poll(question, options.iter().map(String::as_str))
+            .map_err(PollFormError::Validation)?;
         let nonce = uuid::Uuid::new_v4().to_string();
         if !self.socket.as_ref().is_some_and(|socket| {
             view.can_send() && socket.send_poll(&channel_id, question, &nonce, &options)
         }) {
-            return Err("Could not reach SPK. Try again.");
+            return Err(PollFormError::Action("Could not reach SPK. Try again."));
         }
         self.message_send_error = None;
         Ok(())

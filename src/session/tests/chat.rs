@@ -539,7 +539,8 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         peer.close(None).await.unwrap();
         wait_for_delivery(&rx, |delivery| matches!(delivery, Delivery::Unconfirmed)).await;
         let completed = send_poll(&tx, "general", "Offline poll?", &["Yes", "No"]).await;
-        assert!(completed.await.unwrap().is_err());
+        assert_eq!(completed.await.unwrap(), Err(PollFormError::Action("Could not reach SPK. Try again.")));
+        wait_for_sidebar(&rx, |view| view.action_results.contains(&ActionResult::error("Could not reach SPK. Try again."))).await;
         tx.send(Command::SendChatMessage { channel_id: "general".into(), body: "Offline message".into() }).await.unwrap();
         wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
             if chat.message_send_error.as_deref() != Some("Could not reach SPK. Try again.") {
@@ -972,7 +973,19 @@ async fn direct_message_history_is_visible_only_to_a_participant_even_for_admins
         let (line, request) = history.recv().await.unwrap();
         assert_eq!(line, "GET /api/channels/private/messages?before=private-2 HTTP/1.1");
         let older = value!({"id":"private-1","channelId":"private","userId":"bob","body":"Earlier private content","createdAt":1});
-        page(request, &[older], false).await;
+        page(request, std::slice::from_ref(&older), false).await;
+        wait_for_messages(&views, &["private-1", "private-2"]).await;
+        commands.send(Command::OpenConversationTarget("private".into())).await.unwrap();
+        let (line, request) = history.recv().await.unwrap();
+        assert_eq!(line, "GET /api/channels/private/messages?unread=1 HTTP/1.1");
+        request.respond_raw("503 Service Unavailable", &[], b"").await;
+        let failed = wait_for_sidebar(&views, |view| {
+            view.chat.as_ref().is_some_and(ChatView::history_failed)
+        }).await;
+        assert_eq!(failed.action_results, [ActionResult::error("Could not open the direct message. Try again.")]);
+        commands.send(Command::RetryChatHistory).await.unwrap();
+        let (_, request) = history.recv().await.unwrap();
+        page(request, &[older, message.clone()], false).await;
         wait_for_messages(&views, &["private-1", "private-2"]).await;
 
         let (outsider, outsider_views, _, _outsider_peer, charlie) =
@@ -1653,6 +1666,10 @@ async fn direct_message_participants_vote_edit_create_and_reopen_polls() {
             assert!(completed.await.unwrap().is_err());
         }
 
+        let completed = send_poll(&bob, "unavailable", "Stale poll?", &["Yes", "No"]).await;
+        assert_eq!(completed.await.unwrap(), Err(PollFormError::Action("This conversation is unavailable.")));
+        wait_for_sidebar(&bob_views, |view| view.action_results.contains(&ActionResult::error("This conversation is unavailable."))).await;
+
         let maximum_option = "😀".repeat(50);
         let completed = send_poll(&bob, "private", &maximum_question, &[&maximum_option, "No"]).await;
         assert_eq!(completed.await.unwrap(), Ok(()));
@@ -1871,7 +1888,7 @@ async fn send_poll(
     channel: &str,
     question: &str,
     options: &[&str],
-) -> tokio::sync::oneshot::Receiver<Result<(), &'static str>> {
+) -> tokio::sync::oneshot::Receiver<Result<(), PollFormError>> {
     let (completed, result) = tokio::sync::oneshot::channel();
     commands
         .send(Command::SendChatPoll {
