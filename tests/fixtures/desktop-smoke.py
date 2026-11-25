@@ -736,7 +736,19 @@ class Desktop:
         subprocess.run(["xdotool", "windowfocus", dialog], check=True)
         self.key("ctrl+l")
         subprocess.run(["xdotool", "type", "--clearmodifiers", "--", str(path)], check=True)
-        self.key("Return")
+
+        def choose_button():
+            try:
+                return next((node for node in walk(Atspi.get_desktop(0))
+                             if node.get_name() == "Choose Soundboard audio"
+                             and node.get_role_name() == "push button"), None)
+            except GLib.Error:
+                return None
+
+        button = wait_for("Choose Soundboard audio in the native file chooser", choose_button)
+        bounds = button.get_component_iface().get_extents(Atspi.CoordType.SCREEN)
+        subprocess.run(["xdotool", "mousemove", str(bounds.x + bounds.width // 2),
+                        str(bounds.y + bounds.height // 2), "click", "1"], check=True)
         wait_for("the native file chooser to close", lambda: not picker())
         subprocess.run(["xdotool", "windowfocus", self.window], check=True)
         self.find("Source waveform")
@@ -817,13 +829,17 @@ class Desktop:
 
     def check_soundboard_upload(self, sources, logs, admin):
         self.click("Settings", "push button")
-        self.click("Soundboard", "push button")
+        self.find("Soundboard", "push button")
+        self.tab_to("Soundboard", "push button")
+        self.key("Return")
         self.choose_sound_source(sources[0])
+        self.find("Source duration: 3.000 s")
         self.expect_sound_selection(0, 3)
         self.click("Discard", "push button")
         wait_for("the discarded waveform to clear", lambda: self.find_node("Source waveform") is None)
 
         self.choose_sound_source(sources[1])
+        self.find("Source duration: 16.000 s")
         self.expect_sound_selection(0, 10)
         waveform = self.bounds("Source waveform")
         start = "Trim start"
