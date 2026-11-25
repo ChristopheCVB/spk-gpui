@@ -902,6 +902,7 @@ pub(super) fn connection_diagnostics_with_status(
     connection_diagnostics_popover(
         icon_label_button(
             control_button("voice-connection-status")
+                .xsmall()
                 .ghost()
                 .tab_stop(true),
             IconName::Activity,

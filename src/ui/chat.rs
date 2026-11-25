@@ -52,6 +52,8 @@ use crate::{
 };
 
 const EMBED_DESCRIPTION: &str = "embed-description";
+// SPK Web scales inline code to 90% of the surrounding text.
+const INLINE_CODE_SCALE: f32 = 0.9;
 
 struct RenderedChatMarkdown {
     view: TextView,
@@ -1281,8 +1283,14 @@ impl Spk {
         }
         let hidden = hidden.into_inner();
         let link_app = cx.weak_entity();
+        let body_size = if id == EMBED_DESCRIPTION {
+            embed::BODY_SIZE
+        } else {
+            rems(1.)
+        };
         let view = TextView::markdown(id, display)
-            .style(chat_text_style(cx))
+            .text_size(body_size)
+            .style(chat_text_style(cx, body_size * INLINE_CODE_SCALE))
             .markdown_extensions(extensions.parser_revision(4).raw_html(false))
             .link(|link, _| safe_link(&link.url).map(|_| link.clone()))
             .on_link_click(move |href, _, _, cx| {
@@ -1556,12 +1564,7 @@ impl Spk {
                         .into_any_element()
                 })
             })
-            .when(!message.body.is_empty() && !editing, |row| {
-                row.child(
-                    text.text_base()
-                        .inline_code_style(StyleRefinement::default().text_size(px(14.4))),
-                )
-            })
+            .when(!message.body.is_empty() && !editing, |row| row.child(text))
             .when(editing, |row| {
                 row.children(self.message_action_form(chat, message, window, cx))
             })
@@ -1876,7 +1879,7 @@ impl MarkdownPlugin for MessageMention {
     }
 }
 
-fn chat_text_style(cx: &App) -> TextViewStyle {
+fn chat_text_style(cx: &App, inline_code_size: impl Into<AbsoluteLength>) -> TextViewStyle {
     let theme = cx.theme();
     let base = theme.popover;
     TextViewStyle::from_theme(&gpui_kit::base::Theme::global(cx))
@@ -1888,6 +1891,7 @@ fn chat_text_style(cx: &App) -> TextViewStyle {
                 .text_color(theme.table_head_foreground),
         )
         .with_table_row_hover(theme.table_hover)
+        .with_inline_code_style(StyleRefinement::default().text_size(inline_code_size))
         .with_inline_code(HighlightStyle {
             background_color: Some(base),
             ..Default::default()

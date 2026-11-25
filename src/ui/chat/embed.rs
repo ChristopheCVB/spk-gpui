@@ -4,8 +4,7 @@ use gpui_kit::base::text::{InlineElement, InlineRenderContext};
 use markdown::mdast::Node;
 use url::Url;
 
-// SPK Web sets inline code to 90% of the embed's 0.875rem body size.
-const INLINE_CODE_SIZE: Rems = rems(0.875 * 0.9);
+pub(super) const BODY_SIZE: Rems = rems(0.875);
 
 pub(super) struct EmbedLinks {
     pub app: WeakEntity<Spk>,
@@ -94,7 +93,7 @@ impl MarkdownPlugin for EmbedLinks {
                         .mono
                         .clone(),
                 )
-                .text_size(INLINE_CODE_SIZE)
+                .text_size(font_size * INLINE_CODE_SCALE)
                 .child(code.clone()),
             LinkLabel::Text(parts) => div().flex().items_center().text_size(font_size).children(
                 parts.iter().enumerate().map(|(index, part)| match part {
@@ -193,9 +192,7 @@ impl Spk {
                     card.child(Label::new(title.to_owned()).font_semibold())
                 }
             })
-            .children(description.map(|view| {
-                view.inline_code_style(StyleRefinement::default().text_size(INLINE_CODE_SIZE))
-            }))
+            .children(description)
             .when(!embed.fields.is_empty(), |card| {
                 let app = cx.weak_entity();
                 let gap = window.rem_size();
@@ -320,7 +317,7 @@ impl Spk {
             .bg(theme.popover)
             .px_3()
             .py_2()
-            .text_sm()
+            .text_size(BODY_SIZE)
             .child(content)
     }
 }
