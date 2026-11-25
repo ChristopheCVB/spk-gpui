@@ -12,6 +12,8 @@ import sys
 import tempfile
 import time
 
+# Keep the fixture import from writing a cache into the checkout.
+sys.dont_write_bytecode = True
 from livekit_fixture import livekit_server
 
 

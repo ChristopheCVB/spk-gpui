@@ -15,6 +15,7 @@ import signal
 import socket
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 from urllib.error import HTTPError, URLError
@@ -25,6 +26,9 @@ import gi
 
 gi.require_version("Atspi", "2.0")
 from gi.repository import Atspi, GLib
+
+# Keep the fixture import from writing a cache into the checkout.
+sys.dont_write_bytecode = True
 from livekit_fixture import livekit_server
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -244,6 +248,8 @@ socket.addEventListener("message", event => {
     if (frame.type === "voice:joined") {
         send({type: "voice:state", cam: true, screen: true});
         console.log("joined");
+    } else if (frame.type === "voice:move" && frame.sid === sid) {
+        send({type: "voice:join", channelId: frame.channelId, ready: true});
     }
 });
 socket.addEventListener("error", event => {
@@ -511,6 +517,16 @@ class Desktop:
         self.absent(FIRST_VOICE, "menu item")
         self.key("Escape")
         self.key("Escape")
+        self.tab_to(f"Actions for {person}", "push button", within=(person, "panel"))
+        self.key("Return")
+        self.click("Move to", "menu item")
+        destination = self.bounds(SECOND_VOICE, "menu item")
+        self.move(destination.x + destination.width // 2, destination.y + destination.height // 2)
+        self.key("Return")
+        wait_for("the participant to move below the destination channel",
+                 lambda: self.bounds(person, "panel").y > self.bounds(SECOND_VOICE, "push button").y)
+        wait_for("focus to stay with the source Voice Channel",
+                 lambda: self.focused(voice_action, "push button"))
         self.open_participant_menu(person)
         _, user_choice = self.role_choices()
         if not user_choice.get_state_set().contains(Atspi.StateType.CHECKED):
@@ -559,8 +575,12 @@ class Desktop:
         wait_for("the banned participant to leave the sidebar",
                  lambda: self.find_node(person, "panel") is None)
 
+        self.open_voice_channel_menu(FIRST_VOICE, "Join", admin=True, context=True)
         os.killpg(server.pid, signal.SIGTERM)
         self.visible_text("Reconnecting to live updates")
+        self.check_disabled_menu_item("Join")
+        self.screenshot(logs, "voice-channel-disconnected-dark.png")
+        self.key("Escape")
         self.click(FIRST_VOICE, "push button", button=3)
         self.check_disabled_menu_item("Join")
 

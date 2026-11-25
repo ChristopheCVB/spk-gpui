@@ -1158,6 +1158,38 @@ impl Spk {
         let channel_focus = focus.clone();
         let app = cx.weak_entity();
         let menu_id = id.clone();
+        let add_items = move |menu: PopupMenu, action: Option<VoiceChannelMenuAction>, cx: &App| {
+            let Some(action) = action else {
+                return menu;
+            };
+            let app = app.clone();
+            let id = menu_id.clone();
+            let menu = menu.item(
+                PopupMenuItem::new(action.label)
+                    .icon(action.icon)
+                    .disabled(!action.enabled)
+                    .on_click(move |_, window, cx| {
+                        let _ = app.update(cx, |this, cx| {
+                            if action.enabled
+                                && voice_channel_menu_action(&this.view, &id) == Some(action)
+                            {
+                                if action.leave {
+                                    this.leave_voice_session(cx);
+                                } else {
+                                    this.join_sidebar_voice_channel(&id, window, cx);
+                                }
+                            }
+                        });
+                    }),
+            );
+            match &actions {
+                Some(actions) => actions.items(menu, &focus, cx),
+                None => menu,
+            }
+        };
+        let add_items = Rc::new(add_items);
+        let app = cx.weak_entity();
+        let menu_id = id.clone();
         let (right_click, ellipsis) = row_menu.triggers(
             tool_button(
                 "channel-actions",
@@ -1165,55 +1197,23 @@ impl Spk {
                 format!("Actions for {name}"),
             ),
             Anchor::TopRight,
-            move |menu, _, cx| {
+            move |menu, window, cx| {
                 let Some(workspace) = app.upgrade() else {
                     return menu;
                 };
-                let View::SignedIn(sidebar) = &workspace.read(cx).view else {
-                    return menu;
-                };
-                let switching = sidebar.switching_to() == Some(menu_id.as_str());
-                let call = sidebar_voice_call(sidebar, &menu_id, switching);
-                let (icon, label, enabled) = match call {
-                    Some(call) => voice_leave_action(call.status, switching),
-                    None => (
-                        IconName::Phone,
-                        if sidebar.voice.is_some() {
-                            "Switch"
-                        } else {
-                            "Join"
-                        },
-                        sidebar.can_join_voice(&menu_id),
-                    ),
-                };
-                let menu = menu.item(
-                    PopupMenuItem::new(label)
-                        .icon(icon)
-                        .disabled(!enabled)
-                        .on_click({
-                            let app = app.clone();
-                            let id = menu_id.clone();
-                            let leave = call.is_some();
-                            move |_, window, cx| {
-                                let _ = app.update(cx, |this, cx| {
-                                    if !leave {
-                                        this.join_sidebar_voice_channel(&id, window, cx);
-                                    } else if let View::SignedIn(sidebar) = &this.view {
-                                        let switching = sidebar.switching_to() == Some(id.as_str());
-                                        if sidebar_voice_call(sidebar, &id, switching).is_some_and(
-                                            |call| call.status != Status::Leaving || switching,
-                                        ) {
-                                            this.leave_voice_session(cx);
-                                        }
-                                    }
-                                });
-                            }
-                        }),
-                );
-                match &actions {
-                    Some(actions) => actions.items(menu, &focus, cx),
-                    None => menu,
-                }
+                let mut action = voice_channel_menu_action(&workspace.read(cx).view, &menu_id);
+                let initial = action;
+                let id = menu_id.clone();
+                let rebuild_items = add_items.clone();
+                cx.observe_in(&workspace, window, move |menu, workspace, window, cx| {
+                    let current = voice_channel_menu_action(&workspace.read(cx).view, &id);
+                    if current != action {
+                        action = current;
+                        menu.rebuild(window, cx, |menu, _, cx| rebuild_items(menu, current, cx));
+                    }
+                })
+                .detach();
+                add_items(menu, initial, cx)
             },
         );
         div()
@@ -1931,8 +1931,8 @@ impl Spk {
                             cx,
                             &app,
                             &id,
-                            destinations,
-                            enabled,
+                            enabled.then_some(destinations.as_slice()),
+                            None,
                         )
                     } else {
                         menu
@@ -2158,6 +2158,40 @@ fn voice_leave_action(status: Status, switching: bool) -> (IconName, &'static st
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct VoiceChannelMenuAction {
+    icon: IconName,
+    label: &'static str,
+    enabled: bool,
+    leave: bool,
+}
+
+fn voice_channel_menu_action(view: &View, id: &str) -> Option<VoiceChannelMenuAction> {
+    let View::SignedIn(sidebar) = view else {
+        return None;
+    };
+    let switching = sidebar.switching_to() == Some(id);
+    let call = sidebar_voice_call(sidebar, id, switching);
+    let (icon, label, enabled) = match call {
+        Some(call) => voice_leave_action(call.status, switching),
+        None => (
+            IconName::Phone,
+            if sidebar.voice.is_some() {
+                "Switch"
+            } else {
+                "Join"
+            },
+            sidebar.can_join_voice(id),
+        ),
+    };
+    Some(VoiceChannelMenuAction {
+        icon,
+        label,
+        enabled,
+        leave: call.is_some(),
+    })
+}
+
 fn voice_moderation_destinations(
     sidebar: &Sidebar,
     user_id: &str,
@@ -2280,8 +2314,8 @@ fn sidebar_participant_items(
                     cx,
                     &app,
                     &user_id,
-                    destinations,
-                    !moderation_pending,
+                    (!moderation_pending).then_some(destinations),
+                    Some(&channel_focus),
                 )
             });
             menu.when(can_ban, |menu| {
@@ -2465,13 +2499,14 @@ fn add_voice_moderation_items(
     cx: &mut Context<PopupMenu>,
     app: &WeakEntity<Spk>,
     user_id: &str,
-    destinations: &[(String, String)],
-    enabled: bool,
+    destinations: Option<&[(String, String)]>,
+    channel_focus: Option<&FocusHandle>,
 ) -> PopupMenu {
-    if enabled && !destinations.is_empty() {
+    if let Some(destinations) = destinations.filter(|destinations| !destinations.is_empty()) {
         let app = app.clone();
         let user_id = user_id.to_owned();
         let destinations = destinations.to_vec();
+        let channel_focus = channel_focus.cloned();
         menu = menu.submenu("Move to", window, cx, move |mut submenu, _, _| {
             for (id, name) in &destinations {
                 submenu = submenu.item(voice_moderation_item(
@@ -2479,6 +2514,7 @@ fn add_voice_moderation_items(
                     app.clone(),
                     user_id.clone(),
                     VoiceModeration::Move(id.clone()),
+                    channel_focus.clone(),
                 ));
             }
             submenu
@@ -2490,8 +2526,9 @@ fn add_voice_moderation_items(
             app.clone(),
             user_id.to_owned(),
             VoiceModeration::Disconnect,
+            channel_focus.cloned(),
         )
-        .disabled(!enabled),
+        .disabled(destinations.is_none()),
     )
 }
 
@@ -2500,8 +2537,13 @@ fn voice_moderation_item(
     app: WeakEntity<Spk>,
     user_id: String,
     action: VoiceModeration,
+    channel_focus: Option<FocusHandle>,
 ) -> PopupMenuItem {
-    PopupMenuItem::new(label).on_click(move |_, _, cx| {
+    PopupMenuItem::new(label).on_click(move |_, window, cx| {
+        // Successful moderation can remove the row before the next key press.
+        if let Some(focus) = &channel_focus {
+            focus.focus(window, cx);
+        }
         let _ = app.update(cx, |app, cx| {
             app.send(
                 Command::ModerateVoice {
