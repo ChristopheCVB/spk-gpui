@@ -37,7 +37,6 @@ pub struct GifPickerView {
     pub favorites_ready: bool,
     pub favorites_error: Option<&'static str>,
     pub saving: bool,
-    pub mutation_error: Option<&'static str>,
     pub preview_urls: Vec<String>,
     images: Arc<HashMap<String, Option<Arc<ChatImage>>>>,
 }
@@ -235,7 +234,6 @@ impl GifPicker {
             return;
         };
         let saved = !view.is_favorite(id);
-        view.mutation_error = None;
         view.saving = true;
         self.updating_favorite = true;
         let client = client.clone();
@@ -249,48 +247,48 @@ impl GifPicker {
         &mut self,
         client: &SpkClient,
         result: Result<FavoriteResult, Failure>,
-    ) {
+    ) -> Option<ActionResult> {
         let updating = std::mem::take(&mut self.updating_favorite);
+        let action_result = if updating {
+            result.as_ref().err().map(|error| {
+                ActionResult::error(match error {
+                    Failure::Http(StatusCode::CONFLICT) => "You can save up to 50 GIF favorites.",
+                    Failure::Http(StatusCode::TOO_MANY_REQUESTS) => {
+                        "Too many favorites requests. Try again in a minute."
+                    }
+                    _ => "Could not update favorites",
+                })
+            })
+        } else {
+            None
+        };
         let Some(view) = &mut self.view else {
-            return;
+            return action_result;
         };
         view.favorites_loading = false;
         if updating && !view.saving {
             // A previous picker's write finished while the new picker was opening.
             self.load_favorites(client);
-            return;
+            return action_result;
         }
         if let Ok(FavoriteResult::List(favorites)) = result {
             view.favorites = Arc::new(favorites);
             view.favorites_ready = true;
         } else if view.saving {
             view.saving = false;
-            match result {
-                Ok(FavoriteResult::Changed { gif, saved }) => {
-                    let items = Arc::make_mut(&mut view.favorites);
-                    if saved {
-                        items.push(gif);
-                        items.sort_by(|a, b| (&a.title, &a.id).cmp(&(&b.title, &b.id)));
-                    } else {
-                        items.retain(|item| item.id != gif.id);
-                    }
+            if let Ok(FavoriteResult::Changed { gif, saved }) = result {
+                let items = Arc::make_mut(&mut view.favorites);
+                if saved {
+                    items.push(gif);
+                    items.sort_by(|a, b| (&a.title, &a.id).cmp(&(&b.title, &b.id)));
+                } else {
+                    items.retain(|item| item.id != gif.id);
                 }
-                Err(error) => {
-                    view.mutation_error = Some(match error {
-                        Failure::Http(StatusCode::CONFLICT) => {
-                            "You can save up to 50 GIF favorites."
-                        }
-                        Failure::Http(StatusCode::TOO_MANY_REQUESTS) => {
-                            "Too many favorites requests. Try again in a minute."
-                        }
-                        _ => "Could not update favorites",
-                    });
-                }
-                _ => {}
             }
         } else {
             view.favorites_error = Some("Could not load favorites");
         }
+        action_result
     }
 
     pub fn pick(&mut self, id: &str) -> Option<StagedGif> {

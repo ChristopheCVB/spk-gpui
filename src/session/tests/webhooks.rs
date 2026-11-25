@@ -86,7 +86,10 @@ async fn signed_in_reader_opens_visible_webhook_history() {
             .send(Command::OpenWebhook("private".into()))
             .await
             .unwrap();
-        let denied = wait_for_sidebar(&reader_views, |view| view.chat_notice.is_some()).await;
+        let denied = wait_for_sidebar(&reader_views, |view| {
+            view.action_results == [ActionResult::error("Webhook feed unavailable.")]
+        })
+        .await;
         assert_eq!(
             denied
                 .webhook_feeds()

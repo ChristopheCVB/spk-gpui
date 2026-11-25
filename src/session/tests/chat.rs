@@ -351,9 +351,9 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         let request = chat_action_request(&history, vote_path, value!({"choiceId":null})).await;
         request.respond_raw("400 Bad Request", &[], b"").await;
         wait_for_sidebar(&rx, |view| {
-            view.chat.as_ref().is_some_and(|chat|
-                chat.vote_error == Some("SPK rejected the vote. Try again.")
-                    && chat.messages[1].poll.as_ref().unwrap().options[1].user_ids == ["alice"])
+            view.action_results == [ActionResult::error("SPK rejected the vote. Try again.")]
+                && view.chat.as_ref().is_some_and(|chat|
+                    chat.messages[1].poll.as_ref().unwrap().options[1].user_ids == ["alice"])
         }).await;
 
         tx.send(vote(None)).await.unwrap();
@@ -466,11 +466,12 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         assert_eq!(line, "PATCH /api/messages/m3 HTTP/1.1");
         assert_eq!(serde_json::from_slice::<Value>(&rejected.body).unwrap(), value!({"body":changed}));
         rejected.respond_raw("400 Bad Request", &[], b"").await;
-        wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
-            !chat.action_pending
-                && chat.action_outcome.as_ref().is_some_and(|result| result.error.is_some())
-                && chat.messages.last().unwrap().body == saved_markdown
-        })).await;
+        let failed_edit = wait_for_sidebar(&rx, |view| {
+            view.action_results == [ActionResult::error("SPK rejected the change. Check the message or emoji.")]
+        }).await;
+        let chat = failed_edit.chat.unwrap();
+        assert!(!chat.action_pending);
+        assert_eq!(chat.messages.last().unwrap().body, saved_markdown);
 
         tx.send(edit(changed)).await.unwrap();
         let (line, retry) = history.recv().await.unwrap();
@@ -749,11 +750,12 @@ async fn text_channel_exchanges_messages_and_recovers_paginated_history() {
         .await;
 
         rejected_vote.respond_raw("429 Too Many Requests", &[], b"").await;
-        timeout(Duration::from_secs(2), wait_for_sidebar(&rx, |view| view.chat.as_ref().is_some_and(|chat| {
-            chat.channel_id == "quiet"
-                && chat.vote_error == Some("Too many changes. Try again shortly.")
-                && chat.messages.is_empty()
-        }))).await.expect("vote rejection should reach the selected conversation");
+        timeout(Duration::from_secs(2), wait_for_sidebar(&rx, |view| {
+            view.action_results == [ActionResult::error("Too many changes. Try again shortly.")]
+                && view.chat.as_ref().is_some_and(|chat| {
+                    chat.channel_id == "quiet" && chat.messages.is_empty()
+                })
+        })).await.expect("vote rejection should reach the selected conversation");
 
         peer.send(Message::text(value!({
             "type":"message:error","nonce":rejected["nonce"],"error":"Poll rejected after switching"
@@ -972,7 +974,9 @@ async fn direct_message_history_is_visible_only_to_a_participant_even_for_admins
             .send(Command::OpenDirectMessage("private".into()))
             .await
             .unwrap();
-        let denied = wait_for_sidebar(&outsider_views, |view| view.chat_notice.is_some()).await;
+        let denied = wait_for_sidebar(&outsider_views, |view| {
+            view.action_results == [ActionResult::error("Direct message unavailable.")]
+        }).await;
         assert!(denied.chat.is_none());
         assert!(denied.channels.unwrap().is_empty());
         assert!(history.is_empty());
@@ -1134,8 +1138,10 @@ async fn bot_can_be_mentioned_and_replied_to_but_only_the_human_can_open_a_dm() 
             .send(Command::StartDirectMessage("spk-bot".into()))
             .await
             .unwrap();
-        let sidebar = wait_for_sidebar(&views, |view| view.chat_notice.is_some()).await;
-        assert_eq!(sidebar.chat_notice, Some("Direct message unavailable."));
+        wait_for_sidebar(&views, |view| {
+            view.action_results == [ActionResult::error("Direct message unavailable.")]
+        })
+        .await;
 
         commands
             .send(Command::OpenTextChannel("general".into()))

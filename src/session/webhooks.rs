@@ -17,8 +17,14 @@ pub enum WebhookAction {
     Delete(String),
 }
 
-pub type WebhookReply = oneshot::Sender<Result<Option<WebhookUrl>, &'static str>>;
-pub(super) type WebhookCompletion = (Result<WebhookChange, Failure>, WebhookReply, bool);
+#[derive(Debug)]
+pub enum WebhookError {
+    Validation(&'static str),
+    Action(&'static str),
+}
+
+pub type WebhookReply = oneshot::Sender<Result<Option<WebhookUrl>, WebhookError>>;
+pub(super) type WebhookCompletion = (Result<WebhookChange, Failure>, WebhookReply, bool, bool);
 
 pub(super) enum WebhookChange {
     Created(Channel, WebhookUrl),
@@ -42,7 +48,7 @@ impl Sidebar {
 }
 
 impl WebhookAction {
-    pub(super) fn validated(self, sidebar: &Sidebar) -> Result<Self, &'static str> {
+    pub(super) fn validated(self, sidebar: &Sidebar) -> Result<Self, WebhookError> {
         let id = match &self {
             Self::Create(_) => None,
             Self::Edit { id, .. } | Self::Rotate(id) | Self::Delete(id) => Some(id),
@@ -50,16 +56,19 @@ impl WebhookAction {
         if let Some(id) = id {
             let feed = sidebar
                 .webhook_feed(id)
-                .ok_or("Webhook feed unavailable.")?;
+                .ok_or(WebhookError::Action("Webhook feed unavailable."))?;
             if !sidebar.can_manage_webhook(feed) {
-                return Err("You cannot manage this webhook.");
+                return Err(WebhookError::Action("You cannot manage this webhook."));
             }
         }
         match self {
-            Self::Create(settings) => settings.validated().map(Self::Create),
+            Self::Create(settings) => settings
+                .validated()
+                .map(Self::Create)
+                .map_err(WebhookError::Validation),
             Self::Edit { id, settings } => Ok(Self::Edit {
                 id,
-                settings: settings.validated()?,
+                settings: settings.validated().map_err(WebhookError::Validation)?,
             }),
             Self::Rotate(_) | Self::Delete(_) => Ok(self),
         }
@@ -67,6 +76,7 @@ impl WebhookAction {
 
     pub(super) async fn send(self, client: &SpkClient, reply: WebhookReply) -> WebhookCompletion {
         let creating = matches!(self, Self::Create(_));
+        let has_fields = creating || matches!(self, Self::Edit { .. });
         let result = match self {
             Self::Create(settings) => client
                 .create_webhook(settings)
@@ -85,7 +95,7 @@ impl WebhookAction {
                 .await
                 .map(|()| WebhookChange::Deleted(id)),
         };
-        (result, reply, creating)
+        (result, reply, creating, has_fields)
     }
 }
 
@@ -105,7 +115,8 @@ impl MutationContext<'_> {
         client: &SpkClient,
         result: Result<WebhookChange, Failure>,
         creating: bool,
-    ) -> Result<Option<WebhookUrl>, &'static str> {
+        has_fields: bool,
+    ) -> Result<Option<WebhookUrl>, WebhookError> {
         let change = match result {
             Ok(change) => change,
             Err(error) => {
@@ -117,7 +128,17 @@ impl MutationContext<'_> {
                 {
                     self.refresh.fetch(client, Resource::Channels);
                 }
-                return Err(mutation_error(error, creating));
+                if has_fields
+                    && matches!(
+                        error,
+                        Failure::Http(StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY)
+                    )
+                {
+                    return Err(WebhookError::Validation(
+                        "SPK rejected the webhook settings. Check the name and icon, then try again.",
+                    ));
+                }
+                return Err(WebhookError::Action(mutation_error(error, creating)));
             }
         };
         let removed = match change {
@@ -158,7 +179,7 @@ impl MutationContext<'_> {
                     .webhook_feed(&id)
                     .filter(|feed| self.sidebar.can_manage_webhook(feed))
                     .map(|_| Some(url))
-                    .ok_or("Webhook feed unavailable.");
+                    .ok_or(WebhookError::Action("Webhook feed unavailable."));
             }
             WebhookChange::Deleted(id) => {
                 self.refresh.webhook_changed(client);
@@ -188,9 +209,6 @@ fn mutation_error(error: Failure, creating: bool) -> &'static str {
             "SPK denied permission to create this webhook."
         }
         Failure::Http(StatusCode::FORBIDDEN) => "SPK denied permission to manage this webhook.",
-        Failure::Http(StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY) => {
-            "SPK rejected the webhook settings. Check the name and icon, then try again."
-        }
         Failure::Connection => "Could not reach SPK. Check your connection and try again.",
         _ if creating => "Could not create the webhook. Refresh the feed list before trying again.",
         _ => "Could not update the webhook. Refresh the feed list before trying again.",

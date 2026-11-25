@@ -846,14 +846,8 @@ impl Spk {
                         .into_any_element(),
                 }
             });
-        let status = if chat.jump_failed {
-            Some("Message unavailable.")
-        } else if chat.unavailable() {
-            Some(if chat.webhook {
-                "Webhook feed unavailable."
-            } else {
-                "Direct message unavailable."
-            })
+        let status = if chat.unavailable() {
+            (chat.webhook && !chat.jump_failed).then_some("Webhook feed unavailable.")
         } else if chat.history_failed() {
             Some("Could not load message history.")
         } else if chat.loading() {
@@ -875,25 +869,15 @@ impl Spk {
             .when(!chat.unavailable(), |area| {
                 area.child(self.pins(sidebar, chat, cx))
             })
-            .children(
-                [
-                    (
-                        "chat-action-error",
-                        chat.action_outcome.as_ref().and_then(|result| result.error),
+            .when_some(chat.message_send_error.as_ref(), |area, error| {
+                area.child(
+                    div().px_4().py_2().child(
+                        Label::new(error.clone())
+                            .id("chat-send-error")
+                            .text_color(theme.danger),
                     ),
-                    ("chat-send-error", chat.message_send_error.as_deref()),
-                    ("chat-vote-error", chat.vote_error),
-                ]
-                .into_iter()
-                .filter_map(|(id, error)| {
-                    error.map(|error| {
-                        div()
-                            .px_4()
-                            .py_2()
-                            .child(Label::new(error.to_owned()).id(id).text_color(theme.danger))
-                    })
-                }),
-            )
+                )
+            })
             .when_some(status, |area, status| {
                 area.child(
                     div()

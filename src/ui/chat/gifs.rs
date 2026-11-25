@@ -140,9 +140,6 @@ impl Spk {
                         )),
                 )
             })
-            .when_some(gifs.mutation_error, |panel, error| {
-                panel.child(Label::new(error))
-            })
             .when_some(gifs.browse_error.filter(|_| !favorites), |panel, error| {
                 panel.child(
                     div()
