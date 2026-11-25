@@ -338,7 +338,9 @@ impl Spk {
             sidebar.draft_notice,
             sidebar.read_notice,
             sidebar.device_notice,
-            sidebar.voice_moderation_notice,
+            sidebar
+                .voice_moderation_pending
+                .then_some("Moderating voice…"),
         ];
         let rejoin = sidebar
             .rejoin_channel()
@@ -499,17 +501,6 @@ impl Spk {
                             .text_color(theme.muted_foreground)
                             .child(notice)
                     }))
-                    .when_some(sidebar.account_moderation_notice, |area, notice| {
-                        area.child(
-                            div()
-                                .id("account-moderation-status")
-                                .role(Role::Status)
-                                .px_4()
-                                .py_1()
-                                .text_color(theme.muted_foreground)
-                                .child(notice),
-                        )
-                    })
                     .when_some(sidebar.voice_notice, |area, notice| {
                         area.child(
                             div()

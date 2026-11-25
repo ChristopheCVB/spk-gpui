@@ -326,7 +326,6 @@ pub struct Sidebar {
     pub profile: Profile,
     pub profile_edit: ProfileEdit,
     pub admin_accounts: AdminAccountsView,
-    pub account_moderation_notice: Option<&'static str>,
     pub user_status: UserStatus,
     pub user_status_notice: Option<&'static str>,
     pub channels: Option<Vec<Channel>>,
@@ -349,7 +348,6 @@ pub struct Sidebar {
     pub channel_radio: HashMap<String, String>,
     switching_to: Option<VoiceDestination>,
     pub voice_notice: Option<&'static str>,
-    pub voice_moderation_notice: Option<&'static str>,
     pub voice_moderation_pending: bool,
     voice_rejoin: Option<String>,
     pub voice_intent: Intent,
@@ -368,7 +366,6 @@ impl Sidebar {
             profile,
             profile_edit: ProfileEdit::Idle,
             admin_accounts: AdminAccountsView::default(),
-            account_moderation_notice: None,
             user_status: UserStatus::default(),
             user_status_notice: None,
             channels: None,
@@ -391,7 +388,6 @@ impl Sidebar {
             channel_radio: HashMap::new(),
             switching_to: None,
             voice_notice: None,
-            voice_moderation_notice: None,
             voice_moderation_pending: false,
             voice_rejoin: None,
             voice_intent: Intent::default(),
@@ -1210,19 +1206,15 @@ async fn watch_session(
                 if result.as_ref().is_err_and(Failure::unauthorized) {
                     break SessionEnd::Invalidated(SESSION_EXPIRED);
                 }
-                sidebar.voice_moderation_notice = Some(match result {
-                    Ok(VoiceModeration::Move(_)) => "Move requested.",
-                    Ok(VoiceModeration::Disconnect) => "Voice participant disconnected.",
-                    Err(Failure::Http(reqwest::StatusCode::FORBIDDEN)) => {
-                        "You don’t have permission to moderate voice."
-                    }
-                    Err(Failure::Http(reqwest::StatusCode::CONFLICT)) => {
-                        "That participant is no longer in the expected voice channel."
-                    }
-                    Err(Failure::Http(reqwest::StatusCode::NOT_FOUND)) => {
-                        "That voice channel is unavailable."
-                    }
-                    Err(_) => "Could not moderate voice. Try again.",
+                sidebar.action_results.push(match result {
+                    Ok(VoiceModeration::Move(_)) => ActionResult::info("Move requested."),
+                    Ok(VoiceModeration::Disconnect) => ActionResult::success("Voice participant disconnected."),
+                    Err(error) => ActionResult::error(match error {
+                        Failure::Http(reqwest::StatusCode::FORBIDDEN) => "You don’t have permission to moderate voice.",
+                        Failure::Http(reqwest::StatusCode::CONFLICT) => "That participant is no longer in the expected voice channel.",
+                        Failure::Http(reqwest::StatusCode::NOT_FOUND) => "That voice channel is unavailable.",
+                        _ => "Could not moderate voice. Try again.",
+                    }),
                 });
             }
             event = socket.recv() => match event {

@@ -3,7 +3,7 @@ use std::{future::pending, sync::Arc};
 use reqwest::StatusCode;
 use tokio::task::{JoinError, JoinSet};
 
-use super::Sidebar;
+use super::{ActionResult, Sidebar};
 use crate::api::{AccountRole, AdminDirectory, Failure, Invite, IssuedAccountLink, SpkClient};
 
 const ACCESS_REQUIRED: &str = "Admin access is required.";
@@ -53,7 +53,7 @@ impl AdminAccountAction {
         }
     }
 
-    fn error(&self, error: Failure) -> &'static str {
+    fn error(&self, error: &Failure) -> &'static str {
         match (self, error) {
             (Self::RevokeInvite(_), Failure::Http(StatusCode::CONFLICT)) => {
                 "That Invite Link is no longer active."
@@ -71,13 +71,13 @@ impl AdminAccountAction {
         }
     }
 
-    fn notice(&self) -> &'static str {
+    fn success_message(&self) -> Option<&'static str> {
         match self {
-            Self::RevokeInvite(_) => "Invite Link revoked.",
-            Self::SetRole(..) => "Role updated.",
-            Self::Ban { .. } => "User banned.",
-            Self::Unban(_) => "User unbanned.",
-            _ => unreachable!("only actions without a link have a notice"),
+            Self::RevokeInvite(_) => Some("Invite Link revoked."),
+            Self::SetRole(..) => Some("Role updated."),
+            Self::Ban { .. } => Some("User banned."),
+            Self::Unban(_) => Some("User unbanned."),
+            _ => None,
         }
     }
 }
@@ -102,7 +102,6 @@ pub struct AdminAccountsView {
     pub loading: bool,
     pub busy: bool,
     pub error: Option<&'static str>,
-    pub notice: Option<&'static str>,
 }
 
 pub struct RevealedLink {
@@ -127,17 +126,17 @@ pub(super) enum AccountAdminSurface {
     Workspace,
 }
 
-impl AccountAdminSurface {
-    fn report_error(self, sidebar: &mut Sidebar, error: &'static str) {
-        match self {
-            Self::Settings => sidebar.admin_accounts.error = Some(error),
-            Self::Workspace => sidebar.account_moderation_notice = Some(error),
-        }
+fn report_error(sidebar: &mut Sidebar, toast: bool, error: &'static str) {
+    if toast {
+        sidebar.action_results.push(ActionResult::error(error));
+    } else {
+        sidebar.admin_accounts.error = Some(error);
     }
 }
 
 pub(super) struct PendingMutation {
     surface: AccountAdminSurface,
+    success_message: Option<&'static str>,
     task: JoinSet<MutationResult>,
 }
 
@@ -181,8 +180,9 @@ impl AccountAdmin {
             self.clear(sidebar);
             return;
         }
+        let success_message = action.success_message();
         if !sidebar.is_admin() {
-            surface.report_error(sidebar, ACCESS_REQUIRED);
+            report_error(sidebar, success_message.is_some(), ACCESS_REQUIRED);
             return;
         }
         if let AdminAccountAction::Show(page) = action {
@@ -205,16 +205,16 @@ impl AccountAdmin {
         {
             return;
         }
-        match surface {
-            AccountAdminSurface::Settings => {
-                sidebar.admin_accounts.error = None;
-                sidebar.admin_accounts.notice = None;
-            }
-            AccountAdminSurface::Workspace => sidebar.account_moderation_notice = None,
+        if surface == AccountAdminSurface::Settings {
+            sidebar.admin_accounts.error = None;
         }
         if matches!(&action, AdminAccountAction::Ban { id, .. } if sidebar.profile.id.as_ref() == Some(id))
         {
-            surface.report_error(sidebar, "You can’t ban yourself.");
+            report_error(
+                sidebar,
+                surface == AccountAdminSurface::Workspace,
+                "You can’t ban yourself.",
+            );
             return;
         }
         if matches!(
@@ -230,7 +230,11 @@ impl AccountAdmin {
             let result = action.send(&client).await;
             (action, result)
         });
-        self.mutation = Some(PendingMutation { surface, task });
+        self.mutation = Some(PendingMutation {
+            surface,
+            success_message,
+            task,
+        });
     }
 
     fn clear(&mut self, sidebar: &mut Sidebar) {
@@ -320,10 +324,17 @@ impl AccountAdmin {
         surface: AccountAdminSurface,
         result: Result<MutationResult, JoinError>,
     ) -> Result<bool, Failure> {
-        self.mutation = None;
+        let success_message = self
+            .mutation
+            .take()
+            .and_then(|mutation| mutation.success_message);
         sidebar.admin_accounts.busy = false;
         let Ok((action, result)) = result else {
-            surface.report_error(sidebar, "Could not complete the Admin action. Try again.");
+            report_error(
+                sidebar,
+                success_message.is_some(),
+                "Could not complete the Admin action. Try again.",
+            );
             return Ok(false);
         };
         let view = &mut sidebar.admin_accounts;
@@ -337,8 +348,14 @@ impl AccountAdmin {
                 page: view.page,
                 ..Default::default()
             };
-            surface.report_error(sidebar, ACCESS_REQUIRED);
+            report_error(sidebar, success_message.is_some(), ACCESS_REQUIRED);
             return Ok(true);
+        }
+        if let Some(message) = success_message {
+            sidebar.action_results.push(match &result {
+                Ok(_) => ActionResult::success(message),
+                Err(error) => ActionResult::error(action.error(error)),
+            });
         }
         let changed_users = result.is_ok()
             && matches!(
@@ -348,10 +365,6 @@ impl AccountAdmin {
                     | AdminAccountAction::SetRole(..)
             );
         if surface == AccountAdminSurface::Workspace {
-            sidebar.account_moderation_notice = Some(match result {
-                Ok(_) => action.notice(),
-                Err(error) => action.error(error),
-            });
             if changed_users {
                 self.users_changed(sidebar, client);
             }
@@ -373,9 +386,9 @@ impl AccountAdmin {
                     {
                         view.link = None;
                     }
-                    view.notice = Some(action.notice());
                 }
-                Err(error) => view.error = Some(action.error(error)),
+                Err(error) if success_message.is_none() => view.error = Some(action.error(&error)),
+                Err(_) => {}
             }
             if !matches!(action, AdminAccountAction::ResetPassword { .. }) {
                 self.refresh(sidebar, client);

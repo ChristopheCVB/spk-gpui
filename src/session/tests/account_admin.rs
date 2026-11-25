@@ -2,7 +2,7 @@ use super::*;
 use crate::api::{AccountRole, InviteStatus};
 
 #[tokio::test]
-async fn manages_invites_only_as_admin_and_retains_server_rejections() {
+async fn admin_invites_keep_generated_links_and_report_revocation_results() {
     let (advance, step) = async_channel::unbounded();
     let end = voice_session(
         Call::start_for_test,
@@ -34,6 +34,14 @@ async fn manages_invites_only_as_admin_and_retains_server_rejections() {
             let origin = request.header("origin").unwrap();
             let issued = value!({"id":"invite-1","url":format!("{origin}/signup?invite=fixture")});
             request.respond(&[], &issued.to_string()).await;
+            expect(&requests, "GET /api/invites")
+                .await
+                .respond(&[], &invite("active"))
+                .await;
+            expect(&requests, "POST /api/invites/invite-1/revoke")
+                .await
+                .respond_raw("500 Internal Server Error", &[], b"")
+                .await;
             expect(&requests, "GET /api/invites")
                 .await
                 .respond(&[], &invite("active"))
@@ -100,6 +108,21 @@ async fn manages_invites_only_as_admin_and_retains_server_rejections() {
             assert_eq!(rows[1].used_by.as_ref().unwrap().name, "Bob");
             assert!(rows[2].status == InviteStatus::Expired);
             dispatch(AdminAccountAction::RevokeInvite("invite-1".into())).await;
+            let rejected = wait_for_sidebar(&views, |view| {
+                view.action_results
+                    == [ActionResult::error(
+                        "Could not revoke the Invite Link. Try again.",
+                    )]
+            })
+            .await;
+            assert!(rejected.admin_accounts.error.is_none());
+            assert_eq!(rejected.admin_accounts.link.as_ref().unwrap().url, link.url);
+            dispatch(AdminAccountAction::RevokeInvite("invite-1".into())).await;
+            let revoked = wait_for_sidebar(&views, |view| {
+                view.action_results == [ActionResult::success("Invite Link revoked.")]
+            })
+            .await;
+            assert!(revoked.admin_accounts.link.is_none());
             wait_for_sidebar(&views, |view| {
                 view.admin_accounts.invites.as_ref().is_some_and(|rows| {
                     rows.first()
@@ -247,14 +270,19 @@ async fn admin_accounts_show_storage_and_follow_shared_role_and_ban_changes() {
                 AccountRole::User,
             ))
             .await;
-            wait_for_sidebar(&views, |view| {
-                view.admin_accounts.error == Some("The last Admin cannot be demoted.")
+            let rejected = wait_for_sidebar(&views, |view| {
+                view.action_results == [ActionResult::error("The last Admin cannot be demoted.")]
             })
             .await;
+            assert!(rejected.admin_accounts.error.is_none());
             dispatch(AdminAccountAction::SetRole(
                 "bob".into(),
                 AccountRole::Admin,
             ))
+            .await;
+            wait_for_sidebar(&views, |view| {
+                view.action_results == [ActionResult::success("Role updated.")]
+            })
             .await;
             wait_for_sidebar(&views, |view| {
                 listed_bob(view).is_some_and(|bob| bob.role == "admin")
@@ -267,19 +295,26 @@ async fn admin_accounts_show_storage_and_follow_shared_role_and_ban_changes() {
                 reason: " Spam ".into(),
             })
             .await;
+            wait_for_sidebar(&views, |view| {
+                view.action_results == [ActionResult::success("User banned.")]
+            })
+            .await;
             let banned = wait_for_sidebar(&views, |view| {
                 listed_bob(view).is_some_and(|bob| bob.banned) && view.person("bob").is_none()
             })
             .await;
             assert!(banned.inspect_person("bob").is_some_and(|bob| bob.banned));
             dispatch(AdminAccountAction::Unban("bob".into())).await;
+            wait_for_sidebar(&views, |view| {
+                view.action_results == [ActionResult::success("User unbanned.")]
+            })
+            .await;
             let peer_change = wait_for_sidebar(&views, |view| {
                 listed_bob(view).is_some_and(|bob| !bob.banned && bob.role == "user")
                     && view.person("bob").is_some_and(|bob| bob.role == "user")
-                    && view.admin_accounts.notice == Some("User unbanned.")
             })
             .await;
-            assert_eq!(peer_change.admin_accounts.notice, Some("User unbanned."));
+            assert!(peer_change.action_results.is_empty());
             dispatch(AdminAccountAction::Show(None)).await;
             let hidden = wait_for_sidebar(&views, |view| view.admin_accounts.page.is_none()).await;
             assert!(hidden.admin_accounts.users.is_none());
@@ -330,7 +365,7 @@ async fn sidebar_role_changes_report_server_results_and_survive_closing_settings
             };
             sidebar_role("alice", AccountRole::User).await;
             let rejected = wait_for_sidebar(&views, |view| {
-                view.account_moderation_notice == Some("The last Admin cannot be demoted.")
+                view.action_results == [ActionResult::error("The last Admin cannot be demoted.")]
             })
             .await;
             assert!(rejected.is_admin());
@@ -352,9 +387,12 @@ async fn sidebar_role_changes_report_server_results_and_survive_closing_settings
             })
             .await;
             close_settings.send(()).await.unwrap();
+            wait_for_sidebar(&views, |view| {
+                view.action_results == [ActionResult::success("Role updated.")]
+            })
+            .await;
             let updated = wait_for_sidebar(&views, |view| {
-                view.account_moderation_notice == Some("Role updated.")
-                    && view.person("bob").is_some_and(|bob| bob.role == "admin")
+                view.person("bob").is_some_and(|bob| bob.role == "admin")
             })
             .await;
             assert!(updated.admin_accounts.page.is_none());

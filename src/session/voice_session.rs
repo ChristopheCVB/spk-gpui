@@ -5,7 +5,7 @@ use tokio::{
     time::Instant,
 };
 
-use super::{Command, Sidebar, VoiceProcessingSetting};
+use super::{ActionResult, Command, Sidebar, VoiceProcessingSetting};
 use crate::api::{Channel, Connection, Failure, SpkClient, VoiceModeration, VoiceSocket};
 use crate::sounds::Sound;
 use crate::voice::{
@@ -142,7 +142,9 @@ impl Sidebar {
         action: VoiceModeration,
     ) {
         if !self.is_admin() {
-            self.voice_moderation_notice = Some("You don’t have permission to moderate voice.");
+            self.action_results.push(ActionResult::error(
+                "You don’t have permission to moderate voice.",
+            ));
             return;
         }
         let available = self
@@ -152,10 +154,11 @@ impl Sidebar {
                 VoiceModeration::Disconnect => true,
             });
         if !available {
-            self.voice_moderation_notice = Some("This voice moderation action is unavailable.");
+            self.action_results.push(ActionResult::error(
+                "This voice moderation action is unavailable.",
+            ));
             return;
         }
-        self.voice_moderation_notice = Some("Moderating voice…");
         let client = client.clone();
         tasks.spawn(async move {
             client.moderate_voice(&user_id, &action).await?;
