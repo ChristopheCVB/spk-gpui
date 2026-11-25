@@ -605,7 +605,7 @@ class Desktop:
                  lambda: self.role_choices(open_submenu=False)[0].get_state_set().contains(Atspi.StateType.CHECKED))
         self.click("User", "menu item")
         wait_for("the open role menu to accept the new role choice", lambda: account()["role"] == "user")
-        self.visible_text("Role updated")
+        self.check_toast_position("Role updated.")
         self.open_participant_menu(person)
         self.role_choices()
         wait_for("the menu to show the restored User role",
@@ -615,7 +615,7 @@ class Desktop:
         bounds = admin_choice.get_component_iface().get_extents(Atspi.CoordType.WINDOW)
         self.click_at(bounds.x + bounds.width // 2, bounds.y + bounds.height // 2)
         wait_for("the sidebar promotion to reach SPK", lambda: account()["role"] == "admin")
-        self.visible_text("Role updated")
+        self.check_toast_position("Role updated.")
         self.open_participant_menu(person, context=True)
         admin_choice, _ = self.role_choices()
         if not admin_choice.get_state_set().contains(Atspi.StateType.CHECKED):
@@ -639,7 +639,7 @@ class Desktop:
         self.enter("Ban reason", "entry", "Smoke test confirmation")
         self.click("Ban", "push button")
         wait_for("the sidebar ban to reach SPK", lambda: account()["banned"])
-        self.visible_text("User banned")
+        self.check_toast_position("User banned.")
         wait_for("the banned participant to leave the sidebar",
                  lambda: self.find_node(person, "panel") is None)
 
@@ -869,6 +869,8 @@ class Desktop:
         self.absent(notification_result, None)
         self.absent(density_result, None)
         self.absent("Open", "push button")
+        self.click("smoke-target", "push button", partial=True)
+        self.find("smoke-target", "push button")
 
     def check(self, post_live_alert, logs):
         self.find("smoke-target", "push button", partial=True)
