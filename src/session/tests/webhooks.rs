@@ -596,7 +596,9 @@ mod creation {
             );
             assert!(matches!(
                 create(&commands, "Duplicate", false).await.await.unwrap(),
-                Err("A webhook change is already in progress.")
+                Err(WebhookError::Action(
+                    "A webhook change is already in progress."
+                ))
             ));
             created.send_replace(true);
             let url = format!("{base}api/hooks/feed/test-fixture-secret");
@@ -676,24 +678,30 @@ mod creation {
                     .await
                     .await
                     .unwrap(),
-                Err("Webhook names must be 1–32 characters.")
+                Err(WebhookError::Validation(
+                    "Webhook names must be 1–32 characters."
+                ))
             ));
             for (status, expected_error) in [
                 (
                     "404 Not Found",
-                    "This SPK server needs a version that supports Webhooks.",
+                    WebhookError::Action("This SPK server needs a version that supports Webhooks."),
                 ),
                 (
                     "403 Forbidden",
-                    "SPK denied permission to create this webhook.",
+                    WebhookError::Action("SPK denied permission to create this webhook."),
                 ),
                 (
                     "422 Unprocessable Entity",
-                    "SPK rejected the webhook settings. Check the name and icon, then try again.",
+                    WebhookError::Validation(
+                        "SPK rejected the webhook settings. Check the name and icon, then try again.",
+                    ),
                 ),
                 (
                     "503 Service Unavailable",
-                    "Could not create the webhook. Refresh the feed list before trying again.",
+                    WebhookError::Action(
+                        "Could not create the webhook. Refresh the feed list before trying again.",
+                    ),
                 ),
             ] {
                 let result = create(&commands, "Deployments", false).await;
@@ -705,7 +713,12 @@ mod creation {
                 request
                     .respond_raw(status, &[], b"untrusted server error body")
                     .await;
-                assert!(matches!(result.await.unwrap(), Err(message) if message == expected_error));
+                assert!(matches!(
+                    (result.await.unwrap(), expected_error),
+                    (Err(WebhookError::Action(actual)), WebhookError::Action(expected))
+                        | (Err(WebhookError::Validation(actual)), WebhookError::Validation(expected))
+                        if actual == expected
+                ));
             }
 
             commands
@@ -736,7 +749,7 @@ mod creation {
         commands: &Sender<Command>,
         name: &str,
         private: bool,
-    ) -> oneshot::Receiver<Result<Option<crate::api::WebhookUrl>, &'static str>> {
+    ) -> oneshot::Receiver<Result<Option<crate::api::WebhookUrl>, WebhookError>> {
         let (reply, result) = oneshot::channel();
         commands
             .send(Command::MutateWebhook {
