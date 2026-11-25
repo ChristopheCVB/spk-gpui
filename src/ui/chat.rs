@@ -299,10 +299,10 @@ pub(super) fn unread_badges(counts: UnreadState, cx: &App) -> impl IntoElement {
         .flex_shrink_0()
         .items_center()
         .gap_1()
+        .text_size(px(10.0))
         .when(counts.mentions > 0, |badges| {
             badges.child(
                 Label::new(format!("@{}", counts.mentions))
-                    .text_size(px(10.0))
                     .font_semibold()
                     .px_1()
                     .rounded_md()
@@ -313,7 +313,6 @@ pub(super) fn unread_badges(counts: UnreadState, cx: &App) -> impl IntoElement {
         .when(counts.unread > 0, |badges| {
             badges.child(
                 Label::new(counts.unread.to_string())
-                    .text_size(px(10.0))
                     .px_1()
                     .rounded_md()
                     .bg(theme.secondary)
@@ -1029,7 +1028,11 @@ impl Spk {
                             [one, two] => format!("{one} and {two} are typing…"),
                             _ => "Several people are typing…".into(),
                         };
-                        composer.child(Label::new(text).text_color(theme.muted_foreground))
+                        composer.child(
+                            Label::new(text)
+                                .text_xs()
+                                .text_color(theme.muted_foreground),
+                        )
                     })
                     .when_some(
                         chat.draft.reply.as_ref().filter(|_| !self.chat_submitting),
@@ -1044,6 +1047,7 @@ impl Spk {
                                     .px_2()
                                     .rounded_md()
                                     .bg(theme.popover)
+                                    .text_xs()
                                     .child(
                                         Icon::new(IconName::Reply)
                                             .size(ACTION_ICON_SIZE)
@@ -1553,7 +1557,10 @@ impl Spk {
                 })
             })
             .when(!message.body.is_empty() && !editing, |row| {
-                row.child(text.text_base())
+                row.child(
+                    text.text_base()
+                        .inline_code_style(StyleRefinement::default().text_size(px(14.4))),
+                )
             })
             .when(editing, |row| {
                 row.children(self.message_action_form(chat, message, window, cx))
@@ -1874,7 +1881,7 @@ fn chat_text_style(cx: &App) -> TextViewStyle {
     let base = theme.popover;
     TextViewStyle::from_theme(&gpui_kit::base::Theme::global(cx))
         .with_link(theme.primary)
-        .with_code_block(StyleRefinement::default().rounded_md().bg(base))
+        .with_code_block(StyleRefinement::default().rounded_md().bg(base).text_sm())
         .with_table_head(
             StyleRefinement::default()
                 .bg(theme.table_head)
