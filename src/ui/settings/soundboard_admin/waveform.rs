@@ -315,14 +315,6 @@ struct TrimHandle {
     disabled: bool,
 }
 
-impl IntoElement for TrimHandle {
-    type Element = Self;
-
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
 impl Element for TrimHandle {
     type RequestLayoutState = <Stateful<Div> as Element>::RequestLayoutState;
     type PrepaintState = <Stateful<Div> as Element>::PrepaintState;
