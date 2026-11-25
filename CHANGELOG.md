@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.9.0](https://github.com/ChristopheCVB/spk-gpui/compare/v0.8.1...v0.9.0) (2026-11-25)
+
+
+### Features
+
+* **chat:** play animated GIF previews ([#204](https://github.com/ChristopheCVB/spk-gpui/issues/204)) ([b5a2287](https://github.com/ChristopheCVB/spk-gpui/commit/b5a2287f64dc063455b2b532c72267cd66c29613)), closes [#199](https://github.com/ChristopheCVB/spk-gpui/issues/199)
+* **chat:** render Twemoji in posted messages ([#207](https://github.com/ChristopheCVB/spk-gpui/issues/207)) ([332eec1](https://github.com/ChristopheCVB/spk-gpui/commit/332eec173718e8accf6be63a70c73e29d571d63f)), closes [#201](https://github.com/ChristopheCVB/spk-gpui/issues/201)
+* **chat:** show commit links and sender avatars in Webhook alerts ([#208](https://github.com/ChristopheCVB/spk-gpui/issues/208)) ([f25eac4](https://github.com/ChristopheCVB/spk-gpui/commit/f25eac4a15d572c30b16bf4084dd7aeadb429782)), closes [#200](https://github.com/ChristopheCVB/spk-gpui/issues/200)
+
+
+### Bug Fixes
+
+* reveal sidebar ellipsis on interaction ([#206](https://github.com/ChristopheCVB/spk-gpui/issues/206)) ([b6fb607](https://github.com/ChristopheCVB/spk-gpui/commit/b6fb607556eeea910455a7dd820053acefa29361)), closes [#198](https://github.com/ChristopheCVB/spk-gpui/issues/198)
+
 ## [0.8.1](https://github.com/ChristopheCVB/spk-gpui/compare/v0.8.0...v0.8.1) (2026-11-24)
 
 
