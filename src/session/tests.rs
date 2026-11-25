@@ -2371,8 +2371,17 @@ fn failed_screen_quality_restores_the_previous_preset_for_the_current_share() {
     let settings = fixture_settings(String::new(), Call::start_for_test);
     session.screen_report(&mut sidebar, &settings, report(attempt - 1));
     assert_eq!(sidebar.voice_intent.screen.quality, rejected);
+    assert!(sidebar.action_results.is_empty());
     session.screen_report(&mut sidebar, &settings, report(attempt));
     assert_eq!(sidebar.voice_intent.screen.quality, applied);
+    assert_eq!(
+        std::mem::take(&mut sidebar.action_results),
+        [ActionResult::error(
+            "Could not change Screen Share quality."
+        )]
+    );
+    session.screen_report(&mut sidebar, &settings, report(attempt));
+    assert!(sidebar.action_results.is_empty());
     assert!(
         sidebar
             .voice

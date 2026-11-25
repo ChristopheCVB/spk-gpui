@@ -152,10 +152,6 @@ impl Settings {
                 view.error
                     .map(|text| Label::new(text).text_color(theme.danger)),
             )
-            .children(
-                view.notice
-                    .map(|text| Label::new(text).text_color(theme.success)),
-            )
             .children(link)
             .child(match page {
                 AdminPage::Invites => self.invites(sidebar, cx).into_any_element(),

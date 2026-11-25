@@ -315,7 +315,6 @@ impl Spk {
                 mic_test: None,
                 mic_level: 0,
                 playback_pending: false,
-                audio_test_error: None,
                 camera: camera::Preview::default(),
                 soundboard: soundboard_admin::SoundboardForm::new(window, cx),
             }
@@ -377,7 +376,6 @@ struct Settings {
     mic_test: Option<(Option<crate::voice::Device>, Task<()>)>,
     mic_level: u8,
     playback_pending: bool,
-    audio_test_error: Option<&'static str>,
     camera: camera::Preview,
     soundboard: soundboard_admin::SoundboardForm,
 }

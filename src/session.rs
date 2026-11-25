@@ -326,7 +326,6 @@ pub struct Sidebar {
     pub profile: Profile,
     pub profile_edit: ProfileEdit,
     pub admin_accounts: AdminAccountsView,
-    pub account_moderation_notice: Option<&'static str>,
     pub user_status: UserStatus,
     pub channels: Option<Vec<Channel>>,
     pub channel_admin: ChannelAdmin,
@@ -346,7 +345,6 @@ pub struct Sidebar {
     pub channel_radio: HashMap<String, String>,
     switching_to: Option<VoiceDestination>,
     pub voice_notice: Option<&'static str>,
-    pub voice_moderation_notice: Option<&'static str>,
     pub voice_moderation_pending: bool,
     voice_rejoin: Option<String>,
     pub voice_intent: Intent,
@@ -365,7 +363,6 @@ impl Sidebar {
             profile,
             profile_edit: ProfileEdit::Idle,
             admin_accounts: AdminAccountsView::default(),
-            account_moderation_notice: None,
             user_status: UserStatus::default(),
             channels: None,
             channel_admin: ChannelAdmin::default(),
@@ -388,7 +385,6 @@ impl Sidebar {
             channel_radio: HashMap::new(),
             switching_to: None,
             voice_notice: None,
-            voice_moderation_notice: None,
             voice_moderation_pending: false,
             voice_rejoin: None,
             voice_intent: Intent::default(),
@@ -1237,19 +1233,15 @@ async fn watch_session(
                 if result.as_ref().is_err_and(Failure::unauthorized) {
                     break SessionEnd::Invalidated(SESSION_EXPIRED);
                 }
-                sidebar.voice_moderation_notice = Some(match result {
-                    Ok(VoiceModeration::Move(_)) => "Move requested.",
-                    Ok(VoiceModeration::Disconnect) => "Voice participant disconnected.",
-                    Err(Failure::Http(reqwest::StatusCode::FORBIDDEN)) => {
-                        "You don’t have permission to moderate voice."
-                    }
-                    Err(Failure::Http(reqwest::StatusCode::CONFLICT)) => {
-                        "That participant is no longer in the expected voice channel."
-                    }
-                    Err(Failure::Http(reqwest::StatusCode::NOT_FOUND)) => {
-                        "That voice channel is unavailable."
-                    }
-                    Err(_) => "Could not moderate voice. Try again.",
+                sidebar.action_results.push(match result {
+                    Ok(VoiceModeration::Move(_)) => ActionResult::info("Move requested."),
+                    Ok(VoiceModeration::Disconnect) => ActionResult::success("Voice participant disconnected."),
+                    Err(error) => ActionResult::error(match error {
+                        Failure::Http(reqwest::StatusCode::FORBIDDEN) => "You don’t have permission to moderate voice.",
+                        Failure::Http(reqwest::StatusCode::CONFLICT) => "That participant is no longer in the expected voice channel.",
+                        Failure::Http(reqwest::StatusCode::NOT_FOUND) => "That voice channel is unavailable.",
+                        _ => "Could not moderate voice. Try again.",
+                    }),
                 });
             }
             event = socket.recv() => match event {
@@ -1374,7 +1366,7 @@ async fn watch_session(
                         if voice.radio_scope(&sidebar).is_some_and(|(current_sid, current_channel)| {
                             sid == current_sid && channel_id.as_deref().is_none_or(|channel| channel == current_channel)
                         }) => {
-                        sidebar.radio.command_error = Some(error);
+                        sidebar.action_results.push(ActionResult::error(error));
                     }
                     Frame::SoundNew => sidebar.soundboard.has_new_clip = true,
                     Frame::VoiceSound { user_id, sound_id } => {
@@ -1429,11 +1421,11 @@ async fn watch_session(
             }
             () = RadioSession::playback_changed(&mut radio.player) => {}
             Some(Ok((id, result))) = radio.tasks.join_next_with_id() => {
-                if let Err(error) = radio.complete(&mut sidebar.radio, id, result) {
+                if let Err(error) = radio.complete(&mut sidebar, id, result) {
                     if error.unauthorized() {
                         break SessionEnd::Invalidated(SESSION_EXPIRED);
                     }
-                    sidebar.radio.directory_error = Some("Could not load or update radio stations. Try again.");
+                    sidebar.radio.directory_error = Some("Could not load radio stations. Try again.");
                 }
             }
             Some(Ok((id, result))) = soundboard.tasks.join_next_with_id() => {

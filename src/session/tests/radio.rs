@@ -1,6 +1,7 @@
 use super::*;
 
 const STATION: &str = "23456789-1111-4ccc-8aaa-123456789abc";
+const UNAVAILABLE_STATION: &str = "23456789-1111-4ccc-8aaa-123456789abe";
 
 fn station(name: &str) -> Value {
     value!({
@@ -22,6 +23,10 @@ pub(super) async fn respond(line: &str, request: Request, favorite: &mut bool) {
             } else {
                 value!([])
             }
+        }
+        line if line == format!("PUT /api/radio/favorites/{UNAVAILABLE_STATION} HTTP/1.1") => {
+            request.respond_raw("404 Not Found", &[], b"{}").await;
+            return;
         }
         line if line == format!("PUT /api/radio/favorites/{STATION} HTTP/1.1") => {
             *favorite = true;
@@ -73,6 +78,20 @@ async fn channel_radio_uses_shared_station_and_local_controls() {
                         .await
                         .unwrap();
                 }
+                assert_eq!(
+                    receive_voice_frame(&mut socket).await,
+                    value!({"type":"voice:radio:stop","sid":sid})
+                );
+                socket
+                    .send(Message::text(
+                        value!({
+                            "type":"voice:radio:error","sid":sid,"channelId":"first",
+                            "error":"Could not stop Channel Radio.",
+                        })
+                        .to_string(),
+                    ))
+                    .await
+                    .unwrap();
                 let mut updates = [
                     receive_voice_frame(&mut socket).await,
                     receive_voice_frame(&mut socket).await,
@@ -123,6 +142,28 @@ async fn channel_radio_uses_shared_station_and_local_controls() {
                 .await;
                 commands
                     .send(Command::SetRadioFavorite {
+                        id: UNAVAILABLE_STATION.into(),
+                        saved: true,
+                    })
+                    .await
+                    .unwrap();
+                let failed_favorite = wait_for_sidebar(&views, |s| {
+                    s.action_results
+                        == [ActionResult::error(
+                            "Could not update radio Favorites. Try again.",
+                        )]
+                })
+                .await;
+                assert!(
+                    failed_favorite
+                        .radio
+                        .favorites
+                        .as_ref()
+                        .is_some_and(Vec::is_empty)
+                );
+                assert!(failed_favorite.radio.directory_error.is_none());
+                commands
+                    .send(Command::SetRadioFavorite {
                         id: STATION.into(),
                         saved: true,
                     })
@@ -140,6 +181,16 @@ async fn channel_radio_uses_shared_station_and_local_controls() {
                     .await
                     .unwrap();
                 wait_for_sidebar(&views, |s| s.radio.playback == RadioPlayback::Unavailable).await;
+                commands.send(Command::StopRadio).await.unwrap();
+                let failed_stop = wait_for_sidebar(&views, |s| {
+                    s.action_results == [ActionResult::error("Could not stop Channel Radio.")]
+                })
+                .await;
+                assert_eq!(failed_stop.radio.playback, RadioPlayback::Unavailable);
+                assert_eq!(
+                    failed_stop.radio.station.as_ref().unwrap().name,
+                    "Shared jazz"
+                );
                 commands.send(Command::PauseRadio).await.unwrap();
                 commands.send(Command::SetRadioVolume(25)).await.unwrap();
                 commands.send(Command::ToggleDeafen).await.unwrap();

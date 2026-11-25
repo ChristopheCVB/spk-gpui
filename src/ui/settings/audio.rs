@@ -31,7 +31,6 @@ impl Settings {
     }
 
     fn toggle_mic_test(&mut self, cx: &mut Context<Self>) {
-        self.audio_test_error = None;
         self.mic_level = 0;
         if self.mic_test.take().is_some() {
             cx.notify();
@@ -68,8 +67,14 @@ impl Settings {
             }
             let _ = settings.update(cx, |settings, cx| {
                 settings.mic_test = None;
-                settings.audio_test_error =
-                    Some("Could not open the microphone. Check your audio device and permissions.");
+                settings.spk.update(cx, |app, cx| {
+                    app.show_action_result(
+                        ActionResult::error(
+                            "Could not open the microphone. Check your audio device and permissions.",
+                        ),
+                        cx,
+                    );
+                });
                 cx.notify();
             });
         });
@@ -96,19 +101,27 @@ impl Settings {
             .cloned();
         let volume = (sidebar.voice_intent.preferred.output_gain() * 100.0).round() as u8;
         self.playback_pending = true;
-        self.audio_test_error = None;
         let (finished, result) = async_channel::bounded(1);
         std::thread::spawn(move || {
             let _ = finished.try_send(test_playback(output.as_ref(), volume).is_some());
         });
+        let spk = self.spk.downgrade();
         cx.spawn(async move |settings, cx| {
             let played = result.recv().await == Ok(true);
             let _ = settings.update(cx, |settings, cx| {
                 settings.playback_pending = false;
-                settings.audio_test_error =
-                    (!played).then_some("Could not play the test sound on the selected speakers.");
                 cx.notify();
             });
+            if !played {
+                let _ = spk.update(cx, |app, cx| {
+                    app.show_action_result(
+                        ActionResult::error(
+                            "Could not play the test sound on the selected speakers.",
+                        ),
+                        cx,
+                    );
+                });
+            }
         })
         .detach();
         cx.notify();
@@ -279,10 +292,6 @@ impl Settings {
             ))
             .child(self.processing(sidebar, cx))
             .child(self.camera_settings(sidebar, cx))
-            .children(
-                self.audio_test_error
-                    .map(|error| Label::new(error).text_color(cx.theme().danger)),
-            )
             .child(self.voice_sounds(cx))
             .children(
                 sidebar
