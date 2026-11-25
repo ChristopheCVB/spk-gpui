@@ -173,7 +173,7 @@ jobs:
         timeout-minutes: 15
         run: |
           sudo apt-get install -y at-spi2-core gir1.2-atspi-2.0 imagemagick libvulkan1 mesa-vulkan-drivers \
-            tesseract-ocr x11-xserver-utils xdotool
+            tesseract-ocr x11-xserver-utils xdotool xdg-desktop-portal-gtk
           work="$(mktemp -d "$RUNNER_TEMP/spk-desktop-smoke.XXXXXXXX")"
           mise run desktop-smoke -- "$work" "$RUNNER_TEMP/spk-desktop-smoke-evidence"
       - name: Upload desktop smoke test evidence

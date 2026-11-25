@@ -94,7 +94,8 @@ Install the Linux build prerequisites above and the fixture's desktop tools.
 
 ```sh
 sudo apt-get install -y at-spi2-core gir1.2-atspi-2.0 imagemagick mesa-vulkan-drivers python3-gi \
-  dbus-daemon pulseaudio pulseaudio-utils tesseract-ocr x11-xserver-utils xauth xdotool xvfb
+  dbus-daemon pulseaudio pulseaudio-utils tesseract-ocr x11-xserver-utils xauth xdotool \
+  xdg-desktop-portal-gtk xvfb
 smoke_work="$(mktemp -d /tmp/spk-desktop-smoke.XXXXXXXX)"
 smoke_evidence="$(mktemp -d /tmp/spk-desktop-smoke-evidence.XXXXXXXX)"
 mise run desktop-smoke -- "$smoke_work" "$smoke_evidence"
