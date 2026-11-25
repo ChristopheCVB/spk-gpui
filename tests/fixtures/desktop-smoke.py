@@ -165,6 +165,7 @@ def seed(origin, database, log, process):
         {"name": "Smoke Reader", "email": EMAIL, "password": PASSWORD},
         {"X-Invite-Token": parse_qs(urlsplit(signup).query)["invite"][0]},
     )["user"]["id"]
+    alerts = admin("/api/admin/channels", {"name": "smoke-alerts", "type": "text"})["id"]
     source = admin("/api/admin/channels", {"name": "smoke-chat", "type": "text"})["id"]
     target = admin("/api/admin/channels", {"name": "smoke-target", "type": "text"})["id"]
     voice = {
@@ -226,7 +227,7 @@ def seed(origin, database, log, process):
             }},
         }, {"X-GitHub-Event": event})
 
-    return post_live_alert, voice, target, owner, reader
+    return post_live_alert, voice, alerts, owner, reader
 
 
 @contextmanager
@@ -798,12 +799,12 @@ class Desktop:
         for channel in (FIRST_VOICE, SECOND_VOICE):
             self.find(channel, "push button")
 
-    def check_incoming_toast(self, logs, send_message, target, reader):
+    def check_incoming_toast(self, logs, send_message, alerts, reader):
         self.click("smoke-chat", "push button", partial=True)
         self.find("Show all 2 pinned messages", "toggle button")
-        send_message(target, f"<@{reader}> Incoming smoke alert")
+        send_message(alerts, f"<@{reader}> Incoming smoke alert")
         self.check_toast_position("Open", "push button")
-        self.find("Smoke Author in #smoke-target", "label")
+        self.find("Smoke Author in #smoke-alerts", "label")
         time.sleep(0.45)
         self.screenshot(logs, "incoming-toast-dark.png")
 
@@ -825,7 +826,7 @@ class Desktop:
             finally:
                 clipboard.terminate()
 
-    def check_settings_toasts(self, logs, config, send_message, target, owner):
+    def check_settings_toasts(self, logs, config, send_message, alerts, owner):
         notification_result = "Could not save notification settings."
         self.click("Settings", "push button")
         self.click("Notifications", "push button")
@@ -843,7 +844,7 @@ class Desktop:
         if not self.focused(previews, "toggle button"):
             raise RuntimeError("The toast took focus from the Settings control")
         started = time.monotonic()
-        time.sleep(2.5)
+        time.sleep(3.2)
         self.key("space")
         time.sleep(max(0, started + 5.5 - time.monotonic()))
         if sum(node.get_name() == notification_result for node in self.nodes()) != 1:
@@ -852,10 +853,14 @@ class Desktop:
         (config / "density").mkdir()
         self.click("Compact", "radio button")
         density_result = "Could not save your density preference."
-        toast = self.check_toast_position(density_result)
-        self.move(toast.x + toast.width // 2, toast.y + toast.height // 2)
-        self.check_toast_position(notification_result)
+        self.check_toast_position(density_result)
+        time.sleep(0.45)
+        newest = self.check_toast_position(density_result)
+        self.move(newest.x + newest.width // 2, newest.y + newest.height // 2)
         time.sleep(0.3)
+        previous = self.check_toast_position(notification_result)
+        if previous.y + previous.height > newest.y:
+            raise RuntimeError("Distinct action results should expand into separate toasts")
         self.screenshot(logs, "settings-toasts-dark.png")
         self.move(700, 30)
         wait_for("the five-second action toasts to expire",
@@ -877,13 +882,11 @@ class Desktop:
         self.click("Close settings", "push button")
         self.click("smoke-chat", "push button", partial=True)
         self.find("Show all 2 pinned messages", "toggle button")
-        send_message(target, f"<@{owner}> Live update with notifications off")
-        self.find("smoke-target, 1 unread, 1 pings", "push button")
+        send_message(alerts, f"<@{owner}> Live update with notifications off")
+        self.find("smoke-alerts, 1 unread, 1 pings", "push button")
         self.absent(notification_result, None)
         self.absent(density_result, None)
         self.absent("Open", "push button")
-        self.click("smoke-target", "push button", partial=True)
-        self.find("smoke-target", "push button")
 
     def check(self, post_live_alert, logs):
         self.find("smoke-target", "push button", partial=True)
@@ -1065,7 +1068,7 @@ def main(work, artifacts):
                        NUXT_PUBLIC_LIVEKIT_URL=livekit)
         with service(["node", "node_modules/nuxt/bin/nuxt.mjs", "dev", "--host", "127.0.0.1",
                       "--port", str(port)], server_log, web, web_env) as server:
-            post_live_alert, voice, target, owner, reader = seed(origin, database, server_log, server)
+            post_live_alert, voice, alerts, owner, reader = seed(origin, database, server_log, server)
             binary = desktop_binary(work, logs, {**env, "SPK_URL": origin, "LIVEKIT_URL": livekit})
             with (voice_peer(origin, ADMIN_EMAIL, voice[FIRST_VOICE], web,
                              logs / "author-peer.log", env) as send_message,
@@ -1073,7 +1076,7 @@ def main(work, artifacts):
                 desktop.sign_in(EMAIL, "Smoke Reader")
                 desktop.check(post_live_alert, logs)
                 desktop.check_reader_menus(logs)
-                desktop.check_incoming_toast(logs, send_message, target, reader)
+                desktop.check_incoming_toast(logs, send_message, alerts, reader)
                 desktop.check_upload_recovery()
 
             admin_launches = logs / "admin-browser-launches.log"
@@ -1089,7 +1092,7 @@ def main(work, artifacts):
                 config = Path(admin_env["XDG_CONFIG_HOME"]) / "spk-gpui"
                 desktop.check_admin_menus(
                     logs, admin, server,
-                    lambda: desktop.check_settings_toasts(logs, config, send_message, target, owner),
+                    lambda: desktop.check_settings_toasts(logs, config, send_message, alerts, owner),
                 )
     print("SPK desktop smoke test passed")
 
