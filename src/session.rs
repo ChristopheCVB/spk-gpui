@@ -68,7 +68,10 @@ pub use {
     presence::Participant,
     profiles::ProfileEdit,
     radio::RadioPlayback,
-    soundboard_admin::{SoundboardAdminAction, SoundboardCrop},
+    soundboard_admin::{
+        SoundboardAdminAction, SoundboardCrop, SoundboardPreview, SoundboardTrim,
+        SoundboardWaveform,
+    },
     voice_session::VoiceView,
     webhooks::{WebhookAction, WebhookError, WebhookReply},
 };
@@ -1442,6 +1445,7 @@ async fn watch_session(
                     break SessionEnd::Invalidated(SESSION_EXPIRED);
                 }
             }
+            () = AdminSoundboard::preview_changed(&mut admin_soundboard.preview_progress) => {}
             Some(Ok(result)) = admin_soundboard.tasks.join_next() => {
                 if admin_soundboard.complete(&mut sidebar, result).is_err() {
                     break SessionEnd::Invalidated(SESSION_EXPIRED);

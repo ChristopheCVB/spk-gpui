@@ -6,6 +6,7 @@ import csv
 import errno
 import fcntl
 from http.cookiejar import CookieJar
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import io
 import json
 import os
@@ -14,13 +15,16 @@ import re
 import signal
 import socket
 import sqlite3
+import struct
 import subprocess
 import sys
 import tempfile
+from threading import Thread
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import HTTPCookieProcessor, ProxyHandler, Request, build_opener
+import wave
 
 import gi
 
@@ -34,11 +38,16 @@ from livekit_fixture import livekit_server
 ROOT = Path(__file__).resolve().parents[2]
 WEB_REPO = "https://github.com/meeehdi-dev/spk.git"
 WEB_REVISION = "43613954d119eae4fd30e25a1f969b4327c58e89"
+R2_SIGNER = "server/utils/r2sign.ts"
+R2_ORIGIN = b"https://${c.accountId}.r2.cloudflarestorage.com"
 EMAIL = "reader@spk.test"
 ADMIN_EMAIL = "author@spk.test"
 PASSWORD = "fixture-password-42"
 FIRST_VOICE = "Smoke Voice A"
 SECOND_VOICE = "Smoke Voice B"
+SOUND_NAME = "Smoke trimmed clip"
+SOUND_ICON = "bell"
+SOUND_RATE = 8_000
 GITHUB = "https://github.com"
 PUSH_REPO = f"{GITHUB}/spk-smoke/demo"
 PUSH_SENDER = {"login": "Push Sender", "html_url": f"{GITHUB}/push-sender"}
@@ -89,7 +98,12 @@ def service(args, log, cwd, env, stdin=None):
                 process.wait()
 
 
-def web_checkout(work, logs):
+def replace_signer(web, staging, content):
+    staging.write_bytes(content)
+    staging.replace(web / R2_SIGNER)
+
+
+def web_checkout(work, logs, attempt):
     web = work / "spk-web"
     if web.is_symlink():
         raise RuntimeError(f"Expected a fixture checkout, found a symlink: {web}")
@@ -100,12 +114,24 @@ def web_checkout(work, logs):
         ["git", "-C", web, "remote", "get-url", "origin"], text=True,
     ).strip() != WEB_REPO:
         raise RuntimeError(f"Expected a fixture checkout of {WEB_REPO}: {web}")
-    if subprocess.check_output(["git", "-C", web, "status", "--porcelain", "--untracked-files=no"]):
-        raise RuntimeError(f"Pinned SPK Web checkout has local changes: {web}")
+    changes = subprocess.check_output(
+        ["git", "-C", web, "status", "--porcelain", "--untracked-files=no"],
+    )
     revision = subprocess.run(
         ["git", "-C", web, "rev-parse", "--verify", "HEAD"],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
     ).stdout.strip()
+    if changes:
+        if revision != WEB_REVISION or changes != f" M {R2_SIGNER}\n".encode():
+            raise RuntimeError(f"Pinned SPK Web checkout has local changes: {web}")
+        original = subprocess.check_output(["git", "-C", web, "show", f"HEAD:{R2_SIGNER}"])
+        # Recover only the routing substitution, including the last attempt's ephemeral port.
+        patched = re.escape(original).replace(
+            re.escape(R2_ORIGIN), rb"http://127\.0\.0\.1:[1-9][0-9]{0,4}",
+        )
+        if original.count(R2_ORIGIN) != 1 or not re.fullmatch(patched, (web / R2_SIGNER).read_bytes()):
+            raise RuntimeError(f"Pinned SPK Web checkout has local changes: {web}")
+        replace_signer(web, attempt / "r2sign.ts", original)
     if revision != WEB_REVISION:
         subprocess.run(["git", "-C", web, "fetch", "--depth=1", "origin", WEB_REVISION], check=True)
         subprocess.run(["git", "-C", web, "checkout", "--detach", WEB_REVISION], check=True)
@@ -117,6 +143,117 @@ def web_checkout(work, logs):
             cwd=ROOT, stdout=output, stderr=subprocess.STDOUT, check=True,
         )
     return web
+
+
+@contextmanager
+def sound_storage(web, directory, log):
+    directory.mkdir()
+
+    class ObjectStorage(BaseHTTPRequestHandler):
+        timeout = 5
+
+        def object_path(self):
+            key = re.fullmatch(r"/smoke/sounds/([0-9a-f-]{36})", urlsplit(self.path).path)
+            if key:
+                return directory / key[1]
+            self.send_error(404)
+
+        def do_PUT(self):
+            path = self.object_path()
+            if path is None:
+                return
+            length = int(self.headers.get("Content-Length", "0"))
+            signed = parse_qs(urlsplit(self.path).query).get("X-Amz-SignedHeaders", [""])[0]
+            if (self.headers.get("Content-Type") != "audio/wav"
+                    or not 44 < length <= 3 * 1024 * 1024
+                    or not {"content-length", "content-type"} <= set(signed.split(";"))):
+                self.send_error(400)
+                return
+            body = self.rfile.read(length)
+            if len(body) != length:
+                self.send_error(400)
+                return
+            path.write_bytes(body)
+            self.send_response(200)
+            self.end_headers()
+
+        def do_GET(self):
+            path = self.object_path()
+            if path is None:
+                return
+            if not path.is_file():
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "audio/wav")
+            self.send_header("Content-Length", str(path.stat().st_size))
+            self.end_headers()
+            if self.command == "GET":
+                self.wfile.write(path.read_bytes())
+
+        do_HEAD = do_GET
+
+        def log_message(self, _format, *_args):
+            print(self.command, urlsplit(self.path).path, file=log, flush=True)
+
+    original = (web / R2_SIGNER).read_bytes()
+    if original.count(R2_ORIGIN) != 1:
+        raise RuntimeError("Update the fixture R2 routing for the pinned SPK Web revision")
+    with HTTPServer(("127.0.0.1", 0), ObjectStorage) as storage:
+        origin = f"http://127.0.0.1:{storage.server_port}"
+        thread = Thread(target=storage.serve_forever, daemon=True)
+        # Keep the real presign and save handlers. Only their fixture object-store origin changes.
+        staging = directory / "r2sign.ts"
+        replace_signer(web, staging, original.replace(R2_ORIGIN, origin.encode()))
+        thread.start()
+        try:
+            yield {
+                "NUXT_R2_ACCOUNT_ID": "smoke",
+                "NUXT_R2_BUCKET": "smoke",
+                "NUXT_R2_ACCESS_KEY_ID": "smoke-access-key",
+                "NUXT_R2_SECRET_ACCESS_KEY": "smoke-secret-key",
+            }
+        finally:
+            storage.shutdown()
+            thread.join()
+            replace_signer(web, staging, original)
+
+
+def sound_sources(directory):
+    # Each section has its own pitch and uses integer samples to make the crop exact.
+    for name, sections in (
+        ("Short source.wav", [(3000, 2048, 500)]),
+        ("Long source.wav", [(6100, 2048, 500), (8900, 4096, 1000),
+                             (900, 8192, 2000), (100, 12288, 4000)]),
+    ):
+        with wave.open(str(directory / name), "wb") as wav:
+            wav.setparams((1, 2, SOUND_RATE, 0, "NONE", "not compressed"))
+            for ms, amplitude, frequency in sections:
+                half_period = SOUND_RATE // frequency // 2
+                period = struct.pack("<h", amplitude) * half_period
+                period += struct.pack("<h", -amplitude) * half_period
+                wav.writeframes(period * (ms * frequency // 1000))
+    return directory / "Short source.wav", directory / "Long source.wav"
+
+
+def verify_saved_sound(admin):
+    clip = next((row for row in admin("/api/sounds") if row["name"] == SOUND_NAME), None)
+    if clip is None or clip["icon"] != SOUND_ICON or clip["durationMs"] != 9800:
+        raise RuntimeError(f"Unexpected saved Soundboard metadata: {clip}")
+    url = admin(f"/api/sounds/{clip['id']}/file")["url"]
+    with build_opener(ProxyHandler({})).open(url, timeout=5) as response:
+        body = response.read()
+    with wave.open(io.BytesIO(body), "rb") as wav:
+        if (wav.getnchannels(), wav.getsampwidth(), wav.getframerate(), wav.getnframes()) != (
+            1, 3, SOUND_RATE, 9_800 * SOUND_RATE // 1000,
+        ):
+            raise RuntimeError(f"Unexpected cropped WAV format or duration: {wav.getparams()}")
+        pcm = wav.readframes(wav.getnframes())
+    # 6.100–15.900 s at 150% gain spans 8.9 s of the middle tone and 0.9 s of the last tone.
+    middle = (bytes.fromhex("000018") * 4 + bytes.fromhex("0000e8") * 4) * 8900
+    tail = (bytes.fromhex("000030") * 2 + bytes.fromhex("0000d0") * 2) * 1800
+    if pcm != middle + tail:
+        raise RuntimeError("Stored PCM differs from the selected excerpt at 150% gain")
 
 
 def http(origin, cookies=None):
@@ -287,9 +424,10 @@ def walk(node):
 
 
 class Desktop:
-    def __init__(self, process, launches):
+    def __init__(self, process, launches, pulse_server):
         self.process = process
         self.launches = launches
+        self.pulse_server = pulse_server
         self.checked_launches = []
 
     def nodes(self):
@@ -345,6 +483,15 @@ class Desktop:
     def click_at(self, x, y, button=1):
         self.move(x, y)
         subprocess.run(["xdotool", "click", str(button)], check=True)
+
+    def drag_horizontal(self, x, y, destination):
+        self.move(x, y)
+        subprocess.run(["xdotool", "mousedown", "1"], check=True)
+        try:
+            self.move((x + destination) // 2, y)
+            self.move(destination, y)
+        finally:
+            subprocess.run(["xdotool", "mouseup", "1"], check=True)
 
     def menu_order(self, *labels):
         positions = [self.bounds(label, "menu item").y for label in labels]
@@ -493,7 +640,8 @@ class Desktop:
         self.key("Escape")
         self.open_voice_channel_menu(FIRST_VOICE, "Join", context=True)
         self.click("Join", "menu item")
-        self.find("Leave voice", "push button")
+        self.find(f"Switch to {SECOND_VOICE}", "push button")
+        self.find("Smoke Reader", "panel", within=("Voice channels", "panel"))
         self.click(SECOND_VOICE, "push button", button=3)
         self.find("Switch", "menu item")
         self.key("Escape")
@@ -652,6 +800,247 @@ class Desktop:
         self.key("Escape")
         self.click(FIRST_VOICE, "push button", button=3)
         self.check_disabled_menu_item("Join")
+
+    def choose_sound_source(self, path):
+        self.click("Choose audio file", "push button")
+
+        def picker():
+            result = subprocess.run(["xdotool", "search", "--onlyvisible", "--name", "^Open File$"],
+                                    capture_output=True, text=True)
+            return result.stdout.strip()
+
+        dialog = wait_for("the native GTK file chooser", picker)
+        subprocess.run(["xdotool", "windowfocus", "--sync", dialog], check=True)
+        self.key("ctrl+l")
+        subprocess.run(["xdotool", "type", "--clearmodifiers", "--delay", "10", "--",
+                        f"{path.parent}/"], check=True)
+        # Let GTK resolve the folder in its location entry before submitting it.
+        time.sleep(0.3)
+        self.key("Return")
+
+        def source_row():
+            try:
+                return next((node for node in walk(Atspi.get_desktop(0))
+                             if node.get_name() == path.name and node.get_role_name() == "table cell"), None)
+            except GLib.Error:
+                return None
+
+        row = wait_for(f"{path.name} in the native file chooser", source_row)
+        bounds = row.get_component_iface().get_extents(Atspi.CoordType.SCREEN)
+        subprocess.run(["xdotool", "mousemove", str(bounds.x + bounds.width // 2),
+                        str(bounds.y + bounds.height // 2), "click", "--repeat", "2", "1"], check=True)
+        wait_for("the native file chooser to close", lambda: not picker())
+        subprocess.run(["xdotool", "windowfocus", self.window], check=True)
+        self.find("Source waveform")
+
+    def activate_soundboard_button(self, name):
+        def activate():
+            try:
+                node = self.find_node(name, "push button")
+                if node and node.get_state_set().contains(Atspi.StateType.SENSITIVE):
+                    action = node.get_action_iface()
+                    return action and action.do_action(0)
+            except GLib.Error:
+                return None
+
+        wait_for(f"{name} to accept activation", activate)
+
+    def sound_timing(self, label):
+        node = self.find(f"{label}: ", partial=True)
+        return float(re.fullmatch(rf"{label}: (\d+\.\d{{3}}) s", node.get_name())[1])
+
+    def expect_sound_selection(self, start, end):
+        for label, value in (("Start", start), ("End", end), ("Duration", end - start)):
+            self.find(f"{label}: {value:.3f} s")
+
+    def check_late_waveform(self, waveform, left, ten_seconds):
+        def painted_height(seconds):
+            x = round(left + (ten_seconds - left) * seconds / 10)
+            width = 12
+            height = waveform.height - 8
+            pixels = subprocess.check_output(
+                ["import", "-window", self.window, "-crop",
+                 f"{width}x{height}+{x}+{waveform.y + 4}", "-depth", "8", "rgb:-"],
+                timeout=5,
+            )
+            colors = [pixels[i:i + 3] for i in range(0, len(pixels), 3)]
+            return max(sum(color != column[0] for color in column)
+                       for column in (colors[i::width] for i in range(width)))
+
+        # Both strips are outside the initial selection. The louder tail must be drawn taller.
+        if not 0 < painted_height(12) < painted_height(15.25):
+            raise RuntimeError("The source waveform did not show its louder section after 15 seconds")
+
+    def preview_tone_rms(self):
+        # Record the private null sink while the preview is still within its 1000 Hz section.
+        try:
+            subprocess.run(
+                ["parec", f"--server={self.pulse_server}", "--device=spk_smoke.monitor",
+                 "--raw", "--format=s16le", "--rate=48000", "--channels=1", "--latency-msec=50"],
+                stdout=subprocess.PIPE, check=True, timeout=3.5,
+            )
+        except subprocess.TimeoutExpired as error:
+            pcm = error.stdout or b""
+        else:
+            raise RuntimeError("The silent Media Output monitor stopped recording unexpectedly")
+
+        samples = [sample for (sample,) in struct.iter_unpack("<h", pcm[:len(pcm) & ~1])]
+        window = 9600  # 200 ms, or 200 cycles of the selected tone.
+        rms = 0.0
+        for offset in range(0, len(samples) - window + 1, window):
+            chunk = samples[offset:offset + window]
+            crossings = 0
+            negative = False
+            for sample in chunk:
+                if sample < -512:
+                    negative = True
+                elif sample > 512 and negative:
+                    crossings += 1
+                    negative = False
+            if 180 <= crossings <= 220:
+                rms = max(rms, (sum(sample ** 2 for sample in chunk) / window) ** 0.5)
+        if rms == 0:
+            raise RuntimeError("The silent Media Output did not play the selected 1000 Hz tone")
+        return rms
+
+    def check_soundboard_preview(self, logs):
+        def position():
+            try:
+                node = self.find_node("Preview playhead")
+                if node is not None:
+                    return node.get_value_iface().get_current_value()
+            except GLib.Error:
+                # Playback updates can replace part of the tree during a query.
+                pass
+            return -1
+
+        def play():
+            self.click("Play selection", "push button")
+            wait_for("the playhead to advance from the nonzero trim start",
+                     lambda: 6.4 < position() < 15.9)
+
+        def reset(start, timeout=15):
+            wait_for(f"the preview to stop and reset to {start:.3f} s",
+                     lambda: abs(position() - start) < 0.001
+                     and self.find_node("Stop preview", "push button") is None, timeout=timeout)
+
+        reset(6.1)
+        play()
+        self.screenshot(logs, "soundboard-preview-dark.png")
+        amplified = self.preview_tone_rms()
+        self.click("Stop preview", "push button")
+        reset(6.1, timeout=3)
+
+        self.replace_sound_field("Upload gain (%)", "100")
+        play()
+        baseline = self.preview_tone_rms()
+        reset(6.1)
+        ratio = amplified / baseline
+        if not 1.4 <= ratio <= 1.6:
+            raise RuntimeError(f"Expected 150% preview gain, measured {ratio:.2%}")
+        self.replace_sound_field("Upload gain (%)", "150")
+
+        play()
+        handle = self.bounds("Trim end", "slider")
+        waveform = self.bounds("Source waveform")
+        self.drag_horizontal(handle.x + handle.width // 2, handle.y + handle.height // 2,
+                             waveform.x + waveform.width - 1)
+        self.expect_sound_selection(6.1, 16)
+        reset(6.1, timeout=3)
+        self.tab_to("Trim end", "slider")
+        self.key("Left")
+        self.expect_sound_selection(6.1, 15.9)
+
+        play()
+        self.replace_sound_field("Upload gain (%)", "125")
+        reset(6.1, timeout=3)
+        self.replace_sound_field("Upload gain (%)", "150")
+
+    def replace_sound_field(self, label, value):
+        self.click(label, "entry")
+        self.key("ctrl+a")
+        subprocess.run(["xdotool", "type", "--clearmodifiers", "--", value], check=True)
+
+    def check_soundboard_upload(self, sources, logs, admin):
+        self.click("Settings", "push button")
+        self.activate_soundboard_button("Soundboard")
+        self.find("No sounds yet.")
+        self.choose_sound_source(sources[0])
+        self.find("Source duration: 3.000 s")
+        self.expect_sound_selection(0, 3)
+        self.click("Discard", "push button")
+        wait_for("the discarded waveform to clear", lambda: self.find_node("Source waveform") is None)
+
+        self.choose_sound_source(sources[1])
+        self.find("Source duration: 16.000 s")
+        self.expect_sound_selection(0, 10)
+        waveform = self.bounds("Source waveform")
+        start = "Trim start"
+        end = "Trim end"
+        slider = "slider"
+        start_handle = self.bounds(start, slider)
+        self.check_late_waveform(waveform, start_handle.x + start_handle.width,
+                                 self.bounds(end, slider).x)
+
+        def center(label):
+            bounds = self.bounds(label, slider)
+            return bounds.x + bounds.width // 2, bounds.y + bounds.height // 2
+
+        x, y = center(start)
+        end_x, _ = center(end)
+        self.drag_horizontal(x, y, x + (end_x - x) * 2 // 5)
+        wait_for("only the start to move", lambda: 3.5 < self.sound_timing("Start") < 4.5)
+        self.find("End: 10.000 s")
+        x, y = center(end)
+        self.drag_horizontal(x, y, waveform.x)
+        self.find("Duration: 0.001 s")
+        start_bounds = self.bounds(start, slider)
+        end_bounds = self.bounds(end, slider)
+        grip_x = (start_bounds.x + start_bounds.width + end_bounds.x) // 2
+        grip_y = waveform.y + waveform.height - 10
+        self.drag_horizontal(grip_x, grip_y, waveform.x)
+        self.expect_sound_selection(0, 0.001)
+        self.drag_horizontal(waveform.x + start_bounds.width, grip_y, grip_x)
+        wait_for("the 1 ms selection to move back", lambda: 3.5 < self.sound_timing("Start") < 4.5)
+        self.find("Duration: 0.001 s")
+        x, y = center(end)
+        self.drag_horizontal(x, y, waveform.x + waveform.width - 1)
+        self.find("Duration: 10.000 s")
+        if not 13.5 < self.sound_timing("End") < 14.5:
+            raise RuntimeError("Moving the trim end failed to clamp the selection to 10 seconds")
+
+        for right in (True, False, True):
+            x, y = center(start)
+            end_x, _ = center(end)
+            destination = waveform.x + waveform.width - 1 if right else waveform.x
+            self.drag_horizontal((x + end_x) // 2, y, destination)
+            self.expect_sound_selection(*((6, 16) if right else (0, 10)))
+
+        self.tab_to(start, slider)
+        self.key("Right")
+        self.expect_sound_selection(6.1, 16)
+        self.tab_to(end, slider)
+        self.key("Left")
+        self.expect_sound_selection(6.1, 15.9)
+        for label, minimum, maximum in ((start, 5.9, 15.899), (end, 6.101, 16.0)):
+            value = self.find(label, slider).get_value_iface()
+            if (abs(value.get_minimum_value() - minimum) > 0.00001
+                    or abs(value.get_maximum_value() - maximum) > 0.00001):
+                raise RuntimeError(f"{label} did not expose its current trim limits")
+        self.replace_sound_field("Name", SOUND_NAME)
+        self.replace_sound_field("Upload gain (%)", "150")
+        self.click("Icon", "combo box")
+        self.enter("Search icons", "entry", SOUND_ICON)
+        self.click("", "list item", within=("", "list"))
+        wait_for("the icon picker to close", lambda: self.find_node("Search icons", "entry") is None)
+        self.check_soundboard_preview(logs)
+        self.screenshot(logs, "soundboard-waveform-dark.png")
+        self.click("Save", "push button")
+        self.find(SOUND_NAME)
+        wait_for("the saved waveform to clear", lambda: self.find_node("Source waveform") is None)
+        verify_saved_sound(admin)
+        self.click("Close settings", "push button")
+        wait_for("Settings to close", lambda: self.find_node("Close settings", "push button") is None)
 
     def text_positions(self, phrases):
         self.ensure_running()
@@ -1020,7 +1409,7 @@ def desktop_session(binary, launches, log, env):
     client_env = {key: value for key, value in env.items()
                   if key.lower() not in ("http_proxy", "https_proxy", "all_proxy")}
     with service([binary], log, ROOT, client_env) as client:
-        desktop = Desktop(client, launches)
+        desktop = Desktop(client, launches, env["PULSE_SERVER"])
         try:
             yield desktop
             desktop.ensure_launches_checked()
@@ -1043,7 +1432,16 @@ def main(work, artifacts):
     launches = logs / "browser-launches.log"
     launches.touch()
     env = isolated_env(attempt, launches)
-    web = web_checkout(work, logs)
+    portal = Path(env["XDG_CONFIG_HOME"]) / "xdg-desktop-portal"
+    portal.mkdir()
+    (portal / "portals.conf").write_text("[preferred]\ndefault=gtk\n")
+    subprocess.run(
+        ["dbus-update-activation-environment", "DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR",
+         "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CURRENT_DESKTOP"],
+        env={**env, "XDG_CURRENT_DESKTOP": "GTK"}, check=True,
+    )
+    sources = sound_sources(attempt)
+    web = web_checkout(work, logs, attempt)
     port_file = work / "port"
     with socket.socket() as listener:
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -1074,11 +1472,14 @@ def main(work, artifacts):
         check=True, stdout=subprocess.DEVNULL,
     )
     Atspi.init()
-    with (livekit_server(attempt, logs / "livekit.log") as (signaling, key, secret),
+    with ((logs / "sound-storage.log").open("w") as storage_log,
+          sound_storage(web, attempt / "sound-storage", storage_log) as r2,
+          livekit_server(attempt, logs / "livekit.log") as (signaling, key, secret),
           silent_audio(attempt, logs / "pulse.log", env)):
         livekit = f"ws://127.0.0.1:{signaling}"
         web_env.update(NUXT_LIVEKIT_API_KEY=key, NUXT_LIVEKIT_API_SECRET=secret,
                        NUXT_PUBLIC_LIVEKIT_URL=livekit)
+        web_env.update(r2)
         with service(["node", "node_modules/nuxt/bin/nuxt.mjs", "dev", "--host", "127.0.0.1",
                       "--port", str(port)], server_log, web, web_env) as server:
             post_live_alert, voice, alerts, owner, reader = seed(origin, database, server_log, server)
@@ -1102,6 +1503,7 @@ def main(work, artifacts):
                              logs / "reader-peer.log", env) as send_message,
                   desktop_session(binary, admin_launches, logs / "admin.log", admin_env) as desktop):
                 desktop.sign_in(ADMIN_EMAIL)
+                desktop.check_soundboard_upload(sources, logs, admin)
                 config = Path(admin_env["XDG_CONFIG_HOME"]) / "spk-gpui"
                 desktop.check_admin_menus(
                     logs, admin, server,

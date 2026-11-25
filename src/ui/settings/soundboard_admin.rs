@@ -1,9 +1,11 @@
+mod waveform;
+
 use gpui_kit::component::Disableable;
 
 use super::*;
 use crate::{
     api::SoundboardClip,
-    session::{SoundboardAdminAction as Action, SoundboardCrop},
+    session::{SoundboardAdminAction as Action, SoundboardPreview},
     ui::{
         icon_picker::{IconPicker, icon_picker, icon_picker_field},
         soundboard::clip_icon,
@@ -56,8 +58,8 @@ enum ClipAction {
 pub(super) struct SoundboardForm {
     upload: Metadata,
     edit: Metadata,
-    start: Entity<InputState>,
-    end: Entity<InputState>,
+    trim_focus: [FocusHandle; 2],
+    drag: Option<waveform::Drag>,
     gain: Entity<InputState>,
     picker_open: bool,
     clip_action: Option<ClipAction>,
@@ -66,40 +68,24 @@ pub(super) struct SoundboardForm {
 
 impl SoundboardForm {
     pub(super) fn new(window: &mut Window, cx: &mut Context<Settings>) -> Self {
+        let gain = cx.new(|cx| InputState::new(window, cx).default_value("100"));
+        cx.subscribe(&gain, |settings, input, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                let gain = input.read(cx).value().trim().parse().unwrap_or(u16::MAX);
+                settings.soundboard_action(Action::Gain(gain), cx);
+            }
+        })
+        .detach();
         Self {
             upload: Metadata::new(window, cx),
             edit: Metadata::new(window, cx),
-            start: cx.new(|cx| InputState::new(window, cx).default_value("0")),
-            end: cx.new(|cx| InputState::new(window, cx).placeholder("End of selection")),
-            gain: cx.new(|cx| InputState::new(window, cx).default_value("100")),
+            trim_focus: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
+            drag: None,
+            gain,
             picker_open: false,
             clip_action: None,
             mutation_revision: 0,
         }
-    }
-
-    fn crop(&self, duration: f64, cx: &App) -> SoundboardCrop {
-        let start = self
-            .start
-            .read(cx)
-            .value()
-            .trim()
-            .parse::<f64>()
-            .unwrap_or(f64::NAN);
-        let end = self.end.read(cx).value();
-        let end = if end.trim().is_empty() {
-            (start + 10.0).min(duration)
-        } else {
-            end.trim().parse().unwrap_or(f64::NAN)
-        };
-        let gain = self
-            .gain
-            .read(cx)
-            .value()
-            .trim()
-            .parse()
-            .unwrap_or(u16::MAX);
-        SoundboardCrop { start, end, gain }
     }
 }
 
@@ -115,6 +101,9 @@ impl Settings {
             let board = &sidebar.admin_soundboard;
             if self.soundboard.mutation_revision != board.mutation_revision {
                 self.soundboard.clip_action = None;
+            }
+            if board.waveform.is_none() {
+                self.soundboard.drag = None;
             }
             self.soundboard.mutation_revision = board.mutation_revision;
         }
@@ -136,6 +125,7 @@ impl Settings {
                 match result {
                     Ok(Ok(Some(paths))) if settings.tab == Tab::Soundboard => {
                         if let Some(path) = paths.into_iter().next() {
+                            form.drag = None;
                             let name: String = path
                                 .file_stem()
                                 .and_then(|name| name.to_str())
@@ -149,10 +139,6 @@ impl Settings {
                             form.upload
                                 .name
                                 .update(cx, |input, cx| input.set_value(name, window, cx));
-                            form.start
-                                .update(cx, |input, cx| input.set_value("0", window, cx));
-                            form.end
-                                .update(cx, |input, cx| input.set_value("", window, cx));
                             form.gain
                                 .update(cx, |input, cx| input.set_value("100", window, cx));
                             settings.soundboard_action(Action::ChooseFile(path), cx);
@@ -181,7 +167,9 @@ impl Settings {
         let board = &sidebar.admin_soundboard;
         let form = &self.soundboard;
         let busy = board.saving || board.decoding || board.loading || form.picker_open;
-        let disabled = busy || board.previewing;
+        let disabled = busy || board.preview.is_playing();
+        let saved_preview = matches!(board.preview, SoundboardPreview::Saved);
+        let selection_disabled = busy || saved_preview;
         let theme = cx.theme();
         let status = if board.loading {
             Some("Loading sounds…")
@@ -203,30 +191,35 @@ impl Settings {
                 ).tab_stop(true).disabled(disabled)
                     .on_click(cx.listener(|settings, _, window, cx| settings.choose_sound_file(window, cx))))
                 .child(Label::new("Choose a mono or stereo WAV, MP3, M4A, Ogg Vorbis, or FLAC file up to 20 MB. SPK receives only the selected audio.").text_color(theme.muted_foreground))
-                .children(board.duration.map(|duration| {
+                .children(board.waveform.as_ref().zip(board.selection).map(|(waveform, crop)| {
+                    let duration = waveform.duration;
+                    let (upload_preview, playhead) = match board.preview {
+                        SoundboardPreview::Upload { position } => (true, position),
+                        _ => (false, crop.start),
+                    };
                     div().w_full().flex().flex_col().gap_3()
-                        .child(Label::new(format!("Source duration {:.3} s. Select up to 10 seconds. Leave End empty for the longest selection.", duration)))
-                        .child(div().flex().gap_3()
-                            .child(field("Start (seconds)", &form.start, disabled, cx))
-                            .child(field("End (seconds)", &form.end, disabled, cx))
-                            .child(field("Upload gain (%)", &form.gain, disabled, cx)))
+                        .child(Label::new(format!("Source duration: {duration:.3} s")))
+                        .child(form.waveform(waveform, crop, playhead, selection_disabled, cx))
+                        .child(waveform::timing(crop))
+                        .child(field("Upload gain (%)", &form.gain, selection_disabled, cx))
                         .child(form.upload.render(disabled, cx))
                         .child(div().flex().gap_2()
-                            .child(control_button("preview-crop").label("Play selection").tab_stop(true).disabled(disabled)
+                            .child(control_button("preview-crop")
+                                .label(if upload_preview { "Stop preview" } else { "Play selection" })
+                                .tab_stop(true).disabled(selection_disabled)
                                 .on_click(cx.listener(move |settings, _, _, cx| {
-                                    let crop = settings.soundboard.crop(duration, cx);
-                                    settings.soundboard_action(Action::Preview(crop), cx);
+                                    let action = if upload_preview { Action::StopPreview } else { Action::Preview };
+                                    settings.soundboard_action(action, cx);
                                 })))
                             .child(control_button("save-sound").label("Save").primary().tab_stop(true).disabled(disabled)
-                                .on_click(cx.listener(move |settings, _, _, cx| {
-                                    let crop = settings.soundboard.crop(duration, cx);
+                                .on_click(cx.listener(|settings, _, _, cx| {
                                     let (name, icon) = settings.soundboard.upload.values(cx);
-                                    settings.soundboard_action(Action::Add { crop, name, icon }, cx);
+                                    settings.soundboard_action(Action::Add { name, icon }, cx);
                                 })))
                             .child(control_button("discard-sound").label("Discard").ghost().tab_stop(true).disabled(disabled)
                                 .on_click(cx.listener(|settings, _, _, cx| settings.soundboard_action(Action::Discard, cx)))))
                 })), cx))
-            .children(board.previewing.then(|| control_button("stop-sound-preview").label("Stop preview").tab_stop(true)
+            .children(saved_preview.then(|| control_button("stop-sound-preview").label("Stop preview").tab_stop(true)
                 .on_click(cx.listener(|settings, _, _, cx| settings.soundboard_action(Action::StopPreview, cx)))))
             .child(card("Sounds", div().flex().flex_col().gap_3()
                 .children(board.directory_error.map(|message| div().id("soundboard-directory-error").role(Role::Status)

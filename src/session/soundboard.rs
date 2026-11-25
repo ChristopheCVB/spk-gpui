@@ -193,7 +193,7 @@ impl SoundboardSession {
         let task = self.tasks.spawn(async move {
             let result = async {
                 let bytes = client.soundboard_file(id).await?;
-                soundboard::play(bytes, settings)
+                soundboard::play(bytes, settings, None)
                     .await
                     .map_err(|_| Failure::InvalidResponse)
             }

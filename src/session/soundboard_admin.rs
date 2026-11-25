@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{future::pending, path::PathBuf, sync::Arc, time::Duration};
 
 use reqwest::StatusCode;
 use tokio::{
@@ -16,7 +16,9 @@ use crate::{
     },
 };
 
-pub use crate::voice::soundboard::Crop as SoundboardCrop;
+pub use crate::voice::soundboard::{
+    Crop as SoundboardCrop, Trim as SoundboardTrim, Waveform as SoundboardWaveform,
+};
 
 const ACCESS_REQUIRED: &str = "Admin access is required.";
 const CHOOSE_AUDIO: &str = "Choose an audio file first.";
@@ -26,11 +28,13 @@ pub enum SoundboardAdminAction {
     Close,
     ChooseFile(PathBuf),
     Discard,
-    Preview(SoundboardCrop),
+    Trim(SoundboardTrim, f64),
+    NudgeTrim(SoundboardTrim, f64),
+    Gain(u16),
+    Preview,
     PreviewSaved(String),
     StopPreview,
     Add {
-        crop: SoundboardCrop,
         name: String,
         icon: String,
     },
@@ -42,13 +46,30 @@ pub enum SoundboardAdminAction {
     Delete(String),
 }
 
+#[derive(Clone, Copy, Default)]
+pub enum SoundboardPreview {
+    #[default]
+    Idle,
+    Saved,
+    Upload {
+        position: f64,
+    },
+}
+
+impl SoundboardPreview {
+    pub fn is_playing(self) -> bool {
+        !matches!(self, Self::Idle)
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct SoundboardAdminView {
     pub clips: Option<Arc<[SoundboardClip]>>,
     pub loading: bool,
-    pub duration: Option<f64>,
+    pub waveform: Option<SoundboardWaveform>,
+    pub selection: Option<SoundboardCrop>,
     pub decoding: bool,
-    pub previewing: bool,
+    pub preview: SoundboardPreview,
     pub saving: bool,
     pub mutation_revision: u64,
     pub directory_error: Option<&'static str>,
@@ -85,6 +106,7 @@ pub(super) struct AdminSoundboard {
     open: bool,
     source: Option<Arc<SoundSource>>,
     preview_output: Option<watch::Sender<MediaOutput>>,
+    pub preview_progress: Option<watch::Receiver<Duration>>,
     pub tasks: JoinSet<Completion>,
     pub mutations: JoinSet<(Mutation, Result<(), WorkError>)>,
 }
@@ -104,18 +126,47 @@ impl AdminSoundboard {
                 true
             });
         }
+        let view = &mut sidebar.admin_soundboard;
+        if let (SoundboardPreview::Upload { position }, Some(progress), Some(crop)) = (
+            &mut view.preview,
+            &mut self.preview_progress,
+            view.selection,
+        ) {
+            *position = (crop.start + progress.borrow_and_update().as_secs_f64()).min(crop.end);
+        }
+    }
+
+    pub async fn preview_changed(progress: &mut Option<watch::Receiver<Duration>>) {
+        if let Some(progress) = progress
+            && progress.changed().await.is_ok()
+        {
+            return;
+        }
+        pending().await
+    }
+
+    fn finish_preview(&mut self, view: &mut SoundboardAdminView) {
+        self.tasks = JoinSet::new();
+        self.preview_output = None;
+        self.preview_progress = None;
+        view.preview = SoundboardPreview::Idle;
     }
 
     fn close(&mut self, view: &mut SoundboardAdminView) {
         self.open = false;
-        self.tasks = JoinSet::new();
+        self.finish_preview(view);
         self.source = None;
-        self.preview_output = None;
         *view = SoundboardAdminView {
             saving: !self.mutations.is_empty(),
             mutation_revision: view.mutation_revision,
             ..Default::default()
         };
+    }
+
+    fn clear_source(&mut self, view: &mut SoundboardAdminView) {
+        self.source = None;
+        view.waveform = None;
+        view.selection = None;
     }
 
     fn load(&mut self, view: &mut SoundboardAdminView, client: &SpkClient) {
@@ -150,7 +201,7 @@ impl AdminSoundboard {
         }
         if matches!(action, Show) {
             self.open = true;
-            if !view.saving && !view.previewing {
+            if !view.saving && !view.preview.is_playing() {
                 view.validation_error = None;
                 self.load(view, client);
             }
@@ -159,19 +210,21 @@ impl AdminSoundboard {
         if !self.open || view.loading || view.saving || view.decoding {
             return;
         }
-        if view.previewing {
-            if matches!(action, StopPreview) {
-                self.tasks = JoinSet::new();
-                self.preview_output = None;
-                view.previewing = false;
+        if view.preview.is_playing() {
+            match action {
+                StopPreview => {
+                    self.finish_preview(view);
+                    return;
+                }
+                Trim(..) | NudgeTrim(..) | Gain(_)
+                    if matches!(view.preview, SoundboardPreview::Upload { .. }) => {}
+                _ => return,
             }
-            return;
         }
         view.validation_error = None;
         match action {
             ChooseFile(path) => {
-                self.source = None;
-                view.duration = None;
+                self.clear_source(view);
                 view.decoding = true;
                 self.tasks.spawn(async move {
                     Completion::Selected(
@@ -189,23 +242,50 @@ impl AdminSoundboard {
                     )
                 });
             }
-            Discard => {
-                self.source = None;
-                view.duration = None;
+            Discard => self.clear_source(view),
+            Trim(target, seconds) | NudgeTrim(target, seconds) => {
+                if let (Some(source), Some(crop)) = (&self.source, &mut view.selection) {
+                    let previous = (crop.start, crop.end);
+                    let seconds = if matches!(action, NudgeTrim(..)) {
+                        seconds
+                            + match target {
+                                SoundboardTrim::Start | SoundboardTrim::Region => crop.start,
+                                SoundboardTrim::End => crop.end,
+                            }
+                    } else {
+                        seconds
+                    };
+                    source.trim(crop, target, seconds);
+                    if previous != (crop.start, crop.end) && view.preview.is_playing() {
+                        self.finish_preview(view);
+                    }
+                }
             }
-            Preview(crop) => {
-                let Some(source) = self.source.clone() else {
+            Gain(gain) => {
+                if let Some(crop) = &mut view.selection {
+                    crop.gain = gain;
+                    if view.preview.is_playing() {
+                        self.finish_preview(view);
+                    }
+                }
+            }
+            Preview => {
+                let (Some(source), Some(crop)) = (self.source.clone(), view.selection) else {
                     view.validation_error = Some(CHOOSE_AUDIO);
                     return;
                 };
                 let (sender, receiver) = watch::channel(output);
+                let (progress, positions) = watch::channel(Duration::ZERO);
                 self.preview_output = Some(sender);
-                view.previewing = true;
+                self.preview_progress = Some(positions);
+                view.preview = SoundboardPreview::Upload {
+                    position: crop.start,
+                };
                 self.tasks.spawn(async move {
                     Completion::Previewed(
                         async {
                             let clip = prepare_crop(source, crop).await?;
-                            soundboard::play(clip.wav, receiver)
+                            soundboard::play(clip.wav, receiver, Some(progress))
                                 .await
                                 .map_err(|_| WorkError::Action("Could not preview this sound."))
                         }
@@ -217,13 +297,13 @@ impl AdminSoundboard {
                 let Ok(id) = Uuid::parse_str(&id) else { return };
                 let (sender, receiver) = watch::channel(output);
                 self.preview_output = Some(sender);
-                view.previewing = true;
+                view.preview = SoundboardPreview::Saved;
                 let client = client.clone();
                 self.tasks.spawn(async move {
                     Completion::Previewed(
                         async {
                             let wav = client.soundboard_file(id).await?;
-                            soundboard::play(wav, receiver)
+                            soundboard::play(wav, receiver, None)
                                 .await
                                 .map_err(|_| WorkError::Action("Could not preview this sound."))
                         }
@@ -235,6 +315,7 @@ impl AdminSoundboard {
                 view.saving = true;
                 let source = self.source.clone();
                 let client = client.clone();
+                let crop = view.selection;
                 self.mutations.spawn(async move {
                     let kind = match &action {
                         Add { .. } => Mutation::Add,
@@ -242,7 +323,7 @@ impl AdminSoundboard {
                         Delete(_) => Mutation::Delete,
                         _ => unreachable!(),
                     };
-                    (kind, mutate(&client, source, action).await)
+                    (kind, mutate(&client, source, crop, action).await)
                 });
             }
             Show | Close | StopPreview => {}
@@ -266,7 +347,8 @@ impl AdminSoundboard {
                 view.decoding = false;
                 match result {
                     Ok(source) => {
-                        view.duration = Some(source.duration());
+                        view.waveform = Some(source.waveform.clone());
+                        view.selection = Some(source.initial_crop());
                         self.source = Some(Arc::new(source));
                     }
                     Err(error) => {
@@ -275,8 +357,7 @@ impl AdminSoundboard {
                 }
             }
             Completion::Previewed(result) => {
-                self.preview_output = None;
-                view.previewing = false;
+                self.finish_preview(view);
                 if let Err(error) = result {
                     self.show_error(sidebar, error, "Could not preview this sound.")?;
                 }
@@ -298,8 +379,7 @@ impl AdminSoundboard {
             Ok(()) => {
                 let message = match kind {
                     Mutation::Add => {
-                        self.source = None;
-                        view.duration = None;
+                        self.clear_source(view);
                         "Sound added."
                     }
                     Mutation::Edit => "Sound updated.",
@@ -365,12 +445,15 @@ async fn prepare_crop(
 async fn mutate(
     client: &SpkClient,
     source: Option<Arc<SoundSource>>,
+    crop: Option<SoundboardCrop>,
     action: SoundboardAdminAction,
 ) -> Result<(), WorkError> {
     match action {
-        SoundboardAdminAction::Add { crop, name, icon } => {
+        SoundboardAdminAction::Add { name, icon } => {
             let name = sound_name(&name, &icon)?;
-            let source = source.ok_or(WorkError::Validation(CHOOSE_AUDIO))?;
+            let (Some(source), Some(crop)) = (source, crop) else {
+                return Err(WorkError::Validation(CHOOSE_AUDIO));
+            };
             let clip = prepare_crop(source, crop).await?;
             client
                 .add_soundboard_clip(&name, &icon, clip.duration_ms, clip.wav)

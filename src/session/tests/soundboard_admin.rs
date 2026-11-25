@@ -107,13 +107,7 @@ async fn admin_soundboard_uploads_selected_audio_and_peer_refreshes_edits_and_de
     std::fs::write(&sample, wav).unwrap();
     std::fs::write(&invalid, b"not audio").unwrap();
     let mutation = |action| alice.try_send(Command::AdminSoundboard(action)).unwrap();
-    let crop = SoundboardCrop {
-        start: 0.008,
-        end: 0.016,
-        gain: 50,
-    };
     let add = || SoundboardAdminAction::Add {
-        crop,
         name: " Ping ".into(),
         icon: "bell".into(),
     };
@@ -160,6 +154,24 @@ async fn admin_soundboard_uploads_selected_audio_and_peer_refreshes_edits_and_de
         })
         .await;
 
+        let alice_socket = config.get_mut("session=alice").unwrap();
+        wait_for_sidebar(&alice_views, |view| {
+            view.channels.is_some() && matches!(view.connection, Connection::Online)
+        })
+        .await;
+        alice
+            .send(Command::JoinVoice("first".into()))
+            .await
+            .unwrap();
+        let join = receive_voice_frame(alice_socket).await;
+        confirm_voice_join(alice_socket, &join).await;
+        wait_for_sidebar(&alice_views, |view| {
+            view.voice
+                .as_ref()
+                .is_some_and(|voice| voice.is_participating())
+        })
+        .await;
+
         mutation(SoundboardAdminAction::Show);
         let unavailable = wait_for_sidebar(&alice_views, |view| {
             view.admin_soundboard.directory_error == Some("Could not load sounds. Try again.")
@@ -185,27 +197,81 @@ async fn admin_soundboard_uploads_selected_audio_and_peer_refreshes_edits_and_de
         .await;
         mutation(SoundboardAdminAction::ChooseFile(sample));
         wait_for_sidebar(&alice_views, |view| {
-            view.admin_soundboard.duration == Some(0.016)
+            view.admin_soundboard.waveform.is_some()
+                && view
+                    .admin_soundboard
+                    .selection
+                    .is_some_and(|selection| selection.start == 0.0 && selection.end == 0.016)
         })
         .await;
-        mutation(SoundboardAdminAction::Preview(SoundboardCrop {
-            end: 1.0,
-            ..crop
-        }));
+        mutation(SoundboardAdminAction::Trim(SoundboardTrim::Start, 0.008));
+        mutation(SoundboardAdminAction::Gain(201));
+        mutation(SoundboardAdminAction::Preview);
         wait_for_sidebar(&alice_views, |view| {
-            view.admin_soundboard.validation_error.is_some() && !view.admin_soundboard.previewing
+            view.admin_soundboard.validation_error
+                == Some("Upload gain must be between 0% and 200%.")
+                && !view.admin_soundboard.preview.is_playing()
         })
         .await;
-        mutation(SoundboardAdminAction::Preview(crop));
-        wait_for_sidebar(&alice_views, |view| view.admin_soundboard.previewing).await;
+        mutation(SoundboardAdminAction::Gain(50));
+        mutation(SoundboardAdminAction::Preview);
+        wait_for_sidebar(&alice_views, |view| {
+            view.admin_soundboard.preview.is_playing()
+        })
+        .await;
+        mutation(SoundboardAdminAction::Trim(SoundboardTrim::Region, 0.004));
+        wait_for_sidebar(&alice_views, |view| {
+            !view.admin_soundboard.preview.is_playing()
+                && view
+                    .admin_soundboard
+                    .selection
+                    .is_some_and(|selection| selection.start == 0.004 && selection.end == 0.012)
+        })
+        .await;
+        mutation(SoundboardAdminAction::Trim(SoundboardTrim::Region, 0.008));
+        mutation(SoundboardAdminAction::Preview);
+        wait_for_sidebar(&alice_views, |view| {
+            view.admin_soundboard.preview.is_playing()
+        })
+        .await;
+        mutation(SoundboardAdminAction::Gain(75));
+        wait_for_sidebar(&alice_views, |view| {
+            !view.admin_soundboard.preview.is_playing()
+                && view
+                    .admin_soundboard
+                    .selection
+                    .is_some_and(|selection| selection.gain == 75)
+        })
+        .await;
+        mutation(SoundboardAdminAction::Gain(50));
+        mutation(SoundboardAdminAction::Preview);
+        wait_for_sidebar(&alice_views, |view| {
+            view.admin_soundboard.preview.is_playing()
+        })
+        .await;
         mutation(SoundboardAdminAction::StopPreview);
-        wait_for_sidebar(&alice_views, |view| !view.admin_soundboard.previewing).await;
-        mutation(add());
         wait_for_sidebar(&alice_views, |view| {
-            view.action_results == [ActionResult::error("Could not save the sound. Try again.")]
-                && view.admin_soundboard.duration == Some(0.016)
+            !view.admin_soundboard.preview.is_playing()
         })
         .await;
+        alice.send(Command::LeaveVoice).await.unwrap();
+        assert_eq!(
+            receive_voice_frame(alice_socket).await,
+            value!({"type":"voice:leave","sid":join["sid"]})
+        );
+        mutation(add());
+        let sidebar = wait_for_sidebar(&alice_views, |view| {
+            view.action_results == [ActionResult::error("Could not save the sound. Try again.")]
+        })
+        .await;
+        let selection = sidebar
+            .admin_soundboard
+            .selection
+            .expect("retain the failed selection");
+        assert_eq!(selection.start, 0.008);
+        assert_eq!(selection.end - selection.start, 0.008);
+        assert_eq!(selection.gain, 50);
+        assert!(sidebar.admin_soundboard.waveform.is_some());
         mutation(add());
         wait_for_sidebar(&alice_views, |view| {
             view.action_results == [ActionResult::success("Sound added.")]
@@ -213,6 +279,8 @@ async fn admin_soundboard_uploads_selected_audio_and_peer_refreshes_edits_and_de
         .await;
         wait_for_sidebar(&alice_views, |view| {
             view.action_results.is_empty()
+                && view.admin_soundboard.waveform.is_none()
+                && view.admin_soundboard.selection.is_none()
                 && view
                     .admin_soundboard
                     .clips
