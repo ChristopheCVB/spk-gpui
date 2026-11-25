@@ -2,6 +2,7 @@ use super::*;
 use crate::session::{SoundboardCrop, SoundboardTrim as Trim, SoundboardWaveform};
 
 const HANDLE_WIDTH: Pixels = px(16.0);
+const GRIP_SIZE: Pixels = px(20.0);
 const KEY_STEP: f64 = 0.1;
 
 #[derive(Clone, Copy)]
@@ -32,7 +33,7 @@ impl SoundboardForm {
         cx: &Context<Settings>,
     ) -> impl IntoElement {
         let theme = cx.theme();
-        let waveform = waveform.clone();
+        let drawing = waveform.clone();
         let duration = waveform.duration;
         let peak_color = theme.muted_foreground;
         let selection_color = theme.primary.opacity(0.22);
@@ -50,9 +51,9 @@ impl SoundboardForm {
         let draw = canvas(
             |_, _, _| (),
             move |bounds, (), window, _| {
-                for (bin, peak) in waveform.peaks.iter().enumerate() {
-                    let left = waveform.peak_width * bin as f64;
-                    let right = (left + waveform.peak_width).min(1.0);
+                for (bin, peak) in drawing.peaks.iter().enumerate() {
+                    let left = drawing.peak_width * bin as f64;
+                    let right = (left + drawing.peak_width).min(1.0);
                     let width = bounds.size.width * (right - left) as f32;
                     let height = (bounds.size.height * (peak * 0.85)).max(px(1.0));
                     window.paint_quad(fill(
@@ -123,16 +124,16 @@ impl SoundboardForm {
                     )
                     .child(trim_handle(
                         Trim::Start,
-                        crop.start,
-                        duration,
+                        crop,
+                        waveform,
                         disabled,
                         &self.trim_focus[0],
                         cx,
                     ))
                     .child(trim_handle(
                         Trim::End,
-                        crop.end,
-                        duration,
+                        crop,
+                        waveform,
                         disabled,
                         &self.trim_focus[1],
                         cx,
@@ -153,6 +154,35 @@ impl SoundboardForm {
                             .bottom_0()
                             .w(px(2.0))
                             .bg(theme.foreground),
+                    )
+                    .child(
+                        div()
+                            .id("move-sound-selection")
+                            .absolute()
+                            .bottom_0()
+                            .left(relative(
+                                ((crop.start + crop.end) / (2.0 * duration)) as f32,
+                            ))
+                            .ml(-GRIP_SIZE / 2.0)
+                            .size(GRIP_SIZE)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .bg(theme.primary)
+                            .child(
+                                div()
+                                    .h(px(2.0))
+                                    .w(px(10.0))
+                                    .rounded_full()
+                                    .bg(theme.primary_foreground),
+                            )
+                            .when(!disabled, |grip| {
+                                grip.cursor(CursorStyle::OpenHand).on_mouse_down(
+                                    MouseButton::Left,
+                                    begin_drag(Trim::Region, crop.start, cx),
+                                )
+                            }),
                     ),
             )
     }
@@ -174,8 +204,8 @@ fn begin_drag(
 
 fn trim_handle(
     target: Trim,
-    seconds: f64,
-    duration: f64,
+    crop: SoundboardCrop,
+    waveform: &SoundboardWaveform,
     disabled: bool,
     focus: &FocusHandle,
     cx: &Context<Settings>,
@@ -183,11 +213,14 @@ fn trim_handle(
     let theme = cx.theme();
     let start = matches!(target, Trim::Start);
     let label = if start { "Trim start" } else { "Trim end" };
+    let seconds = if start { crop.start } else { crop.end };
+    let duration = waveform.duration;
+    let (minimum, maximum) = waveform.trim_bounds(crop, target);
     div()
         .absolute()
         .left(relative((seconds / duration) as f32))
         .top_0()
-        .bottom_0()
+        .bottom(GRIP_SIZE)
         .child(
             div()
                 .id(label)
@@ -208,8 +241,8 @@ fn trim_handle(
                 .aria_label(label)
                 .aria_value(format!("{seconds:.3} s"))
                 .aria_numeric_value(seconds)
-                .aria_min_numeric_value(0.0)
-                .aria_max_numeric_value(duration)
+                .aria_min_numeric_value(minimum)
+                .aria_max_numeric_value(maximum)
                 .aria_numeric_value_step(KEY_STEP)
                 .aria_orientation(Orientation::Horizontal)
                 .child(
@@ -233,8 +266,8 @@ fn trim_handle(
                             let action = match event.keystroke.key.as_str() {
                                 "left" | "down" => Action::NudgeTrim(target, -step),
                                 "right" | "up" => Action::NudgeTrim(target, step),
-                                "home" => Action::Trim(target, 0.0),
-                                "end" => Action::Trim(target, duration),
+                                "home" => Action::Trim(target, minimum),
+                                "end" => Action::Trim(target, maximum),
                                 _ => return,
                             };
                             settings.soundboard_action(action, cx);

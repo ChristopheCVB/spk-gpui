@@ -2,7 +2,7 @@ use std::{
     fs::{self, File},
     io::{Cursor, Read},
     num::NonZero,
-    ops::Range,
+    ops::{Range, RangeInclusive},
     path::Path,
     sync::Arc,
     time::Duration,
@@ -44,6 +44,41 @@ pub struct Waveform {
     pub duration: f64,
     pub peaks: Arc<[f32]>,
     pub peak_width: f64,
+    rate: u32,
+    frames: usize,
+}
+
+impl Waveform {
+    pub fn trim_bounds(&self, crop: Crop, target: Trim) -> (f64, f64) {
+        let bounds = self.trim_frames(crop, target);
+        (self.seconds(*bounds.start()), self.seconds(*bounds.end()))
+    }
+
+    fn trim_frames(&self, crop: Crop, target: Trim) -> RangeInclusive<usize> {
+        let minimum = (self.rate as usize).div_ceil(1000);
+        let maximum = self.rate as usize * MAX_SECONDS as usize;
+        let start = self.frame(crop.start);
+        let end = self.frame(crop.end);
+        if self.frames < minimum {
+            return match target {
+                Trim::Start | Trim::Region => start..=start,
+                Trim::End => end..=end,
+            };
+        }
+        match target {
+            Trim::Start => end.saturating_sub(maximum)..=end - minimum,
+            Trim::End => start + minimum..=(start + maximum).min(self.frames),
+            Trim::Region => 0..=self.frames - (end - start),
+        }
+    }
+
+    fn frame(&self, seconds: f64) -> usize {
+        (seconds * f64::from(self.rate)).round() as usize
+    }
+
+    fn seconds(&self, frames: usize) -> f64 {
+        frames as f64 / f64::from(self.rate)
+    }
 }
 
 pub(crate) struct PreparedSound {
@@ -53,9 +88,7 @@ pub(crate) struct PreparedSound {
 
 pub(crate) struct SoundSource {
     source: Vec<u8>,
-    rate: u32,
     channels: u16,
-    frames: usize,
     pub waveform: Waveform,
 }
 
@@ -88,13 +121,13 @@ impl SoundSource {
         )?;
         Ok(Self {
             source,
-            rate,
             channels,
-            frames,
             waveform: Waveform {
                 duration: frames as f64 / f64::from(rate),
                 peaks: peaks.into(),
                 peak_width: frames_per_peak as f64 / frames as f64,
+                rate,
+                frames,
             },
         })
     }
@@ -108,29 +141,23 @@ impl SoundSource {
     }
 
     pub fn trim(&self, crop: &mut Crop, target: Trim, seconds: f64) {
-        let minimum = (self.rate as usize).div_ceil(1000);
-        if self.frames < minimum || !seconds.is_finite() {
+        if !seconds.is_finite() {
             return;
         }
-        let maximum = self.rate as usize * MAX_SECONDS as usize;
-        let mut start = self.frame(crop.start);
-        let mut end = self.frame(crop.end);
-        let value = self.frame(seconds);
+        let waveform = &self.waveform;
+        let bounds = waveform.trim_frames(*crop, target);
+        let frame = waveform
+            .frame(seconds)
+            .clamp(*bounds.start(), *bounds.end());
         match target {
-            Trim::Start => start = value.clamp(end.saturating_sub(maximum), end - minimum),
-            Trim::End => end = value.clamp(start + minimum, (start + maximum).min(self.frames)),
+            Trim::Start => crop.start = waveform.seconds(frame),
+            Trim::End => crop.end = waveform.seconds(frame),
             Trim::Region => {
-                let length = end - start;
-                start = value.min(self.frames - length);
-                end = start + length;
+                let length = waveform.frame(crop.end) - waveform.frame(crop.start);
+                crop.start = waveform.seconds(frame);
+                crop.end = waveform.seconds(frame + length);
             }
         }
-        crop.start = start as f64 / f64::from(self.rate);
-        crop.end = end as f64 / f64::from(self.rate);
-    }
-
-    fn frame(&self, seconds: f64) -> usize {
-        (seconds * f64::from(self.rate)).round() as usize
     }
 
     pub fn crop(&self, crop: Crop) -> Result<PreparedSound, &'static str> {
@@ -145,12 +172,14 @@ impl SoundSource {
         if crop.gain > 200 {
             return Err("Upload gain must be between 0% and 200%.");
         }
-        let rate = f64::from(self.rate);
-        let start = self.frame(crop.start);
-        let end = self.frame(crop.end);
+        let sample_rate = self.waveform.rate;
+        let rate = f64::from(sample_rate);
+        let start = self.waveform.frame(crop.start);
+        let end = self.waveform.frame(crop.end);
         let frames = end - start;
         let duration_ms = (frames as f64 * 1000.0 / rate).round() as u32;
-        if frames * 1000 < self.rate as usize || frames > self.rate as usize * MAX_SECONDS as usize
+        if frames * 1000 < sample_rate as usize
+            || frames > sample_rate as usize * MAX_SECONDS as usize
         {
             return Err(BAD_CROP);
         }
@@ -165,8 +194,8 @@ impl SoundSource {
         wav.extend((36 + padded as u32).to_le_bytes());
         wav.extend(b"WAVEfmt \x10\0\0\0\x01\0");
         wav.extend(self.channels.to_le_bytes());
-        wav.extend(self.rate.to_le_bytes());
-        wav.extend((self.rate * u32::from(block)).to_le_bytes());
+        wav.extend(sample_rate.to_le_bytes());
+        wav.extend((sample_rate * u32::from(block)).to_le_bytes());
         wav.extend(block.to_le_bytes());
         wav.extend(b"\x18\0data");
         wav.extend((size as u32).to_le_bytes());

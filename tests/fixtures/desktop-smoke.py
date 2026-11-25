@@ -38,6 +38,8 @@ from livekit_fixture import livekit_server
 ROOT = Path(__file__).resolve().parents[2]
 WEB_REPO = "https://github.com/meeehdi-dev/spk.git"
 WEB_REVISION = "43613954d119eae4fd30e25a1f969b4327c58e89"
+R2_SIGNER = "server/utils/r2sign.ts"
+R2_ORIGIN = b"https://${c.accountId}.r2.cloudflarestorage.com"
 EMAIL = "reader@spk.test"
 ADMIN_EMAIL = "author@spk.test"
 PASSWORD = "fixture-password-42"
@@ -96,7 +98,12 @@ def service(args, log, cwd, env):
                 process.wait()
 
 
-def web_checkout(work, logs):
+def replace_signer(web, staging, content):
+    staging.write_bytes(content)
+    staging.replace(web / R2_SIGNER)
+
+
+def web_checkout(work, logs, attempt):
     web = work / "spk-web"
     if web.is_symlink():
         raise RuntimeError(f"Expected a fixture checkout, found a symlink: {web}")
@@ -107,12 +114,24 @@ def web_checkout(work, logs):
         ["git", "-C", web, "remote", "get-url", "origin"], text=True,
     ).strip() != WEB_REPO:
         raise RuntimeError(f"Expected a fixture checkout of {WEB_REPO}: {web}")
-    if subprocess.check_output(["git", "-C", web, "status", "--porcelain", "--untracked-files=no"]):
-        raise RuntimeError(f"Pinned SPK Web checkout has local changes: {web}")
+    changes = subprocess.check_output(
+        ["git", "-C", web, "status", "--porcelain", "--untracked-files=no"],
+    )
     revision = subprocess.run(
         ["git", "-C", web, "rev-parse", "--verify", "HEAD"],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
     ).stdout.strip()
+    if changes:
+        if revision != WEB_REVISION or changes != f" M {R2_SIGNER}\n".encode():
+            raise RuntimeError(f"Pinned SPK Web checkout has local changes: {web}")
+        original = subprocess.check_output(["git", "-C", web, "show", f"HEAD:{R2_SIGNER}"])
+        # Recover only the routing substitution, including the last attempt's ephemeral port.
+        patched = re.escape(original).replace(
+            re.escape(R2_ORIGIN), rb"http://127\.0\.0\.1:[1-9][0-9]{0,4}",
+        )
+        if original.count(R2_ORIGIN) != 1 or not re.fullmatch(patched, (web / R2_SIGNER).read_bytes()):
+            raise RuntimeError(f"Pinned SPK Web checkout has local changes: {web}")
+        replace_signer(web, attempt / "r2sign.ts", original)
     if revision != WEB_REVISION:
         subprocess.run(["git", "-C", web, "fetch", "--depth=1", "origin", WEB_REVISION], check=True)
         subprocess.run(["git", "-C", web, "checkout", "--detach", WEB_REVISION], check=True)
@@ -177,16 +196,15 @@ def sound_storage(web, directory, log):
         def log_message(self, _format, *_args):
             print(self.command, urlsplit(self.path).path, file=log, flush=True)
 
-    signer = web / "server/utils/r2sign.ts"
-    original = signer.read_text()
-    r2_origin = "https://${c.accountId}.r2.cloudflarestorage.com"
-    if original.count(r2_origin) != 1:
+    original = (web / R2_SIGNER).read_bytes()
+    if original.count(R2_ORIGIN) != 1:
         raise RuntimeError("Update the fixture R2 routing for the pinned SPK Web revision")
     with HTTPServer(("127.0.0.1", 0), ObjectStorage) as storage:
         origin = f"http://127.0.0.1:{storage.server_port}"
         thread = Thread(target=storage.serve_forever, daemon=True)
         # Keep the real presign and save handlers. Only their fixture object-store origin changes.
-        signer.write_text(original.replace(r2_origin, origin))
+        staging = directory / "r2sign.ts"
+        replace_signer(web, staging, original.replace(R2_ORIGIN, origin.encode()))
         thread.start()
         try:
             yield {
@@ -196,22 +214,25 @@ def sound_storage(web, directory, log):
                 "NUXT_R2_SECRET_ACCESS_KEY": "smoke-secret-key",
             }
         finally:
-            signer.write_text(original)
             storage.shutdown()
             thread.join()
+            replace_signer(web, staging, original)
 
 
 def sound_sources(directory):
-    # Powers of two make the expected 24-bit samples independent of rounding.
+    # Each section has its own pitch and uses integer samples to make the crop exact.
     for name, sections in (
-        ("Short source.wav", [(3000, 2048)]),
-        ("Long source.wav", [(6100, 2048), (8900, 4096), (900, 8192), (100, 12288)]),
+        ("Short source.wav", [(3000, 2048, 500)]),
+        ("Long source.wav", [(6100, 2048, 500), (8900, 4096, 1000),
+                             (900, 8192, 2000), (100, 12288, 4000)]),
     ):
         with wave.open(str(directory / name), "wb") as wav:
             wav.setparams((1, 2, SOUND_RATE, 0, "NONE", "not compressed"))
-            for ms, amplitude in sections:
-                period = struct.pack("<hh", amplitude, -amplitude)
-                wav.writeframes(period * (ms * SOUND_RATE // 2000))
+            for ms, amplitude, frequency in sections:
+                half_period = SOUND_RATE // frequency // 2
+                period = struct.pack("<h", amplitude) * half_period
+                period += struct.pack("<h", -amplitude) * half_period
+                wav.writeframes(period * (ms * frequency // 1000))
     return directory / "Short source.wav", directory / "Long source.wav"
 
 
@@ -229,8 +250,8 @@ def verify_saved_sound(admin):
             raise RuntimeError(f"Unexpected cropped WAV format or duration: {wav.getparams()}")
         pcm = wav.readframes(wav.getnframes())
     # 6.100–15.900 s at 150% gain spans 8.9 s of the middle tone and 0.9 s of the last tone.
-    middle = bytes.fromhex("000018 0000e8") * (8_900 * SOUND_RATE // 2000)
-    tail = bytes.fromhex("000030 0000d0") * (900 * SOUND_RATE // 2000)
+    middle = (bytes.fromhex("000018") * 4 + bytes.fromhex("0000e8") * 4) * 8900
+    tail = (bytes.fromhex("000030") * 2 + bytes.fromhex("0000d0") * 2) * 1800
     if pcm != middle + tail:
         raise RuntimeError("Stored PCM differs from the selected excerpt at 150% gain")
 
@@ -392,9 +413,10 @@ def walk(node):
 
 
 class Desktop:
-    def __init__(self, process, launches):
+    def __init__(self, process, launches, pulse_server):
         self.process = process
         self.launches = launches
+        self.pulse_server = pulse_server
         self.checked_launches = []
 
     def nodes(self):
@@ -779,6 +801,34 @@ class Desktop:
         if not 0 < painted_height(12) < painted_height(15.25):
             raise RuntimeError("The source waveform did not show its louder section after 15 seconds")
 
+    def check_preview_audio(self):
+        # Record the private null sink while the preview is still within its 1000 Hz section.
+        try:
+            subprocess.run(
+                ["parec", f"--server={self.pulse_server}", "--device=spk_smoke.monitor",
+                 "--raw", "--format=s16le", "--rate=48000", "--channels=1", "--latency-msec=50"],
+                stdout=subprocess.PIPE, check=True, timeout=3.5,
+            )
+        except subprocess.TimeoutExpired as error:
+            pcm = error.stdout or b""
+        else:
+            raise RuntimeError("The silent Media Output monitor stopped recording unexpectedly")
+
+        samples = [sample for (sample,) in struct.iter_unpack("<h", pcm[:len(pcm) & ~1])]
+        window = 9600  # 200 ms, or 200 cycles of the selected tone.
+        for offset in range(0, len(samples) - window + 1, window):
+            crossings = 0
+            negative = False
+            for sample in samples[offset:offset + window]:
+                if sample < -512:
+                    negative = True
+                elif sample > 512 and negative:
+                    crossings += 1
+                    negative = False
+            if 180 <= crossings <= 220:
+                return
+        raise RuntimeError("The silent Media Output did not play the selected 1000 Hz tone")
+
     def check_soundboard_preview(self, logs):
         def position():
             try:
@@ -803,6 +853,7 @@ class Desktop:
         reset(6.1)
         play()
         self.screenshot(logs, "soundboard-preview-dark.png")
+        self.check_preview_audio()
         self.click("Stop preview", "push button")
         reset(6.1)
 
@@ -861,6 +912,15 @@ class Desktop:
         x, y = center(end)
         self.drag_horizontal(x, y, waveform.x)
         self.find("Duration: 0.001 s")
+        start_bounds = self.bounds(start, slider)
+        end_bounds = self.bounds(end, slider)
+        grip_x = (start_bounds.x + start_bounds.width + end_bounds.x) // 2
+        grip_y = waveform.y + waveform.height - 10
+        self.drag_horizontal(grip_x, grip_y, waveform.x)
+        self.expect_sound_selection(0, 0.001)
+        self.drag_horizontal(waveform.x + start_bounds.width, grip_y, grip_x)
+        wait_for("the 1 ms selection to move back", lambda: 3.5 < self.sound_timing("Start") < 4.5)
+        self.find("Duration: 0.001 s")
         x, y = center(end)
         self.drag_horizontal(x, y, waveform.x + waveform.width - 1)
         self.find("Duration: 10.000 s")
@@ -880,6 +940,11 @@ class Desktop:
         self.tab_to(end, slider)
         self.key("Left")
         self.expect_sound_selection(6.1, 15.9)
+        for label, minimum, maximum in ((start, 5.9, 15.899), (end, 6.101, 16.0)):
+            value = self.find(label, slider).get_value_iface()
+            if (abs(value.get_minimum_value() - minimum) > 0.00001
+                    or abs(value.get_maximum_value() - maximum) > 0.00001):
+                raise RuntimeError(f"{label} did not expose its current trim limits")
         self.replace_sound_field("Name", SOUND_NAME)
         self.replace_sound_field("Upload gain (%)", "150")
         self.click("Icon", "combo box")
@@ -1158,7 +1223,7 @@ def desktop_session(binary, launches, log, env):
     client_env = {key: value for key, value in env.items()
                   if key.lower() not in ("http_proxy", "https_proxy", "all_proxy")}
     with service([binary], log, ROOT, client_env) as client:
-        desktop = Desktop(client, launches)
+        desktop = Desktop(client, launches, env["PULSE_SERVER"])
         try:
             yield desktop
             desktop.ensure_launches_checked()
@@ -1190,7 +1255,7 @@ def main(work, artifacts):
         env={**env, "XDG_CURRENT_DESKTOP": "GTK"}, check=True,
     )
     sources = sound_sources(attempt)
-    web = web_checkout(work, logs)
+    web = web_checkout(work, logs, attempt)
     port_file = work / "port"
     with socket.socket() as listener:
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

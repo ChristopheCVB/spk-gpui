@@ -168,7 +168,7 @@ impl Settings {
         let form = &self.soundboard;
         let busy = board.saving || board.decoding || board.loading || form.picker_open;
         let disabled = busy || board.previewing;
-        let selection_disabled = busy || board.previewing && board.preview_position.is_none();
+        let selection_disabled = busy || board.previewing_saved();
         let theme = cx.theme();
         let error = form
             .picker_error

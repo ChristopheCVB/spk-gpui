@@ -61,6 +61,12 @@ pub struct SoundboardAdminView {
     pub notice: Option<&'static str>,
 }
 
+impl SoundboardAdminView {
+    pub fn previewing_saved(&self) -> bool {
+        self.previewing && self.preview_position.is_none()
+    }
+}
+
 pub(super) enum Completion {
     Loaded(Result<Vec<SoundboardClip>, Failure>),
     Selected(Result<SoundSource, &'static str>),
@@ -144,6 +150,12 @@ impl AdminSoundboard {
         };
     }
 
+    fn clear_source(&mut self, view: &mut SoundboardAdminView) {
+        self.source = None;
+        view.waveform = None;
+        view.selection = None;
+    }
+
     fn load(&mut self, view: &mut SoundboardAdminView, client: &SpkClient) {
         if !view.loading {
             view.loading = true;
@@ -188,7 +200,7 @@ impl AdminSoundboard {
                     self.finish_preview(view);
                     return;
                 }
-                Trim(..) | NudgeTrim(..) | Gain(_) if self.preview_progress.is_some() => {}
+                Trim(..) | NudgeTrim(..) | Gain(_) if !view.previewing_saved() => {}
                 _ => return,
             }
         }
@@ -196,9 +208,7 @@ impl AdminSoundboard {
         view.notice = None;
         match action {
             ChooseFile(path) => {
-                self.source = None;
-                view.waveform = None;
-                view.selection = None;
+                self.clear_source(view);
                 view.decoding = true;
                 self.tasks.spawn(async move {
                     Completion::Selected(
@@ -208,11 +218,7 @@ impl AdminSoundboard {
                     )
                 });
             }
-            Discard => {
-                self.source = None;
-                view.waveform = None;
-                view.selection = None;
-            }
+            Discard => self.clear_source(view),
             Trim(target, seconds) | NudgeTrim(target, seconds) => {
                 if let (Some(source), Some(crop)) = (&self.source, &mut view.selection) {
                     let previous = (crop.start, crop.end);
@@ -353,9 +359,7 @@ impl AdminSoundboard {
                 if self.open {
                     let notice = match kind {
                         Mutation::Add => {
-                            self.source = None;
-                            view.waveform = None;
-                            view.selection = None;
+                            self.clear_source(view);
                             "Sound added."
                         }
                         Mutation::Edit => "Sound updated.",
