@@ -538,7 +538,7 @@ class Desktop:
         time.sleep(0.45)
         open_workspace = background(self.check_toast_position(result))
         self.click("New text channel", "push button")
-        self.click("Channel name", "entry")
+        wait_for("Channel name to receive initial focus", lambda: self.focused("Channel name", "entry"))
         self.move(700, 30)
         time.sleep(0.25)
         if background(self.check_toast_position(result)) != open_workspace:
