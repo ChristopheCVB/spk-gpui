@@ -328,11 +328,9 @@ pub struct Sidebar {
     pub admin_accounts: AdminAccountsView,
     pub account_moderation_notice: Option<&'static str>,
     pub user_status: UserStatus,
-    pub user_status_notice: Option<&'static str>,
     pub channels: Option<Vec<Channel>>,
     pub channel_admin: ChannelAdmin,
     pub connection: Connection,
-    pub notice: Option<&'static str>,
     pub load_failed: bool,
     pub chat: Option<ChatView>,
     pub search: SearchView,
@@ -363,18 +361,16 @@ pub struct Sidebar {
 }
 
 impl Sidebar {
-    fn new(profile: Profile, notice: Option<&'static str>) -> Self {
+    fn new(profile: Profile, session_save_error: Option<&'static str>) -> Self {
         Self {
             profile,
             profile_edit: ProfileEdit::Idle,
             admin_accounts: AdminAccountsView::default(),
             account_moderation_notice: None,
             user_status: UserStatus::default(),
-            user_status_notice: None,
             channels: None,
             channel_admin: ChannelAdmin::default(),
             connection: Connection::Connecting,
-            notice,
             load_failed: false,
             chat: None,
             search: SearchView::default(),
@@ -382,7 +378,10 @@ impl Sidebar {
             draft_notice: None,
             read_notice: None,
             alerts: Vec::new(),
-            action_results: Vec::new(),
+            action_results: session_save_error
+                .into_iter()
+                .map(ActionResult::error)
+                .collect(),
             unread: Arc::default(),
             voice: None,
             radio: RadioView::default(),
@@ -713,6 +712,7 @@ async fn watch_session(
     let mut refresh = Refresh::default();
     refresh.fetch_all(client);
     let mut sidebar = Sidebar::new(profile, notice);
+    let mut session_save_error = notice;
     sidebar.user_status = settings.presence.status;
     let mut presence = PresenceReporter::default();
     let mut avatars = AvatarLoads::default();
@@ -754,6 +754,7 @@ async fn watch_session(
     let mut profiles = JoinSet::new();
     let mut account_admin = AccountAdmin::default();
     let mut draft_save_at = None;
+    let mut draft_save_failed = false;
     let end = loop {
         if commands.is_closed() {
             break SessionEnd::Closed;
@@ -814,7 +815,15 @@ async fn watch_session(
                 }
             }
             Some(result) = chat.draft_writes.join_next() => {
-                chat.draft_save_completed(result, &mut sidebar.draft_notice);
+                let saved = chat.draft_save_completed(result);
+                match saved {
+                    Ok(()) => sidebar.draft_notice = None,
+                    Err(message) if !draft_save_failed => {
+                        sidebar.action_results.push(ActionResult::error(message));
+                    }
+                    Err(_) => {}
+                }
+                draft_save_failed = saved.is_err();
             }
             Some(result) = unread.writes.join_next() => {
                 let result = result.unwrap_or(Err(Failure::Connection));
@@ -943,7 +952,9 @@ async fn watch_session(
                 Ok(Command::SignOut) => break SessionEnd::SignOut,
                 Ok(Command::SetUserStatus(status)) => {
                     sidebar.user_status = status;
-                    sidebar.user_status_notice = settings.presence.save(status).await.err();
+                    if let Err(message) = settings.presence.save(status).await {
+                        sidebar.action_results.push(ActionResult::error(message));
+                    }
                 }
                 Ok(Command::Refresh) => {
                     refresh.fetch_all(client);
@@ -1538,7 +1549,11 @@ async fn watch_session(
                 if refresh.dirty.remove(&resource) {
                     refresh.fetch(client, resource);
                 }
-                sidebar.notice = saved.save(client).await.err();
+                let error = saved.save(client).await.err();
+                if let Some(message) = error.filter(|_| error != session_save_error) {
+                    sidebar.action_results.push(ActionResult::error(message));
+                }
+                session_save_error = error;
             }
         }
     };
@@ -1562,12 +1577,12 @@ async fn watch_session(
             }
         }
         if let Some(result) = chat.draft_writes.join_next().await {
-            chat.draft_save_completed(result, &mut sidebar.draft_notice);
+            let _ = chat.draft_save_completed(result);
         }
         if chat.drafts_to_save() {
             chat.save_drafts(store);
             if let Some(result) = chat.draft_writes.join_next().await {
-                chat.draft_save_completed(result, &mut sidebar.draft_notice);
+                let _ = chat.draft_save_completed(result);
             }
         }
     }

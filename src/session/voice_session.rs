@@ -5,7 +5,7 @@ use tokio::{
     time::Instant,
 };
 
-use super::{Command, Sidebar, VoiceProcessingSetting};
+use super::{ActionResult, Command, Sidebar, VoiceProcessingSetting};
 use crate::api::{Channel, Connection, Failure, SpkClient, VoiceModeration, VoiceSocket};
 use crate::sounds::Sound;
 use crate::voice::{
@@ -243,6 +243,7 @@ pub(super) struct DeviceSettings {
     pub(super) path: Option<PathBuf>,
     pub(super) preferred: DevicePreferences,
     pub(super) notice: Option<&'static str>,
+    pub(super) save_failed: bool,
 }
 
 impl DeviceSettings {
@@ -263,19 +264,26 @@ impl DeviceSettings {
             path,
             preferred,
             notice,
+            save_failed: false,
         }
     }
 
-    async fn save(&mut self, preferred: &DevicePreferences) {
-        self.preferred = preferred.clone();
+    async fn save(&mut self, sidebar: &mut Sidebar) {
+        self.preferred = sidebar.voice_intent.preferred.clone();
         let path = self.path.clone();
-        let preferred = preferred.clone();
+        let preferred = self.preferred.clone();
         let saved = spawn_blocking(move || path.is_some_and(|path| preferred.save(&path).is_ok()))
             .await
             .unwrap_or(false);
-        self.notice = (!saved).then_some(
-            "Could not save audio settings. Your choices will only last until you close SPK.",
-        );
+        self.save_failed = !saved;
+        if saved {
+            self.notice = None;
+            sidebar.device_notice = None;
+        } else {
+            sidebar.action_results.push(ActionResult::error(
+                "Could not save audio settings. Your choices will only last until you close SPK.",
+            ));
+        }
     }
 }
 
@@ -849,8 +857,7 @@ impl VoiceSession {
                 if let Some(call) = &self.call {
                     call.apply(&sidebar.voice_intent);
                 }
-                settings.devices.save(&sidebar.voice_intent.preferred).await;
-                sidebar.device_notice = settings.devices.notice;
+                settings.devices.save(sidebar).await;
                 return;
             }
             Command::SetOutputVolume(volume) => {
@@ -893,9 +900,8 @@ impl VoiceSession {
                 if let Some(call) = &self.call {
                     call.apply(&sidebar.voice_intent);
                 }
-                if changed || settings.devices.notice.is_some() {
-                    settings.devices.save(&sidebar.voice_intent.preferred).await;
-                    sidebar.device_notice = settings.devices.notice;
+                if changed || settings.devices.notice.is_some() || settings.devices.save_failed {
+                    settings.devices.save(sidebar).await;
                 }
                 return;
             }
@@ -903,8 +909,7 @@ impl VoiceSession {
                 let volume = volume.min(200);
                 if sidebar.voice_intent.preferred.radio_volume != volume {
                     sidebar.voice_intent.preferred.radio_volume = volume;
-                    settings.devices.save(&sidebar.voice_intent.preferred).await;
-                    sidebar.device_notice = settings.devices.notice;
+                    settings.devices.save(sidebar).await;
                 }
                 return;
             }
@@ -1081,8 +1086,7 @@ impl VoiceSession {
             call.apply(&sidebar.voice_intent);
         }
         if save_preferences {
-            settings.devices.save(&sidebar.voice_intent.preferred).await;
-            sidebar.device_notice = settings.devices.notice;
+            settings.devices.save(sidebar).await;
         }
     }
 }

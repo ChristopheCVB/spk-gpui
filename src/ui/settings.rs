@@ -134,7 +134,12 @@ impl Spk {
         cx: &mut Context<Self>,
     ) {
         self.appearance = appearance;
-        self.appearance_error = appearance.save_to(preference_path("appearance")).is_err();
+        if appearance.save_to(preference_path("appearance")).is_err() {
+            self.show_action_result(
+                ActionResult::error("Could not save your theme preference."),
+                cx,
+            );
+        }
         appearance.apply(window, cx);
         cx.notify();
     }
@@ -302,7 +307,6 @@ impl Spk {
                 ban_reason,
                 ban_target: None,
                 avatar_picker_open: false,
-                avatar_picker_error: None,
                 volumes,
                 message_volume,
                 recorder_focus: cx.focus_handle(),
@@ -365,7 +369,6 @@ struct Settings {
     ban_reason: Entity<InputState>,
     ban_target: Option<String>,
     avatar_picker_open: bool,
-    avatar_picker_error: Option<&'static str>,
     volumes: [Entity<SliderState>; Sound::ALL.len()],
     message_volume: Entity<SliderState>,
     recorder_focus: FocusHandle,
@@ -636,56 +639,32 @@ impl Settings {
             .gap(if app.compact() { px(8.0) } else { px(16.0) })
             .child(card(
                 "Theme",
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(
-                        RadioGroup::vertical("theme-choices")
-                            .children(THEMES.map(Appearance::label))
-                            .selected_index(
-                                THEMES.iter().position(|choice| *choice == app.appearance),
-                            )
-                            .on_change(move |&index, window, cx| {
-                                let _ = theme_app.update(cx, |app, cx| {
-                                    app.set_appearance(THEMES[index], window, cx);
-                                });
-                            }),
-                    )
-                    .when(app.appearance_error, |body| {
-                        body.child(
-                            Label::new("Could not save your theme preference.")
-                                .text_color(cx.theme().danger),
-                        )
+                RadioGroup::vertical("theme-choices")
+                    .children(THEMES.map(Appearance::label))
+                    .selected_index(THEMES.iter().position(|choice| *choice == app.appearance))
+                    .on_change(move |&index, window, cx| {
+                        let _ = theme_app.update(cx, |app, cx| {
+                            app.set_appearance(THEMES[index], window, cx);
+                        });
                     }),
                 cx,
             ))
             .child(card(
                 "Density",
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(
-                        RadioGroup::vertical("density-choices")
-                            .children(DENSITIES.map(Density::label))
-                            .selected_index(
-                                DENSITIES.iter().position(|choice| *choice == app.density),
-                            )
-                            .on_change(move |&index, _, cx| {
-                                let _ = density_app.update(cx, |app, cx| {
-                                    app.density = DENSITIES[index];
-                                    app.density_error =
-                                        app.density.save_to(preference_path("density")).is_err();
-                                    cx.notify();
-                                });
-                            }),
-                    )
-                    .when(app.density_error, |body| {
-                        body.child(
-                            Label::new("Could not save your density preference.")
-                                .text_color(cx.theme().danger),
-                        )
+                RadioGroup::vertical("density-choices")
+                    .children(DENSITIES.map(Density::label))
+                    .selected_index(DENSITIES.iter().position(|choice| *choice == app.density))
+                    .on_change(move |&index, _, cx| {
+                        let _ = density_app.update(cx, |app, cx| {
+                            app.density = DENSITIES[index];
+                            if app.density.save_to(preference_path("density")).is_err() {
+                                app.show_action_result(
+                                    ActionResult::error("Could not save your density preference."),
+                                    cx,
+                                );
+                            }
+                            cx.notify();
+                        });
                     }),
                 cx,
             ))
