@@ -725,7 +725,7 @@ class Desktop:
         self.check_disabled_menu_item("Join")
 
     def choose_sound_source(self, path):
-        self.click("Choose audio file", "push button")
+        self.activate_soundboard_button("Choose audio file")
 
         def picker():
             result = subprocess.run(["xdotool", "search", "--onlyvisible", "--name", "^Open File$"],
@@ -752,6 +752,19 @@ class Desktop:
         wait_for("the native file chooser to close", lambda: not picker())
         subprocess.run(["xdotool", "windowfocus", self.window], check=True)
         self.find("Source waveform")
+
+    def activate_soundboard_button(self, name):
+        def enabled():
+            try:
+                node = self.find_node(name, "push button")
+                if node and node.get_state_set().contains(Atspi.StateType.SENSITIVE):
+                    return node
+            except GLib.Error:
+                return None
+
+        button = wait_for(f"enabled {name} button", enabled)
+        if not button.get_action_iface().do_action(0):
+            raise RuntimeError(f"Could not activate {name}")
 
     def sound_timing(self, label):
         node = self.find(f"{label}: ", partial=True)
@@ -829,9 +842,7 @@ class Desktop:
 
     def check_soundboard_upload(self, sources, logs, admin):
         self.click("Settings", "push button")
-        self.find("Soundboard", "push button")
-        self.tab_to("Soundboard", "push button")
-        self.key("Return")
+        self.activate_soundboard_button("Soundboard")
         self.choose_sound_source(sources[0])
         self.find("Source duration: 3.000 s")
         self.expect_sound_selection(0, 3)
