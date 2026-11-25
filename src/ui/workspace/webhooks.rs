@@ -158,19 +158,13 @@ impl Spk {
 #[derive(Clone)]
 pub(super) struct WebhookRowMenu {
     pub(super) id: String,
-    pub(super) name: String,
     pub(super) muted: bool,
     pub(super) app: WeakEntity<Spk>,
 }
 
 impl WebhookRowMenu {
-    pub(super) fn render(self, menu: SidebarRowMenu) -> AnyElement {
+    pub(super) fn render(self, menu: SidebarRowMenu, button: Button) -> AnyElement {
         let focus = menu.focus();
-        let button = tool_button(
-            "webhook-actions",
-            IconName::Ellipsis,
-            format!("Actions for {}", self.name),
-        );
         menu.render(button, true, Anchor::TopRight, move |menu, _, cx| {
             self.items(menu, Some(&focus), cx)
         })

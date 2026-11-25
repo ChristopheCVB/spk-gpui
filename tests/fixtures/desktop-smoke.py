@@ -562,6 +562,26 @@ class Desktop:
             raise RuntimeError(f"The ellipsis must follow the name of {row}")
         return label
 
+    def check_chat_channel_ellipsis_fill(self, channel):
+        label = self.channel_ellipsis(channel)
+        row = self.bounds(channel, "push button", partial=True)
+        action = self.bounds(label, "push button")
+        self.move(action.x + action.width // 2, action.y + action.height // 2)
+        time.sleep(0.15)
+
+        def fills_match():
+            left = row.x + 22
+            right = action.x + 6
+            crop = f"{right - left + 1}x1+{left}+{action.y + 24}"
+            pixels = subprocess.check_output(
+                ["import", "-window", self.window, "-crop", crop, "-depth", "8", "rgb:-"],
+                timeout=5,
+            )
+            return len(pixels) == (right - left + 1) * 3 and pixels[:3] == pixels[-3:]
+
+        wait_for(f"{channel} to share its hover fill with its ellipsis", fills_match, timeout=3)
+        return label
+
     def open_participant_menu(self, person, context=False):
         if context:
             self.click(person, "panel", button=3)
@@ -601,7 +621,7 @@ class Desktop:
         self.menu_order("Mark read", "Mute notifications")
         self.absent("Rename", "menu item")
         self.click("Mute notifications", "menu item")
-        target_action = self.channel_ellipsis(target)
+        target_action = self.check_chat_channel_ellipsis_fill(target)
         self.move(1000, 30)
         self.tab_to(target_action, "push button")
         self.key("Return")
@@ -610,6 +630,7 @@ class Desktop:
 
         self.click(target, "push button", partial=True)
         self.visible_text("Smoke destination loaded")
+        self.check_chat_channel_ellipsis_fill(target)
         self.move(1000, 30)
         watch_buttons = [f"Watch {person}’s {feed}" for feed in ("camera", "screen share")]
         for label in watch_buttons:
@@ -1128,6 +1149,7 @@ class Desktop:
         visible_bounds = visible_row.get_component_iface().get_extents(Atspi.CoordType.WINDOW)
         if visible_bounds.x + visible_bounds.width > action_bounds.x:
             raise RuntimeError("The webhook ellipsis must follow its primary button")
+        self.check_chat_channel_ellipsis_fill("Smoke Webhook")
         self.screenshot(logs, "webhook-actions-dark.png")
         move(700, 30)
         wait_for("the webhook ellipsis to hide after hover", hidden)
@@ -1332,6 +1354,7 @@ class Desktop:
 
     def check(self, post_live_alert, logs):
         self.find("smoke-target", "push button", partial=True)
+        self.check_chat_channel_ellipsis_fill("Smoke Webhook")
         self.click("Smoke Webhook", "push button", partial=True)
         self.find("Smoke deploy alert", partial=True)
         self.visible_text("Smoke embed body")

@@ -958,14 +958,29 @@ impl Spk {
                 this.send(command, None, cx);
             }));
         let row = sidebar_chat_row(row.pr_1(), highlighted, highlighted, cx);
+        let theme = cx.theme();
+        // The row paints the hover fill across both buttons.
+        let menu_button = tool_button(
+            if webhook {
+                "webhook-actions"
+            } else {
+                "channel-actions"
+            },
+            IconName::Ellipsis,
+            format!("Actions for {name}"),
+        )
+        .custom(
+            ButtonCustomVariant::new(cx)
+                .foreground(theme.secondary_foreground)
+                .active(theme.secondary_active),
+        );
         if webhook {
             let webhook_menu = webhooks::WebhookRowMenu {
                 id: menu_id,
-                name,
                 muted,
                 app,
             };
-            let ellipsis = webhook_menu.clone().render(row_menu);
+            let ellipsis = webhook_menu.clone().render(row_menu, menu_button);
             return row
                 .child(select)
                 .child(ellipsis)
@@ -973,14 +988,8 @@ impl Spk {
         }
 
         let focus = row_menu.focus();
-        let (right_click, ellipsis) = row_menu.triggers(
-            tool_button(
-                "channel-actions",
-                IconName::Ellipsis,
-                format!("Actions for {name}"),
-            ),
-            Anchor::TopRight,
-            move |menu, _, cx| {
+        let (right_click, ellipsis) =
+            row_menu.triggers(menu_button, Anchor::TopRight, move |menu, _, cx| {
                 let menu = menu
                     .item(mark_read_item(menu_id.clone(), app.clone()))
                     .item(notifications::mute_item(
@@ -992,8 +1001,7 @@ impl Spk {
                     Some(actions) => actions.items(menu, &focus, cx),
                     None => menu,
                 }
-            },
-        );
+            });
         row.child(select).child(ellipsis).context_menu(right_click)
     }
 
