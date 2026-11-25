@@ -1,6 +1,6 @@
 use gpui_kit::component::{
     menu::PopupMenuItem,
-    notification::{Notification, NotificationDelivery},
+    notification::{Notification, NotificationDelivery, NotificationType},
 };
 use url::Url;
 
@@ -49,6 +49,15 @@ pub(super) fn mute_item(channel_id: String, muted: bool, app: WeakEntity<Spk>) -
 }
 
 impl Spk {
+    pub(super) fn show_action_result(&self, result: ActionResult, cx: &mut Context<Self>) {
+        let entity_id = cx.entity_id();
+        cx.defer(move |cx| {
+            cx.with_window(entity_id, |window, cx| {
+                push_action_result(result, window, cx)
+            });
+        });
+    }
+
     pub(super) fn change_notifications(
         &mut self,
         change: impl FnOnce(&mut notifications::Preferences),
@@ -58,8 +67,14 @@ impl Spk {
             return;
         };
         change(&mut self.notification_preferences);
-        self.notification_error = preferences_path(user_id)
-            .is_none_or(|path| self.notification_preferences.save(&path).is_err());
+        if preferences_path(user_id)
+            .is_none_or(|path| self.notification_preferences.save(&path).is_err())
+        {
+            self.show_action_result(
+                ActionResult::error("Could not save notification settings."),
+                cx,
+            );
+        }
         cx.notify();
     }
 
@@ -93,8 +108,16 @@ impl Spk {
                 window.push_notification(
                     Notification::new()
                         .delivery(NotificationDelivery::InApp)
-                        .title(alert.title)
-                        .message(body)
+                        .placement(Anchor::BottomRight)
+                        .content(move |_, _, _| {
+                            div()
+                                .flex()
+                                .flex_col()
+                                .text_sm()
+                                .child(Label::new(alert.title.clone()).font_semibold())
+                                .child(Label::new(body.clone()))
+                                .into_any_element()
+                        })
                         .action(move |_, _, cx| {
                             let app = app.clone();
                             let target = target.clone();
@@ -156,6 +179,73 @@ impl Spk {
             cx.notify();
         }
         self.alert_activation.send_replace(Some(target));
+    }
+}
+
+#[derive(Default)]
+struct ActionToasts(Vec<WeakEntity<Notification>>);
+
+impl Global for ActionToasts {}
+
+pub(super) fn dismiss_action_toasts(
+    event: &KeystrokeEvent,
+    shortcuts: &Shortcuts,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    if !window.is_window_active() || event.input_preference == InputPreference::CharacterInput {
+        return false;
+    }
+    let mut modifiers = event.keystroke.modifiers;
+    modifiers.shift |= window.modifiers().shift;
+    if !modifiers.secondary(cx) || !modifiers.shift || modifiers.number_of_modifiers() != 2 {
+        return false;
+    }
+    if event.keystroke.key != shortcuts.action_toast_key(cx.platform_info().is_mac()) {
+        return false;
+    }
+    let visible = window.notifications(cx);
+    let tracked = &mut cx.default_global::<ActionToasts>().0;
+    let before = tracked.len();
+    tracked.retain(|toast| {
+        !visible
+            .iter()
+            .any(|note| note.entity_id() == toast.entity_id())
+    });
+    if tracked.len() == before {
+        return false;
+    }
+    window.remove_notification::<ActionResult>(cx);
+    true
+}
+
+pub(super) fn push_action_result(result: ActionResult, window: &mut Window, cx: &mut App) {
+    let (severity, message) = match result {
+        ActionResult::Success(message) => (NotificationType::Success, message),
+        ActionResult::Info(message) => (NotificationType::Info, message),
+        ActionResult::Warning(message) => (NotificationType::Warning, message),
+        ActionResult::Error(message) => (NotificationType::Error, message),
+    };
+    let id = SharedString::from(format!("{severity:?}:{message}"));
+    let message = SharedString::from(message);
+    let existing = window.notifications(cx);
+    window.push_notification(
+        Notification::new()
+            .with_type(severity)
+            .content(move |_, _, _| Label::new(message.clone()).text_sm().into_any_element())
+            .id1::<ActionResult>(id)
+            .delivery(NotificationDelivery::InApp)
+            .placement(Anchor::BottomRight),
+        cx,
+    );
+    if let Some(added) = window
+        .notifications(cx)
+        .iter()
+        .find(|note| !existing.contains(note))
+    {
+        let tracked = &mut cx.default_global::<ActionToasts>().0;
+        tracked.retain(|toast| toast.upgrade().is_some());
+        tracked.push(added.downgrade());
     }
 }
 

@@ -59,7 +59,7 @@ impl MarkdownPlugin for MessageSpoiler {
         let app = self.app.clone();
         let emoji = emoji::MessageEmoji::new(false);
         let rich_text = TextView::markdown(id.clone(), emoji.display_markdown(&content.formatted))
-            .style(chat_text_style(cx))
+            .style(chat_text_style(cx, context.font_size() * INLINE_CODE_SCALE))
             .text_size(context.font_size())
             .line_height(context.line_height())
             .selectable(false)
@@ -148,14 +148,6 @@ impl MarkdownPlugin for MessageSpoiler {
 
 // Match the revealed Markdown's layout without painting or exposing its content to input or accessibility.
 struct LayoutOnly(AnyElement);
-
-impl IntoElement for LayoutOnly {
-    type Element = Self;
-
-    fn into_element(self) -> Self {
-        self
-    }
-}
 
 impl Element for LayoutOnly {
     type RequestLayoutState = ();

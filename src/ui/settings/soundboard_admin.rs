@@ -62,9 +62,8 @@ pub(super) struct SoundboardForm {
     drag: Option<waveform::Drag>,
     gain: Entity<InputState>,
     picker_open: bool,
-    picker_error: Option<&'static str>,
     clip_action: Option<ClipAction>,
-    revision: u64,
+    mutation_revision: u64,
 }
 
 impl SoundboardForm {
@@ -84,9 +83,8 @@ impl SoundboardForm {
             drag: None,
             gain,
             picker_open: false,
-            picker_error: None,
             clip_action: None,
-            revision: 0,
+            mutation_revision: 0,
         }
     }
 }
@@ -101,19 +99,18 @@ impl Settings {
     pub(super) fn sync_soundboard_form(&mut self, cx: &mut Context<Self>) {
         if let View::SignedIn(sidebar) = &self.spk.read(cx).view {
             let board = &sidebar.admin_soundboard;
-            if self.soundboard.revision != board.revision && board.notice.is_some() {
+            if self.soundboard.mutation_revision != board.mutation_revision {
                 self.soundboard.clip_action = None;
             }
-            if board.waveform.is_none() || self.soundboard.revision != board.revision {
+            if board.waveform.is_none() {
                 self.soundboard.drag = None;
             }
-            self.soundboard.revision = board.revision;
+            self.soundboard.mutation_revision = board.mutation_revision;
         }
     }
 
     fn choose_sound_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.soundboard.picker_open = true;
-        self.soundboard.picker_error = None;
         let selection = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -125,12 +122,10 @@ impl Settings {
             let _ = settings.update_in(cx, |settings, window, cx| {
                 let form = &mut settings.soundboard;
                 form.picker_open = false;
-                if settings.tab != Tab::Soundboard {
-                    return;
-                }
                 match result {
-                    Ok(Ok(Some(paths))) => {
+                    Ok(Ok(Some(paths))) if settings.tab == Tab::Soundboard => {
                         if let Some(path) = paths.into_iter().next() {
+                            form.drag = None;
                             let name: String = path
                                 .file_stem()
                                 .and_then(|name| name.to_str())
@@ -149,8 +144,13 @@ impl Settings {
                             settings.soundboard_action(Action::ChooseFile(path), cx);
                         }
                     }
-                    Ok(Ok(None)) => {}
-                    _ => form.picker_error = Some("Could not open the file picker."),
+                    Ok(Ok(_)) => {}
+                    _ => settings.spk.update(cx, |app, cx| {
+                        app.show_action_result(
+                            ActionResult::error("Could not open the file picker."),
+                            cx,
+                        );
+                    }),
                 }
                 cx.notify();
             });
@@ -171,21 +171,19 @@ impl Settings {
         let saved_preview = matches!(board.preview, SoundboardPreview::Saved);
         let selection_disabled = busy || saved_preview;
         let theme = cx.theme();
-        let error = form
-            .picker_error
-            .or(board.error)
-            .or(self.spk.read(cx).form_error);
         let status = if board.loading {
             Some("Loading sounds…")
         } else if board.saving {
             Some("Saving…")
         } else {
-            board.notice
+            None
         };
 
         div().flex().flex_col().gap_4()
-            .children(error.or(status).map(|message| div().id("soundboard-admin-status").role(Role::Status)
-                .child(Label::new(message).text_color(if error.is_some() { theme.danger } else { theme.muted_foreground }))))
+            .children(status.map(|message| div().id("soundboard-admin-status").role(Role::Status)
+                .child(Label::new(message).text_color(theme.muted_foreground))))
+            .children(board.validation_error.map(|message| div().id("soundboard-validation-error").role(Role::Status)
+                .child(Label::new(message).text_color(theme.danger))))
             .child(card("Add a sound", div().flex().flex_col().gap_3().items_start()
                 .child(icon_label_button(
                     control_button("choose-sound-file").outline(), IconName::Upload,
@@ -224,7 +222,9 @@ impl Settings {
             .children(saved_preview.then(|| control_button("stop-sound-preview").label("Stop preview").tab_stop(true)
                 .on_click(cx.listener(|settings, _, _, cx| settings.soundboard_action(Action::StopPreview, cx)))))
             .child(card("Sounds", div().flex().flex_col().gap_3()
-                .when(!board.loading && (board.clips.is_none() || board.error.is_some()), |body| body.child(
+                .children(board.directory_error.map(|message| div().id("soundboard-directory-error").role(Role::Status)
+                    .child(Label::new(message).text_color(theme.danger))))
+                .when(!board.loading && (board.clips.is_none() || board.directory_error.is_some()), |body| body.child(
                     control_button("reload-sounds").label("Reload sounds").tab_stop(true).disabled(disabled)
                         .on_click(cx.listener(|settings, _, _, cx| settings.soundboard_action(Action::Show, cx)))))
                 .when(board.clips.as_ref().is_some_and(|clips| clips.is_empty()), |body| body.child(Label::new("No sounds yet.")))

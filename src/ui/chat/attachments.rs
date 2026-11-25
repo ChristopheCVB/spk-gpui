@@ -42,7 +42,6 @@ pub(in crate::ui) struct AttachmentUi {
 struct AttachmentCard {
     revealed: bool,
     pending: Option<Uuid>,
-    error: Option<&'static str>,
     preview_pending: Option<Uuid>,
     preview_error: Option<&'static str>,
     preview_attempted: bool,
@@ -71,8 +70,6 @@ impl AttachmentCard {
         *self.request(access) = Some(operation);
         if preview {
             self.preview_attempted = true;
-        } else {
-            self.error = None;
         }
         Some(operation)
     }
@@ -627,7 +624,7 @@ impl Spk {
                         )
                     })
                     .children(
-                        card.and_then(|card| card.error.or(card.preview_error))
+                        card.and_then(|card| card.preview_error)
                             .map(|error| Label::new(error).text_color(theme.danger)),
                     );
                 let row = row.id(SharedString::from(file.id.clone()));
@@ -908,7 +905,7 @@ impl Spk {
                         }
                         Ok(Some(AccessResult::Downloaded) | None) => {}
                         Err(error) if auto => state.preview_error = Some(error),
-                        Err(error) => state.error = Some(error),
+                        Err(error) => app.show_action_result(ActionResult::error(error), cx),
                     }
                     cx.notify();
                 }

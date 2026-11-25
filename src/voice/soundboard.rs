@@ -92,21 +92,30 @@ pub(crate) struct SoundSource {
     pub waveform: Waveform,
 }
 
+pub(crate) enum SoundSourceError {
+    Invalid(&'static str),
+    Read(&'static str),
+}
+
 impl SoundSource {
-    pub fn open(path: &Path) -> Result<Self, &'static str> {
-        let metadata = fs::metadata(path).map_err(|_| "Could not open the audio file.")?;
+    pub fn open(path: &Path) -> Result<Self, SoundSourceError> {
+        let metadata = fs::metadata(path)
+            .map_err(|_| SoundSourceError::Read("Could not open the audio file."))?;
         if !metadata.is_file() {
-            return Err("Choose an audio file.");
+            return Err(SoundSourceError::Invalid("Choose an audio file."));
         }
         if metadata.len() > MAX_SOURCE_BYTES as u64 {
-            return Err("Source audio must be 20 MB or smaller.");
+            return Err(SoundSourceError::Invalid(
+                "Source audio must be 20 MB or smaller.",
+            ));
         }
-        let file = File::open(path).map_err(|_| "Could not open the audio file.")?;
+        let file = File::open(path)
+            .map_err(|_| SoundSourceError::Read("Could not open the audio file."))?;
         let mut source = Vec::new();
         file.take(MAX_SOURCE_BYTES as u64 + 1)
             .read_to_end(&mut source)
-            .map_err(|_| "Could not read the audio file.")?;
-        Self::decode(source)
+            .map_err(|_| SoundSourceError::Read("Could not read the audio file."))?;
+        Self::decode(source).map_err(SoundSourceError::Invalid)
     }
 
     fn decode(source: Vec<u8>) -> Result<Self, &'static str> {

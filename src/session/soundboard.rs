@@ -7,7 +7,7 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use super::{Command, Sidebar, VoiceSession};
+use super::{ActionResult, Command, Sidebar, VoiceSession};
 use crate::{
     api::{Failure, SoundboardClip, SpkClient, VoiceFrame},
     voice::{MediaOutput, soundboard},
@@ -25,7 +25,6 @@ pub struct SoundboardView {
     pub playback_blocked: bool,
     pub active_clips: HashMap<String, Option<SoundboardClip>>,
     pub directory_error: Option<&'static str>,
-    pub playback_error: Option<&'static str>,
 }
 
 pub(super) enum SoundboardResult {
@@ -239,7 +238,6 @@ impl SoundboardSession {
                 {
                     return;
                 }
-                board.playback_error = None;
                 if preview {
                     self.play(client, sound_id, true);
                     return;
@@ -248,8 +246,9 @@ impl SoundboardSession {
                     return;
                 }
                 let Some((socket, sid)) = voice.active_socket(sidebar) else {
-                    sidebar.soundboard.playback_error =
-                        Some("Soundboard is offline. Wait for reconnection.");
+                    sidebar.action_results.push(ActionResult::error(
+                        "Soundboard is offline. Wait for reconnection.",
+                    ));
                     return;
                 };
                 self.tasks.spawn(async move {
@@ -281,13 +280,14 @@ impl SoundboardSession {
 
     pub fn complete(
         &mut self,
-        board: &mut SoundboardView,
+        sidebar: &mut Sidebar,
         client: &SpkClient,
         id: Id,
         result: SoundboardResult,
     ) -> Result<(), Failure> {
         match result {
             SoundboardResult::Directory(result) => {
+                let board = &mut sidebar.soundboard;
                 board.loading = false;
                 if std::mem::take(&mut self.reload)
                     && !result.as_ref().is_err_and(Failure::unauthorized)
@@ -314,12 +314,16 @@ impl SoundboardSession {
                 if self.playback.remove(&id).is_some()
                     && let Err(error) = result
                 {
-                    board.playback_error = Some("Could not play this Soundboard clip.");
+                    sidebar
+                        .action_results
+                        .push(ActionResult::error("Could not play this Soundboard clip."));
                     return Err(error);
                 }
             }
             SoundboardResult::Sent(Err(_)) => {
-                board.playback_error = Some("Could not send this Soundboard clip. Try again.");
+                sidebar.action_results.push(ActionResult::error(
+                    "Could not send this Soundboard clip. Try again.",
+                ));
             }
             SoundboardResult::Sent(Ok(())) => {}
         }

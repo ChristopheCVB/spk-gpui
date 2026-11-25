@@ -7,12 +7,12 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use super::{Sidebar, soundboard::soundboard_output};
+use super::{ActionResult, Sidebar, soundboard::soundboard_output};
 use crate::{
     api::{Failure, SoundboardClip, SpkClient},
     voice::{
         MediaOutput,
-        soundboard::{self, SoundSource},
+        soundboard::{self, PreparedSound, SoundSource, SoundSourceError},
     },
 };
 
@@ -71,19 +71,20 @@ pub struct SoundboardAdminView {
     pub decoding: bool,
     pub preview: SoundboardPreview,
     pub saving: bool,
-    pub revision: u64,
-    pub error: Option<&'static str>,
-    pub notice: Option<&'static str>,
+    pub mutation_revision: u64,
+    pub directory_error: Option<&'static str>,
+    pub validation_error: Option<&'static str>,
 }
 
 pub(super) enum Completion {
     Loaded(Result<Vec<SoundboardClip>, Failure>),
-    Selected(Result<SoundSource, &'static str>),
+    Selected(Result<SoundSource, WorkError>),
     Previewed(Result<(), WorkError>),
 }
 
 pub(super) enum WorkError {
-    Invalid(&'static str),
+    Validation(&'static str),
+    Action(&'static str),
     Request(Failure),
 }
 
@@ -157,6 +158,7 @@ impl AdminSoundboard {
         self.source = None;
         *view = SoundboardAdminView {
             saving: !self.mutations.is_empty(),
+            mutation_revision: view.mutation_revision,
             ..Default::default()
         };
     }
@@ -170,6 +172,7 @@ impl AdminSoundboard {
     fn load(&mut self, view: &mut SoundboardAdminView, client: &SpkClient) {
         if !view.loading {
             view.loading = true;
+            view.directory_error = None;
             let client = client.clone();
             self.tasks
                 .spawn(async move { Completion::Loaded(client.soundboard_clips().await) });
@@ -191,13 +194,15 @@ impl AdminSoundboard {
             return;
         }
         if !admin {
-            view.error = Some(ACCESS_REQUIRED);
+            sidebar
+                .action_results
+                .push(ActionResult::error(ACCESS_REQUIRED));
             return;
         }
         if matches!(action, Show) {
             self.open = true;
             if !view.saving && !view.preview.is_playing() {
-                view.error = None;
+                view.validation_error = None;
                 self.load(view, client);
             }
             return;
@@ -216,8 +221,7 @@ impl AdminSoundboard {
                 _ => return,
             }
         }
-        view.error = None;
-        view.notice = None;
+        view.validation_error = None;
         match action {
             ChooseFile(path) => {
                 self.clear_source(view);
@@ -226,7 +230,15 @@ impl AdminSoundboard {
                     Completion::Selected(
                         spawn_blocking(move || SoundSource::open(&path))
                             .await
-                            .unwrap_or(Err("Could not read the audio file.")),
+                            .unwrap_or(Err(SoundSourceError::Read(
+                                "Could not read the audio file.",
+                            )))
+                            .map_err(|error| match error {
+                                SoundSourceError::Invalid(message) => {
+                                    WorkError::Validation(message)
+                                }
+                                SoundSourceError::Read(message) => WorkError::Action(message),
+                            }),
                     )
                 });
             }
@@ -259,7 +271,7 @@ impl AdminSoundboard {
             }
             Preview => {
                 let (Some(source), Some(crop)) = (self.source.clone(), view.selection) else {
-                    view.error = Some(CHOOSE_AUDIO);
+                    view.validation_error = Some(CHOOSE_AUDIO);
                     return;
                 };
                 let (sender, receiver) = watch::channel(output);
@@ -272,13 +284,10 @@ impl AdminSoundboard {
                 self.tasks.spawn(async move {
                     Completion::Previewed(
                         async {
-                            let clip = spawn_blocking(move || source.crop(crop))
-                                .await
-                                .unwrap_or(Err("Could not prepare the selected audio."))
-                                .map_err(WorkError::Invalid)?;
+                            let clip = prepare_crop(source, crop).await?;
                             soundboard::play(clip.wav, receiver, Some(progress))
                                 .await
-                                .map_err(|_| WorkError::Invalid("Could not preview this sound."))
+                                .map_err(|_| WorkError::Action("Could not preview this sound."))
                         }
                         .await,
                     )
@@ -296,7 +305,7 @@ impl AdminSoundboard {
                             let wav = client.soundboard_file(id).await?;
                             soundboard::play(wav, receiver, None)
                                 .await
-                                .map_err(|_| WorkError::Invalid("Could not preview this sound."))
+                                .map_err(|_| WorkError::Action("Could not preview this sound."))
                         }
                         .await,
                     )
@@ -321,19 +330,16 @@ impl AdminSoundboard {
         }
     }
 
-    pub fn complete(
-        &mut self,
-        view: &mut SoundboardAdminView,
-        result: Completion,
-    ) -> Result<(), Failure> {
+    pub fn complete(&mut self, sidebar: &mut Sidebar, result: Completion) -> Result<(), Failure> {
+        let view = &mut sidebar.admin_soundboard;
         match result {
             Completion::Loaded(result) => {
                 view.loading = false;
                 match result {
                     Ok(clips) => view.clips = Some(clips.into()),
                     Err(error) => {
-                        view.error =
-                            Some(message(error.into(), "Could not load sounds. Try again.")?)
+                        view.directory_error =
+                            Some(request_message(error, "Could not load sounds. Try again.")?)
                     }
                 }
             }
@@ -343,16 +349,17 @@ impl AdminSoundboard {
                     Ok(source) => {
                         view.waveform = Some(source.waveform.clone());
                         view.selection = Some(source.initial_crop());
-                        view.revision += 1;
                         self.source = Some(Arc::new(source));
                     }
-                    Err(error) => view.error = Some(error),
+                    Err(error) => {
+                        self.show_error(sidebar, error, "Could not read the audio file.")?
+                    }
                 }
             }
             Completion::Previewed(result) => {
                 self.finish_preview(view);
                 if let Err(error) = result {
-                    view.error = Some(message(error, "Could not preview this sound.")?);
+                    self.show_error(sidebar, error, "Could not preview this sound.")?;
                 }
             }
         }
@@ -361,31 +368,33 @@ impl AdminSoundboard {
 
     pub fn mutated(
         &mut self,
-        view: &mut SoundboardAdminView,
+        sidebar: &mut Sidebar,
         client: &SpkClient,
         kind: Mutation,
         result: Result<(), WorkError>,
     ) -> Result<bool, Failure> {
+        let view = &mut sidebar.admin_soundboard;
         view.saving = false;
         match result {
             Ok(()) => {
+                let message = match kind {
+                    Mutation::Add => {
+                        self.clear_source(view);
+                        "Sound added."
+                    }
+                    Mutation::Edit => "Sound updated.",
+                    Mutation::Delete => "Sound deleted.",
+                };
+                view.mutation_revision += 1;
                 if self.open {
-                    let notice = match kind {
-                        Mutation::Add => {
-                            self.clear_source(view);
-                            "Sound added."
-                        }
-                        Mutation::Edit => "Sound updated.",
-                        Mutation::Delete => "Sound deleted.",
-                    };
-                    view.notice = Some(notice);
-                    view.revision += 1;
                     self.load(view, client);
                 }
+                sidebar.action_results.push(ActionResult::success(message));
                 Ok(true)
             }
             Err(error) => {
-                let notice = message(
+                self.show_error(
+                    sidebar,
                     error,
                     match kind {
                         Mutation::Add => "Could not save the sound. Try again.",
@@ -393,16 +402,44 @@ impl AdminSoundboard {
                         Mutation::Delete => "Could not delete the sound. Try again.",
                     },
                 )?;
-                if self.open {
-                    view.error = Some(notice);
-                    if view.clips.is_none() {
-                        self.load(view, client);
-                    }
+                let view = &mut sidebar.admin_soundboard;
+                if self.open && view.clips.is_none() {
+                    self.load(view, client);
                 }
                 Ok(false)
             }
         }
     }
+
+    fn show_error(
+        &self,
+        sidebar: &mut Sidebar,
+        error: WorkError,
+        fallback: &'static str,
+    ) -> Result<(), Failure> {
+        let message = match error {
+            WorkError::Validation(message) => {
+                if self.open {
+                    sidebar.admin_soundboard.validation_error = Some(message);
+                }
+                return Ok(());
+            }
+            WorkError::Action(message) => message,
+            WorkError::Request(error) => request_message(error, fallback)?,
+        };
+        sidebar.action_results.push(ActionResult::error(message));
+        Ok(())
+    }
+}
+
+async fn prepare_crop(
+    source: Arc<SoundSource>,
+    crop: SoundboardCrop,
+) -> Result<PreparedSound, WorkError> {
+    spawn_blocking(move || source.crop(crop))
+        .await
+        .map_err(|_| WorkError::Action("Could not prepare the selected audio."))?
+        .map_err(WorkError::Validation)
 }
 
 async fn mutate(
@@ -415,12 +452,9 @@ async fn mutate(
         SoundboardAdminAction::Add { name, icon } => {
             let name = sound_name(&name, &icon)?;
             let (Some(source), Some(crop)) = (source, crop) else {
-                return Err(WorkError::Invalid(CHOOSE_AUDIO));
+                return Err(WorkError::Validation(CHOOSE_AUDIO));
             };
-            let clip = spawn_blocking(move || source.crop(crop))
-                .await
-                .unwrap_or(Err("Could not prepare the selected audio."))
-                .map_err(WorkError::Invalid)?;
+            let clip = prepare_crop(source, crop).await?;
             client
                 .add_soundboard_clip(&name, &icon, clip.duration_ms, clip.wav)
                 .await?;
@@ -438,29 +472,28 @@ async fn mutate(
 }
 
 fn sound_id(id: &str) -> Result<Uuid, WorkError> {
-    Uuid::parse_str(id).map_err(|_| WorkError::Invalid("This sound is unavailable."))
+    Uuid::parse_str(id).map_err(|_| WorkError::Action("This sound is unavailable."))
 }
 
 fn sound_name(name: &str, icon: &str) -> Result<String, WorkError> {
     let clean: String = name.chars().filter(|ch| !ch.is_ascii_control()).collect();
     let name = clean.trim();
     if !(1..=32).contains(&name.encode_utf16().count()) {
-        return Err(WorkError::Invalid("Sound names must be 1–32 characters."));
+        return Err(WorkError::Validation(
+            "Sound names must be 1–32 characters.",
+        ));
     }
     if !(1..=64).contains(&icon.len()) || !crate::api::has_icon_name_characters(icon) {
-        return Err(WorkError::Invalid("Choose a valid sound icon."));
+        return Err(WorkError::Validation("Choose a valid sound icon."));
     }
     Ok(name.to_owned())
 }
 
-fn message(error: WorkError, fallback: &'static str) -> Result<&'static str, Failure> {
+fn request_message(error: Failure, fallback: &'static str) -> Result<&'static str, Failure> {
     match error {
-        WorkError::Invalid(message) => Ok(message),
-        WorkError::Request(error) if error.unauthorized() => Err(error),
-        WorkError::Request(Failure::Http(StatusCode::FORBIDDEN)) => Ok(ACCESS_REQUIRED),
-        WorkError::Request(Failure::Http(StatusCode::NOT_FOUND)) => {
-            Ok("This sound is no longer available.")
-        }
-        WorkError::Request(_) => Ok(fallback),
+        error if error.unauthorized() => Err(error),
+        Failure::Http(StatusCode::FORBIDDEN) => Ok(ACCESS_REQUIRED),
+        Failure::Http(StatusCode::NOT_FOUND) => Ok("This sound is no longer available."),
+        _ => Ok(fallback),
     }
 }

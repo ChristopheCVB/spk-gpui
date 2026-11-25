@@ -52,6 +52,8 @@ use crate::{
 };
 
 const EMBED_DESCRIPTION: &str = "embed-description";
+// SPK Web scales inline code to 90% of the surrounding text.
+const INLINE_CODE_SCALE: f32 = 0.9;
 
 struct RenderedChatMarkdown {
     view: TextView,
@@ -299,10 +301,10 @@ pub(super) fn unread_badges(counts: UnreadState, cx: &App) -> impl IntoElement {
         .flex_shrink_0()
         .items_center()
         .gap_1()
+        .text_size(px(10.0))
         .when(counts.mentions > 0, |badges| {
             badges.child(
                 Label::new(format!("@{}", counts.mentions))
-                    .text_xs()
                     .font_semibold()
                     .px_1()
                     .rounded_md()
@@ -313,7 +315,6 @@ pub(super) fn unread_badges(counts: UnreadState, cx: &App) -> impl IntoElement {
         .when(counts.unread > 0, |badges| {
             badges.child(
                 Label::new(counts.unread.to_string())
-                    .text_xs()
                     .px_1()
                     .rounded_md()
                     .bg(theme.secondary)
@@ -756,15 +757,14 @@ impl Spk {
             return;
         }
         let reading_older = chat.has_more_after;
-        self.send(
+        if self.try_send(
             Command::SendChatMessage {
                 channel_id: chat.channel_id.clone(),
                 body,
             },
             None,
             cx,
-        );
-        if self.form_error.is_none() {
+        ) {
             self.chat_submitting = true;
             self.chat_draft_edited = false;
             self.suggestions[0].dismiss();
@@ -846,14 +846,16 @@ impl Spk {
                         .into_any_element(),
                 }
             });
-        let status = if chat.jump_failed {
-            Some("Message unavailable.")
-        } else if chat.unavailable() {
-            Some(if chat.webhook {
-                "Webhook feed unavailable."
+        let status = if chat.unavailable() {
+            if chat.jump_failed {
+                None
+            } else if chat.webhook {
+                Some("Webhook feed unavailable.")
             } else {
-                "Direct message unavailable."
-            })
+                chat.direct_message_peer
+                    .as_ref()
+                    .map(|_| "Direct message unavailable.")
+            }
         } else if chat.history_failed() {
             Some("Could not load message history.")
         } else if chat.loading() {
@@ -875,25 +877,15 @@ impl Spk {
             .when(!chat.unavailable(), |area| {
                 area.child(self.pins(sidebar, chat, cx))
             })
-            .children(
-                [
-                    (
-                        "chat-action-error",
-                        chat.action_outcome.as_ref().and_then(|result| result.error),
+            .when_some(chat.message_send_error.as_ref(), |area, error| {
+                area.child(
+                    div().px_4().py_2().child(
+                        Label::new(error.clone())
+                            .id("chat-send-error")
+                            .text_color(theme.danger),
                     ),
-                    ("chat-send-error", chat.message_send_error.as_deref()),
-                    ("chat-vote-error", chat.vote_error),
-                ]
-                .into_iter()
-                .filter_map(|(id, error)| {
-                    error.map(|error| {
-                        div()
-                            .px_4()
-                            .py_2()
-                            .child(Label::new(error.to_owned()).id(id).text_color(theme.danger))
-                    })
-                }),
-            )
+                )
+            })
             .when_some(status, |area, status| {
                 area.child(
                     div()
@@ -1029,7 +1021,11 @@ impl Spk {
                             [one, two] => format!("{one} and {two} are typing…"),
                             _ => "Several people are typing…".into(),
                         };
-                        composer.child(Label::new(text).text_color(theme.muted_foreground))
+                        composer.child(
+                            Label::new(text)
+                                .text_xs()
+                                .text_color(theme.muted_foreground),
+                        )
                     })
                     .when_some(
                         chat.draft.reply.as_ref().filter(|_| !self.chat_submitting),
@@ -1044,6 +1040,7 @@ impl Spk {
                                     .px_2()
                                     .rounded_md()
                                     .bg(theme.popover)
+                                    .text_xs()
                                     .child(
                                         Icon::new(IconName::Reply)
                                             .size(ACTION_ICON_SIZE)
@@ -1153,6 +1150,7 @@ impl Spk {
             .children(self.suggestion_menu(false, window, cx))
             .child(
                 editor::textarea(&self.chat_input)
+                    .text_base()
                     .flex_shrink_0()
                     .bg(if focused {
                         theme.secondary_hover.opacity(0.35)
@@ -1276,8 +1274,14 @@ impl Spk {
         }
         let hidden = hidden.into_inner();
         let link_app = cx.weak_entity();
+        let body_size = if id == EMBED_DESCRIPTION {
+            embed::BODY_SIZE
+        } else {
+            rems(1.)
+        };
         let view = TextView::markdown(id, display)
-            .style(chat_text_style(cx))
+            .text_size(body_size)
+            .style(chat_text_style(cx, body_size * INLINE_CODE_SCALE))
             .markdown_extensions(extensions.parser_revision(4).raw_html(false))
             .link(|link, _| safe_link(&link.url).map(|_| link.clone()))
             .on_link_click(move |href, _, _, cx| {
@@ -1427,7 +1431,7 @@ impl Spk {
                     .when(starts_group, |header| {
                         let label = div()
                             .id("message-author")
-                            .child(Label::new(author.to_owned()).font_semibold());
+                            .child(Label::new(author.to_owned()).text_sm().font_semibold());
                         header.child(match user_menu {
                             Some((id, app)) => label
                                 .context_menu(move |menu, _, _| {
@@ -1478,7 +1482,7 @@ impl Spk {
                         |row| {
                             row.child(
                                 Label::new("(edited)")
-                                    .text_xs()
+                                    .text_size(px(10.))
                                     .text_color(theme.muted_foreground),
                             )
                         },
@@ -1866,18 +1870,19 @@ impl MarkdownPlugin for MessageMention {
     }
 }
 
-fn chat_text_style(cx: &App) -> TextViewStyle {
+fn chat_text_style(cx: &App, inline_code_size: impl Into<AbsoluteLength>) -> TextViewStyle {
     let theme = cx.theme();
     let base = theme.popover;
     TextViewStyle::from_theme(&gpui_kit::base::Theme::global(cx))
         .with_link(theme.primary)
-        .with_code_block(StyleRefinement::default().rounded_md().bg(base))
+        .with_code_block(StyleRefinement::default().rounded_md().bg(base).text_sm())
         .with_table_head(
             StyleRefinement::default()
                 .bg(theme.table_head)
                 .text_color(theme.table_head_foreground),
         )
         .with_table_row_hover(theme.table_hover)
+        .with_inline_code_style(StyleRefinement::default().text_size(inline_code_size))
         .with_inline_code(HighlightStyle {
             background_color: Some(base),
             ..Default::default()

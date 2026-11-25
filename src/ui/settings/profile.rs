@@ -6,7 +6,6 @@ use super::*;
 
 impl Settings {
     pub(super) fn save_nickname(&mut self, cx: &mut Context<Self>) {
-        self.avatar_picker_error = None;
         let name = self.nickname.read(cx).value().to_string();
         self.spk.update(cx, |app, cx| {
             app.send(Command::SaveNickname(name), None, cx)
@@ -15,7 +14,6 @@ impl Settings {
 
     fn choose_avatar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.avatar_picker_open = true;
-        self.avatar_picker_error = None;
         let selection = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -35,7 +33,12 @@ impl Settings {
                         }
                     }
                     Ok(Ok(None)) => {}
-                    _ => settings.avatar_picker_error = Some("Could not open the file picker."),
+                    _ => settings.spk.update(cx, |app, cx| {
+                        app.show_action_result(
+                            ActionResult::error("Could not open the file picker."),
+                            cx,
+                        );
+                    }),
                 }
                 cx.notify();
             });
@@ -50,16 +53,6 @@ impl Settings {
         let spk = self.spk.downgrade();
         let edit = sidebar.profile_edit;
         let disabled = edit.busy() || self.avatar_picker_open;
-        let result = self
-            .avatar_picker_error
-            .or(self.spk.read(cx).form_error)
-            .map(|error| (error, theme.danger))
-            .or_else(|| match edit {
-                ProfileEdit::Failed(error) => Some((error, theme.danger)),
-                ProfileEdit::Saved => Some(("Nickname saved.", theme.success)),
-                ProfileEdit::Uploaded => Some(("Avatar updated.", theme.success)),
-                _ => None,
-            });
         div()
             .flex()
             .flex_col()
@@ -136,6 +129,20 @@ impl Settings {
                                         ),
                                 ),
                         )
+                        .when_some(
+                            match edit {
+                                ProfileEdit::Validation(error) => Some(error),
+                                _ => None,
+                            },
+                            |body, error| {
+                                body.child(
+                                    div()
+                                        .id("nickname-validation")
+                                        .role(Role::Status)
+                                        .child(Label::new(error).text_color(theme.danger)),
+                                )
+                            },
+                        )
                         .child(
                             div()
                                 .flex()
@@ -149,18 +156,6 @@ impl Settings {
                                     cx,
                                 )),
                         )
-                        .children(sidebar.user_status_notice.map(|notice| {
-                            div()
-                                .id("user-status-notice")
-                                .role(Role::Status)
-                                .child(Label::new(notice).text_color(theme.danger))
-                        }))
-                        .children(result.map(|(message, color)| {
-                            div()
-                                .id("profile-result")
-                                .role(Role::Status)
-                                .child(Label::new(message).text_color(color))
-                        }))
                         .child(
                             div()
                                 .flex()

@@ -995,7 +995,7 @@ async fn desktop_voice_teardown_releases_media_and_owned_presence() {
         )
         .await;
         assert!(match ending {
-            CallEnd::SignOut => matches!(end, SessionEnd::SignOut),
+            CallEnd::SignOut => matches!(end, SessionEnd::SignOut(None)),
             _ => matches!(end, SessionEnd::Closed),
         });
     }

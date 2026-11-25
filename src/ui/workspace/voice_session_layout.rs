@@ -17,14 +17,6 @@ pub(super) struct VoiceSessionLayout {
     pub actions: Option<AnyElement>,
 }
 
-impl IntoElement for VoiceSessionLayout {
-    type Element = Self;
-
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
 impl Element for VoiceSessionLayout {
     type RequestLayoutState = ();
     type PrepaintState = ();

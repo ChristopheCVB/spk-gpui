@@ -34,6 +34,7 @@ async fn admin_soundboard_uploads_selected_audio_and_peer_refreshes_edits_and_de
     });
     let server = tokio::spawn(async move {
         let mut clip = None;
+        let mut reject_directory = true;
         let mut reject_edit = true;
         loop {
             let (line, request) = Request::receive(&http).await;
@@ -49,7 +50,15 @@ async fn admin_soundboard_uploads_selected_audio_and_peer_refreshes_edits_and_de
                 "POST /api/voice/token HTTP/1.1" => {
                     value!({"token":"fixture-token","url":env!("LIVEKIT_URL")})
                 }
-                "GET /api/sounds HTTP/1.1" => value!(clip.iter().collect::<Vec<_>>()),
+                "GET /api/sounds HTTP/1.1" => {
+                    if cookie == Some("session=alice") && std::mem::take(&mut reject_directory) {
+                        request
+                            .respond_raw("503 Service Unavailable", &[], b"")
+                            .await;
+                        continue;
+                    }
+                    value!(clip.iter().collect::<Vec<_>>())
+                }
                 _ if cookie == Some("session=bob") => panic!("User attempted {line}"),
                 "POST /api/sounds/presign HTTP/1.1" => {
                     assert_eq!(json(), value!({"size":236}));
@@ -132,7 +141,7 @@ async fn admin_soundboard_uploads_selected_audio_and_peer_refreshes_edits_and_de
         .await
         .unwrap();
         wait_for_sidebar(&bob_views, |view| {
-            view.admin_soundboard.error == Some("Admin access is required.")
+            view.action_results == [ActionResult::error("Admin access is required.")]
         })
         .await;
         bob.send(Command::JoinVoice("first".into())).await.unwrap();
@@ -164,10 +173,26 @@ async fn admin_soundboard_uploads_selected_audio_and_peer_refreshes_edits_and_de
         .await;
 
         mutation(SoundboardAdminAction::Show);
+        let unavailable = wait_for_sidebar(&alice_views, |view| {
+            view.admin_soundboard.directory_error == Some("Could not load sounds. Try again.")
+        })
+        .await;
+        assert!(unavailable.action_results.is_empty());
+        mutation(SoundboardAdminAction::Show);
         wait_for_sidebar(&alice_views, |view| view.admin_soundboard.clips.is_some()).await;
+
+        mutation(SoundboardAdminAction::ChooseFile(
+            files.path().join("missing.wav"),
+        ));
+        wait_for_sidebar(&alice_views, |view| {
+            view.action_results == [ActionResult::error("Could not open the audio file.")]
+        })
+        .await;
         mutation(SoundboardAdminAction::ChooseFile(invalid));
         wait_for_sidebar(&alice_views, |view| {
-            view.admin_soundboard.error == Some("Choose a supported mono or stereo audio file.")
+            view.admin_soundboard.validation_error
+                == Some("Choose a supported mono or stereo audio file.")
+                && view.action_results.is_empty()
         })
         .await;
         mutation(SoundboardAdminAction::ChooseFile(sample));
@@ -183,7 +208,8 @@ async fn admin_soundboard_uploads_selected_audio_and_peer_refreshes_edits_and_de
         mutation(SoundboardAdminAction::Gain(201));
         mutation(SoundboardAdminAction::Preview);
         wait_for_sidebar(&alice_views, |view| {
-            view.admin_soundboard.error == Some("Upload gain must be between 0% and 200%.")
+            view.admin_soundboard.validation_error
+                == Some("Upload gain must be between 0% and 200%.")
                 && !view.admin_soundboard.preview.is_playing()
         })
         .await;
@@ -235,7 +261,7 @@ async fn admin_soundboard_uploads_selected_audio_and_peer_refreshes_edits_and_de
         );
         mutation(add());
         let sidebar = wait_for_sidebar(&alice_views, |view| {
-            view.admin_soundboard.error == Some("Could not save the sound. Try again.")
+            view.action_results == [ActionResult::error("Could not save the sound. Try again.")]
         })
         .await;
         let selection = sidebar
@@ -248,7 +274,12 @@ async fn admin_soundboard_uploads_selected_audio_and_peer_refreshes_edits_and_de
         assert!(sidebar.admin_soundboard.waveform.is_some());
         mutation(add());
         wait_for_sidebar(&alice_views, |view| {
-            view.admin_soundboard.waveform.is_none()
+            view.action_results == [ActionResult::success("Sound added.")]
+        })
+        .await;
+        wait_for_sidebar(&alice_views, |view| {
+            view.action_results.is_empty()
+                && view.admin_soundboard.waveform.is_none()
                 && view.admin_soundboard.selection.is_none()
                 && view
                     .admin_soundboard
@@ -262,10 +293,14 @@ async fn admin_soundboard_uploads_selected_audio_and_peer_refreshes_edits_and_de
                 Some("Bells") => {
                     mutation(edit());
                     wait_for_sidebar(&alice_views, |view| {
-                        view.admin_soundboard.error == Some("Admin access is required.")
+                        view.action_results == [ActionResult::error("Admin access is required.")]
                     })
                     .await;
                     mutation(edit());
+                    wait_for_sidebar(&alice_views, |view| {
+                        view.action_results == [ActionResult::success("Sound updated.")]
+                    })
+                    .await;
                     wait_for_sidebar(&alice_views, |view| {
                         view.admin_soundboard
                             .clips
@@ -276,6 +311,10 @@ async fn admin_soundboard_uploads_selected_audio_and_peer_refreshes_edits_and_de
                 }
                 None => {
                     mutation(SoundboardAdminAction::Delete(ID.into()));
+                    wait_for_sidebar(&alice_views, |view| {
+                        view.action_results == [ActionResult::success("Sound deleted.")]
+                    })
+                    .await;
                     wait_for_sidebar(&alice_views, |view| {
                         view.admin_soundboard
                             .clips

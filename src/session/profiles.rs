@@ -4,7 +4,7 @@ use image::ImageFormat;
 use reqwest::StatusCode;
 use tokio::{sync::oneshot, task::JoinSet};
 
-use super::{Command, Sidebar};
+use super::{ActionResult, Command, Sidebar};
 use crate::api::{Failure, MAX_AVATAR_UPLOAD, SpkClient};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -12,9 +12,7 @@ pub enum ProfileEdit {
     Idle,
     Saving,
     Uploading,
-    Saved,
-    Uploaded,
-    Failed(&'static str),
+    Validation(&'static str),
 }
 
 impl ProfileEdit {
@@ -44,7 +42,7 @@ impl Work {
             Command::SaveNickname(name) if !sidebar.profile_edit.busy() => {
                 if !(2..=32).contains(&name.trim().encode_utf16().count()) {
                     sidebar.profile_edit =
-                        ProfileEdit::Failed("Nickname must be 2 to 32 characters.");
+                        ProfileEdit::Validation("Nickname must be 2 to 32 characters.");
                     return;
                 }
                 sidebar.profile_edit = ProfileEdit::Saving;
@@ -79,12 +77,18 @@ impl Work {
         let (result, fallback) = match self {
             Self::Nickname(Ok(name)) => {
                 sidebar.profile.display_name = Some(name);
-                sidebar.profile_edit = ProfileEdit::Saved;
+                sidebar.profile_edit = ProfileEdit::Idle;
+                sidebar
+                    .action_results
+                    .push(ActionResult::success("Nickname saved."));
                 return Ok(true);
             }
             Self::Avatar(Ok(key)) => {
                 sidebar.profile.avatar_key = Some(key);
-                sidebar.profile_edit = ProfileEdit::Uploaded;
+                sidebar.profile_edit = ProfileEdit::Idle;
+                sidebar
+                    .action_results
+                    .push(ActionResult::success("Avatar updated."));
                 return Ok(true);
             }
             Self::Email(reply, result) => {
@@ -97,7 +101,7 @@ impl Work {
                 return Ok(false);
             }
             Self::Nickname(Err(Failure::Http(StatusCode::CONFLICT))) => {
-                sidebar.profile_edit = ProfileEdit::Failed("That nickname is taken.");
+                sidebar.profile_edit = ProfileEdit::Validation("That nickname is taken.");
                 return Ok(true);
             }
             Self::Nickname(Err(error)) => (error, "Could not save the nickname. Try again."),
@@ -109,7 +113,8 @@ impl Work {
         if result.unauthorized() {
             return Err(result);
         }
-        sidebar.profile_edit = ProfileEdit::Failed(fallback);
+        sidebar.profile_edit = ProfileEdit::Idle;
+        sidebar.action_results.push(ActionResult::error(fallback));
         Ok(true)
     }
 }

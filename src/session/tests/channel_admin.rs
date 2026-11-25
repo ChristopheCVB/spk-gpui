@@ -24,13 +24,22 @@ async fn channel_changes_reach_another_session_and_close_removed_channels() {
             ];
             let mut reject_reorder = true;
             let mut reject_rename = true;
+            let mut reject_alice_channels = false;
             loop {
                 let (line, request) = Request::receive(&listener).await;
                 let cookie = request.header("cookie");
                 assert!(matches!(cookie, Some("session=alice" | "session=bob")));
                 match line.as_str() {
                     "GET /api/channels HTTP/1.1" => {
-                        request.respond(&[], &value!(channels).to_string()).await
+                        if cookie == Some("session=alice")
+                            && std::mem::take(&mut reject_alice_channels)
+                        {
+                            request
+                                .respond_raw("503 Service Unavailable", &[], b"")
+                                .await;
+                        } else {
+                            request.respond(&[], &value!(channels).to_string()).await;
+                        }
                     }
                     "GET /api/users HTTP/1.1" | "GET /api/voice HTTP/1.1" => {
                         request.respond(&[], "[]").await
@@ -114,6 +123,7 @@ async fn channel_changes_reach_another_session_and_close_removed_channels() {
                                     .position(|channel| channel["id"] == new)
                                     .unwrap();
                                 channels.swap(before, after);
+                                reject_alice_channels = kind == "voice";
                                 value!({"ok":true})
                             }
                             "DELETE /api/admin/channels/new-text HTTP/1.1"
@@ -128,7 +138,10 @@ async fn channel_changes_reach_another_session_and_close_removed_channels() {
                             }
                             _ => panic!("unexpected request {route}"),
                         };
-                        for socket in sockets.lock().await.values_mut() {
+                        for (cookie, socket) in sockets.lock().await.iter_mut() {
+                            if reject_alice_channels && cookie == "session=alice" {
+                                continue;
+                            }
                             socket
                                 .send(Message::text(r#"{"type":"channels:changed"}"#))
                                 .await
@@ -170,7 +183,10 @@ async fn channel_changes_reach_another_session_and_close_removed_channels() {
         .await
         .unwrap();
         wait_for_sidebar(&bob_views, |view| {
-            view.channel_admin.result == Some(Err("You don’t have permission to manage channels."))
+            view.action_results
+                == [ActionResult::error(
+                    "You don’t have permission to manage channels.",
+                )]
         })
         .await;
         alice
@@ -181,7 +197,8 @@ async fn channel_changes_reach_another_session_and_close_removed_channels() {
             .await
             .unwrap();
         wait_for_sidebar(&alice_views, |view| {
-            view.channel_admin.result == Some(Err("Channel names must be 1–32 characters."))
+            view.channel_admin.validation == Some("Channel names must be 1–32 characters.")
+                && view.action_results.is_empty()
         })
         .await;
 
@@ -208,7 +225,12 @@ async fn channel_changes_reach_another_session_and_close_removed_channels() {
                 )))
                 .await
                 .unwrap();
-            wait_for_channels(&alice_views, kind, &[(existing, None), (id, Some(name))]).await;
+            let created =
+                wait_for_channels(&alice_views, kind, &[(existing, None), (id, Some(name))]).await;
+            assert_eq!(
+                created.action_results,
+                [ActionResult::success("Channel created.")]
+            );
             wait_for_channels(&bob_views, kind, &[(existing, None), (id, Some(name))]).await;
             if kind == ChannelKind::Text {
                 bob.send(Command::OpenTextChannel(id.into())).await.unwrap();
@@ -226,8 +248,10 @@ async fn channel_changes_reach_another_session_and_close_removed_channels() {
                     .await
                     .unwrap();
                 let denied = wait_for_sidebar(&alice_views, |view| {
-                    view.channel_admin.result
-                        == Some(Err("You don’t have permission to manage channels."))
+                    view.action_results
+                        == [ActionResult::error(
+                            "You don’t have permission to manage channels.",
+                        )]
                 })
                 .await;
                 assert_eq!(
@@ -247,7 +271,13 @@ async fn channel_changes_reach_another_session_and_close_removed_channels() {
                 )))
                 .await
                 .unwrap();
-            wait_for_channels(&alice_views, kind, &[(existing, None), (id, Some(renamed))]).await;
+            let renamed_here =
+                wait_for_channels(&alice_views, kind, &[(existing, None), (id, Some(renamed))])
+                    .await;
+            assert_eq!(
+                renamed_here.action_results,
+                [ActionResult::success("Channel renamed.")]
+            );
             let renamed_peer =
                 wait_for_channels(&bob_views, kind, &[(existing, None), (id, Some(renamed))]).await;
             if kind == ChannelKind::Text {
@@ -263,8 +293,8 @@ async fn channel_changes_reach_another_session_and_close_removed_channels() {
                     .unwrap();
                 wait_for_sidebar(&alice_views, |view| {
                     !view.channel_admin.pending
-                        && view.channel_admin.result
-                            == Some(Err("The channel list changed. Try again."))
+                        && view.action_results
+                            == [ActionResult::error("The channel list changed. Try again.")]
                 })
                 .await;
             }
@@ -275,7 +305,27 @@ async fn channel_changes_reach_another_session_and_close_removed_channels() {
                 }))
                 .await
                 .unwrap();
-            wait_for_channels(&alice_views, kind, &[(id, Some(renamed)), (existing, None)]).await;
+            if kind == ChannelKind::Voice {
+                let warning =
+                    ActionResult::warning("Channel updated. Refresh to reload the channel list.");
+                let stale = wait_for_sidebar(&alice_views, |view| {
+                    view.action_results == [warning.clone()]
+                })
+                .await;
+                assert_eq!(stale.channels_of_kind(kind).next().unwrap().id, existing);
+                alice.send(Command::Refresh).await.unwrap();
+            }
+            let reordered =
+                wait_for_channels(&alice_views, kind, &[(id, Some(renamed)), (existing, None)])
+                    .await;
+            if kind == ChannelKind::Text {
+                assert_eq!(
+                    reordered.action_results,
+                    [ActionResult::success("Channel reordered.")]
+                );
+            } else {
+                assert!(reordered.action_results.is_empty());
+            }
             wait_for_channels(&bob_views, kind, &[(id, Some(renamed)), (existing, None)]).await;
             let joined_sid = if kind == ChannelKind::Voice {
                 bob.send(Command::JoinVoice(id.into())).await.unwrap();
@@ -298,7 +348,11 @@ async fn channel_changes_reach_another_session_and_close_removed_channels() {
                 .send(Command::ManageChannel(ChannelAction::Delete(id.into())))
                 .await
                 .unwrap();
-            wait_for_channels(&alice_views, kind, &[(existing, None)]).await;
+            let deleted_here = wait_for_channels(&alice_views, kind, &[(existing, None)]).await;
+            assert_eq!(
+                deleted_here.action_results,
+                [ActionResult::success("Channel deleted.")]
+            );
             let deleted = wait_for_channels(&bob_views, kind, &[(existing, None)]).await;
             if kind == ChannelKind::Text {
                 assert!(deleted.chat.is_none());

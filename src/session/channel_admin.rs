@@ -15,7 +15,13 @@ pub enum ChannelAction {
 pub struct ChannelAdmin {
     pub revision: u64,
     pub pending: bool,
-    pub result: Option<Result<&'static str, &'static str>>,
+    pub succeeded: bool,
+    pub validation: Option<&'static str>,
+}
+
+pub(super) enum ChannelMutationError {
+    Validation(&'static str),
+    Action(&'static str),
 }
 
 impl Sidebar {
@@ -29,9 +35,11 @@ impl Sidebar {
     pub(super) fn channel_mutation(
         &self,
         action: ChannelAction,
-    ) -> Result<(ChannelMutation, &'static str), &'static str> {
+    ) -> Result<(ChannelMutation, &'static str), ChannelMutationError> {
         if !self.is_admin() {
-            return Err("You don’t have permission to manage channels.");
+            return Err(ChannelMutationError::Action(
+                "You don’t have permission to manage channels.",
+            ));
         }
         let locate = |id: &str| {
             self.channels
@@ -39,17 +47,25 @@ impl Sidebar {
                 .flatten()
                 .find(|channel| channel.id == id)
                 .and_then(ChannelKind::from_channel)
-                .ok_or("That channel no longer exists.")
+                .ok_or(ChannelMutationError::Action(
+                    "That channel no longer exists.",
+                ))
         };
         Ok(match action {
             ChannelAction::Create(kind, name) => (
-                ChannelMutation::Create(kind, channel_name(name)?),
+                ChannelMutation::Create(
+                    kind,
+                    channel_name(name).map_err(ChannelMutationError::Validation)?,
+                ),
                 "Channel created.",
             ),
             ChannelAction::Rename(id, name) => {
                 locate(&id)?;
                 (
-                    ChannelMutation::Rename(id, channel_name(name)?),
+                    ChannelMutation::Rename(
+                        id,
+                        channel_name(name).map_err(ChannelMutationError::Validation)?,
+                    ),
                     "Channel renamed.",
                 )
             }
@@ -72,7 +88,9 @@ impl Sidebar {
                 } else {
                     index.checked_sub(1)
                 };
-                let next = next.ok_or("That channel is already at the edge of its section.")?;
+                let next = next.ok_or(ChannelMutationError::Action(
+                    "That channel is already at the edge of its section.",
+                ))?;
                 ids.swap(index, next);
                 (ChannelMutation::Reorder(kind, ids), "Channel reordered.")
             }

@@ -5,7 +5,7 @@ use std::{
 
 use tokio::task::JoinSet;
 
-use super::{Sidebar, chat::ChatSession};
+use super::{ActionResult, Sidebar, chat::ChatSession};
 use crate::api::{Failure, SpkClient, UnreadState};
 
 type Counts = HashMap<String, UnreadState>;
@@ -64,10 +64,7 @@ impl UnreadSession {
         Arc::make_mut(&mut sidebar.unread).insert(channel_id, state);
     }
 
-    pub fn mark(&mut self, sidebar: &mut Sidebar, channel_id: String, mark: Mark) {
-        if mark != Mark::Visible {
-            sidebar.read_notice = None;
-        }
+    pub fn mark(&mut self, channel_id: String, mark: Mark) {
         let write = Write { channel_id, mark };
         if self.pending.back() != Some(&write) {
             self.pending.push_back(write);
@@ -111,12 +108,16 @@ impl UnreadSession {
         };
         match write.mark {
             Mark::Visible => {}
-            Mark::Read if result.is_err() => sidebar.read_notice = Some("Could not mark as read."),
+            Mark::Read if result.is_err() => sidebar
+                .action_results
+                .push(ActionResult::error("Could not mark as read.")),
             Mark::Read => chat.clear_unread_marker(&write.channel_id),
             Mark::Unread(id, request) => {
                 chat.finish_mark_unread(&write.channel_id, id, request, result.is_ok());
                 if result.is_err() {
-                    sidebar.read_notice = Some("Could not mark as unread.");
+                    sidebar
+                        .action_results
+                        .push(ActionResult::error("Could not mark as unread."));
                 }
             }
         }

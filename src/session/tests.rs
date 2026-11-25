@@ -184,7 +184,11 @@ async fn saved_session_restores_signs_out_and_clears_expired_credentials() {
         let (tx, commands) = async_channel::unbounded();
         let (views, rx) = async_channel::unbounded();
         let (saved, storage) = SavedSession::with_test_store(Some(bytes.clone()));
-        let settings = fixture_settings(endpoint.clone(), Call::start_for_test);
+        let mut settings = fixture_settings(endpoint.clone(), Call::start_for_test);
+        let blocked_drafts = tempfile::tempdir().unwrap();
+        let drafts_path = blocked_drafts.path().join("drafts.json");
+        std::fs::create_dir(&drafts_path).unwrap();
+        settings.drafts_path = Some(drafts_path);
         let server = async {
             let request = Request::read(&http, "GET /api/profile/me HTTP/1.1").await;
             assert_eq!(request.header("cookie"), Some("session=saved"));
@@ -229,7 +233,17 @@ async fn saved_session_restores_signs_out_and_clears_expired_credentials() {
                 assert_eq!(request.header("cookie"), Some("session=saved"));
                 match line.as_str() {
                     "GET /api/unread HTTP/1.1" => request.respond(&[], "{}").await,
-                    "GET /api/channels HTTP/1.1"
+                    "GET /api/channels HTTP/1.1" => {
+                        request
+                            .respond(&[], r#"[{"id":"general","type":"text","name":"general"}]"#)
+                            .await
+                    }
+                    "GET /api/channels/general/messages?unread=1 HTTP/1.1" => {
+                        request
+                            .respond(&[], r#"{"messages":[],"hasMoreBefore":false}"#)
+                            .await
+                    }
+                    "GET /api/channels/general/pins HTTP/1.1"
                     | "GET /api/voice HTTP/1.1"
                     | "GET /api/users HTTP/1.1" => request.respond(&[], "[]").await,
                     "GET /api/users/presence HTTP/1.1" => request.respond(&[], "{}").await,
@@ -252,6 +266,19 @@ async fn saved_session_restores_signs_out_and_clears_expired_credentials() {
                 .await;
                 assert_eq!(sidebar.profile.id.as_deref(), Some("alice"));
                 assert_eq!(*storage.lock().unwrap(), Some(bytes.clone()));
+                tx.send(Command::OpenTextChannel("general".into()))
+                    .await
+                    .unwrap();
+                wait_for_sidebar(&rx, |sidebar| {
+                    sidebar.chat.as_ref().is_some_and(ChatView::history_ready)
+                })
+                .await;
+                tx.send(Command::UpdateChatDraft {
+                    channel_id: "general".into(),
+                    body: "Unsent at sign-out".into(),
+                })
+                .await
+                .unwrap();
                 tx.send(Command::SignOut).await.unwrap();
                 loop {
                     if matches!(rx.recv().await.unwrap(), View::Busy("Signing out…")) {
@@ -263,8 +290,13 @@ async fn saved_session_restores_signs_out_and_clears_expired_credentials() {
                 View::SignIn {
                     message,
                     retry_restore: false,
+                    draft_save_error,
                 } => {
                     assert_eq!(message, expired.then_some(SESSION_EXPIRED));
+                    assert_eq!(
+                        draft_save_error,
+                        (!expired).then_some("Could not save Drafts for the next launch.")
+                    );
                 }
                 _ => panic!("expected the sign-in form"),
             }
@@ -277,7 +309,8 @@ async fn saved_session_restores_signs_out_and_clears_expired_credentials() {
                     rx.recv().await.unwrap(),
                     View::SignIn {
                         message: Some(SESSION_EXPIRED),
-                        retry_restore: false
+                        retry_restore: false,
+                        draft_save_error: None,
                     }
                 ));
                 tx.send(Command::SignIn {
@@ -568,6 +601,7 @@ fn fixture_settings(
             path: None,
             preferred: DevicePreferences::default(),
             notice: None,
+            save_failed: false,
         },
         sounds: VoiceSounds::new(watch::channel(sounds).1),
         window_active: watch::channel(false).1,
@@ -1009,7 +1043,7 @@ async fn spk_recovery_yields_to_voice_teardown_and_invalidation() {
         )
         .await;
         match ending {
-            VoiceEnding::SignOut => assert!(matches!(end, SessionEnd::SignOut)),
+            VoiceEnding::SignOut => assert!(matches!(end, SessionEnd::SignOut(None))),
             VoiceEnding::Unauthorized => {
                 assert!(matches!(end, SessionEnd::Invalidated(SESSION_EXPIRED)))
             }
@@ -2370,8 +2404,17 @@ fn failed_screen_quality_restores_the_previous_preset_for_the_current_share() {
     let settings = fixture_settings(String::new(), Call::start_for_test);
     session.screen_report(&mut sidebar, &settings, report(attempt - 1));
     assert_eq!(sidebar.voice_intent.screen.quality, rejected);
+    assert!(sidebar.action_results.is_empty());
     session.screen_report(&mut sidebar, &settings, report(attempt));
     assert_eq!(sidebar.voice_intent.screen.quality, applied);
+    assert_eq!(
+        std::mem::take(&mut sidebar.action_results),
+        [ActionResult::error(
+            "Could not change Screen Share quality."
+        )]
+    );
+    session.screen_report(&mut sidebar, &settings, report(attempt));
+    assert!(sidebar.action_results.is_empty());
     assert!(
         sidebar
             .voice

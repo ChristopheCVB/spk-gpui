@@ -40,7 +40,13 @@ pub enum PollEditOutcome {
     ConfirmVoteChange,
 }
 
-pub type PollEditReply = tokio::sync::oneshot::Sender<Result<PollEditOutcome, &'static str>>;
+#[derive(Debug, PartialEq, Eq)]
+pub enum PollFormError {
+    Validation(&'static str),
+    Action(&'static str),
+}
+
+pub type PollEditReply = tokio::sync::oneshot::Sender<Result<PollEditOutcome, PollFormError>>;
 
 pub(in crate::session) type VoteResult = (String, String, Result<MessageChange, Failure>);
 
@@ -86,7 +92,7 @@ impl ChatSession {
     pub fn mutate(
         &mut self,
         client: &SpkClient,
-        sidebar: &Sidebar,
+        sidebar: &mut Sidebar,
         channel_id: &str,
         message_id: String,
         action: MessageAction,
@@ -118,23 +124,25 @@ impl ChatSession {
             MessageAction::React { .. } => true,
             MessageAction::Vote(_) => message.poll.is_some(),
         };
-        if voting {
-            self.vote_error = (!allowed).then_some(CHANGE_DENIED);
-            if allowed {
-                let client = client.clone();
-                let channel_id = channel_id.to_owned();
-                self.vote_tasks.spawn(async move {
-                    let result = client
-                        .mutate_message(&channel_id, &message_id, action)
-                        .await;
-                    (channel_id, message_id, result)
-                });
+        if !allowed {
+            sidebar
+                .action_results
+                .push(ActionResult::error(CHANGE_DENIED));
+            if !voting {
+                view.action_outcome = Some(Arc::new(ActionOutcome {
+                    message_id,
+                    error: Some(CHANGE_DENIED),
+                }));
             }
-        } else if !allowed {
-            view.action_outcome = Some(Arc::new(ActionOutcome {
-                message_id,
-                error: Some(CHANGE_DENIED),
-            }));
+        } else if voting {
+            let client = client.clone();
+            let channel_id = channel_id.to_owned();
+            self.vote_tasks.spawn(async move {
+                let result = client
+                    .mutate_message(&channel_id, &message_id, action)
+                    .await;
+                (channel_id, message_id, result)
+            });
         } else if matches!(&action, MessageAction::Edit(body) if *body == message.body) {
             view.action_outcome = Some(Arc::new(ActionOutcome {
                 message_id,
@@ -151,17 +159,18 @@ impl ChatSession {
         channel_id: &str,
         message_id: &str,
         result: Result<MessageChange, Failure>,
-    ) {
+    ) -> Option<ActionResult> {
         // The web client applies both HTTP and socket results as they arrive.
         match result {
-            Ok(change) => self.apply_message_change(client, channel_id, message_id, change),
-            Err(error) => {
-                self.vote_error = Some(message_action_error(
-                    &error,
-                    "SPK rejected the vote. Try again.",
-                    "Could not vote. Try again.",
-                ));
+            Ok(change) => {
+                self.apply_message_change(client, channel_id, message_id, change);
+                None
             }
+            Err(error) => Some(ActionResult::error(message_action_error(
+                &error,
+                "SPK rejected the vote. Try again.",
+                "Could not vote. Try again.",
+            ))),
         }
     }
 
@@ -173,25 +182,31 @@ impl ChatSession {
         question: &str,
         mut options: Vec<PollEditOption>,
         reset_votes: Option<bool>,
-    ) -> Result<Option<MessageAction>, &'static str> {
+    ) -> Result<Option<MessageAction>, PollFormError> {
         let view = self
             .selected
             .as_ref()
             .filter(|view| view.channel_id == channel_id && view.can_send())
-            .ok_or("This conversation is unavailable.")?;
+            .ok_or(PollFormError::Action("This conversation is unavailable."))?;
         let message = view
             .message(message_id)
-            .ok_or("This message is unavailable.")?;
+            .ok_or(PollFormError::Action("This message is unavailable."))?;
         if sidebar.profile.id.as_deref() != Some(message.user_id.as_str()) {
-            return Err(CHANGE_DENIED);
+            return Err(PollFormError::Action(CHANGE_DENIED));
         }
-        let poll = message.poll.as_ref().ok_or("This poll is unavailable.")?;
+        let poll = message
+            .poll
+            .as_ref()
+            .ok_or(PollFormError::Action("This poll is unavailable."))?;
         if self.pending_action.is_some() {
-            return Err("A message change is in progress. Try again.");
+            return Err(PollFormError::Action(
+                "A message change is in progress. Try again.",
+            ));
         }
 
         let (body, labels) =
-            validate_poll(question, options.iter().map(|option| option.label.as_str()))?;
+            validate_poll(question, options.iter().map(|option| option.label.as_str()))
+                .map_err(PollFormError::Validation)?;
         let changed = poll.options.len() != options.len()
             || poll.options.iter().zip(options.iter().zip(&labels)).any(
                 |(existing, (option, label))| {
@@ -245,11 +260,13 @@ impl ChatSession {
         });
     }
 
-    pub fn action_complete(&mut self, client: &SpkClient, result: Result<MessageChange, Failure>) {
-        let (Some(pending), Some(view)) = (self.pending_action.take(), self.selected.as_mut())
-        else {
-            return;
-        };
+    pub fn action_complete(
+        &mut self,
+        client: &SpkClient,
+        result: Result<MessageChange, Failure>,
+    ) -> Option<ActionResult> {
+        let pending = self.pending_action.take()?;
+        let view = self.selected.as_mut()?;
         view.action_pending = false;
         let error = result.as_ref().err().map(|error| {
             let (bad_request, fallback) = if pending.poll_edit_reply.is_some() {
@@ -265,6 +282,11 @@ impl ChatSession {
             };
             message_action_error(error, bad_request, fallback)
         });
+        let field_error = pending.poll_edit_reply.is_some()
+            && matches!(
+                &result,
+                Err(Failure::Http(reqwest::StatusCode::BAD_REQUEST))
+            );
         view.action_outcome = Some(Arc::new(ActionOutcome {
             message_id: pending.message_id.clone(),
             error,
@@ -276,8 +298,15 @@ impl ChatSession {
             self.apply_message_change(client, &channel_id, &pending.message_id, change);
         }
         if let Some(reply) = pending.poll_edit_reply {
-            let _ = reply.send(error.map_or(Ok(PollEditOutcome::Saved), Err));
+            let _ = reply.send(error.map_or(Ok(PollEditOutcome::Saved), |message| {
+                Err(if field_error {
+                    PollFormError::Validation(message)
+                } else {
+                    PollFormError::Action(message)
+                })
+            }));
         }
+        error.filter(|_| !field_error).map(ActionResult::error)
     }
 
     pub fn message_changed(

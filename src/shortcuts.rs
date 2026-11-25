@@ -462,16 +462,19 @@ impl Shortcuts {
         self.preferences.sounds
     }
 
-    pub fn set_sound_settings(&mut self, sounds: SoundSettings) {
+    pub fn set_sound_settings(&mut self, sounds: SoundSettings) -> Result<(), ChangeError> {
         let next = Preferences {
             sounds,
             ..self.preferences.clone()
         };
-        self.settings_error = next
+        let result = next
             .save(self.path.as_deref())
-            .err()
-            .map(|_| ChangeError::Save.message());
+            .map_err(|_| ChangeError::Save);
         self.preferences = next;
+        if result.is_ok() {
+            self.settings_error = None;
+        }
+        result
     }
 
     fn register(&mut self, binding: &Binding) -> Result<Option<HotKey>, ChangeError> {
@@ -593,6 +596,25 @@ impl Shortcuts {
         {
             self.reset_global();
         }
+    }
+
+    pub fn action_toast_key(&self, is_mac: bool) -> &'static str {
+        let modifiers = Modifiers {
+            control: !is_mac,
+            platform: is_mac,
+            shift: true,
+            ..Modifiers::default()
+        };
+        ["f8", "f9", "f10"]
+            .into_iter()
+            .find(|key| {
+                !self.owns_chord(&Chord {
+                    key: (*key).into(),
+                    modifiers,
+                    mac_key: None,
+                })
+            })
+            .expect("SPK has only two configurable voice shortcuts")
     }
 
     pub fn owns_chord(&self, chord: &Chord) -> bool {
@@ -787,7 +809,7 @@ mod tests {
         let mut sounds = SoundSettings::default();
         sounds.leave.enabled = false;
         sounds.deafen.volume = 23;
-        shortcuts.set_sound_settings(sounds);
+        shortcuts.set_sound_settings(sounds).unwrap();
         assert!(shortcuts.settings_error.is_none());
         let mut reopened = Shortcuts::load(Some(path), None);
         assert_eq!(reopened.binding(Action::Mute), Some(&original));
