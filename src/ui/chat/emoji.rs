@@ -98,18 +98,55 @@ impl MessageEmoji {
         // syntax to split mixed text into individual objects while keeping its Markdown marks.
         let mut edits = Vec::new();
         self.find_emoji(&document, source, &mut edits);
-        match apply_edits(source, edits) {
-            Cow::Borrowed(_) => source.clone(),
-            Cow::Owned(display) => {
-                // shortcut: keep the original formatting when unusual delimiter runs
-                // cannot be rewritten without changing their parse. Remove once GPUI Kit
-                // can split Markdown text nodes into inline objects directly.
-                if source.contains(['*', '_', '~']) && !same_markdown(source, &display, options) {
-                    source.clone()
-                } else {
-                    display.into()
+        let Cow::Owned(display) = apply_edits(source, edits) else {
+            return source.clone();
+        };
+        if !source.contains(['*', '_', '~']) {
+            return display.into();
+        }
+        let options = markdown::Options {
+            parse: options,
+            compile: markdown::CompileOptions {
+                // Preserve the marker URL in the in-memory comparison.
+                allow_dangerous_protocol: true,
+                ..Default::default()
+            },
+        };
+        let Ok(original) = markdown::to_html_with_options(source, &options) else {
+            return source.clone();
+        };
+        if same_markdown(&original, &display, &options) {
+            return display.into();
+        }
+
+        let Node::Root(root) = document else {
+            return source.clone();
+        };
+        let blocks = root
+            .children
+            .iter()
+            .filter_map(|block| {
+                let mut edits = Vec::new();
+                self.find_emoji(block, source, &mut edits);
+                if !edits.is_empty()
+                    && let Some(position) = block.position()
+                    && !independent_block_matches(
+                        source,
+                        position.start.offset..position.end.offset,
+                        &edits,
+                        &options,
+                    )
+                {
+                    edits.retain(|edit| standalone_glyph(source, edit));
                 }
-            }
+                (!edits.is_empty()).then_some(edits)
+            })
+            .collect::<Vec<_>>();
+        let mut retained = Vec::new();
+        retain_compatible_edits(source, &original, &options, &blocks, &mut retained);
+        match apply_edits(source, retained) {
+            Cow::Borrowed(_) => source.clone(),
+            Cow::Owned(display) => display.into(),
         }
     }
 
@@ -264,19 +301,92 @@ impl MessageEmoji {
     }
 }
 
-fn same_markdown(source: &str, display: &str, parse: markdown::ParseOptions) -> bool {
-    let options = markdown::Options {
-        parse,
-        compile: markdown::CompileOptions {
-            // This HTML is compared in memory, so preserve the marker URL for comparison.
-            allow_dangerous_protocol: true,
-            ..Default::default()
-        },
+type MarkdownEdit = (Range<usize>, String);
+
+fn independent_block_matches(
+    source: &str,
+    bounds: Range<usize>,
+    edits: &[MarkdownEdit],
+    options: &markdown::Options,
+) -> bool {
+    let block = &source[bounds.clone()];
+    if block.contains('[')
+        || !block.contains(['*', '_', '~'])
+        || edits
+            .iter()
+            .any(|(range, _)| range.start < bounds.start || range.end > bounds.end)
+    {
+        return true;
+    }
+    let Ok(original) = markdown::to_html_with_options(block, options) else {
+        return true;
     };
-    let (Ok(original), Ok(projected)) = (
-        markdown::to_html_with_options(source, &options),
-        markdown::to_html_with_options(display, &options),
-    ) else {
+    let local = edits
+        .iter()
+        .map(|(range, replacement)| {
+            (
+                range.start - bounds.start..range.end - bounds.start,
+                replacement.clone(),
+            )
+        })
+        .collect();
+    same_markdown(&original, &apply_edits(block, local), options)
+}
+
+fn standalone_glyph(source: &str, (range, replacement): &MarkdownEdit) -> bool {
+    let before = range
+        .start
+        .checked_sub(1)
+        .and_then(|index| source.as_bytes().get(index));
+    let after = source.as_bytes().get(range.end);
+    replacement.trim_start_matches("&#92;").starts_with("![")
+        && !before
+            .into_iter()
+            .chain(after)
+            .copied()
+            .any(attention_delimiter)
+}
+
+fn retain_compatible_edits(
+    source: &str,
+    original: &str,
+    options: &markdown::Options,
+    blocks: &[Vec<MarkdownEdit>],
+    retained: &mut Vec<MarkdownEdit>,
+) {
+    if blocks.is_empty() {
+        return;
+    }
+    let previous = retained.len();
+    retained.extend(blocks.iter().flatten().cloned());
+    if same_markdown(original, &apply_edits(source, retained.clone()), options) {
+        return;
+    }
+    retained.truncate(previous);
+
+    if let [block] = blocks {
+        // shortcut: leave delimiter-adjacent emoji as Unicode in incompatible
+        // blocks until GPUI Kit can split Markdown text nodes directly.
+        retained.extend(
+            block
+                .iter()
+                .filter(|edit| standalone_glyph(source, edit))
+                .cloned(),
+        );
+        if retained.len() != previous
+            && !same_markdown(original, &apply_edits(source, retained.clone()), options)
+        {
+            retained.truncate(previous);
+        }
+        return;
+    }
+    let (first, second) = blocks.split_at(blocks.len() / 2);
+    retain_compatible_edits(source, original, options, first, retained);
+    retain_compatible_edits(source, original, options, second, retained);
+}
+
+fn same_markdown(original: &str, display: &str, options: &markdown::Options) -> bool {
+    let Ok(projected) = markdown::to_html_with_options(display, options) else {
         return false;
     };
     let marker = "<img src=\"spk-emoji:\" alt=\"";
@@ -634,5 +744,32 @@ mod tests {
     fn posted_emoji_preserves_original_source_if_markdown_would_change() {
         let source = SharedString::from("**hi😀****Status**");
         assert_eq!(MessageEmoji::new(false).display_markdown(&source), source);
+    }
+
+    #[test]
+    fn posted_emoji_keeps_compatible_replacements_around_ambiguous_markdown() {
+        for separator in [" ", "\n\n"] {
+            let source =
+                SharedString::from(format!("Ready 👍🏽{separator}**hi😀****Status** and 🇫🇷"));
+            let display = MessageEmoji::new(false).display_markdown(&source);
+            assert_eq!(
+                &*display,
+                format!(
+                    "Ready ![👍🏽](spk-emoji:){separator}**hi😀****Status** and ![🇫🇷](spk-emoji:)"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn posted_emoji_keeps_formatting_and_external_link_definitions_in_compatible_blocks() {
+        let source = SharedString::from(
+            "**Ready 👍🏽** [Flag 🇫🇷][destination]\n\n**hi😀****Status**\n\n[destination]: /rooms",
+        );
+        let display = MessageEmoji::new(false).display_markdown(&source);
+        assert_eq!(
+            &*display,
+            "**Ready ![👍🏽](spk-emoji:)** [Flag ![🇫🇷](spk-emoji:)][destination]\n\n**hi😀****Status**\n\n[destination]: /rooms"
+        );
     }
 }
