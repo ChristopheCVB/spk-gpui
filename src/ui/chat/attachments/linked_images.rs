@@ -6,7 +6,7 @@ pub(super) type LinkImageKey = (MessageTarget, Url);
 
 pub(super) enum LinkImage {
     Loading(Uuid),
-    Ready(Arc<RenderImage>),
+    Ready(Arc<ChatImage>),
     Unavailable,
 }
 
@@ -33,7 +33,7 @@ impl AttachmentUi {
                         .is_some_and(|(old, new)| old == new)
                 });
             if !keep && let LinkImage::Ready(image) = state {
-                let _ = window.drop_image(image.clone());
+                let _ = window.drop_image(image.pixels.clone());
             }
             keep
         });
@@ -54,7 +54,7 @@ impl AttachmentUi {
         &mut self,
         key: LinkImageKey,
         operation: Uuid,
-        image: Option<Arc<RenderImage>>,
+        image: Option<Arc<ChatImage>>,
     ) -> bool {
         self.inline_loads -= 1;
         if let Some(state @ LinkImage::Loading(_)) = self.link_images.get_mut(&key)
@@ -109,11 +109,10 @@ impl Spk {
                                             .h_auto()
                                             .p_0()
                                             .child(
-                                                img(image.clone())
+                                                chat_image(image.clone())
                                                     .max_w_full()
                                                     .w(px(360.0))
-                                                    .h(px(225.0))
-                                                    .object_fit(ObjectFit::Contain),
+                                                    .h(px(225.0)),
                                             )
                                             .on_click(cx.listener(move |_, _, window, cx| {
                                                 let url = url.clone();

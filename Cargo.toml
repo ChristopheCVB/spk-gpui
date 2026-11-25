@@ -14,10 +14,11 @@ dfn3_rs = "=0.1.2"
 dirs = "7"
 flate2 = "1"
 futures = "0.3"
+gif = "0.14"
 global-hotkey = "=0.10.0"
 html5ever = "0.27"
 gpui-kit = "=0.10.0"
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg"] }
 image-webp = "0.2.4"
 icu_normalizer = { version = "2.4", default-features = false, features = ["compiled_data"] }
 icu_properties = { version = "2.4", default-features = false, features = ["compiled_data"] }
@@ -63,7 +64,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 screencapturekit = { version = "=11.1.2", features = ["macos_15_0"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-ashpd = { version = "0.14.1", default-features = false, features = ["async-io", "screencast"] }
+ashpd = { version = "0.14.1", default-features = false, features = ["async-io", "screencast", "settings"] }
 cpal = { version = "0.18.2", features = ["pulseaudio"] }
 notify-rust = "=4.19.0"
 cxx = "1.0"

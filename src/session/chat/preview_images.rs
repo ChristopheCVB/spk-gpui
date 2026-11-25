@@ -2,7 +2,7 @@ use super::*;
 
 use std::io::Cursor;
 
-use gpui_kit::{Image, ImageFormat, RenderImage, SvgRenderer};
+use gpui_kit::{Image, ImageFormat, RenderImage, Size, SvgRenderer, size};
 use image_webp::WebPDecoder;
 
 use crate::{
@@ -11,7 +11,7 @@ use crate::{
 };
 use url::Url;
 
-pub(in crate::session) type PreviewImage = Option<Arc<RenderImage>>;
+pub(in crate::session) type PreviewImage = Option<Arc<ChatImage>>;
 
 type PreviewKey = (String, String);
 pub(in crate::session) type PreviewResult = (PreviewKey, Result<Arc<RenderImage>, Failure>);
@@ -119,7 +119,7 @@ impl ChatSession {
         let client = client.clone();
         self.message_preview.spawn(async move {
             tokio::select! {
-                image = load_image(&client, url.as_str(), 800, 600) => { let _ = reply.send(image); }
+                image = load_image(&client, url.as_str(), size(800, 600)) => { let _ = reply.send(image); }
                 _ = reply.closed() => {}
             }
         });
@@ -137,12 +137,7 @@ fn decode(bytes: Vec<u8>) -> Result<Arc<RenderImage>, Failure> {
         .map_err(|_| Failure::InvalidResponse)
 }
 
-pub(super) async fn load_image(
-    client: &SpkClient,
-    url: &str,
-    width: u32,
-    height: u32,
-) -> PreviewImage {
+pub(super) async fn load_image(client: &SpkClient, url: &str, bounds: Size<u32>) -> PreviewImage {
     let bytes = client.public_image_preview(url).await.ok()?;
     tokio::task::spawn_blocking(move || {
         if matches!(
@@ -152,7 +147,7 @@ pub(super) async fn load_image(
                 | image::ImageFormat::Png
                 | image::ImageFormat::Jpeg
         ) {
-            return attachments::raster_thumbnail(&bytes, width, height);
+            return images::raster_thumbnail(&bytes, bounds);
         }
         None
     })
