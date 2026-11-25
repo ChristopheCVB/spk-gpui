@@ -70,11 +70,11 @@ def wait_for(description, probe, timeout=15):
 
 
 @contextmanager
-def service(args, log, cwd, env):
+def service(args, log, cwd, env, stdin=None):
     with log.open("wb") as output:
         process = subprocess.Popen(
             args, cwd=cwd, env=env, stdout=output, stderr=subprocess.STDOUT,
-            start_new_session=True,
+            start_new_session=True, stdin=stdin,
         )
         try:
             yield process
@@ -226,7 +226,7 @@ def seed(origin, database, log, process):
             }},
         }, {"X-GitHub-Event": event})
 
-    return post_live_alert, voice
+    return post_live_alert, voice, target, owner, reader
 
 
 @contextmanager
@@ -242,6 +242,8 @@ const sid = crypto.randomUUID();
 const url = origin.replace(/^http/, "ws") + "/_ws";
 const socket = new WebSocket(url, {headers: {Origin: origin, Cookie: process.env.PEER_COOKIE}});
 const send = frame => socket.send(JSON.stringify({...frame, sid}));
+const {createInterface} = await import("node:readline");
+createInterface({input: process.stdin}).on("line", line => send(JSON.parse(line)));
 socket.addEventListener("open", () => send({type: "voice:join", channelId, ready: true}));
 socket.addEventListener("message", event => {
     const frame = JSON.parse(event.data);
@@ -258,14 +260,22 @@ socket.addEventListener("error", event => {
 });
 """
     env = {**env, "PEER_ORIGIN": origin, "PEER_CHANNEL": channel, "PEER_COOKIE": cookie}
-    with service(["node", "-e", script], log, web, env) as process:
+    with service(["node", "--input-type=module", "-e", script], log, web, env,
+                 stdin=subprocess.PIPE) as process:
         def joined():
             if process.poll() is not None:
                 raise RuntimeError(f"Voice peer exited. See {log}")
             return "joined" in log.read_text()
 
         wait_for("the SPK Web voice peer", joined)
-        yield
+        def message(channel_id, body):
+            process.stdin.write((json.dumps({
+                "type": "message:send", "channelId": channel_id, "body": body,
+                "nonce": os.urandom(16).hex(),
+            }) + "\n").encode())
+            process.stdin.flush()
+
+        yield message
 
 
 def walk(node):
@@ -352,6 +362,47 @@ class Desktop:
     def screenshot(self, logs, filename):
         subprocess.run(["import", "-window", self.window, str(logs / filename)],
                        timeout=10, check=True)
+
+    def check_toast_position(self, name, role=None):
+        node = self.find(name, role)
+        while node is not None and node.get_role_name() != "notification":
+            node = node.get_parent()
+        if node is None:
+            raise RuntimeError(f"{name} should be inside a notification")
+        toast = node.get_component_iface().get_extents(Atspi.CoordType.WINDOW)
+        geometry = subprocess.check_output([
+            "xdotool", "getwindowgeometry", "--shell", self.window,
+        ], text=True)
+        width, height = map(int, re.findall(r"^(?:WIDTH|HEIGHT)=(\d+)$", geometry, re.MULTILINE))
+        if abs(width - (toast.x + toast.width)) > 48 or toast.y < height / 2:
+            raise RuntimeError(f"{name} should appear in the bottom right")
+        return toast
+
+    def check_channel_toast(self, logs):
+        def background(toast):
+            pixel = f"1x1+{toast.x + toast.width - 12}+{toast.y + toast.height // 2}"
+            return subprocess.check_output(
+                ["import", "-window", self.window, "-crop", pixel, "txt:-"], timeout=5,
+            )
+
+        result = "Channel reordered."
+        self.check_toast_position(result)
+        time.sleep(0.45)
+        open_workspace = background(self.check_toast_position(result))
+        self.click("New text channel", "push button")
+        self.click("Channel name", "entry")
+        self.move(700, 30)
+        time.sleep(0.25)
+        if background(self.check_toast_position(result)) != open_workspace:
+            raise RuntimeError("The dialog's dimming layer should stay behind the toast")
+        self.screenshot(logs, "channel-toast-dark.png")
+        self.key("ctrl+shift+F8")
+        wait_for("the keyboard to dismiss the toast",
+                 lambda: self.find_node(result) is None, timeout=2)
+        wait_for("Channel name to retain focus", lambda: self.focused("Channel name", "entry"))
+        self.click("Create", "push button")
+        self.find("Channel names must be 1–32 characters.")
+        self.click("Cancel", "push button")
 
     def channel_ellipsis(self, row):
         bounds = self.bounds(row, "push button", partial=True)
@@ -469,7 +520,7 @@ class Desktop:
         self.click("Leave voice", "menu item")
         self.find(f"Join {FIRST_VOICE}", "push button")
 
-    def check_admin_menus(self, logs, admin, server):
+    def check_admin_menus(self, logs, admin, server, check_settings):
         person = "Smoke Reader"
 
         def check_text_menu():
@@ -495,6 +546,8 @@ class Desktop:
         wait_for("the Text Channel to move above smoke-chat",
                  lambda: self.bounds("smoke-target", "push button", partial=True).y
                  < self.bounds("smoke-chat", "push button", partial=True).y)
+        self.check_channel_toast(logs)
+        check_settings()
 
         voice_action = self.channel_ellipsis(FIRST_VOICE)
         ellipsis = self.bounds(voice_action, "push button")
@@ -745,6 +798,78 @@ class Desktop:
         for channel in (FIRST_VOICE, SECOND_VOICE):
             self.find(channel, "push button")
 
+    def check_incoming_toast(self, logs, send_message, target, reader):
+        self.click("smoke-chat", "push button", partial=True)
+        self.find("Show all 2 pinned messages", "toggle button")
+        send_message(target, f"<@{reader}> Incoming smoke alert")
+        self.check_toast_position("Open", "push button")
+        self.find("Smoke Author in #smoke-target", "label")
+        time.sleep(0.45)
+        self.screenshot(logs, "incoming-toast-dark.png")
+
+    def check_upload_recovery(self):
+        self.click("Write a message", "entry")
+        image = subprocess.check_output(["convert", "-size", "8x8", "xc:blue", "png:-"])
+        with subprocess.Popen(["xclip", "-quiet", "-selection", "clipboard", "-target",
+                               "image/png"], stdin=subprocess.PIPE, stderr=subprocess.DEVNULL) as clipboard:
+            clipboard.stdin.write(image)
+            clipboard.stdin.close()
+            try:
+                wait_for("an image on the clipboard", lambda: b"image/png" in subprocess.run(
+                    ["xclip", "-selection", "clipboard", "-target", "TARGETS", "-out"],
+                    capture_output=True, timeout=2,
+                ).stdout)
+                self.key("ctrl+v")
+                self.find("Retry", "push button")
+                self.click("Remove file", "push button")
+            finally:
+                clipboard.terminate()
+
+    def check_settings_toasts(self, logs, config, send_message, target, owner):
+        notification_result = "Could not save notification settings."
+        self.click("Settings", "push button")
+        self.click("Notifications", "push button")
+        for setting in ("Direct messages", "Mentions and replies"):
+            self.click(setting, "toggle button")
+            if self.find(setting, "toggle button").get_state_set().contains(Atspi.StateType.CHECKED):
+                raise RuntimeError(f"{setting} notifications should be off")
+        preferences, = config.glob("notifications/instance/*/account/*/preferences.json")
+        preferences.unlink()
+        preferences.mkdir()
+        previews = "Show system notification previews"
+        self.tab_to(previews, "toggle button")
+        self.key("space")
+        self.check_toast_position(notification_result)
+        if not self.focused(previews, "toggle button"):
+            raise RuntimeError("The toast took focus from the Settings control")
+        started = time.monotonic()
+        time.sleep(2.5)
+        self.key("space")
+        time.sleep(max(0, started + 5.5 - time.monotonic()))
+        if sum(node.get_name() == notification_result for node in self.nodes()) != 1:
+            raise RuntimeError("Repeating the action should refresh one toast")
+        self.click("Appearance", "push button")
+        (config / "density").mkdir()
+        self.click("Compact", "radio button")
+        density_result = "Could not save your density preference."
+        toast = self.check_toast_position(density_result)
+        self.move(toast.x + toast.width // 2, toast.y + toast.height // 2)
+        self.check_toast_position(notification_result)
+        time.sleep(0.3)
+        self.screenshot(logs, "settings-toasts-dark.png")
+        self.move(700, 30)
+        wait_for("the five-second action toasts to expire",
+                 lambda: self.find_node(density_result) is None
+                 and self.find_node(notification_result) is None, timeout=7)
+        self.click("Close settings", "push button")
+        self.click("smoke-chat", "push button", partial=True)
+        self.find("Show all 2 pinned messages", "toggle button")
+        send_message(target, f"<@{owner}> Live update with notifications off")
+        self.find("smoke-target, 1 unread, 1 pings", "push button")
+        self.absent(notification_result, None)
+        self.absent(density_result, None)
+        self.absent("Open", "push button")
+
     def check(self, post_live_alert, logs):
         self.find("smoke-target", "push button", partial=True)
         self.click("Smoke Webhook", "push button", partial=True)
@@ -908,6 +1033,8 @@ def main(work, artifacts):
     web_env.update({
         "TMPDIR": str(attempt), "BETTER_AUTH_URL": origin,
         "BETTER_AUTH_SECRET": os.urandom(32).hex(), "NUXT_DATABASE_PATH": str(database),
+        # The upload must fail locally before contacting object storage.
+        "NUXT_R2_ACCOUNT_ID": "invalid fixture account",
     })
     subprocess.run(["xset", "b", "off"], check=True)
     subprocess.run(
@@ -923,13 +1050,16 @@ def main(work, artifacts):
                        NUXT_PUBLIC_LIVEKIT_URL=livekit)
         with service(["node", "node_modules/nuxt/bin/nuxt.mjs", "dev", "--host", "127.0.0.1",
                       "--port", str(port)], server_log, web, web_env) as server:
-            post_live_alert, voice = seed(origin, database, server_log, server)
+            post_live_alert, voice, target, owner, reader = seed(origin, database, server_log, server)
             binary = desktop_binary(work, logs, {**env, "SPK_URL": origin, "LIVEKIT_URL": livekit})
-            with (voice_peer(origin, ADMIN_EMAIL, voice[FIRST_VOICE], web, logs / "author-peer.log", env),
+            with (voice_peer(origin, ADMIN_EMAIL, voice[FIRST_VOICE], web,
+                             logs / "author-peer.log", env) as send_message,
                   desktop_session(binary, launches, logs / "reader.log", env) as desktop):
                 desktop.sign_in(EMAIL, "Smoke Reader")
                 desktop.check(post_live_alert, logs)
                 desktop.check_reader_menus(logs)
+                desktop.check_incoming_toast(logs, send_message, target, reader)
+                desktop.check_upload_recovery()
 
             admin_launches = logs / "admin-browser-launches.log"
             admin_launches.touch()
@@ -937,10 +1067,15 @@ def main(work, artifacts):
             admin_env["PULSE_SERVER"] = env["PULSE_SERVER"]
             admin = http(origin)
             admin("/api/auth/sign-in/email", {"email": ADMIN_EMAIL, "password": PASSWORD})
-            with (voice_peer(origin, EMAIL, voice[FIRST_VOICE], web, logs / "reader-peer.log", env),
+            with (voice_peer(origin, EMAIL, voice[FIRST_VOICE], web,
+                             logs / "reader-peer.log", env) as send_message,
                   desktop_session(binary, admin_launches, logs / "admin.log", admin_env) as desktop):
                 desktop.sign_in(ADMIN_EMAIL)
-                desktop.check_admin_menus(logs, admin, server)
+                config = Path(admin_env["XDG_CONFIG_HOME"]) / "spk-gpui"
+                desktop.check_admin_menus(
+                    logs, admin, server,
+                    lambda: desktop.check_settings_toasts(logs, config, send_message, target, owner),
+                )
     print("SPK desktop smoke test passed")
 
 
