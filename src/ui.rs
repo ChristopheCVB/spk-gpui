@@ -875,6 +875,31 @@ fn surface_input(state: &Entity<InputState>, fill: Hsla, cx: &App) -> Input {
         .border_color(cx.theme().transparent)
 }
 
+fn ban_confirmation_fields(
+    name: Option<&str>,
+    reason: &Entity<InputState>,
+    fill: Hsla,
+    disabled: bool,
+    cx: &App,
+) -> Div {
+    const IMPACT: &str = "They’ll be signed out and disconnected from voice. Their messages stay.";
+    let copy: SharedString = match name {
+        Some(name) => format!("Ban {name}? {IMPACT}").into(),
+        None => IMPACT.into(),
+    };
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(Label::new(copy).whitespace_normal())
+        .child(Label::new("Reason (optional)"))
+        .child(
+            surface_input(reason, fill, cx)
+                .aria_label("Ban reason")
+                .disabled(disabled),
+        )
+}
+
 fn floating_shadow(cx: &App) -> Vec<BoxShadow> {
     let ink = gpui_kit::black().alpha(if cx.theme().mode.is_dark() { 0.5 } else { 0.1 });
     vec![

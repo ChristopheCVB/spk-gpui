@@ -163,7 +163,7 @@ pub(super) struct ChannelActions {
 }
 
 impl ChannelActions {
-    pub(super) fn render(self, menu: SidebarRowMenu) -> AnyElement {
+    pub(super) fn items(&self, menu: PopupMenu, focus: &FocusHandle, cx: &App) -> PopupMenu {
         let Self {
             id,
             name,
@@ -172,60 +172,58 @@ impl ChannelActions {
             can_move_down,
             app,
         } = self;
-        let focus = menu.focus();
-        let button = tool_button(
-            "channel-actions",
-            IconName::Ellipsis,
-            format!("Actions for {name}"),
-        );
-        menu.render(button, true, Anchor::TopRight, move |menu, _, cx| {
-            let editable = app.upgrade().is_some_and(|app| {
-                matches!(&app.read(cx).view, View::SignedIn(sidebar)
-                    if sidebar.is_admin() && !sidebar.channel_admin.pending)
-            });
-            let mut menu = menu.item(channel_form_item(
-                "Rename…",
-                IconName::Pencil,
-                ChannelForm::Rename(id.clone(), name.clone()),
-                editable,
-                app.clone(),
-                focus.clone(),
-            ));
-            for (down, label, icon, enabled) in [
-                (false, "Move up", IconName::ArrowUp, can_move_up),
-                (true, "Move down", IconName::ArrowDown, can_move_down),
-            ] {
-                let id = id.clone();
-                let app = app.clone();
-                let focus = focus.clone();
-                menu = menu.item(
-                    PopupMenuItem::new(label)
-                        .icon(icon)
-                        .disabled(!editable || !enabled)
-                        .on_click(move |_, window, cx| {
-                            focus.focus(window, cx);
-                            let _ = app.update(cx, |this, cx| {
-                                this.send(
-                                    Command::ManageChannel(ChannelAction::Move {
-                                        id: id.clone(),
-                                        down,
-                                    }),
-                                    None,
-                                    cx,
-                                );
-                            });
-                        }),
-                );
-            }
-            menu.separator().item(channel_form_item(
-                "Delete…",
-                IconName::Trash,
-                ChannelForm::Delete(id.clone(), name.clone(), kind),
-                editable,
-                app.clone(),
-                focus.clone(),
-            ))
-        })
+        let Some(workspace) = app.upgrade() else {
+            return menu;
+        };
+        let View::SignedIn(sidebar) = &workspace.read(cx).view else {
+            return menu;
+        };
+        if !sidebar.is_admin() {
+            return menu;
+        }
+        let editable = !sidebar.channel_admin.pending;
+        let mut menu = menu.separator().item(channel_form_item(
+            "Rename",
+            IconName::Pencil,
+            ChannelForm::Rename(id.clone(), name.clone()),
+            editable,
+            app.clone(),
+            focus.clone(),
+        ));
+        for (down, label, icon, enabled) in [
+            (false, "Move up", IconName::ArrowUp, *can_move_up),
+            (true, "Move down", IconName::ArrowDown, *can_move_down),
+        ] {
+            let id = id.clone();
+            let app = app.clone();
+            let focus = focus.clone();
+            menu = menu.item(
+                PopupMenuItem::new(label)
+                    .icon(icon)
+                    .disabled(!editable || !enabled)
+                    .on_click(move |_, window, cx| {
+                        focus.focus(window, cx);
+                        let _ = app.update(cx, |this, cx| {
+                            this.send(
+                                Command::ManageChannel(ChannelAction::Move {
+                                    id: id.clone(),
+                                    down,
+                                }),
+                                None,
+                                cx,
+                            );
+                        });
+                    }),
+            );
+        }
+        menu.item(channel_form_item(
+            "Delete",
+            IconName::Trash,
+            ChannelForm::Delete(id.clone(), name.clone(), *kind),
+            editable,
+            app.clone(),
+            focus.clone(),
+        ))
     }
 }
 

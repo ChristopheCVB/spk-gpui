@@ -10,6 +10,7 @@ use gpui_kit::base::{LayoutDirection, LogicalStyledExt};
 use gpui_kit::component::{
     IndexPath,
     button::ButtonCustomVariant,
+    menu::PopupMenuItem,
     popover::Popover,
     select::{SearchableVec, SelectEvent},
     slider::{Slider, SliderEvent, SliderState, SliderValue},
@@ -977,31 +978,27 @@ fn connection_diagnostics_popover(trigger: Button, cx: &Context<Spk>) -> Popover
     })
 }
 
-impl Spk {
-    pub(super) fn participant_volume_button(
-        &self,
-        participant: &crate::session::Participant<'_>,
-        sidebar: &Sidebar,
-        cx: &Context<Self>,
-    ) -> Button {
-        let id = participant.id.to_owned();
-        let name = participant.name.to_owned();
-        let volume = sidebar.voice_intent.preferred.participant_volume(&id);
-        tool_button(
-            "participant-volume",
-            if volume.muted {
-                IconName::VolumeX
-            } else {
-                IconName::Volume2
-            },
-            format!("Volume for {name}"),
-        )
-        .on_click(cx.listener(move |this, _, window, cx| {
-            this.open_participant_volume(&id, &name, window, cx);
-        }))
-    }
+pub(super) fn participant_volume_item(
+    id: String,
+    name: String,
+    app: WeakEntity<Spk>,
+) -> PopupMenuItem {
+    PopupMenuItem::new("Volume…")
+        .icon(IconName::SlidersHorizontal)
+        .on_click(move |_, window, cx| {
+            let app = app.clone();
+            let id = id.clone();
+            let name = name.clone();
+            window.defer(cx, move |window, cx| {
+                let _ = app.update(cx, |this, cx| {
+                    this.open_participant_volume(&id, &name, window, cx)
+                });
+            });
+        })
+}
 
-    pub(super) fn open_participant_volume(
+impl Spk {
+    fn open_participant_volume(
         &self,
         id: &str,
         name: &str,

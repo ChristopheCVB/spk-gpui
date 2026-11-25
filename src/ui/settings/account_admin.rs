@@ -448,20 +448,35 @@ impl Settings {
         let name = user.user.name().unwrap_or(&user.email);
         card(
             "Ban user",
-            div().flex().flex_col().gap_2()
-                .child(Label::new(format!("Ban {name}? They’ll be signed out and disconnected from voice. Their messages stay.")).whitespace_normal())
-                .child(Label::new("Reason (optional)"))
-                .child(surface_input(&self.ban_reason, cx.theme().popover, cx).aria_label("Ban reason").disabled(busy))
-                .child(div().flex().gap_2()
-                    .child(admin_button("cancel-ban", "Cancel").on_click(cx.listener(|this, _, _, cx| {
-                        this.ban_target = None;
-                        cx.notify();
-                    })))
-                    .child(control_button("confirm-ban").danger().tab_stop(true).label("Ban").disabled(busy)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let reason = this.ban_reason.read(cx).value().to_string();
-                            this.account_action(AdminAccountAction::Ban { id: id.clone(), reason }, cx);
-                        })))),
+            ban_confirmation_fields(Some(name), &self.ban_reason, cx.theme().popover, busy, cx)
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(admin_button("cancel-ban", "Cancel").on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.ban_target = None;
+                                cx.notify();
+                            },
+                        )))
+                        .child(
+                            control_button("confirm-ban")
+                                .danger()
+                                .tab_stop(true)
+                                .label("Ban")
+                                .disabled(busy)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    let reason = this.ban_reason.read(cx).value().to_string();
+                                    this.account_action(
+                                        AdminAccountAction::Ban {
+                                            id: id.clone(),
+                                            reason,
+                                        },
+                                        cx,
+                                    );
+                                })),
+                        ),
+                ),
             cx,
         )
     }
