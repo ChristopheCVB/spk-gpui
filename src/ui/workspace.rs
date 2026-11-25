@@ -2185,18 +2185,6 @@ fn sidebar_participant_items(
     let is_admin = sidebar.is_admin();
     let is_self = sidebar.profile.id.as_deref() == Some(participant.id);
     let can_ban = can_ban_participant(sidebar, participant.id);
-    let current_role = if is_self {
-        Some(sidebar.profile.role.as_str())
-    } else {
-        sidebar
-            .person(participant.id)
-            .map(|user| user.role.as_str())
-    };
-    let current_role = match current_role {
-        Some("admin") => Some(AccountRole::Admin),
-        Some("user") => Some(AccountRole::User),
-        _ => None,
-    };
     let can_inspect = sidebar.inspect_person(participant.id).is_some();
     let can_send_dm = sidebar.can_start_direct_message(participant.id)
         && sidebar.person(participant.id).is_some();
@@ -2265,35 +2253,24 @@ fn sidebar_participant_items(
                 "Change role",
                 window,
                 cx,
-                move |mut menu, _, _| {
-                    for (label, role) in
-                        [("Admin", AccountRole::Admin), ("User", AccountRole::User)]
-                    {
-                        let app = role_app.clone();
-                        let user_id = role_user.clone();
-                        menu = menu.item(
-                            PopupMenuItem::new(label)
-                                .checked(current_role == Some(role))
-                                .disabled(account_pending)
-                                .on_click(move |_, _, cx| {
-                                    if current_role != Some(role) {
-                                        let _ = app.update(cx, |app, cx| {
-                                            app.send(
-                                                Command::ModerateAccount(
-                                                    AdminAccountAction::SetRole(
-                                                        user_id.clone(),
-                                                        role,
-                                                    ),
-                                                ),
-                                                None,
-                                                cx,
-                                            );
-                                        });
-                                    }
-                                }),
-                        );
-                    }
-                    menu
+                move |menu, window, cx| {
+                    let Some(app) = role_app.upgrade() else {
+                        return menu;
+                    };
+                    let mut choices = participant_role_choices(app.read(cx), &role_user);
+                    let initial = choices;
+                    let id = role_user.clone();
+                    cx.observe_in(&app, window, move |menu, app, window, cx| {
+                        let current = participant_role_choices(app.read(cx), &id);
+                        if current != choices {
+                            choices = current;
+                            menu.rebuild(window, cx, |menu, _, _| {
+                                add_participant_role_choices(menu, &app.downgrade(), &id, current)
+                            });
+                        }
+                    })
+                    .detach();
+                    add_participant_role_choices(menu, &role_app, &role_user, initial)
                 },
             );
             let menu = menu.when_some(destinations.as_deref(), |menu, destinations| {
@@ -2333,6 +2310,57 @@ fn sidebar_participant_items(
             })
         })
     }
+}
+
+fn participant_role_choices(app: &Spk, id: &str) -> (Option<AccountRole>, bool) {
+    let View::SignedIn(sidebar) = &app.view else {
+        return (None, false);
+    };
+    let role = if sidebar.profile.id.as_deref() == Some(id) {
+        Some(sidebar.profile.role.as_str())
+    } else {
+        sidebar.person(id).map(|user| user.role.as_str())
+    };
+    let enabled = role.is_some() && sidebar.is_admin() && !sidebar.admin_accounts.busy;
+    let role = match role {
+        Some("admin") => Some(AccountRole::Admin),
+        Some("user") => Some(AccountRole::User),
+        _ => None,
+    };
+    (role, enabled)
+}
+
+fn add_participant_role_choices(
+    mut menu: PopupMenu,
+    app: &WeakEntity<Spk>,
+    id: &str,
+    (current_role, enabled): (Option<AccountRole>, bool),
+) -> PopupMenu {
+    for (label, role) in [("Admin", AccountRole::Admin), ("User", AccountRole::User)] {
+        let app = app.clone();
+        let id = id.to_owned();
+        menu = menu.item(
+            PopupMenuItem::new(label)
+                .checked(current_role == Some(role))
+                .disabled(!enabled)
+                .on_click(move |_, _, cx| {
+                    let _ = app.update(cx, |app, cx| {
+                        let (current_role, enabled) = participant_role_choices(app, &id);
+                        if enabled && current_role != Some(role) {
+                            app.send(
+                                Command::ModerateAccount(AdminAccountAction::SetRole(
+                                    id.clone(),
+                                    role,
+                                )),
+                                None,
+                                cx,
+                            );
+                        }
+                    });
+                }),
+        );
+    }
+    menu
 }
 
 fn can_ban_participant(sidebar: &Sidebar, id: &str) -> bool {
@@ -2398,15 +2426,13 @@ fn confirm_sidebar_ban(
             .width((window.viewport_size().width * 0.9).min(px(440.)))
             .title(title.clone())
             .on_ok(|_, _, _| false)
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(Label::new("They’ll be signed out and disconnected from voice. Their messages stay.").whitespace_normal())
-                    .child(Label::new("Reason (optional)"))
-                    .child(surface_input(&reason, cx.theme().background, cx).aria_label("Ban reason")),
-            )
+            .child(ban_confirmation_fields(
+                None,
+                &reason,
+                cx.theme().background,
+                false,
+                cx,
+            ))
             .footer(
                 div()
                     .flex()

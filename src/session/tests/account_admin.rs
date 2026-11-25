@@ -291,7 +291,8 @@ async fn admin_accounts_show_storage_and_follow_shared_role_and_ban_changes() {
 }
 
 #[tokio::test]
-async fn sidebar_role_changes_report_server_results_and_refresh_users_without_settings() {
+async fn sidebar_role_changes_report_server_results_and_survive_closing_settings() {
+    let (close_settings, settings_closed) = async_channel::bounded(1);
     let end = voice_session(
         Call::start_for_test,
         async |listener, requests, snapshots| {
@@ -312,6 +313,7 @@ async fn sidebar_role_changes_report_server_results_and_refresh_users_without_se
 
             let promote = expect(&requests, "POST /api/admin/users/bob/role").await;
             assert_eq!(payload(&promote), value!({"role":"admin"}));
+            settings_closed.recv().await.unwrap();
             snapshots.send(account("admin")).unwrap();
             promote.respond(&[], r#"{"ok":true}"#).await;
         },
@@ -334,7 +336,22 @@ async fn sidebar_role_changes_report_server_results_and_refresh_users_without_se
             assert!(rejected.is_admin());
             assert!(rejected.admin_accounts.page.is_none());
 
+            let settings = async |page| {
+                commands
+                    .send(Command::AdminAccounts(AdminAccountAction::Show(page)))
+                    .await
+                    .unwrap();
+            };
+            settings(Some(AdminPage::Users)).await;
+            wait_for_sidebar(&views, |view| view.admin_accounts.users.is_some()).await;
             sidebar_role("bob", AccountRole::Admin).await;
+            wait_for_sidebar(&views, |view| view.admin_accounts.busy).await;
+            settings(None).await;
+            wait_for_sidebar(&views, |view| {
+                view.admin_accounts.page.is_none() && view.admin_accounts.busy
+            })
+            .await;
+            close_settings.send(()).await.unwrap();
             let updated = wait_for_sidebar(&views, |view| {
                 view.account_moderation_notice == Some("Role updated.")
                     && view.person("bob").is_some_and(|bob| bob.role == "admin")

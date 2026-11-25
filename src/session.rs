@@ -39,7 +39,7 @@ use crate::voice::{
     ParticipantVolumeChange, Status as VoiceStatus, Update as VoiceUpdate,
     video::{CameraResolution, preview_camera},
 };
-use account_admin::{AccountAdmin, AccountAdminSurface};
+use account_admin::{AccountAdmin, AccountAdminSurface, PendingMutation};
 use accounts::{AccountLinkOutcome, choose_nickname, redeem_link};
 use authentication::{
     SESSION_EXPIRED, SavedSession, login, restore, sign_in, sign_in_message, sign_out,
@@ -1395,8 +1395,8 @@ async fn watch_session(
                     break SessionEnd::Invalidated(SESSION_EXPIRED);
                 }
             }
-            Some(result) = account_admin.mutations.join_next() => {
-                match account_admin.mutated(&mut sidebar, client, result) {
+            (surface, result) = PendingMutation::join(&mut account_admin.mutation) => {
+                match account_admin.mutated(&mut sidebar, client, surface, result) {
                     Ok(true) => refresh.fetch(client, Resource::Users),
                     Ok(false) => {}
                     Err(_) => break SessionEnd::Invalidated(SESSION_EXPIRED),

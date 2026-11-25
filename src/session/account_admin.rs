@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{future::pending, sync::Arc};
 
 use reqwest::StatusCode;
 use tokio::task::{JoinError, JoinSet};
@@ -136,12 +136,29 @@ impl AccountAdminSurface {
     }
 }
 
+pub(super) struct PendingMutation {
+    surface: AccountAdminSurface,
+    task: JoinSet<MutationResult>,
+}
+
+impl PendingMutation {
+    pub(super) async fn join(
+        mutation: &mut Option<Self>,
+    ) -> (AccountAdminSurface, Result<MutationResult, JoinError>) {
+        if let Some(mutation) = mutation
+            && let Some(result) = mutation.task.join_next().await
+        {
+            return (mutation.surface, result);
+        }
+        pending().await
+    }
+}
+
 #[derive(Default)]
 pub(super) struct AccountAdmin {
     reload: bool,
     pub(super) loads: JoinSet<Result<Listing, Failure>>,
-    pub(super) mutations: JoinSet<MutationResult>,
-    mutation_surface: Option<AccountAdminSurface>,
+    pub(super) mutation: Option<PendingMutation>,
 }
 
 impl AccountAdmin {
@@ -174,7 +191,7 @@ impl AccountAdmin {
                 self.reload = false;
                 sidebar.admin_accounts = AdminAccountsView {
                     page,
-                    busy: !self.mutations.is_empty(),
+                    busy: self.mutation.is_some(),
                     ..Default::default()
                 };
             }
@@ -182,7 +199,7 @@ impl AccountAdmin {
             self.refresh(sidebar, client);
             return;
         }
-        if !self.mutations.is_empty()
+        if self.mutation.is_some()
             || (surface == AccountAdminSurface::Settings
                 && sidebar.admin_accounts.page != Some(action.page()))
         {
@@ -207,23 +224,27 @@ impl AccountAdmin {
             sidebar.admin_accounts.link = None;
         }
         sidebar.admin_accounts.busy = true;
-        self.mutation_surface = Some(surface);
         let client = client.clone();
-        self.mutations.spawn(async move {
+        let mut task = JoinSet::new();
+        task.spawn(async move {
             let result = action.send(&client).await;
             (action, result)
         });
+        self.mutation = Some(PendingMutation { surface, task });
     }
 
     fn clear(&mut self, sidebar: &mut Sidebar) {
         self.loads = JoinSet::new();
         self.reload = false;
-        if self.mutation_surface == Some(AccountAdminSurface::Settings) {
-            self.mutations = JoinSet::new();
-            self.mutation_surface = None;
+        if self
+            .mutation
+            .as_ref()
+            .is_some_and(|mutation| mutation.surface == AccountAdminSurface::Settings)
+        {
+            self.mutation = None;
         }
         sidebar.admin_accounts = AdminAccountsView {
-            busy: !self.mutations.is_empty(),
+            busy: self.mutation.is_some(),
             ..Default::default()
         };
     }
@@ -296,9 +317,10 @@ impl AccountAdmin {
         &mut self,
         sidebar: &mut Sidebar,
         client: &SpkClient,
+        surface: AccountAdminSurface,
         result: Result<MutationResult, JoinError>,
     ) -> Result<bool, Failure> {
-        let surface = self.mutation_surface.take().expect("mutation surface");
+        self.mutation = None;
         sidebar.admin_accounts.busy = false;
         let Ok((action, result)) = result else {
             surface.report_error(sidebar, "Could not complete the Admin action. Try again.");

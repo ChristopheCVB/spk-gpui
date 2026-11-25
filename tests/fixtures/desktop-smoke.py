@@ -187,7 +187,7 @@ def seed(origin, database, log, process):
                  now - 1000),
                 ("large-emoji", source, owner, "  🔥 🔥 🔥 🔥 🔥 🔥  ", now - 900),
                 ("small-emoji", source, owner, "🥳🥳🥳🥳🥳🥳🥳", now - 800),
-                ("target", target, owner, "Smoke destination loaded", now),
+                ("target", target, reader, "Smoke destination loaded", now),
             ],
         )
         db.execute("INSERT INTO message_mentions(message_id, user_id) VALUES ('rich', ?)", (reader,))
@@ -367,8 +367,20 @@ class Desktop:
             self.click(f"Actions for {person}", "push button", within=(person, "panel"))
         self.find("Profile", "menu item")
 
-    def role_choices(self):
-        self.click("Change role", "menu item")
+    def open_voice_channel_menu(self, channel, action, admin=False, context=False):
+        if context:
+            self.click(channel, "push button", button=3)
+        else:
+            self.click(self.channel_ellipsis(channel), "push button")
+        if admin:
+            self.menu_order(action, "Admin", "Rename", "Move up", "Move down", "Delete")
+        else:
+            self.find(action, "menu item")
+            self.absent("Rename", "menu item")
+
+    def role_choices(self, open_submenu=True):
+        if open_submenu:
+            self.click("Change role", "menu item")
         user = self.find("User", "menu item")
         submenu = user.get_parent()
         while submenu.get_role_name() != "menu":
@@ -419,9 +431,9 @@ class Desktop:
         self.click("Send DM", "menu item")
         self.visible_text(f"Message @{person}")
 
-        self.click(FIRST_VOICE, "push button", button=3)
-        self.find("Join", "menu item")
-        self.absent("Rename", "menu item")
+        self.open_voice_channel_menu(FIRST_VOICE, "Join")
+        self.key("Escape")
+        self.open_voice_channel_menu(FIRST_VOICE, "Join", context=True)
         self.click("Join", "menu item")
         self.find("Leave voice", "push button")
         self.click(SECOND_VOICE, "push button", button=3)
@@ -445,17 +457,21 @@ class Desktop:
         self.key("Escape")
         wait_for("focus to return to the participant ellipsis",
                  lambda: self.focused(person_action, "push button", within=sidebar_row))
-        self.click(FIRST_VOICE, "push button", button=3)
+        self.open_voice_channel_menu(FIRST_VOICE, "Leave voice", context=True)
+        self.key("Escape")
+        self.open_voice_channel_menu(FIRST_VOICE, "Leave voice")
         self.click("Leave voice", "menu item")
         self.find(f"Join {FIRST_VOICE}", "push button")
 
     def check_admin_menus(self, logs, admin, server):
         person = "Smoke Reader"
+        self.find("smoke-target, 1 unread, 0 pings", "push button")
         self.click("smoke-target", "push button", partial=True, button=3)
         self.menu_order("Mark read", "Mute notifications", "Admin", "Rename", "Move up", "Move down", "Delete")
         self.check_disabled_menu_item("Move down")
         self.screenshot(logs, "text-channel-menu-dark.png")
         self.click("Mark read", "menu item")
+        self.find("smoke-target", "push button")
         text_action = self.channel_ellipsis("smoke-target")
         self.click(text_action, "push button")
         self.menu_order("Mark read", "Mute notifications", "Admin", "Rename", "Move up", "Move down", "Delete")
@@ -476,10 +492,15 @@ class Desktop:
         phone = self.bounds(f"Join {FIRST_VOICE}", "push button")
         if ellipsis.x + ellipsis.width > phone.x:
             raise RuntimeError("The Voice Channel ellipsis must precede the phone button")
-        self.click(voice_action, "push button")
-        self.menu_order("Join", "Admin", "Rename", "Move up", "Move down", "Delete")
-        self.screenshot(logs, "voice-channel-menu-dark.png")
+        self.open_voice_channel_menu(FIRST_VOICE, "Join", admin=True, context=True)
         self.key("Escape")
+        self.open_voice_channel_menu(FIRST_VOICE, "Join", admin=True)
+        self.screenshot(logs, "voice-channel-menu-dark.png")
+        self.click("Join", "menu item")
+        self.find("Leave voice", "push button")
+        self.open_voice_channel_menu(FIRST_VOICE, "Leave voice", admin=True, context=True)
+        self.click("Leave voice", "menu item")
+        self.find(f"Join {FIRST_VOICE}", "push button")
 
         def account():
             return next(user for user in admin("/api/users") if user["displayName"] == person)
@@ -493,9 +514,17 @@ class Desktop:
         self.key("Escape")
         self.key("Escape")
         self.open_participant_menu(person)
-        admin_choice, user_choice = self.role_choices()
+        _, user_choice = self.role_choices()
         if not user_choice.get_state_set().contains(Atspi.StateType.CHECKED):
             raise RuntimeError("The current User role is unchecked")
+        role_endpoint = f"/api/admin/users/{account()['id']}/role"
+        admin(role_endpoint, {"role": "admin"})
+        wait_for("the open role menu to show the promotion",
+                 lambda: self.role_choices(open_submenu=False)[0].get_state_set().contains(Atspi.StateType.CHECKED))
+        self.click("User", "menu item")
+        wait_for("the open role menu to accept the new role choice", lambda: account()["role"] == "user")
+        self.open_participant_menu(person)
+        admin_choice, _ = self.role_choices()
         self.screenshot(logs, "change-role-dark.png")
         bounds = admin_choice.get_component_iface().get_extents(Atspi.CoordType.WINDOW)
         self.click_at(bounds.x + bounds.width // 2, bounds.y + bounds.height // 2)
