@@ -2238,20 +2238,15 @@ fn sidebar_participant_items(
     move |menu, window, cx| {
         let menu = menu
             .when(can_inspect, |menu| {
-                menu.item(
-                    profile::person_profile_item(user_id.clone(), app.clone()).icon(IconName::User),
-                )
+                menu.item(profile::person_profile_item(user_id.clone(), app.clone()))
             })
             .when(can_send_dm, |menu| {
-                menu.item(
-                    profile::send_dm_item(user_id.clone(), app.clone())
-                        .icon(IconName::MessageCircle),
-                )
+                menu.item(profile::send_dm_item(user_id.clone(), app.clone()))
             })
             .when(can_mention, |menu| {
                 menu.item(profile::mention_user_item(user_id.clone(), app.clone()))
             })
-            .item(profile::copy_name_item(user_id.clone(), app.clone()).icon(IconName::Copy))
+            .item(profile::copy_name_item(user_id.clone(), app.clone()))
             .when(can_adjust_volume, |menu| {
                 let mute = if muted {
                     PopupMenuItem::new("Unmute for me").icon(IconName::Volume2)
@@ -2275,10 +2270,11 @@ fn sidebar_participant_items(
                             });
                         }
                     }))
-                    .item(
-                        voice::participant_volume_item(user_id.clone(), name.clone(), app.clone())
-                            .icon(IconName::SlidersHorizontal),
-                    )
+                    .item(voice::participant_volume_item(
+                        user_id.clone(),
+                        name.clone(),
+                        app.clone(),
+                    ))
             });
         menu.when(is_admin, |menu| {
             let role_app = app.clone();

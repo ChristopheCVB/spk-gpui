@@ -983,16 +983,18 @@ pub(super) fn participant_volume_item(
     name: String,
     app: WeakEntity<Spk>,
 ) -> PopupMenuItem {
-    PopupMenuItem::new("Volume…").on_click(move |_, window, cx| {
-        let app = app.clone();
-        let id = id.clone();
-        let name = name.clone();
-        window.defer(cx, move |window, cx| {
-            let _ = app.update(cx, |this, cx| {
-                this.open_participant_volume(&id, &name, window, cx)
+    PopupMenuItem::new("Volume…")
+        .icon(IconName::SlidersHorizontal)
+        .on_click(move |_, window, cx| {
+            let app = app.clone();
+            let id = id.clone();
+            let name = name.clone();
+            window.defer(cx, move |window, cx| {
+                let _ = app.update(cx, |this, cx| {
+                    this.open_participant_volume(&id, &name, window, cx)
+                });
             });
-        });
-    })
+        })
 }
 
 impl Spk {

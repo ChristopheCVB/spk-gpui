@@ -151,35 +151,41 @@ pub(super) fn mention_user_item(id: String, app: WeakEntity<Spk>) -> PopupMenuIt
 }
 
 pub(super) fn person_profile_item(id: String, app: WeakEntity<Spk>) -> PopupMenuItem {
-    PopupMenuItem::new("Profile").on_click(move |_, window, cx| {
-        let id = id.clone();
-        let app = app.clone();
-        window.defer(cx, move |window, cx| {
-            let _ = app.update(cx, |app, cx| app.open_person_profile(id, window, cx));
-        });
-    })
+    PopupMenuItem::new("Profile")
+        .icon(IconName::User)
+        .on_click(move |_, window, cx| {
+            let id = id.clone();
+            let app = app.clone();
+            window.defer(cx, move |window, cx| {
+                let _ = app.update(cx, |app, cx| app.open_person_profile(id, window, cx));
+            });
+        })
 }
 
 pub(super) fn send_dm_item(id: String, app: WeakEntity<Spk>) -> PopupMenuItem {
-    PopupMenuItem::new("Send DM").on_click(move |_, window, cx| {
-        let _ = app.update(cx, |app, cx| {
-            app.close_sidebar_drawer(window, cx);
-            app.open_direct_message(Command::StartDirectMessage(id.clone()), cx);
-        });
-    })
+    PopupMenuItem::new("Send DM")
+        .icon(IconName::MessageCircle)
+        .on_click(move |_, window, cx| {
+            let _ = app.update(cx, |app, cx| {
+                app.close_sidebar_drawer(window, cx);
+                app.open_direct_message(Command::StartDirectMessage(id.clone()), cx);
+            });
+        })
 }
 
 pub(super) fn copy_name_item(id: String, app: WeakEntity<Spk>) -> PopupMenuItem {
-    PopupMenuItem::new("Copy name").on_click(move |_, _, cx| {
-        if let Some(name) = app.upgrade().and_then(|app| {
-            let View::SignedIn(sidebar) = &app.read(cx).view else {
-                return None;
-            };
-            sidebar.person(&id)?.name().map(str::to_owned)
-        }) {
-            cx.write_to_clipboard(ClipboardItem::new_string(name));
-        }
-    })
+    PopupMenuItem::new("Copy name")
+        .icon(IconName::Copy)
+        .on_click(move |_, _, cx| {
+            if let Some(name) = app.upgrade().and_then(|app| {
+                let View::SignedIn(sidebar) = &app.read(cx).view else {
+                    return None;
+                };
+                sidebar.person(&id)?.name().map(str::to_owned)
+            }) {
+                cx.write_to_clipboard(ClipboardItem::new_string(name));
+            }
+        })
 }
 
 impl Spk {
