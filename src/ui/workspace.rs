@@ -1,4 +1,5 @@
 mod channel_admin;
+mod sidebar_row_menu;
 mod voice_session_layout;
 mod webhooks;
 
@@ -23,6 +24,7 @@ use crate::{
     session::{ChannelKind, Participant, VoiceView},
     voice::video::CameraStatus,
 };
+use sidebar_row_menu::SidebarRowMenu;
 use voice_session_layout::{VOICE_SESSION_INSET, VoiceSessionLayout, VoiceSessionPlacement};
 
 pub(super) const SIDEBAR_WIDTH: Pixels = px(288.0);
@@ -688,15 +690,16 @@ impl Spk {
                         index + 1 < voice_count,
                         cx,
                     )
-                    .into_any_element()
                 });
-                let target = navigation_target(
-                    format!("voice-{}", channel.id).into(),
+                self.channel_row(
+                    sidebar,
+                    channel,
+                    selected,
+                    actions,
                     scroll_on_focus,
                     window,
                     cx,
-                );
-                self.channel_row(sidebar, channel, selected, actions, target, cx)
+                )
             }));
         let mut feeds = sidebar.webhook_feeds().peekable();
         let webhook_card =
@@ -735,9 +738,8 @@ impl Spk {
                         scroll_on_focus,
                         window,
                         cx,
-                    )
-                    .0;
-                    self.chat_channel_row(sidebar, channel, target, None, cx)
+                    );
+                    self.chat_channel_row(sidebar, channel, target, None, window, cx)
                 }));
 
         let destinations = div()
@@ -777,8 +779,7 @@ impl Spk {
                             scroll_on_focus,
                             window,
                             cx,
-                        )
-                        .0;
+                        );
                         let actions = sidebar.is_admin().then(|| {
                             self.channel_actions(
                                 channel,
@@ -787,9 +788,8 @@ impl Spk {
                                 index + 1 < text_count,
                                 cx,
                             )
-                            .into_any_element()
                         });
-                        self.chat_channel_row(sidebar, channel, target, actions, cx)
+                        self.chat_channel_row(sidebar, channel, target, actions, window, cx)
                     })),
             )
             .child(voice_card)
@@ -816,9 +816,10 @@ impl Spk {
         &self,
         sidebar: &Sidebar,
         channel: &Channel,
-        target: Stateful<Div>,
-        actions: Option<AnyElement>,
-        cx: &Context<Self>,
+        (mut row, focused): (Stateful<Div>, bool),
+        actions: Option<channel_admin::ChannelActions>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> ContextMenu<Stateful<Div>> {
         let id = channel.id.clone();
         let name = channel_name(channel).to_owned();
@@ -837,6 +838,14 @@ impl Spk {
             muted,
             app: app.clone(),
         });
+        let actions = if let Some(webhook_menu) = webhook_menu.clone() {
+            let menu = SidebarRowMenu::attach(&mut row, focused, window, cx);
+            Some(webhook_menu.render(menu))
+        } else {
+            actions.map(|actions| {
+                actions.render(SidebarRowMenu::attach(&mut row, focused, window, cx))
+            })
+        };
         let primary = cx.theme().primary;
         let muted_color = cx.theme().muted_foreground;
         let label = if webhook {
@@ -851,10 +860,10 @@ impl Spk {
         } else {
             unread_label(&name, counts)
         };
-        target
-            .flex()
+        row.flex()
             .items_center()
             .pr_1()
+            .children(actions)
             .child(
                 control_button("select")
                     .ghost()
@@ -909,8 +918,6 @@ impl Spk {
                         this.send(command, None, cx);
                     })),
             )
-            .children(actions)
-            .children(webhook_menu.clone())
             .context_menu(move |menu, _, cx| {
                 if let Some(webhook_menu) = &webhook_menu {
                     webhook_menu.items(menu, None, cx)
@@ -1106,10 +1113,16 @@ impl Spk {
         sidebar: &Sidebar,
         channel: &Channel,
         selected: Option<&str>,
-        actions: Option<impl IntoElement>,
-        (row, focused): (Stateful<Div>, bool),
-        cx: &Context<Self>,
+        actions: Option<channel_admin::ChannelActions>,
+        scroll_on_focus: Option<&ScrollHandle>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        let id = channel.id.clone();
+        let row_id = SharedString::from(format!("voice-{id}"));
+        let (mut row, focused) = navigation_target(row_id.clone(), scroll_on_focus, window, cx);
+        let actions = actions
+            .map(|actions| actions.render(SidebarRowMenu::attach(&mut row, focused, window, cx)));
         let theme = cx.theme();
         let switching_here = sidebar.switching_to() == Some(channel.id.as_str());
         let call = sidebar
@@ -1117,7 +1130,6 @@ impl Spk {
             .as_ref()
             .filter(|call| switching_here || call.channel_id == channel.id);
         let active = selected == Some(channel.id.as_str());
-        let id = channel.id.clone();
         let join_id = channel.id.clone();
         let name = channel_name(channel).to_owned();
         let can_join = sidebar.can_join_voice(&id);
@@ -1129,7 +1141,7 @@ impl Spk {
             format!("Join {name}")
         };
         div()
-            .id(SharedString::from(format!("voice-{id}")))
+            .id(row_id)
             .child(
                 row.group("voice-channel")
                     .flex()
@@ -1140,6 +1152,7 @@ impl Spk {
                     .when(active, |row| row.bg(theme.primary.opacity(0.10)))
                     .when(!active && focused, |row| row.bg(theme.accent))
                     .when(!active, |row| row.hover(|row| row.bg(theme.accent)))
+                    .children(actions)
                     .child(
                         control_button("select")
                             .ghost()
@@ -1166,6 +1179,7 @@ impl Spk {
                             .id("radio-station")
                             .role(Role::Image)
                             .aria_label(format!("Radio playing {station}"))
+                            .flex_shrink_0()
                             .px_1()
                             .child(themed_icon(IconName::Radio, theme.primary, 14.0))
                     }))
@@ -1189,8 +1203,7 @@ impl Spk {
                                     }),
                                 )),
                         )
-                    })
-                    .children(actions),
+                    }),
             )
             .children(participants.into_iter().enumerate().map(|(index, person)| {
                 let flags = person.flags;
@@ -1201,9 +1214,30 @@ impl Spk {
                 let presence = sidebar.user_presence(person.id);
                 let presence_color = super::profile::user_presence_color(presence, cx);
                 let last = index + 1 == participant_count;
-                div()
-                    .id(SharedString::from(format!("member-{}", person.id)))
-                    .role(Role::Group)
+                let row_id =
+                    SharedString::from(format!("voice-{}-member-{}", channel.id, person.id));
+                let destinations = voice_moderation_destinations(sidebar, person.id);
+                let (mut row, focused) = if destinations.is_some() {
+                    let (row, focused) = navigation_target(row_id, scroll_on_focus, window, cx);
+                    // The row tracks focus for keyboard navigation through its buttons.
+                    (
+                        row.on_any_mouse_down(|_, window, _| window.prevent_default()),
+                        focused,
+                    )
+                } else {
+                    (div().id(row_id), false)
+                };
+                let moderation = destinations.map(|destinations| {
+                    voice_moderation_menu(
+                        &person,
+                        destinations,
+                        sidebar.voice_moderation_pending,
+                        SidebarRowMenu::attach(&mut row, focused, window, cx),
+                        cx,
+                    )
+                });
+                let theme = cx.theme();
+                row.role(Role::Group)
                     .aria_label(person.name.to_owned())
                     .when(speaking, |row| row.aria_description("Speaking"))
                     .when(person.microphone_connecting, |row| {
@@ -1266,34 +1300,46 @@ impl Spk {
                             ),
                     )
                     .child(
-                        Label::new(person.name.to_owned())
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .flex_1()
                             .min_w_0()
-                            .truncate()
-                            .text_color(theme.muted_foreground),
+                            .overflow_hidden()
+                            .child(
+                                Label::new(person.name.to_owned())
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(theme.muted_foreground),
+                            )
+                            .when(flags.radio_listening == Some(true), |details| {
+                                details.child(radio_badge(cx))
+                            })
+                            .when(
+                                call.is_some_and(|call| call.channel_id == channel.id),
+                                |details| {
+                                    details.children(soundboard_badge(sidebar, person.id, cx))
+                                },
+                            )
+                            .children(participant_status(flags.muted, flags.deafened, cx))
+                            .when(person.microphone_connecting, |details| {
+                                details.child(
+                                    Label::new("Connecting…")
+                                        .text_xs()
+                                        .flex_shrink_0()
+                                        .text_color(theme.muted_foreground),
+                                )
+                            }),
                     )
-                    .when(flags.radio_listening == Some(true), |row| {
-                        row.child(radio_badge(cx))
-                    })
-                    .when(
-                        call.is_some_and(|call| call.channel_id == channel.id),
-                        |row| row.children(soundboard_badge(sidebar, person.id, cx)),
-                    )
-                    .children(participant_status(flags.muted, flags.deafened, cx))
-                    .when(person.microphone_connecting, |row| {
-                        row.child(
-                            Label::new("Connecting…")
-                                .text_xs()
-                                .flex_shrink_0()
-                                .text_color(theme.muted_foreground),
-                        )
-                    })
-                    .child(div().flex_1())
                     .child(
                         div()
+                            .relative()
                             .flex()
                             .items_center()
                             .flex_shrink_0()
                             .gap_1()
+                            .children(moderation)
                             .children(self.sidebar_watch_buttons(
                                 sidebar,
                                 &person,
@@ -1312,8 +1358,7 @@ impl Spk {
                                     actions
                                         .child(self.participant_volume_button(&person, sidebar, cx))
                                 },
-                            )
-                            .children(voice_moderation_menu(&person, sidebar, cx)),
+                            ),
                     )
             }))
     }
@@ -2042,22 +2087,24 @@ fn voice_moderation_destinations(
 
 fn voice_moderation_menu(
     participant: &Participant<'_>,
-    sidebar: &Sidebar,
+    destinations: Vec<(String, String)>,
+    pending: bool,
+    row_menu: SidebarRowMenu,
     cx: &Context<Spk>,
-) -> Option<impl IntoElement> {
-    let destinations = voice_moderation_destinations(sidebar, participant.id)?;
+) -> AnyElement {
     let user_id = participant.id.to_owned();
     let app = cx.weak_entity();
-    Some(
+    row_menu.render(
         tool_button(
             "voice-moderation",
             IconName::Ellipsis,
             format!("Moderate {}", participant.name),
-        )
-        .disabled(sidebar.voice_moderation_pending)
-        .dropdown_menu(move |menu, window, cx| {
+        ),
+        !pending,
+        Anchor::TopLeft,
+        move |menu, window, cx| {
             add_voice_moderation_items(menu, window, cx, &app, &user_id, &destinations, true)
-        }),
+        },
     )
 }
 

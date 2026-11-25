@@ -201,16 +201,19 @@ class Desktop:
         if self.process.poll() is not None:
             raise RuntimeError("SPK desktop exited during the smoke test")
 
+    def find_node(self, name, role=None, partial=False):
+        self.ensure_running()
+        for node in self.nodes():
+            label = node.get_name() or ""
+            if (name in label if partial else name == label) and (
+                role is None or node.get_role_name() == role
+            ):
+                return node
+
     def find(self, name, role=None, partial=False):
         def probe():
-            self.ensure_running()
             try:
-                for node in self.nodes():
-                    label = node.get_name() or ""
-                    if (name in label if partial else name == label) and (
-                        role is None or node.get_role_name() == role
-                    ):
-                        return node
+                return self.find_node(name, role, partial)
             except GLib.Error:
                 # A frame can replace part of the accessibility tree during traversal.
                 return None
@@ -269,6 +272,85 @@ class Desktop:
         self.click(label, role)
         subprocess.run(["xdotool", "type", "--clearmodifiers", "--", text], check=True)
 
+    def check_webhook_actions(self):
+        label = "Actions for Smoke Webhook"
+
+        def move(x, y):
+            subprocess.run(["xdotool", "mousemove", "--window", self.window, str(x), str(y)],
+                           check=True)
+
+        def key(name):
+            subprocess.run(["xdotool", "key", "--clearmodifiers", "--delay", "50", name],
+                           check=True)
+
+        def hidden():
+            try:
+                return self.find_node(label, "push button") is None
+            except GLib.Error:
+                return False
+
+        def focused(name=label, expected=True):
+            try:
+                node = self.find_node(name, "push button")
+                is_focused = node is not None and node.get_state_set().contains(Atspi.StateType.FOCUSED)
+                return is_focused == expected
+            except GLib.Error:
+                return False
+
+        def tab_to(name):
+            for _ in range(40):
+                key("Tab")
+                if focused(name):
+                    return
+            raise RuntimeError(f"Tab did not reach {name}")
+
+        move(700, 30)
+        wait_for("the selected webhook to hide its ellipsis while idle", hidden)
+        row = self.find("Smoke Webhook", "push button", partial=True)
+        bounds = row.get_component_iface().get_extents(Atspi.CoordType.WINDOW)
+        move(bounds.x + 8, bounds.y + bounds.height // 2)
+        action = self.find(label, "push button")
+        action_bounds = action.get_component_iface().get_extents(Atspi.CoordType.WINDOW)
+        visible_row = self.find("Smoke Webhook", "push button")
+        visible_bounds = visible_row.get_component_iface().get_extents(Atspi.CoordType.WINDOW)
+        if action_bounds.x + action_bounds.width > visible_bounds.x:
+            raise RuntimeError("The webhook ellipsis must precede its primary button")
+        move(700, 30)
+        wait_for("the webhook ellipsis to hide after hover", hidden)
+
+        tab_to(label)
+        key("Tab")
+        wait_for("focus to leave the webhook ellipsis", lambda: focused(expected=False))
+        key("shift+Tab")
+        wait_for("Shift+Tab to reach the webhook ellipsis", focused)
+        key("Return")
+        self.find("Copy link", "menu item")
+        self.find(label, "push button")
+        key("Escape")
+        wait_for("Escape to return focus to the visible webhook ellipsis", focused)
+        key("Tab")
+        wait_for("focus to leave the webhook ellipsis", lambda: focused(expected=False))
+
+        move(bounds.x + 8, bounds.y + bounds.height // 2)
+        self.click(label, "push button")
+        item = self.find("Copy link", "menu item")
+        item_bounds = item.get_component_iface().get_extents(Atspi.CoordType.WINDOW)
+        move(item_bounds.x + item_bounds.width // 2, item_bounds.y + item_bounds.height // 2)
+        self.find(label, "push button")
+        key("Escape")
+        wait_for("Escape to focus the ellipsis after opening with the mouse", focused)
+
+        prior_focus = "New webhook"
+        tab_to(prior_focus)
+        move(bounds.x + 8, bounds.y + bounds.height // 2)
+        self.click(label, "push button")
+        self.find("Copy link", "menu item")
+        for _ in range(3):
+            key("Down")
+        key("Return")
+        wait_for("Enter to restore the focus from before the mouse-opened menu",
+                 lambda: focused(prior_focus))
+
     def check(self):
         self.find("Sign in to SPK")
         self.window = subprocess.check_output(["xdotool", "search", "--name", "^SPK$"], text=True).strip()
@@ -286,6 +368,7 @@ class Desktop:
         self.visible_text("Smoke embed body")
         self.find("🧪")
         self.find("🔔")
+        self.check_webhook_actions()
         self.click("smoke-chat", "push button", partial=True)
         self.visible_text("Smoke bold", "Smoke italic", "smoke code", "Smoke link", "@Smoke Reader")
         for emoji in ("👍🏽", "🇫🇷", "1️⃣"):

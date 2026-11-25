@@ -155,7 +155,7 @@ impl Spk {
     }
 }
 
-#[derive(Clone, IntoElement)]
+#[derive(Clone)]
 pub(super) struct WebhookRowMenu {
     pub(super) id: String,
     pub(super) name: String,
@@ -163,25 +163,19 @@ pub(super) struct WebhookRowMenu {
     pub(super) app: WeakEntity<Spk>,
 }
 
-impl RenderOnce for WebhookRowMenu {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let focus = window
-            .use_keyed_state("webhook-actions-focus", cx, |_, cx| cx.focus_handle())
-            .read(cx)
-            .clone();
-        tool_button(
+impl WebhookRowMenu {
+    pub(super) fn render(self, menu: SidebarRowMenu) -> AnyElement {
+        let focus = menu.focus();
+        let button = tool_button(
             "webhook-actions",
             IconName::Ellipsis,
             format!("Actions for {}", self.name),
-        )
-        .track_focus(&focus)
-        .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, cx| {
+        );
+        menu.render(button, true, Anchor::TopRight, move |menu, _, cx| {
             self.items(menu, Some(&focus), cx)
         })
     }
-}
 
-impl WebhookRowMenu {
     pub(super) fn items(
         &self,
         mut menu: PopupMenu,
