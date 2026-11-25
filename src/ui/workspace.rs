@@ -20,8 +20,8 @@ use super::{
     *,
 };
 use crate::{
-    api::{Channel, Connection, VoiceModeration},
-    session::{ChannelKind, Participant, VoiceView},
+    api::{AccountRole, Channel, Connection, VoiceModeration},
+    session::{AdminAccountAction, ChannelKind, Participant, VoiceView},
     voice::video::CameraStatus,
 };
 use sidebar_row_menu::SidebarRowMenu;
@@ -500,6 +500,17 @@ impl Spk {
                             .text_color(theme.muted_foreground)
                             .child(notice)
                     }))
+                    .when_some(sidebar.account_moderation_notice, |area, notice| {
+                        area.child(
+                            div()
+                                .id("account-moderation-status")
+                                .role(Role::Status)
+                                .px_4()
+                                .py_1()
+                                .text_color(theme.muted_foreground)
+                                .child(notice),
+                        )
+                    })
                     .when_some(sidebar.voice_notice, |area, notice| {
                         area.child(
                             div()
@@ -2159,7 +2170,21 @@ fn sidebar_participant_items(
 ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + use<> {
     let destinations = voice_moderation_destinations(sidebar, participant.id);
     let moderation_pending = sidebar.voice_moderation_pending;
+    let account_pending = sidebar.admin_accounts.busy;
+    let is_admin = sidebar.is_admin();
     let is_self = sidebar.profile.id.as_deref() == Some(participant.id);
+    let current_role = if is_self {
+        Some(sidebar.profile.role.as_str())
+    } else {
+        sidebar
+            .person(participant.id)
+            .map(|user| user.role.as_str())
+    };
+    let current_role = match current_role {
+        Some("admin") => Some(AccountRole::Admin),
+        Some("user") => Some(AccountRole::User),
+        _ => None,
+    };
     let can_inspect = sidebar.inspect_person(participant.id).is_some();
     let can_send_dm = sidebar.can_start_direct_message(participant.id)
         && sidebar.person(participant.id).is_some();
@@ -2221,19 +2246,56 @@ fn sidebar_participant_items(
                             .icon(IconName::Settings2),
                     )
             });
-        if let Some(destinations) = &destinations {
-            add_voice_moderation_items(
-                menu.separator().label("Admin"),
+        menu.when(is_admin, |menu| {
+            let role_app = app.clone();
+            let role_user = user_id.clone();
+            let menu = menu.separator().label("Admin").submenu(
+                "Change role",
                 window,
                 cx,
-                &app,
-                &user_id,
-                destinations,
-                !moderation_pending,
-            )
-        } else {
-            menu
-        }
+                move |mut menu, _, _| {
+                    for (label, role) in
+                        [("Admin", AccountRole::Admin), ("User", AccountRole::User)]
+                    {
+                        let app = role_app.clone();
+                        let user_id = role_user.clone();
+                        menu = menu.item(
+                            PopupMenuItem::new(label)
+                                .checked(current_role == Some(role))
+                                .disabled(account_pending)
+                                .on_click(move |_, _, cx| {
+                                    if current_role != Some(role) {
+                                        let _ = app.update(cx, |app, cx| {
+                                            app.send(
+                                                Command::ModerateAccount(
+                                                    AdminAccountAction::SetRole(
+                                                        user_id.clone(),
+                                                        role,
+                                                    ),
+                                                ),
+                                                None,
+                                                cx,
+                                            );
+                                        });
+                                    }
+                                }),
+                        );
+                    }
+                    menu
+                },
+            );
+            menu.when_some(destinations.as_deref(), |menu, destinations| {
+                add_voice_moderation_items(
+                    menu,
+                    window,
+                    cx,
+                    &app,
+                    &user_id,
+                    destinations,
+                    !moderation_pending,
+                )
+            })
+        })
     }
 }
 

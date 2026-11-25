@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use reqwest::StatusCode;
-use tokio::task::JoinSet;
+use tokio::task::{JoinError, JoinSet};
 
 use super::Sidebar;
 use crate::api::{AccountRole, AdminDirectory, Failure, Invite, IssuedAccountLink, SpkClient};
@@ -70,6 +70,16 @@ impl AdminAccountAction {
             (Self::Show(_), _) => unreachable!("list requests are handled separately"),
         }
     }
+
+    fn notice(&self) -> &'static str {
+        match self {
+            Self::RevokeInvite(_) => "Invite Link revoked.",
+            Self::SetRole(..) => "Role updated.",
+            Self::Ban { .. } => "User banned.",
+            Self::Unban(_) => "User unbanned.",
+            _ => unreachable!("only actions without a link have a notice"),
+        }
+    }
 }
 
 fn limited_text(text: &str) -> String {
@@ -106,14 +116,32 @@ pub(super) enum Listing {
     Users(AdminDirectory),
 }
 
+type MutationResult = (
+    AdminAccountAction,
+    Result<Option<IssuedAccountLink>, Failure>,
+);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum AccountAdminSurface {
+    Settings,
+    Workspace,
+}
+
+impl AccountAdminSurface {
+    fn report_error(self, sidebar: &mut Sidebar, error: &'static str) {
+        match self {
+            Self::Settings => sidebar.admin_accounts.error = Some(error),
+            Self::Workspace => sidebar.account_moderation_notice = Some(error),
+        }
+    }
+}
+
 #[derive(Default)]
 pub(super) struct AccountAdmin {
     reload: bool,
     pub(super) loads: JoinSet<Result<Listing, Failure>>,
-    pub(super) mutations: JoinSet<(
-        AdminAccountAction,
-        Result<Option<IssuedAccountLink>, Failure>,
-    )>,
+    pub(super) mutations: JoinSet<MutationResult>,
+    mutation_surface: Option<AccountAdminSurface>,
 }
 
 impl AccountAdmin {
@@ -121,14 +149,23 @@ impl AccountAdmin {
         &mut self,
         sidebar: &mut Sidebar,
         client: &SpkClient,
+        surface: AccountAdminSurface,
         action: AdminAccountAction,
     ) {
+        if surface == AccountAdminSurface::Workspace
+            && !matches!(
+                action,
+                AdminAccountAction::SetRole(..) | AdminAccountAction::Ban { .. }
+            )
+        {
+            return;
+        }
         if matches!(action, AdminAccountAction::Show(None)) {
             self.clear(sidebar);
             return;
         }
         if !sidebar.is_admin() {
-            sidebar.admin_accounts.error = Some(ACCESS_REQUIRED);
+            surface.report_error(sidebar, ACCESS_REQUIRED);
             return;
         }
         if let AdminAccountAction::Show(page) = action {
@@ -145,24 +182,32 @@ impl AccountAdmin {
             self.refresh(sidebar, client);
             return;
         }
-        if sidebar.admin_accounts.page != Some(action.page()) || !self.mutations.is_empty() {
+        if !self.mutations.is_empty()
+            || (surface == AccountAdminSurface::Settings
+                && sidebar.admin_accounts.page != Some(action.page()))
+        {
             return;
         }
-        let view = &mut sidebar.admin_accounts;
-        view.error = None;
-        view.notice = None;
+        match surface {
+            AccountAdminSurface::Settings => {
+                sidebar.admin_accounts.error = None;
+                sidebar.admin_accounts.notice = None;
+            }
+            AccountAdminSurface::Workspace => sidebar.account_moderation_notice = None,
+        }
         if matches!(&action, AdminAccountAction::Ban { id, .. } if sidebar.profile.id.as_ref() == Some(id))
         {
-            view.error = Some("You can’t ban yourself.");
+            surface.report_error(sidebar, "You can’t ban yourself.");
             return;
         }
         if matches!(
             &action,
             AdminAccountAction::CreateInvite(_) | AdminAccountAction::ResetPassword { .. }
         ) {
-            view.link = None;
+            sidebar.admin_accounts.link = None;
         }
-        view.busy = true;
+        sidebar.admin_accounts.busy = true;
+        self.mutation_surface = Some(surface);
         let client = client.clone();
         self.mutations.spawn(async move {
             let result = action.send(&client).await;
@@ -171,8 +216,16 @@ impl AccountAdmin {
     }
 
     fn clear(&mut self, sidebar: &mut Sidebar) {
-        *self = Self::default();
-        sidebar.admin_accounts = AdminAccountsView::default();
+        self.loads = JoinSet::new();
+        self.reload = false;
+        if self.mutation_surface == Some(AccountAdminSurface::Settings) {
+            self.mutations = JoinSet::new();
+            self.mutation_surface = None;
+        }
+        sidebar.admin_accounts = AdminAccountsView {
+            busy: !self.mutations.is_empty(),
+            ..Default::default()
+        };
     }
 
     pub(super) fn clear_if_demoted(&mut self, sidebar: &mut Sidebar) {
@@ -243,11 +296,15 @@ impl AccountAdmin {
         &mut self,
         sidebar: &mut Sidebar,
         client: &SpkClient,
-        action: AdminAccountAction,
-        result: Result<Option<IssuedAccountLink>, Failure>,
+        result: Result<MutationResult, JoinError>,
     ) -> Result<bool, Failure> {
+        let surface = self.mutation_surface.take().expect("mutation surface");
+        sidebar.admin_accounts.busy = false;
+        let Ok((action, result)) = result else {
+            surface.report_error(sidebar, "Could not complete the Admin action. Try again.");
+            return Ok(false);
+        };
         let view = &mut sidebar.admin_accounts;
-        view.busy = false;
         if result.as_ref().is_err_and(Failure::unauthorized) {
             return result.map(|_| false);
         }
@@ -256,9 +313,9 @@ impl AccountAdmin {
             self.reload = false;
             *view = AdminAccountsView {
                 page: view.page,
-                error: Some(ACCESS_REQUIRED),
                 ..Default::default()
             };
+            surface.report_error(sidebar, ACCESS_REQUIRED);
             return Ok(true);
         }
         let changed_users = result.is_ok()
@@ -268,7 +325,15 @@ impl AccountAdmin {
                     | AdminAccountAction::Unban(_)
                     | AdminAccountAction::SetRole(..)
             );
-        if view.page == Some(action.page()) {
+        if surface == AccountAdminSurface::Workspace {
+            sidebar.account_moderation_notice = Some(match result {
+                Ok(_) => action.notice(),
+                Err(error) => action.error(error),
+            });
+            if changed_users {
+                self.users_changed(sidebar, client);
+            }
+        } else if view.page == Some(action.page()) {
             match result {
                 Ok(Some(link)) => {
                     view.link = Some(Arc::new(RevealedLink {
@@ -281,18 +346,12 @@ impl AccountAdmin {
                     }));
                 }
                 Ok(None) => {
-                    view.notice = Some(match &action {
-                        AdminAccountAction::RevokeInvite(id) => {
-                            if view.link.as_ref().and_then(|link| link.id.as_ref()) == Some(id) {
-                                view.link = None;
-                            }
-                            "Invite Link revoked."
-                        }
-                        AdminAccountAction::SetRole(..) => "Role updated.",
-                        AdminAccountAction::Ban { .. } => "User banned.",
-                        AdminAccountAction::Unban(_) => "User unbanned.",
-                        _ => unreachable!("creation endpoints return links"),
-                    });
+                    if let AdminAccountAction::RevokeInvite(id) = &action
+                        && view.link.as_ref().and_then(|link| link.id.as_ref()) == Some(id)
+                    {
+                        view.link = None;
+                    }
+                    view.notice = Some(action.notice());
                 }
                 Err(error) => view.error = Some(action.error(error)),
             }

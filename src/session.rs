@@ -39,7 +39,7 @@ use crate::voice::{
     ParticipantVolumeChange, Status as VoiceStatus, Update as VoiceUpdate,
     video::{CameraResolution, preview_camera},
 };
-use account_admin::AccountAdmin;
+use account_admin::{AccountAdmin, AccountAdminSurface};
 use accounts::{AccountLinkOutcome, choose_nickname, redeem_link};
 use authentication::{
     SESSION_EXPIRED, SavedSession, login, restore, sign_in, sign_in_message, sign_out,
@@ -217,6 +217,7 @@ pub enum Command {
     UploadAvatar(PathBuf),
     InspectProfileEmail(String, oneshot::Sender<Option<String>>),
     AdminAccounts(AdminAccountAction),
+    ModerateAccount(AdminAccountAction),
     JoinVoice(String),
     LeaveVoice,
     ModerateVoice {
@@ -299,6 +300,7 @@ pub struct Sidebar {
     pub profile: Profile,
     pub profile_edit: ProfileEdit,
     pub admin_accounts: AdminAccountsView,
+    pub account_moderation_notice: Option<&'static str>,
     pub user_status: UserStatus,
     pub user_status_notice: Option<&'static str>,
     pub channels: Option<Vec<Channel>>,
@@ -339,6 +341,7 @@ impl Sidebar {
             profile,
             profile_edit: ProfileEdit::Idle,
             admin_accounts: AdminAccountsView::default(),
+            account_moderation_notice: None,
             user_status: UserStatus::default(),
             user_status_notice: None,
             channels: None,
@@ -1112,7 +1115,12 @@ async fn watch_session(
                 Ok(command @ (Command::SaveNickname(_) | Command::UploadAvatar(_) | Command::InspectProfileEmail(..))) => {
                     ProfileWork::start(&mut profiles, &mut sidebar, client, command);
                 }
-                Ok(Command::AdminAccounts(action)) => account_admin.command(&mut sidebar, client, action),
+                Ok(Command::AdminAccounts(action)) => {
+                    account_admin.command(&mut sidebar, client, AccountAdminSurface::Settings, action);
+                }
+                Ok(Command::ModerateAccount(action)) => {
+                    account_admin.command(&mut sidebar, client, AccountAdminSurface::Workspace, action);
+                }
                 Ok(Command::JoinVoice(channel_id)) => voice.join(&mut sidebar, channel_id),
                 Ok(Command::LeaveVoice) => voice.leave(&mut sidebar),
                 Ok(Command::ModerateVoice { user_id, action }) if voice_moderation.is_empty() => {
@@ -1388,15 +1396,10 @@ async fn watch_session(
                 }
             }
             Some(result) = account_admin.mutations.join_next() => {
-                if let Ok((action, result)) = result {
-                    match account_admin.mutated(&mut sidebar, client, action, result) {
-                        Ok(true) => refresh.fetch(client, Resource::Users),
-                        Ok(false) => {}
-                        Err(_) => break SessionEnd::Invalidated(SESSION_EXPIRED),
-                    }
-                } else {
-                    sidebar.admin_accounts.busy = false;
-                    sidebar.admin_accounts.error = Some("Could not complete the Admin action. Try again.");
+                match account_admin.mutated(&mut sidebar, client, result) {
+                    Ok(true) => refresh.fetch(client, Resource::Users),
+                    Ok(false) => {}
+                    Err(_) => break SessionEnd::Invalidated(SESSION_EXPIRED),
                 }
             }
             Some(Ok(work)) = profiles.join_next() => {

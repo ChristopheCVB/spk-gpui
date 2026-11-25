@@ -291,6 +291,64 @@ async fn admin_accounts_show_storage_and_follow_shared_role_and_ban_changes() {
 }
 
 #[tokio::test]
+async fn sidebar_role_changes_report_server_results_and_refresh_users_without_settings() {
+    let end = voice_session(
+        Call::start_for_test,
+        async |listener, requests, snapshots| {
+            let mut socket = accept_async(listener.accept().await.unwrap().0)
+                .await
+                .unwrap();
+            let account = |target_role| SidebarSnapshot::AccountAdmin {
+                role: "admin",
+                target_role,
+                banned: false,
+            };
+            snapshots.send(account("user")).unwrap();
+            users_changed(&mut socket).await;
+
+            let demote = expect(&requests, "POST /api/admin/users/alice/role").await;
+            assert_eq!(payload(&demote), value!({"role":"user"}));
+            demote.respond_raw("400 Bad Request", &[], b"").await;
+
+            let promote = expect(&requests, "POST /api/admin/users/bob/role").await;
+            assert_eq!(payload(&promote), value!({"role":"admin"}));
+            snapshots.send(account("admin")).unwrap();
+            promote.respond(&[], r#"{"ok":true}"#).await;
+        },
+        async |commands, views| {
+            wait_for_sidebar(&views, |view| view.is_admin()).await;
+            let sidebar_role = async |id: &str, role| {
+                commands
+                    .send(Command::ModerateAccount(AdminAccountAction::SetRole(
+                        id.into(),
+                        role,
+                    )))
+                    .await
+                    .unwrap();
+            };
+            sidebar_role("alice", AccountRole::User).await;
+            let rejected = wait_for_sidebar(&views, |view| {
+                view.account_moderation_notice == Some("The last Admin cannot be demoted.")
+            })
+            .await;
+            assert!(rejected.is_admin());
+            assert!(rejected.admin_accounts.page.is_none());
+
+            sidebar_role("bob", AccountRole::Admin).await;
+            let updated = wait_for_sidebar(&views, |view| {
+                view.account_moderation_notice == Some("Role updated.")
+                    && view.person("bob").is_some_and(|bob| bob.role == "admin")
+            })
+            .await;
+            assert!(updated.admin_accounts.page.is_none());
+            assert!(updated.admin_accounts.users.is_none());
+        },
+    )
+    .await;
+    assert!(matches!(end, SessionEnd::Closed));
+}
+
+#[tokio::test]
 async fn a_ban_or_redeemed_password_reset_ends_the_affected_session() {
     for (frame, reason) in [
         (
