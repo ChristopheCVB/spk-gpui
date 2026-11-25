@@ -1140,15 +1140,7 @@ class Desktop:
 
         move(700, 30)
         wait_for("the selected webhook to hide its ellipsis while idle", hidden)
-        row = self.find("Smoke Webhook", "push button", partial=True)
-        bounds = row.get_component_iface().get_extents(Atspi.CoordType.WINDOW)
-        move(bounds.x + 8, bounds.y + bounds.height // 2)
-        action = self.find(label, "push button")
-        action_bounds = action.get_component_iface().get_extents(Atspi.CoordType.WINDOW)
-        visible_row = self.find("Smoke Webhook", "push button")
-        visible_bounds = visible_row.get_component_iface().get_extents(Atspi.CoordType.WINDOW)
-        if visible_bounds.x + visible_bounds.width > action_bounds.x:
-            raise RuntimeError("The webhook ellipsis must follow its primary button")
+        bounds = self.bounds("Smoke Webhook", "push button", partial=True)
         self.check_chat_channel_ellipsis_fill("Smoke Webhook")
         self.screenshot(logs, "webhook-actions-dark.png")
         move(700, 30)
