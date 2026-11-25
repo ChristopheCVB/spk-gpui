@@ -68,7 +68,10 @@ pub use {
     presence::Participant,
     profiles::ProfileEdit,
     radio::RadioPlayback,
-    soundboard_admin::{SoundboardAdminAction, SoundboardCrop, SoundboardTrim, SoundboardWaveform},
+    soundboard_admin::{
+        SoundboardAdminAction, SoundboardCrop, SoundboardPreview, SoundboardTrim,
+        SoundboardWaveform,
+    },
     voice_session::VoiceView,
     webhooks::{WebhookAction, WebhookReply},
 };

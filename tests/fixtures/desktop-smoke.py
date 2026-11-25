@@ -588,7 +588,8 @@ class Desktop:
         self.key("Escape")
         self.open_voice_channel_menu(FIRST_VOICE, "Join", context=True)
         self.click("Join", "menu item")
-        self.find("Leave voice", "push button")
+        self.find(f"Switch to {SECOND_VOICE}", "push button")
+        self.find("Smoke Reader", "panel", within=("Voice channels", "panel"))
         self.click(SECOND_VOICE, "push button", button=3)
         self.find("Switch", "menu item")
         self.key("Escape")
@@ -816,7 +817,7 @@ class Desktop:
         if not 0 < painted_height(12) < painted_height(15.25):
             raise RuntimeError("The source waveform did not show its louder section after 15 seconds")
 
-    def check_preview_audio(self):
+    def preview_tone_rms(self):
         # Record the private null sink while the preview is still within its 1000 Hz section.
         try:
             subprocess.run(
@@ -831,18 +832,22 @@ class Desktop:
 
         samples = [sample for (sample,) in struct.iter_unpack("<h", pcm[:len(pcm) & ~1])]
         window = 9600  # 200 ms, or 200 cycles of the selected tone.
+        rms = 0.0
         for offset in range(0, len(samples) - window + 1, window):
+            chunk = samples[offset:offset + window]
             crossings = 0
             negative = False
-            for sample in samples[offset:offset + window]:
+            for sample in chunk:
                 if sample < -512:
                     negative = True
                 elif sample > 512 and negative:
                     crossings += 1
                     negative = False
             if 180 <= crossings <= 220:
-                return
-        raise RuntimeError("The silent Media Output did not play the selected 1000 Hz tone")
+                rms = max(rms, (sum(sample ** 2 for sample in chunk) / window) ** 0.5)
+        if rms == 0:
+            raise RuntimeError("The silent Media Output did not play the selected 1000 Hz tone")
+        return rms
 
     def check_soundboard_preview(self, logs):
         def position():
@@ -868,12 +873,18 @@ class Desktop:
         reset(6.1)
         play()
         self.screenshot(logs, "soundboard-preview-dark.png")
-        self.check_preview_audio()
+        amplified = self.preview_tone_rms()
         self.click("Stop preview", "push button")
         reset(6.1, timeout=3)
 
+        self.replace_sound_field("Upload gain (%)", "100")
         play()
+        baseline = self.preview_tone_rms()
         reset(6.1)
+        ratio = amplified / baseline
+        if not 1.4 <= ratio <= 1.6:
+            raise RuntimeError(f"Expected 150% preview gain, measured {ratio:.2%}")
+        self.replace_sound_field("Upload gain (%)", "150")
 
         play()
         handle = self.bounds("Trim end", "slider")

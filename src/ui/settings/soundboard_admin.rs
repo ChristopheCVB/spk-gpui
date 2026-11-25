@@ -5,7 +5,7 @@ use gpui_kit::component::Disableable;
 use super::*;
 use crate::{
     api::SoundboardClip,
-    session::SoundboardAdminAction as Action,
+    session::{SoundboardAdminAction as Action, SoundboardPreview},
     ui::{
         icon_picker::{IconPicker, icon_picker, icon_picker_field},
         soundboard::clip_icon,
@@ -167,9 +167,9 @@ impl Settings {
         let board = &sidebar.admin_soundboard;
         let form = &self.soundboard;
         let busy = board.saving || board.decoding || board.loading || form.picker_open;
-        let disabled = busy || board.previewing;
-        let selection_disabled = busy || board.previewing_saved();
-        let upload_preview = board.preview_position.is_some();
+        let disabled = busy || board.preview.is_playing();
+        let saved_preview = matches!(board.preview, SoundboardPreview::Saved);
+        let selection_disabled = busy || saved_preview;
         let theme = cx.theme();
         let error = form
             .picker_error
@@ -195,12 +195,13 @@ impl Settings {
                 .child(Label::new("Choose a mono or stereo WAV, MP3, M4A, Ogg Vorbis, or FLAC file up to 20 MB. SPK receives only the selected audio.").text_color(theme.muted_foreground))
                 .children(board.waveform.as_ref().zip(board.selection).map(|(waveform, crop)| {
                     let duration = waveform.duration;
+                    let (upload_preview, playhead) = match board.preview {
+                        SoundboardPreview::Upload { position } => (true, position),
+                        _ => (false, crop.start),
+                    };
                     div().w_full().flex().flex_col().gap_3()
                         .child(Label::new(format!("Source duration: {duration:.3} s")))
-                        .child(form.waveform(
-                            waveform, crop, board.preview_position.unwrap_or(crop.start),
-                            selection_disabled, cx,
-                        ))
+                        .child(form.waveform(waveform, crop, playhead, selection_disabled, cx))
                         .child(waveform::timing(crop))
                         .child(field("Upload gain (%)", &form.gain, selection_disabled, cx))
                         .child(form.upload.render(disabled, cx))
@@ -220,7 +221,7 @@ impl Settings {
                             .child(control_button("discard-sound").label("Discard").ghost().tab_stop(true).disabled(disabled)
                                 .on_click(cx.listener(|settings, _, _, cx| settings.soundboard_action(Action::Discard, cx)))))
                 })), cx))
-            .children(board.previewing_saved().then(|| control_button("stop-sound-preview").label("Stop preview").tab_stop(true)
+            .children(saved_preview.then(|| control_button("stop-sound-preview").label("Stop preview").tab_stop(true)
                 .on_click(cx.listener(|settings, _, _, cx| settings.soundboard_action(Action::StopPreview, cx)))))
             .child(card("Sounds", div().flex().flex_col().gap_3()
                 .when(!board.loading && (board.clips.is_none() || board.error.is_some()), |body| body.child(

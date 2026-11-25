@@ -221,8 +221,9 @@ fn trim_handle(
         .left(relative((seconds / duration) as f32))
         .top_0()
         .bottom(GRIP_SIZE)
-        .child(
-            div()
+        .child(TrimHandle {
+            disabled,
+            control: div()
                 .id(label)
                 .absolute()
                 .left(if start { -HANDLE_WIDTH } else { px(0.0) })
@@ -305,5 +306,80 @@ fn trim_handle(
                             }
                         })
                 }),
-        )
+        })
+}
+
+// GPUI Kit's disabled-node wrapper is private to its built-in controls.
+struct TrimHandle {
+    control: Stateful<Div>,
+    disabled: bool,
+}
+
+impl IntoElement for TrimHandle {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for TrimHandle {
+    type RequestLayoutState = <Stateful<Div> as Element>::RequestLayoutState;
+    type PrepaintState = <Stateful<Div> as Element>::PrepaintState;
+
+    fn id(&self) -> Option<ElementId> {
+        Element::id(&self.control)
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        self.control.source_location()
+    }
+
+    fn request_layout(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        inspector: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        self.control.request_layout(id, inspector, window, cx)
+    }
+
+    fn prepaint(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        inspector: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        self.control
+            .prepaint(id, inspector, bounds, layout, window, cx)
+    }
+
+    fn paint(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        inspector: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        layout: &mut Self::RequestLayoutState,
+        prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.control
+            .paint(id, inspector, bounds, layout, prepaint, window, cx);
+    }
+
+    fn a11y_role(&self) -> Option<Role> {
+        self.control.a11y_role()
+    }
+
+    fn write_a11y_info(&self, node: &mut accesskit::Node) {
+        self.control.write_a11y_info(node);
+        if self.disabled {
+            node.set_disabled();
+        }
+    }
 }

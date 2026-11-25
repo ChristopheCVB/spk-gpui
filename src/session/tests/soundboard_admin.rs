@@ -184,15 +184,18 @@ async fn admin_soundboard_uploads_selected_audio_and_peer_refreshes_edits_and_de
         mutation(SoundboardAdminAction::Preview);
         wait_for_sidebar(&alice_views, |view| {
             view.admin_soundboard.error == Some("Upload gain must be between 0% and 200%.")
-                && !view.admin_soundboard.previewing
+                && !view.admin_soundboard.preview.is_playing()
         })
         .await;
         mutation(SoundboardAdminAction::Gain(50));
         mutation(SoundboardAdminAction::Preview);
-        wait_for_sidebar(&alice_views, |view| view.admin_soundboard.previewing).await;
+        wait_for_sidebar(&alice_views, |view| {
+            view.admin_soundboard.preview.is_playing()
+        })
+        .await;
         mutation(SoundboardAdminAction::Trim(SoundboardTrim::Region, 0.004));
         wait_for_sidebar(&alice_views, |view| {
-            !view.admin_soundboard.previewing
+            !view.admin_soundboard.preview.is_playing()
                 && view
                     .admin_soundboard
                     .selection
@@ -201,10 +204,13 @@ async fn admin_soundboard_uploads_selected_audio_and_peer_refreshes_edits_and_de
         .await;
         mutation(SoundboardAdminAction::Trim(SoundboardTrim::Region, 0.008));
         mutation(SoundboardAdminAction::Preview);
-        wait_for_sidebar(&alice_views, |view| view.admin_soundboard.previewing).await;
+        wait_for_sidebar(&alice_views, |view| {
+            view.admin_soundboard.preview.is_playing()
+        })
+        .await;
         mutation(SoundboardAdminAction::Gain(75));
         wait_for_sidebar(&alice_views, |view| {
-            !view.admin_soundboard.previewing
+            !view.admin_soundboard.preview.is_playing()
                 && view
                     .admin_soundboard
                     .selection
@@ -213,9 +219,15 @@ async fn admin_soundboard_uploads_selected_audio_and_peer_refreshes_edits_and_de
         .await;
         mutation(SoundboardAdminAction::Gain(50));
         mutation(SoundboardAdminAction::Preview);
-        wait_for_sidebar(&alice_views, |view| view.admin_soundboard.previewing).await;
+        wait_for_sidebar(&alice_views, |view| {
+            view.admin_soundboard.preview.is_playing()
+        })
+        .await;
         mutation(SoundboardAdminAction::StopPreview);
-        wait_for_sidebar(&alice_views, |view| !view.admin_soundboard.previewing).await;
+        wait_for_sidebar(&alice_views, |view| {
+            !view.admin_soundboard.preview.is_playing()
+        })
+        .await;
         alice.send(Command::LeaveVoice).await.unwrap();
         assert_eq!(
             receive_voice_frame(alice_socket).await,
