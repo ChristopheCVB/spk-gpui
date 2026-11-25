@@ -8,7 +8,7 @@ use gpui_kit::{
 };
 
 use super::*;
-use crate::shortcuts::{Action, Binding, Chord, Scope, Shortcuts};
+use crate::shortcuts::{Action, Binding, ChangeError, Chord, Scope, Shortcuts};
 
 pub struct ShortcutKeys;
 
@@ -174,8 +174,10 @@ impl Settings {
                                             if let Err(error) =
                                                 app.shortcuts.set_binding(action, None)
                                             {
-                                                app.shortcuts.settings_error =
-                                                    Some(error.message());
+                                                app.show_action_result(
+                                                    ActionResult::error(error.message()),
+                                                    cx,
+                                                );
                                             }
                                             cx.notify();
                                         });
@@ -202,8 +204,10 @@ impl Settings {
                                                 if let Err(error) =
                                                     app.shortcuts.set_binding(action, Some(binding))
                                                 {
-                                                    app.shortcuts.settings_error =
-                                                        Some(error.message());
+                                                    app.show_action_result(
+                                                        ActionResult::error(error.message()),
+                                                        cx,
+                                                    );
                                                 }
                                                 cx.notify();
                                             }
@@ -299,8 +303,11 @@ impl Settings {
                 }
                 Err(error) => {
                     let editor = app.shortcuts.editor.as_mut().expect("editing a shortcut");
-                    editor.error = Some(error.message());
+                    editor.error = (error != ChangeError::Save).then(|| error.message());
                     editor.allow_focused = error.can_use_focused();
+                    if error == ChangeError::Save {
+                        app.show_action_result(ActionResult::error(error.message()), cx);
+                    }
                 }
             }
             cx.notify();

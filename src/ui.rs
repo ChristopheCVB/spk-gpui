@@ -37,7 +37,7 @@ use gpui_kit::{
 };
 
 use crate::{
-    session::{self, AccountLinkForm, AvatarPhoto, Command, Sidebar, View},
+    session::{self, AccountLinkForm, ActionResult, AvatarPhoto, Command, Sidebar, View},
     shortcuts::{Chord, Shortcuts},
     sounds::{Sound, SoundSetting, SoundSettings, VoiceSounds},
     voice::{DeviceKind, Status},
@@ -114,14 +114,11 @@ pub(super) struct Spk {
     workspace_focus: FocusHandle,
     settings_button_focus: FocusHandle,
     appearance: Appearance,
-    appearance_error: bool,
     density: Density,
-    density_error: bool,
     shortcuts: Shortcuts,
     sound_settings: tokio::sync::watch::Sender<SoundSettings>,
     cues: VoiceSounds,
     notification_preferences: crate::notifications::Preferences,
-    notification_error: bool,
     alert_activation: tokio::sync::watch::Sender<Option<crate::api::MessageTarget>>,
     signing_out: bool,
     last_activity: Instant,
@@ -294,7 +291,22 @@ impl Spk {
             if window.window_handle().window_id() == window_id {
                 let _ = app.update(cx, |this, cx| {
                     this.record_activity(window);
-                    if this.shortcuts.editor.is_some() {
+                    if this
+                        .shortcuts
+                        .editor
+                        .as_ref()
+                        .is_some_and(|editor| editor.recording)
+                    {
+                        this.capture_shortcut(event, window, cx);
+                    } else if notifications::dismiss_action_toasts(
+                        event,
+                        &this.shortcuts,
+                        window,
+                        cx,
+                    ) {
+                        cx.stop_propagation();
+                        window.prevent_default();
+                    } else if this.shortcuts.editor.is_some() {
                         this.capture_shortcut(event, window, cx);
                     } else if this.workspace_key(event, window, cx) {
                         cx.stop_propagation();
@@ -441,6 +453,7 @@ impl Spk {
                     View::SignIn {
                         message: Some("The SPK connection stopped. Close and reopen the app."),
                         retry_restore: false,
+                        draft_save_error: None,
                     },
                     window,
                     cx,
@@ -515,14 +528,11 @@ impl Spk {
             workspace_focus,
             settings_button_focus: cx.focus_handle(),
             appearance,
-            appearance_error: false,
             density: Density::load(),
-            density_error: false,
             shortcuts,
             sound_settings,
             cues,
             notification_preferences: Default::default(),
-            notification_error: false,
             alert_activation,
             signing_out: false,
             last_activity: Instant::now(),
@@ -565,12 +575,10 @@ impl Spk {
                     .as_deref()
                     .map(crate::notifications::Preferences::load)
                     .unwrap_or_default();
-                self.notification_error = false;
                 window.clear_notifications(cx);
             }
         } else {
             self.notification_preferences = Default::default();
-            self.notification_error = false;
         }
         if let View::SignedIn(previous) = &self.view {
             let next = match &view {
@@ -596,6 +604,9 @@ impl Spk {
             {
                 self.selected_voice_channel = None;
             }
+            for result in std::mem::take(&mut sidebar.action_results) {
+                notifications::push_action_result(result, window, cx);
+            }
             for alert in std::mem::take(&mut sidebar.alerts) {
                 self.show_alert(alert, sidebar, window, cx);
             }
@@ -605,11 +616,27 @@ impl Spk {
             self.video_stage.sidebar_watch = None;
             window.clear_notifications(cx);
         }
+        if let View::SignIn {
+            draft_save_error, ..
+        } = &mut view
+            && let Some(message) = draft_save_error.take()
+        {
+            notifications::push_action_result(ActionResult::error(message), window, cx);
+        }
         self.view = view;
         self.update_screen_picker(window, cx);
     }
 
     fn send(&mut self, command: Command, busy: Option<&'static str>, cx: &mut Context<Self>) {
+        self.try_send(command, busy, cx);
+    }
+
+    fn try_send(
+        &mut self,
+        command: Command,
+        busy: Option<&'static str>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         self.form_error = None;
         if matches!(command, Command::LeaveVoice | Command::SignOut) {
             self.video_stage.sidebar_watch = None;
@@ -623,8 +650,13 @@ impl Spk {
                 | Command::AddChatAttachments { .. }
                 | Command::RetryChatAttachment { .. }
         );
-        if self.commands.try_send(command).is_err() {
-            self.form_error = Some("Could not reach the SPK connection. Try again.");
+        let enqueued = self.commands.try_send(command).is_ok();
+        if !enqueued {
+            let message = "Could not reach the SPK connection. Try again.";
+            self.form_error = Some(message);
+            if matches!(self.view, View::SignedIn(_)) {
+                self.show_action_result(ActionResult::error(message), cx);
+            }
         } else {
             self.chat_draft_edited |= edits_draft;
             if signing_out {
@@ -636,6 +668,7 @@ impl Spk {
             }
         }
         cx.notify();
+        enqueued
     }
 
     fn cancel_shortcut_editor(&mut self, cx: &mut Context<Self>) {
@@ -694,7 +727,9 @@ impl Spk {
     ) {
         let mut sounds = self.shortcuts.sound_settings();
         change(sounds.get_mut(sound));
-        self.shortcuts.set_sound_settings(sounds);
+        if let Err(error) = self.shortcuts.set_sound_settings(sounds) {
+            self.show_action_result(ActionResult::error(error.message()), cx);
+        }
         self.sound_settings.send_replace(sounds);
         cx.notify();
     }
@@ -708,6 +743,7 @@ impl Render for Spk {
             View::SignIn {
                 message,
                 retry_restore,
+                ..
             } => self
                 .login(*message, *retry_restore, window, cx)
                 .into_any_element(),

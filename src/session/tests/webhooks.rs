@@ -86,7 +86,10 @@ async fn signed_in_reader_opens_visible_webhook_history() {
             .send(Command::OpenWebhook("private".into()))
             .await
             .unwrap();
-        let denied = wait_for_sidebar(&reader_views, |view| view.chat_notice.is_some()).await;
+        let denied = wait_for_sidebar(&reader_views, |view| {
+            view.action_results == [ActionResult::error("Webhook feed unavailable.")]
+        })
+        .await;
         assert_eq!(
             denied
                 .webhook_feeds()
@@ -390,7 +393,7 @@ async fn channel_refresh_discards_revoked_webhook_history_and_in_flight_pages() 
         assert_eq!(after.chat_notice, Some("Webhook feed unavailable."));
 
         commands.send(Command::SignOut).await.unwrap();
-        assert!(matches!(session.await.unwrap(), SessionEnd::SignOut));
+        assert!(matches!(session.await.unwrap(), SessionEnd::SignOut(None)));
     }).await.expect("webhook access revocation timed out");
     assert!(!http.is_finished());
     http.abort();
@@ -466,7 +469,7 @@ async fn late_search_omits_revoked_feed_never_listed_to_reader() {
         assert_eq!(done.search.next_cursor.as_deref(), Some("20"));
 
         commands.send(Command::SignOut).await.unwrap();
-        assert!(matches!(session.await.unwrap(), SessionEnd::SignOut));
+        assert!(matches!(session.await.unwrap(), SessionEnd::SignOut(None)));
     }).await.expect("late webhook search timed out");
     assert!(!http.is_finished());
     http.abort();
@@ -527,7 +530,7 @@ async fn newly_visible_webhook_loads_existing_unread_alert_count() {
         assert!(updated.alerts.is_empty());
 
         commands.send(Command::SignOut).await.unwrap();
-        assert!(matches!(session.await.unwrap(), SessionEnd::SignOut));
+        assert!(matches!(session.await.unwrap(), SessionEnd::SignOut(None)));
     })
     .await
     .expect("newly visible webhook unread count timed out");
@@ -593,7 +596,9 @@ mod creation {
             );
             assert!(matches!(
                 create(&commands, "Duplicate", false).await.await.unwrap(),
-                Err("A webhook change is already in progress.")
+                Err(WebhookError::Action(
+                    "A webhook change is already in progress."
+                ))
             ));
             created.send_replace(true);
             let url = format!("{base}api/hooks/feed/test-fixture-secret");
@@ -626,7 +631,7 @@ mod creation {
                 .respond(&[], &value!([feed()]).to_string())
                 .await;
             commands.send(Command::SignOut).await.unwrap();
-            assert!(matches!(session.await.unwrap(), SessionEnd::SignOut));
+            assert!(matches!(session.await.unwrap(), SessionEnd::SignOut(None)));
         })
         .await
         .expect("webhook creation timed out");
@@ -673,24 +678,30 @@ mod creation {
                     .await
                     .await
                     .unwrap(),
-                Err("Webhook names must be 1–32 characters.")
+                Err(WebhookError::Validation(
+                    "Webhook names must be 1–32 characters."
+                ))
             ));
             for (status, expected_error) in [
                 (
                     "404 Not Found",
-                    "This SPK server needs a version that supports Webhooks.",
+                    WebhookError::Action("This SPK server needs a version that supports Webhooks."),
                 ),
                 (
                     "403 Forbidden",
-                    "SPK denied permission to create this webhook.",
+                    WebhookError::Action("SPK denied permission to create this webhook."),
                 ),
                 (
                     "422 Unprocessable Entity",
-                    "SPK rejected the webhook settings. Check the name and icon, then try again.",
+                    WebhookError::Validation(
+                        "SPK rejected the webhook settings. Check the name and icon, then try again.",
+                    ),
                 ),
                 (
                     "503 Service Unavailable",
-                    "Could not create the webhook. Refresh the feed list before trying again.",
+                    WebhookError::Action(
+                        "Could not create the webhook. Refresh the feed list before trying again.",
+                    ),
                 ),
             ] {
                 let result = create(&commands, "Deployments", false).await;
@@ -702,7 +713,12 @@ mod creation {
                 request
                     .respond_raw(status, &[], b"untrusted server error body")
                     .await;
-                assert!(matches!(result.await.unwrap(), Err(message) if message == expected_error));
+                assert!(matches!(
+                    (result.await.unwrap(), expected_error),
+                    (Err(WebhookError::Action(actual)), WebhookError::Action(expected))
+                        | (Err(WebhookError::Validation(actual)), WebhookError::Validation(expected))
+                        if actual == expected
+                ));
             }
 
             commands
@@ -721,7 +737,7 @@ mod creation {
             commands.send(Command::SignOut).await.unwrap();
             assert!(signed_out.await.is_err());
             drop(pending);
-            assert!(matches!(session.await.unwrap(), SessionEnd::SignOut));
+            assert!(matches!(session.await.unwrap(), SessionEnd::SignOut(None)));
         })
         .await
         .expect("webhook failure handling timed out");
@@ -733,7 +749,7 @@ mod creation {
         commands: &Sender<Command>,
         name: &str,
         private: bool,
-    ) -> oneshot::Receiver<Result<Option<crate::api::WebhookUrl>, &'static str>> {
+    ) -> oneshot::Receiver<Result<Option<crate::api::WebhookUrl>, WebhookError>> {
         let (reply, result) = oneshot::channel();
         commands
             .send(Command::MutateWebhook {

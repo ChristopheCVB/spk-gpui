@@ -149,14 +149,6 @@ impl MarkdownPlugin for MessageSpoiler {
 // Match the revealed Markdown's layout without painting or exposing its content to input or accessibility.
 struct LayoutOnly(AnyElement);
 
-impl IntoElement for LayoutOnly {
-    type Element = Self;
-
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
 impl Element for LayoutOnly {
     type RequestLayoutState = ();
     type PrepaintState = ();

@@ -17,8 +17,26 @@ pub enum WebhookAction {
     Delete(String),
 }
 
-pub type WebhookReply = oneshot::Sender<Result<Option<WebhookUrl>, &'static str>>;
-pub(super) type WebhookCompletion = (Result<WebhookChange, Failure>, WebhookReply, bool);
+#[derive(Debug)]
+pub enum WebhookError {
+    Validation(&'static str),
+    Action(&'static str),
+}
+
+pub type WebhookReply = oneshot::Sender<Result<Option<WebhookUrl>, WebhookError>>;
+pub(super) type WebhookCompletion = (
+    Result<WebhookChange, Failure>,
+    WebhookReply,
+    WebhookOperation,
+);
+
+#[derive(Clone, Copy)]
+pub(super) enum WebhookOperation {
+    Create,
+    Edit,
+    Rotate,
+    Delete,
+}
 
 pub(super) enum WebhookChange {
     Created(Channel, WebhookUrl),
@@ -42,7 +60,7 @@ impl Sidebar {
 }
 
 impl WebhookAction {
-    pub(super) fn validated(self, sidebar: &Sidebar) -> Result<Self, &'static str> {
+    pub(super) fn validated(self, sidebar: &Sidebar) -> Result<Self, WebhookError> {
         let id = match &self {
             Self::Create(_) => None,
             Self::Edit { id, .. } | Self::Rotate(id) | Self::Delete(id) => Some(id),
@@ -50,23 +68,31 @@ impl WebhookAction {
         if let Some(id) = id {
             let feed = sidebar
                 .webhook_feed(id)
-                .ok_or("Webhook feed unavailable.")?;
+                .ok_or(WebhookError::Action("Webhook feed unavailable."))?;
             if !sidebar.can_manage_webhook(feed) {
-                return Err("You cannot manage this webhook.");
+                return Err(WebhookError::Action("You cannot manage this webhook."));
             }
         }
         match self {
-            Self::Create(settings) => settings.validated().map(Self::Create),
+            Self::Create(settings) => settings
+                .validated()
+                .map(Self::Create)
+                .map_err(WebhookError::Validation),
             Self::Edit { id, settings } => Ok(Self::Edit {
                 id,
-                settings: settings.validated()?,
+                settings: settings.validated().map_err(WebhookError::Validation)?,
             }),
             Self::Rotate(_) | Self::Delete(_) => Ok(self),
         }
     }
 
     pub(super) async fn send(self, client: &SpkClient, reply: WebhookReply) -> WebhookCompletion {
-        let creating = matches!(self, Self::Create(_));
+        let operation = match &self {
+            Self::Create(_) => WebhookOperation::Create,
+            Self::Edit { .. } => WebhookOperation::Edit,
+            Self::Rotate(_) => WebhookOperation::Rotate,
+            Self::Delete(_) => WebhookOperation::Delete,
+        };
         let result = match self {
             Self::Create(settings) => client
                 .create_webhook(settings)
@@ -85,7 +111,7 @@ impl WebhookAction {
                 .await
                 .map(|()| WebhookChange::Deleted(id)),
         };
-        (result, reply, creating)
+        (result, reply, operation)
     }
 }
 
@@ -104,12 +130,12 @@ impl MutationContext<'_> {
         self,
         client: &SpkClient,
         result: Result<WebhookChange, Failure>,
-        creating: bool,
-    ) -> Result<Option<WebhookUrl>, &'static str> {
+        operation: WebhookOperation,
+    ) -> Result<Option<WebhookUrl>, WebhookError> {
         let change = match result {
             Ok(change) => change,
             Err(error) => {
-                if !creating
+                if !matches!(operation, WebhookOperation::Create)
                     && matches!(
                         error,
                         Failure::Http(StatusCode::NOT_FOUND | StatusCode::FORBIDDEN)
@@ -117,7 +143,17 @@ impl MutationContext<'_> {
                 {
                     self.refresh.fetch(client, Resource::Channels);
                 }
-                return Err(mutation_error(error, creating));
+                if matches!(operation, WebhookOperation::Create | WebhookOperation::Edit)
+                    && matches!(
+                        error,
+                        Failure::Http(StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY)
+                    )
+                {
+                    return Err(WebhookError::Validation(
+                        "SPK rejected the webhook settings. Check the name and icon, then try again.",
+                    ));
+                }
+                return Err(WebhookError::Action(mutation_error(error, operation)));
             }
         };
         let removed = match change {
@@ -158,7 +194,7 @@ impl MutationContext<'_> {
                     .webhook_feed(&id)
                     .filter(|feed| self.sidebar.can_manage_webhook(feed))
                     .map(|_| Some(url))
-                    .ok_or("Webhook feed unavailable.");
+                    .ok_or(WebhookError::Action("Webhook feed unavailable."));
             }
             WebhookChange::Deleted(id) => {
                 self.refresh.webhook_changed(client);
@@ -178,7 +214,8 @@ impl MutationContext<'_> {
     }
 }
 
-fn mutation_error(error: Failure, creating: bool) -> &'static str {
+fn mutation_error(error: Failure, operation: WebhookOperation) -> &'static str {
+    let creating = matches!(operation, WebhookOperation::Create);
     match error {
         Failure::Http(StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED) if creating => {
             "This SPK server needs a version that supports Webhooks."
@@ -188,9 +225,6 @@ fn mutation_error(error: Failure, creating: bool) -> &'static str {
             "SPK denied permission to create this webhook."
         }
         Failure::Http(StatusCode::FORBIDDEN) => "SPK denied permission to manage this webhook.",
-        Failure::Http(StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY) => {
-            "SPK rejected the webhook settings. Check the name and icon, then try again."
-        }
         Failure::Connection => "Could not reach SPK. Check your connection and try again.",
         _ if creating => "Could not create the webhook. Refresh the feed list before trying again.",
         _ => "Could not update the webhook. Refresh the feed list before trying again.",

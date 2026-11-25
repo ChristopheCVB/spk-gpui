@@ -63,14 +63,14 @@ pub use {
     chat::{
         AttachmentInput, ChatImage, ChatView, Delivery, GifPickerView, Outgoing, POLL_MAX_OPTIONS,
         POLL_MIN_OPTIONS, POLL_OPTION_LIMIT, POLL_QUESTION_LIMIT, Pins, PollEditOutcome,
-        PollEditReply, UploadStatus, image_preview, trim_poll_text, validate_poll,
+        PollEditReply, PollFormError, UploadStatus, image_preview, trim_poll_text, validate_poll,
     },
     presence::Participant,
     profiles::ProfileEdit,
     radio::RadioPlayback,
     soundboard_admin::{SoundboardAdminAction, SoundboardCrop},
     voice_session::VoiceView,
-    webhooks::{WebhookAction, WebhookReply},
+    webhooks::{WebhookAction, WebhookError, WebhookReply},
 };
 
 #[cfg(test)]
@@ -138,7 +138,7 @@ pub enum Command {
         channel_id: String,
         question: String,
         options: Vec<String>,
-        completed: oneshot::Sender<Result<(), &'static str>>,
+        completed: oneshot::Sender<Result<(), PollFormError>>,
     },
     ShowGifs(bool),
     SearchGifs(String),
@@ -282,6 +282,7 @@ pub enum View {
     SignIn {
         message: Option<&'static str>,
         retry_restore: bool,
+        draft_save_error: Option<&'static str>,
     },
     AccountLink {
         form: AccountLinkForm,
@@ -295,25 +296,48 @@ pub enum View {
     RetrySignOut,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActionResult {
+    Success(String),
+    Info(String),
+    Warning(String),
+    Error(String),
+}
+
+impl ActionResult {
+    pub fn success(message: impl Into<String>) -> Self {
+        Self::Success(message.into())
+    }
+
+    pub fn info(message: impl Into<String>) -> Self {
+        Self::Info(message.into())
+    }
+
+    pub fn warning(message: impl Into<String>) -> Self {
+        Self::Warning(message.into())
+    }
+
+    pub fn error(message: impl Into<String>) -> Self {
+        Self::Error(message.into())
+    }
+}
+
 #[derive(Clone)]
 pub struct Sidebar {
     pub profile: Profile,
     pub profile_edit: ProfileEdit,
     pub admin_accounts: AdminAccountsView,
-    pub account_moderation_notice: Option<&'static str>,
     pub user_status: UserStatus,
-    pub user_status_notice: Option<&'static str>,
     pub channels: Option<Vec<Channel>>,
     pub channel_admin: ChannelAdmin,
     pub connection: Connection,
-    pub notice: Option<&'static str>,
     pub load_failed: bool,
     pub chat: Option<ChatView>,
     pub search: SearchView,
     pub chat_notice: Option<&'static str>,
     pub draft_notice: Option<&'static str>,
-    pub read_notice: Option<&'static str>,
     pub alerts: Vec<Alert>,
+    pub action_results: Vec<ActionResult>,
     unread: Arc<HashMap<String, UnreadState>>,
     pub voice: Option<VoiceView>,
     pub radio: RadioView,
@@ -322,7 +346,6 @@ pub struct Sidebar {
     pub channel_radio: HashMap<String, String>,
     switching_to: Option<VoiceDestination>,
     pub voice_notice: Option<&'static str>,
-    pub voice_moderation_notice: Option<&'static str>,
     pub voice_moderation_pending: bool,
     voice_rejoin: Option<String>,
     pub voice_intent: Intent,
@@ -336,25 +359,25 @@ pub struct Sidebar {
 }
 
 impl Sidebar {
-    fn new(profile: Profile, notice: Option<&'static str>) -> Self {
+    fn new(profile: Profile, session_save_error: Option<&'static str>) -> Self {
         Self {
             profile,
             profile_edit: ProfileEdit::Idle,
             admin_accounts: AdminAccountsView::default(),
-            account_moderation_notice: None,
             user_status: UserStatus::default(),
-            user_status_notice: None,
             channels: None,
             channel_admin: ChannelAdmin::default(),
             connection: Connection::Connecting,
-            notice,
             load_failed: false,
             chat: None,
             search: SearchView::default(),
             chat_notice: None,
             draft_notice: None,
-            read_notice: None,
             alerts: Vec::new(),
+            action_results: session_save_error
+                .into_iter()
+                .map(ActionResult::error)
+                .collect(),
             unread: Arc::default(),
             voice: None,
             radio: RadioView::default(),
@@ -363,7 +386,6 @@ impl Sidebar {
             channel_radio: HashMap::new(),
             switching_to: None,
             voice_notice: None,
-            voice_moderation_notice: None,
             voice_moderation_pending: false,
             voice_rejoin: None,
             voice_intent: Intent::default(),
@@ -583,6 +605,7 @@ async fn run_session(
             _ => return,
         };
 
+        let mut draft_save_error = None;
         let (message, retry_restore) = match auth {
             Ok(Some((client, profile))) => {
                 let notice = saved.save(&client).await.err();
@@ -613,7 +636,8 @@ async fn run_session(
                         }
                         Some(saved.clear().await.err().unwrap_or(reason))
                     }
-                    SessionEnd::SignOut => {
+                    SessionEnd::SignOut(error) => {
+                        draft_save_error = error;
                         let Some(warning) = sign_out(&client, &mut saved, &commands, &views).await
                         else {
                             return;
@@ -627,7 +651,9 @@ async fn run_session(
             Err((retry_restore, message)) => (Some(message), retry_restore),
         };
         sign_in_prompt = message.map(|message| (retry_restore, message));
-        let Some(command) = login(&commands, &views, message, retry_restore).await else {
+        let Some(command) =
+            login(&commands, &views, message, retry_restore, draft_save_error).await
+        else {
             return;
         };
         next = command;
@@ -636,7 +662,7 @@ async fn run_session(
 
 enum SessionEnd {
     Closed,
-    SignOut,
+    SignOut(Option<&'static str>),
     Invalidated(&'static str),
 }
 
@@ -685,6 +711,7 @@ async fn watch_session(
     let mut refresh = Refresh::default();
     refresh.fetch_all(client);
     let mut sidebar = Sidebar::new(profile, notice);
+    let mut session_save_error = notice;
     sidebar.user_status = settings.presence.status;
     let mut presence = PresenceReporter::default();
     let mut avatars = AvatarLoads::default();
@@ -726,7 +753,8 @@ async fn watch_session(
     let mut profiles = JoinSet::new();
     let mut account_admin = AccountAdmin::default();
     let mut draft_save_at = None;
-    let end = loop {
+    let mut draft_save_failed = false;
+    let mut end = loop {
         if commands.is_closed() {
             break SessionEnd::Closed;
         }
@@ -751,6 +779,7 @@ async fn watch_session(
         soundboard.sync(&mut sidebar, &voice);
         admin_soundboard.sync(&mut sidebar);
         voice.start_pending(&mut sidebar, client, &settings.start_call);
+        let action_results = std::mem::take(&mut sidebar.action_results);
         let mut next = sidebar.clone();
         if ChatNavigation::is_opening_alert(&chat_navigation) {
             // A retained alert can point to a conversation the account can no longer access.
@@ -761,6 +790,7 @@ async fn watch_session(
                 chat_navigation = None;
             }
         }
+        next.action_results = action_results;
         next.alerts = std::mem::take(&mut alerts.ready);
         if views.send(View::SignedIn(Box::new(next))).await.is_err() {
             break SessionEnd::Closed;
@@ -784,7 +814,15 @@ async fn watch_session(
                 }
             }
             Some(result) = chat.draft_writes.join_next() => {
-                chat.draft_save_completed(result, &mut sidebar.draft_notice);
+                let saved = chat.draft_save_completed(result);
+                match saved {
+                    Ok(()) => sidebar.draft_notice = None,
+                    Err(message) if !draft_save_failed => {
+                        sidebar.action_results.push(ActionResult::error(message));
+                    }
+                    Err(_) => {}
+                }
+                draft_save_failed = saved.is_err();
             }
             Some(result) = unread.writes.join_next() => {
                 let result = result.unwrap_or(Err(Failure::Connection));
@@ -813,10 +851,10 @@ async fn watch_session(
                     && result.as_ref().is_err_and(|error| {
                         !matches!(error, Failure::Http(reqwest::StatusCode::NOT_FOUND))
                     });
-                chat.complete(client, sidebar.profile.id.as_deref(), result);
+                chat.complete(client, sidebar.profile.id.as_deref(), result, &mut sidebar.action_results);
                 if unverified_alert {
                     chat.close();
-                    sidebar.chat_notice = Some("Message unavailable.");
+                    sidebar.chat_notice = None;
                 }
             }
             Some(result) = chat.action_tasks.join_next() => {
@@ -824,13 +862,13 @@ async fn watch_session(
                 if result.as_ref().is_err_and(Failure::unauthorized) {
                     break SessionEnd::Invalidated(SESSION_EXPIRED);
                 }
-                chat.action_complete(client, result);
+                sidebar.action_results.extend(chat.action_complete(client, result));
             }
             Some(Ok((channel_id, message_id, result))) = chat.vote_tasks.join_next() => {
                 if result.as_ref().is_err_and(Failure::unauthorized) {
                     break SessionEnd::Invalidated(SESSION_EXPIRED);
                 }
-                chat.vote_complete(client, &channel_id, &message_id, result);
+                sidebar.action_results.extend(chat.vote_complete(client, &channel_id, &message_id, result));
             }
             Some(Ok(result)) = chat.preview_tasks.join_next() => chat.preview_complete(result),
             Some(result) = chat.gifs.browsing.join_next() => {
@@ -845,7 +883,7 @@ async fn watch_session(
                 if result.as_ref().is_err_and(Failure::unauthorized) {
                     break SessionEnd::Invalidated(SESSION_EXPIRED);
                 }
-                chat.gifs.favorites_complete(client, result);
+                sidebar.action_results.extend(chat.gifs.favorites_complete(client, result));
             }
             Some(Ok(result)) = chat.gifs.previews.join_next() => chat.gifs.preview_complete(result),
             Some(Ok(result)) = chat.staged_gif_preview.join_next() => chat.staged_gif_preview_complete(result),
@@ -863,7 +901,7 @@ async fn watch_session(
                 }
             }
             Ok(event) = chat.attachments.events.recv() => chat.attachment_event(client, event),
-            Some(Ok((result, reply, creating))) = webhook_mutations.join_next() => {
+            Some(Ok((result, reply, operation))) = webhook_mutations.join_next() => {
                 if result.as_ref().is_err_and(Failure::unauthorized) {
                     break SessionEnd::Invalidated(SESSION_EXPIRED);
                 }
@@ -875,7 +913,10 @@ async fn watch_session(
                     refresh: &mut refresh,
                     unread: &mut unread,
                     search: &mut search,
-                }.complete(client, result, creating);
+                }.complete(client, result, operation);
+                if let Err(WebhookError::Action(message)) = result {
+                    sidebar.action_results.push(ActionResult::error(message));
+                }
                 let _ = reply.send(result);
             }
             Some(result) = direct_message_opens.join_next() => {
@@ -890,7 +931,10 @@ async fn watch_session(
                         refresh.fetch(client, Resource::Channels);
                     }
                     Err(error) if error.unauthorized() => break SessionEnd::Invalidated(SESSION_EXPIRED),
-                    Err(_) => sidebar.chat_notice = Some("Could not open the direct message. Try again."),
+                    Err(_) => {
+                        sidebar.chat_notice = None;
+                        sidebar.action_results.push(ActionResult::error("Could not open the direct message. Try again."));
+                    }
                 }
             }
             _ = sleep_until(rejoin_at.unwrap_or_else(Instant::now)), if rejoin_at.is_some() => {}
@@ -910,10 +954,12 @@ async fn watch_session(
                 }
             } => match command {
                 Err(_) => break SessionEnd::Closed,
-                Ok(Command::SignOut) => break SessionEnd::SignOut,
+                Ok(Command::SignOut) => break SessionEnd::SignOut(None),
                 Ok(Command::SetUserStatus(status)) => {
                     sidebar.user_status = status;
-                    sidebar.user_status_notice = settings.presence.save(status).await.err();
+                    if let Err(message) = settings.presence.save(status).await {
+                        sidebar.action_results.push(ActionResult::error(message));
+                    }
                 }
                 Ok(Command::Refresh) => {
                     refresh.fetch_all(client);
@@ -925,7 +971,8 @@ async fn watch_session(
                 Ok(Command::ManageChannel(action)) => {
                     if !sidebar.channel_admin.pending {
                         sidebar.channel_admin.revision += 1;
-                        sidebar.channel_admin.result = None;
+                        sidebar.channel_admin.succeeded = false;
+                        sidebar.channel_admin.validation = None;
                         match sidebar.channel_mutation(action) {
                             Ok((mutation, notice)) => {
                                 sidebar.channel_admin.pending = true;
@@ -934,21 +981,31 @@ async fn watch_session(
                                     client.mutate_channel(mutation).await.map(|()| notice)
                                 });
                             }
-                            Err(notice) => sidebar.channel_admin.result = Some(Err(notice)),
+                            Err(channel_admin::ChannelMutationError::Validation(message)) => {
+                                sidebar.channel_admin.validation = Some(message);
+                            }
+                            Err(channel_admin::ChannelMutationError::Action(message)) => {
+                                sidebar.action_results.push(ActionResult::error(message));
+                            }
                         }
                     }
                 }
                 Ok(Command::MutateWebhook { action, reply }) => {
                     if !webhook_mutations.is_empty() {
-                        let _ = reply.send(Err("A webhook change is already in progress."));
+                        let message = "A webhook change is already in progress.";
+                        sidebar.action_results.push(ActionResult::error(message));
+                        let _ = reply.send(Err(WebhookError::Action(message)));
                     } else {
                         match action.validated(&sidebar) {
                             Ok(action) => {
                                 let client = client.clone();
                                 webhook_mutations.spawn(async move { action.send(&client, reply).await });
                             }
-                            Err(message) => {
-                                let _ = reply.send(Err(message));
+                            Err(error) => {
+                                if let WebhookError::Action(message) = error {
+                                    sidebar.action_results.push(ActionResult::error(message));
+                                }
+                                let _ = reply.send(Err(error));
                             }
                         }
                     }
@@ -966,7 +1023,7 @@ async fn watch_session(
                         ChatNavigation::open_chat(&mut chat_navigation, &mut chat, client, channel);
                         sidebar.chat_notice = None;
                     } else {
-                        sidebar.chat_notice = Some("Webhook feed unavailable.");
+                        sidebar.action_results.push(ActionResult::error("Webhook feed unavailable."));
                     }
                 }
                 Ok(Command::OpenDirectMessage(id)) => {
@@ -975,7 +1032,8 @@ async fn watch_session(
                         sidebar.chat_notice = None;
                         ChatNavigation::open_chat(&mut chat_navigation, &mut chat, client, channel);
                     } else {
-                        sidebar.chat_notice = Some("Direct message unavailable.");
+                        sidebar.chat_notice = None;
+                        sidebar.action_results.push(ActionResult::error("Direct message unavailable."));
                     }
                 }
                 Ok(Command::StartDirectMessage(user_id)) => {
@@ -984,7 +1042,8 @@ async fn watch_session(
                     }
                     direct_message_opens = JoinSet::new();
                     if !sidebar.can_start_direct_message(&user_id) {
-                        sidebar.chat_notice = Some("Direct message unavailable.");
+                        sidebar.chat_notice = None;
+                        sidebar.action_results.push(ActionResult::error("Direct message unavailable."));
                     } else if let Some(channel) = sidebar.direct_message(&user_id) {
                         ChatNavigation::open_chat(&mut chat_navigation, &mut chat, client, channel);
                         sidebar.chat_notice = None;
@@ -1005,19 +1064,19 @@ async fn watch_session(
                 Ok(Command::RetryChatHistory) => chat.retry_history(client),
                 Ok(Command::ReadVisibleChat(channel_id)) => {
                     if matches!(sidebar.connection, Connection::Online) && chat.should_read(&channel_id) {
-                        unread.mark(&mut sidebar, channel_id, Mark::Visible);
+                        unread.mark(channel_id, Mark::Visible);
                     }
                 }
                 Ok(Command::MarkChatRead(channel_id)) => {
                     if sidebar.channels.iter().flatten().any(|channel| {
                         channel.id == channel_id && channel.is_conversation()
                     }) {
-                        unread.mark(&mut sidebar, channel_id, Mark::Read);
+                        unread.mark(channel_id, Mark::Read);
                     }
                 }
                 Ok(Command::MarkChatUnread { channel_id, message_id }) => {
                     if let Some(request) = chat.start_mark_unread(&channel_id, &message_id) {
-                        unread.mark(&mut sidebar, channel_id, Mark::Unread(message_id, request));
+                        unread.mark(channel_id, Mark::Unread(message_id, request));
                     }
                 },
                 Ok(Command::JumpToChatMessage { .. } | Command::LoadLatestMessages)
@@ -1038,7 +1097,11 @@ async fn watch_session(
                 Ok(Command::SetChatReply { channel_id, message_id }) => chat.set_reply(&channel_id, message_id.as_deref()),
                 Ok(Command::SendChatMessage { channel_id, body }) => chat.send(channel_id, body),
                 Ok(Command::SendChatPoll { channel_id, question, options, completed }) => {
-                    let _ = completed.send(chat.send_poll(channel_id, &question, &options));
+                    let result = chat.send_poll(channel_id, &question, &options);
+                    if let Err(PollFormError::Action(message)) = &result {
+                        sidebar.action_results.push(ActionResult::error(*message));
+                    }
+                    let _ = completed.send(result);
                 }
                 Ok(Command::ShowGifs(true)) => chat.open_gifs(client),
                 Ok(Command::ShowGifs(false)) => chat.gifs.close(),
@@ -1099,7 +1162,7 @@ async fn watch_session(
                 }
                 Ok(Command::MarkChatSendDelivered(nonce)) => chat.mark_send_delivered(&nonce),
                 Ok(Command::MutateChatMessage { channel_id, message_id, action }) => {
-                    chat.mutate(client, &sidebar, &channel_id, message_id, action);
+                    chat.mutate(client, &mut sidebar, &channel_id, message_id, action);
                 }
                 Ok(Command::EditChatPoll { channel_id, message_id, question, options, reset_votes, completed }) => {
                     let result = chat.prepare_poll_edit(
@@ -1108,7 +1171,12 @@ async fn watch_session(
                     match result {
                         Ok(Some(action)) => chat.start_message_action(client, &channel_id, message_id, action, Some(completed)),
                         Ok(None) => { let _ = completed.send(Ok(PollEditOutcome::ConfirmVoteChange)); }
-                        Err(error) => { let _ = completed.send(Err(error)); }
+                        Err(error) => {
+                            if let PollFormError::Action(message) = error {
+                                sidebar.action_results.push(ActionResult::error(message));
+                            }
+                            let _ = completed.send(Err(error));
+                        }
                     }
                 }
                 Ok(Command::RetryChatPins(channel_id)) => chat.retry_pins(client, &channel_id),
@@ -1163,7 +1231,9 @@ async fn watch_session(
                     }
                     _ => {
                         sidebar.channel_admin.pending = false;
-                        sidebar.channel_admin.result = Some(notice);
+                        if let Err(message) = notice {
+                            sidebar.action_results.push(ActionResult::error(message));
+                        }
                     }
                 }
             }
@@ -1172,19 +1242,15 @@ async fn watch_session(
                 if result.as_ref().is_err_and(Failure::unauthorized) {
                     break SessionEnd::Invalidated(SESSION_EXPIRED);
                 }
-                sidebar.voice_moderation_notice = Some(match result {
-                    Ok(VoiceModeration::Move(_)) => "Move requested.",
-                    Ok(VoiceModeration::Disconnect) => "Voice participant disconnected.",
-                    Err(Failure::Http(reqwest::StatusCode::FORBIDDEN)) => {
-                        "You don’t have permission to moderate voice."
-                    }
-                    Err(Failure::Http(reqwest::StatusCode::CONFLICT)) => {
-                        "That participant is no longer in the expected voice channel."
-                    }
-                    Err(Failure::Http(reqwest::StatusCode::NOT_FOUND)) => {
-                        "That voice channel is unavailable."
-                    }
-                    Err(_) => "Could not moderate voice. Try again.",
+                sidebar.action_results.push(match result {
+                    Ok(VoiceModeration::Move(_)) => ActionResult::info("Move requested."),
+                    Ok(VoiceModeration::Disconnect) => ActionResult::success("Voice participant disconnected."),
+                    Err(error) => ActionResult::error(match error {
+                        Failure::Http(reqwest::StatusCode::FORBIDDEN) => "You don’t have permission to moderate voice.",
+                        Failure::Http(reqwest::StatusCode::CONFLICT) => "That participant is no longer in the expected voice channel.",
+                        Failure::Http(reqwest::StatusCode::NOT_FOUND) => "That voice channel is unavailable.",
+                        _ => "Could not moderate voice. Try again.",
+                    }),
                 });
             }
             event = socket.recv() => match event {
@@ -1309,7 +1375,7 @@ async fn watch_session(
                         if voice.radio_scope(&sidebar).is_some_and(|(current_sid, current_channel)| {
                             sid == current_sid && channel_id.as_deref().is_none_or(|channel| channel == current_channel)
                         }) => {
-                        sidebar.radio.command_error = Some(error);
+                        sidebar.action_results.push(ActionResult::error(error));
                     }
                     Frame::SoundNew => sidebar.soundboard.has_new_clip = true,
                     Frame::VoiceSound { user_id, sound_id } => {
@@ -1364,25 +1430,25 @@ async fn watch_session(
             }
             () = RadioSession::playback_changed(&mut radio.player) => {}
             Some(Ok((id, result))) = radio.tasks.join_next_with_id() => {
-                if let Err(error) = radio.complete(&mut sidebar.radio, id, result) {
+                if let Err(error) = radio.complete(&mut sidebar, id, result) {
                     if error.unauthorized() {
                         break SessionEnd::Invalidated(SESSION_EXPIRED);
                     }
-                    sidebar.radio.directory_error = Some("Could not load or update radio stations. Try again.");
+                    sidebar.radio.directory_error = Some("Could not load radio stations. Try again.");
                 }
             }
             Some(Ok((id, result))) = soundboard.tasks.join_next_with_id() => {
-                if soundboard.complete(&mut sidebar.soundboard, client, id, result).is_err_and(|error| error.unauthorized()) {
+                if soundboard.complete(&mut sidebar, client, id, result).is_err_and(|error| error.unauthorized()) {
                     break SessionEnd::Invalidated(SESSION_EXPIRED);
                 }
             }
             Some(Ok(result)) = admin_soundboard.tasks.join_next() => {
-                if admin_soundboard.complete(&mut sidebar.admin_soundboard, result).is_err() {
+                if admin_soundboard.complete(&mut sidebar, result).is_err() {
                     break SessionEnd::Invalidated(SESSION_EXPIRED);
                 }
             }
             Some(Ok((kind, result))) = admin_soundboard.mutations.join_next() => {
-                match admin_soundboard.mutated(&mut sidebar.admin_soundboard, client, kind, result) {
+                match admin_soundboard.mutated(&mut sidebar, client, kind, result) {
                     Ok(true) if sidebar.soundboard.clips.is_some() || sidebar.soundboard.loading => {
                         soundboard.refresh(&mut sidebar.soundboard, client);
                     }
@@ -1448,9 +1514,11 @@ async fn watch_session(
                     && let Some(result) = channel_mutation_result.take()
                 {
                     sidebar.channel_admin.pending = false;
-                    sidebar.channel_admin.result = Some(match (result, presence_loaded) {
-                        (Ok(_), false) => Ok("Channel updated. Refresh to reload the channel list."),
-                        _ => result,
+                    sidebar.channel_admin.succeeded = result.is_ok();
+                    sidebar.action_results.push(match (result, presence_loaded) {
+                        (Ok(message), true) => ActionResult::success(message),
+                        (Ok(_), false) => ActionResult::warning("Channel updated. Refresh to reload the channel list."),
+                        (Err(message), _) => ActionResult::error(message),
                     });
                 }
                 if resource == Resource::Channels
@@ -1470,11 +1538,12 @@ async fn watch_session(
                     if presence_loaded && search::open_chat_target(&mut sidebar, &mut chat, client, channel, message.as_deref()) {
                         chat_navigation = from_alert.then_some(ChatNavigation::OpeningAlert);
                     } else {
-                        sidebar.chat_notice = Some(if message.is_some() {
+                        sidebar.chat_notice = None;
+                        sidebar.action_results.push(ActionResult::error(if message.is_some() {
                             "Message unavailable."
                         } else {
                             "Conversation unavailable."
-                        });
+                        }));
                         chat_navigation = None;
                     }
                 }
@@ -1498,7 +1567,11 @@ async fn watch_session(
                 if refresh.dirty.remove(&resource) {
                     refresh.fetch(client, resource);
                 }
-                sidebar.notice = saved.save(client).await.err();
+                let error = saved.save(client).await.err();
+                if let Some(message) = error.filter(|_| error != session_save_error) {
+                    sidebar.action_results.push(ActionResult::error(message));
+                }
+                session_save_error = error;
             }
         }
     };
@@ -1521,14 +1594,18 @@ async fn watch_session(
                 }
             }
         }
+        let mut error = None;
         if let Some(result) = chat.draft_writes.join_next().await {
-            chat.draft_save_completed(result, &mut sidebar.draft_notice);
+            error = chat.draft_save_completed(result).err();
         }
         if chat.drafts_to_save() {
             chat.save_drafts(store);
             if let Some(result) = chat.draft_writes.join_next().await {
-                chat.draft_save_completed(result, &mut sidebar.draft_notice);
+                error = chat.draft_save_completed(result).err();
             }
+        }
+        if matches!(end, SessionEnd::SignOut(_)) {
+            end = SessionEnd::SignOut(error);
         }
     }
     if matches!(end, SessionEnd::Invalidated(SESSION_EXPIRED))

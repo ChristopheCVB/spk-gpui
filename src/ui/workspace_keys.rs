@@ -9,9 +9,6 @@ impl Spk {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let View::SignedIn(sidebar) = &self.view else {
-            return false;
-        };
         if !window.is_window_active() {
             return false;
         }
@@ -27,6 +24,9 @@ impl Spk {
         if event.input_preference == InputPreference::CharacterInput {
             return false;
         }
+        let View::SignedIn(sidebar) = &self.view else {
+            return false;
+        };
         let everything_search = primary && modifiers.shift && count == 2 && key_name == "f";
         if self.search_panel.is_some()
             && !everything_search
@@ -266,6 +266,15 @@ pub(super) fn shortcut_reference(
                 ),
                 ("Show or hide sidebar", format!("{primary}+B")),
                 ("Show keyboard shortcuts", "?".into()),
+                (
+                    "Dismiss action toasts",
+                    format!(
+                        "{primary}+Shift+{}",
+                        shortcuts
+                            .action_toast_key(cx.platform_info().is_mac())
+                            .to_ascii_uppercase()
+                    ),
+                ),
             ],
         ),
         (

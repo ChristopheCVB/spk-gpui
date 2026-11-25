@@ -757,15 +757,14 @@ impl Spk {
             return;
         }
         let reading_older = chat.has_more_after;
-        self.send(
+        if self.try_send(
             Command::SendChatMessage {
                 channel_id: chat.channel_id.clone(),
                 body,
             },
             None,
             cx,
-        );
-        if self.form_error.is_none() {
+        ) {
             self.chat_submitting = true;
             self.chat_draft_edited = false;
             self.suggestions[0].dismiss();
@@ -847,14 +846,16 @@ impl Spk {
                         .into_any_element(),
                 }
             });
-        let status = if chat.jump_failed {
-            Some("Message unavailable.")
-        } else if chat.unavailable() {
-            Some(if chat.webhook {
-                "Webhook feed unavailable."
+        let status = if chat.unavailable() {
+            if chat.jump_failed {
+                None
+            } else if chat.webhook {
+                Some("Webhook feed unavailable.")
             } else {
-                "Direct message unavailable."
-            })
+                chat.direct_message_peer
+                    .as_ref()
+                    .map(|_| "Direct message unavailable.")
+            }
         } else if chat.history_failed() {
             Some("Could not load message history.")
         } else if chat.loading() {
@@ -876,25 +877,15 @@ impl Spk {
             .when(!chat.unavailable(), |area| {
                 area.child(self.pins(sidebar, chat, cx))
             })
-            .children(
-                [
-                    (
-                        "chat-action-error",
-                        chat.action_outcome.as_ref().and_then(|result| result.error),
+            .when_some(chat.message_send_error.as_ref(), |area, error| {
+                area.child(
+                    div().px_4().py_2().child(
+                        Label::new(error.clone())
+                            .id("chat-send-error")
+                            .text_color(theme.danger),
                     ),
-                    ("chat-send-error", chat.message_send_error.as_deref()),
-                    ("chat-vote-error", chat.vote_error),
-                ]
-                .into_iter()
-                .filter_map(|(id, error)| {
-                    error.map(|error| {
-                        div()
-                            .px_4()
-                            .py_2()
-                            .child(Label::new(error.to_owned()).id(id).text_color(theme.danger))
-                    })
-                }),
-            )
+                )
+            })
             .when_some(status, |area, status| {
                 area.child(
                     div()

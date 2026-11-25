@@ -333,13 +333,12 @@ impl Spk {
         };
         let notices = [
             status,
-            sidebar.notice,
             sidebar.chat_notice,
             sidebar.draft_notice,
-            sidebar.read_notice,
             sidebar.device_notice,
-            sidebar.voice_moderation_notice,
-            self.form_error,
+            sidebar
+                .voice_moderation_pending
+                .then_some("Moderating voice…"),
         ];
         let rejoin = sidebar
             .rejoin_channel()
@@ -501,17 +500,6 @@ impl Spk {
                             .text_color(theme.muted_foreground)
                             .child(notice)
                     }))
-                    .when_some(sidebar.account_moderation_notice, |area, notice| {
-                        area.child(
-                            div()
-                                .id("account-moderation-status")
-                                .role(Role::Status)
-                                .px_4()
-                                .py_1()
-                                .text_color(theme.muted_foreground)
-                                .child(notice),
-                        )
-                    })
                     .when_some(sidebar.voice_notice, |area, notice| {
                         area.child(
                             div()
@@ -805,13 +793,7 @@ impl Spk {
                     })),
             )
             .child(voice_card)
-            .child(webhook_card)
-            .when(sidebar.is_admin(), |nav| {
-                nav.children(channel_admin::channel_status(
-                    sidebar.channel_admin.result,
-                    cx,
-                ))
-            });
+            .child(webhook_card);
         div()
             .id("navigation-viewport")
             .relative()

@@ -262,16 +262,17 @@ async fn soundboard_previews_privately_and_plays_only_the_channels_relay() {
                 .send(Command::PreviewSound(CLIP.into()))
                 .await
                 .unwrap();
-            let unavailable =
-                wait_for_sidebar(&views, |s| s.soundboard.playback_error.is_some()).await;
+            let unavailable = wait_for_sidebar(&views, |s| {
+                s.action_results == [ActionResult::error("Could not play this Soundboard clip.")]
+            })
+            .await;
             assert_eq!(unavailable.voice_intent.preferred.soundboard_volume, 35);
             step.recv().await.unwrap();
             commands
                 .send(Command::PlaySound(CLIP.into()))
                 .await
                 .unwrap();
-            let awaiting_relay =
-                wait_for_sidebar(&views, |s| s.soundboard.playback_error.is_none()).await;
+            let awaiting_relay = wait_for_sidebar(&views, |s| s.action_results.is_empty()).await;
             assert!(!awaiting_relay.soundboard.playback_blocked);
             checked.send(()).await.unwrap();
             let playing = wait_for_sidebar(&views, |s| s.soundboard.playback_blocked).await;
@@ -298,7 +299,7 @@ async fn soundboard_previews_privately_and_plays_only_the_channels_relay() {
             commands.send(Command::LeaveVoice).await.unwrap();
             let left = wait_for_sidebar(&views, |s| s.voice.is_none()).await;
             assert!(left.soundboard.clips.is_none());
-            assert!(left.soundboard.playback_error.is_none());
+            assert!(left.action_results.is_empty());
             assert!(left.soundboard.active_clips.is_empty());
             assert!(!left.soundboard.playback_blocked);
         },

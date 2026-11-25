@@ -196,7 +196,7 @@ pub(super) async fn choose_nickname(
             .await
             .map_err(|_| SessionEnd::Closed)?;
         message = match commands.recv().await.map_err(|_| SessionEnd::Closed)? {
-            Command::SignOut => return Err(SessionEnd::SignOut),
+            Command::SignOut => return Err(SessionEnd::SignOut(None)),
             Command::SetInitialNickname(nickname) => {
                 let nickname = nickname.trim();
                 if !(2..=32).contains(&nickname.encode_utf16().count()) {

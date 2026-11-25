@@ -165,11 +165,13 @@ pub(super) async fn login(
     views: &Sender<View>,
     message: Option<&'static str>,
     retry_restore: bool,
+    draft_save_error: Option<&'static str>,
 ) -> Option<Command> {
     views
         .send(View::SignIn {
             message,
             retry_restore,
+            draft_save_error,
         })
         .await
         .ok()?;

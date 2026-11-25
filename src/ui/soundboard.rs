@@ -194,11 +194,6 @@ impl Render for SoundboardPanel {
                     )
                 },
             )
-            .children(
-                board
-                    .playback_error
-                    .map(|error| Label::new(error).text_color(theme.danger)),
-            )
             .child(media_results(
                 &self.clip_scroll,
                 div()

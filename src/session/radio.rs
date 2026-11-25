@@ -3,7 +3,7 @@ use std::future::pending;
 use tokio::task::{AbortHandle, Id, JoinSet};
 use uuid::Uuid;
 
-use super::{Command, Sidebar, VoiceSession};
+use super::{ActionResult, Command, Sidebar, VoiceSession};
 use crate::{
     api::{Failure, RadioStation, SpkClient, VoiceFrame},
     voice::{Device, MediaOutput, radio::RadioPlayer},
@@ -21,7 +21,6 @@ pub struct RadioView {
     pub enabled: bool,
     pub volume: u8,
     pub playback: RadioPlayback,
-    pub command_error: Option<String>,
     pub directory_error: Option<&'static str>,
 }
 
@@ -36,7 +35,6 @@ impl Default for RadioView {
             enabled: true,
             volume: 100,
             playback: RadioPlayback::Idle,
-            command_error: None,
             directory_error: None,
         }
     }
@@ -67,7 +65,6 @@ impl RadioSession {
             self.revision = None;
             self.player = None;
             sidebar.radio.station = None;
-            sidebar.radio.command_error = None;
         }
         let preferences = &sidebar.voice_intent.preferred;
         sidebar.radio.volume = preferences.radio_volume.min(200);
@@ -122,7 +119,6 @@ impl RadioSession {
             self.player = None;
         }
         sidebar.radio.station = station;
-        sidebar.radio.command_error = None;
     }
 
     pub fn command(
@@ -160,7 +156,6 @@ impl RadioSession {
                 if !sidebar.radio.loading_favorites && sidebar.radio.favorites.is_some() =>
             {
                 sidebar.radio.loading_favorites = true;
-                sidebar.radio.directory_error = None;
                 self.tasks.spawn(async move {
                     let result = client.set_radio_favorite(&id, saved).await;
                     RadioResult::Favorite(id, result)
@@ -168,14 +163,19 @@ impl RadioSession {
             }
             Command::SelectRadio(_) | Command::StopRadio => {
                 let Some((socket, sid)) = voice.active_socket(sidebar) else {
-                    sidebar.radio.command_error =
-                        Some("Radio controls are offline. Wait for reconnection.".into());
+                    sidebar.action_results.push(ActionResult::error(
+                        "Radio controls are offline. Wait for reconnection.",
+                    ));
                     return;
                 };
-                sidebar.radio.command_error = None;
                 let station = match command {
                     Command::SelectRadio(id) => {
-                        let Ok(id) = Uuid::parse_str(&id) else { return };
+                        let Ok(id) = Uuid::parse_str(&id) else {
+                            sidebar
+                                .action_results
+                                .push(ActionResult::error("Could not select this radio station."));
+                            return;
+                        };
                         sidebar.radio.enabled = true;
                         Some(id.to_string())
                     }
@@ -204,10 +204,11 @@ impl RadioSession {
 
     pub fn complete(
         &self,
-        radio: &mut RadioView,
+        sidebar: &mut Sidebar,
         id: Id,
         result: RadioResult,
     ) -> Result<(), Failure> {
+        let radio = &mut sidebar.radio;
         match result {
             RadioResult::Search(result)
                 if self.search.as_ref().is_some_and(|search| search.id() == id) =>
@@ -222,7 +223,16 @@ impl RadioSession {
             }
             RadioResult::Favorite(id, result) => {
                 radio.loading_favorites = false;
-                let favorite = result?;
+                let favorite = match result {
+                    Ok(favorite) => favorite,
+                    Err(error) if error.unauthorized() => return Err(error),
+                    Err(_) => {
+                        sidebar.action_results.push(ActionResult::error(
+                            "Could not update radio Favorites. Try again.",
+                        ));
+                        return Ok(());
+                    }
+                };
                 let favorites = radio.favorites.get_or_insert_default();
                 favorites.retain(|station| station.id != id);
                 favorites.extend(favorite);
@@ -230,8 +240,9 @@ impl RadioSession {
             }
             RadioResult::Sent(sid, result) => {
                 if result.is_err() && self.scope.as_deref() == Some(&sid) {
-                    radio.command_error =
-                        Some("Could not send the radio command. Try again.".into());
+                    sidebar.action_results.push(ActionResult::error(
+                        "Could not send the radio command. Try again.",
+                    ));
                 }
             }
         }

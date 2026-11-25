@@ -105,13 +105,6 @@ impl Settings {
                     ),
                 cx,
             ))
-            .children(
-                if app.notification_error {
-                    Some("Could not save notification settings.")
-                } else {
-                    app.shortcuts.settings_error
-                }
-                .map(Label::new),
-            )
+            .children(app.shortcuts.settings_error.map(Label::new))
     }
 }

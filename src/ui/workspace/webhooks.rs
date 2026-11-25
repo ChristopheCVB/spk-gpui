@@ -3,7 +3,7 @@ use gpui_kit::component::{dialog::DialogEntrance, switch::Switch};
 use super::*;
 use crate::{
     api::WebhookSettings,
-    session::WebhookAction,
+    session::{WebhookAction, WebhookError},
     ui::icon_picker::{IconPicker, icon_picker, icon_picker_field},
 };
 
@@ -306,7 +306,6 @@ impl WebhookEditor {
         if self.pending || self.url.is_some() || self.app.read(cx).signing_out {
             return;
         }
-        self.pending = true;
         self.error = None;
         let action = match (&self.form, &self.fields) {
             (WebhookForm::Create, Some(fields)) => WebhookAction::Create(fields.settings(cx)),
@@ -319,20 +318,22 @@ impl WebhookEditor {
             _ => unreachable!("webhook form settings"),
         };
         let (reply, result) = tokio::sync::oneshot::channel();
-        self.app.update(cx, |app, cx| {
-            app.send(Command::MutateWebhook { action, reply }, None, cx)
-        });
+        if !self.app.update(cx, |app, cx| {
+            app.try_send(Command::MutateWebhook { action, reply }, None, cx)
+        }) {
+            cx.notify();
+            return;
+        }
+        self.pending = true;
         cx.spawn_in(window, async move |this, cx| {
-            let result = result
-                .await
-                .unwrap_or(Err("Could not reach the SPK connection. Try again."));
+            let result = result.await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.pending = false;
                 if !this.app.read(cx).signing_out
                     && matches!(this.app.read(cx).view, View::SignedIn(_))
                 {
                     match result {
-                        Ok(Some(url)) => {
+                        Ok(Ok(Some(url))) => {
                             this.url = Some(cx.new(|cx| {
                                 InputState::new(window, cx).default_value(url.as_str().to_owned())
                             }));
@@ -340,8 +341,17 @@ impl WebhookEditor {
                                 .update(cx, |app, cx| app.close_sidebar_drawer(window, cx));
                             this.copy_focus.focus(window, cx);
                         }
-                        Ok(None) => this.close(window, cx),
-                        Err(message) => this.error = Some(message),
+                        Ok(Ok(None)) => this.close(window, cx),
+                        Ok(Err(WebhookError::Validation(message))) => this.error = Some(message),
+                        Ok(Err(WebhookError::Action(_))) => {}
+                        Err(_) => this.app.update(cx, |app, cx| {
+                            app.show_action_result(
+                                ActionResult::error(
+                                    "Could not reach the SPK connection. Try again.",
+                                ),
+                                cx,
+                            )
+                        }),
                     }
                 }
                 cx.notify();
@@ -446,7 +456,7 @@ impl Render for WebhookEditor {
                     ),
             )
         })
-        .children(channel_admin::channel_status(self.error.map(Err), cx))
+        .children(channel_admin::editor_error(self.error, cx))
         .child(
             div()
                 .flex()

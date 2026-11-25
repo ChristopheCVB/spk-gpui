@@ -271,7 +271,7 @@ pub(crate) fn register_window(
             };
             cx.update(|cx| {
                 if let Some(response) = response {
-                    cx.dismiss_system_notification(&response.tag);
+                    cx.dismiss_system_notification(&response.tag).detach();
                 }
                 cx.activate(true);
                 let _ = window.update(cx, |_, window, cx| {

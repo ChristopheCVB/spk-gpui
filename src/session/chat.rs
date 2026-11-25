@@ -6,7 +6,7 @@ mod images;
 mod preview_images;
 
 use actions::{ActionOutcome, PendingAction, VoteResult, change_message};
-pub use actions::{Pins, PollEditOutcome, PollEditReply};
+pub use actions::{Pins, PollEditOutcome, PollEditReply, PollFormError};
 pub use attachments::{AttachmentInput, UploadStatus};
 use attachments::{AttachmentWork, QueuedAttachment};
 pub(super) use drafts::DraftStore;
@@ -23,6 +23,7 @@ use std::{
 
 use tokio::{task::JoinSet, time::Instant};
 
+use super::ActionResult;
 use crate::api::{
     Channel, ChatMessage, Failure, MessageChange, MessagePage, ReplyRef, SpkClient, VoiceSocket,
 };
@@ -64,7 +65,6 @@ pub struct ChatView {
     pub preview_images: PreviewImages,
     pub gifs: Option<GifPickerView>,
     pub message_send_error: Option<String>,
-    pub vote_error: Option<&'static str>,
     pub action_pending: bool,
     pub action_outcome: Option<Arc<ActionOutcome>>,
     pub paging_forward: bool,
@@ -175,6 +175,7 @@ enum HistoryRequest {
     Newer(String),
     Around(String),
     Latest,
+    OpenDirectMessage,
 }
 
 #[derive(Default)]
@@ -182,7 +183,6 @@ pub(super) struct ChatSession {
     selected: Option<ChatView>,
     outgoing: Vec<Outgoing>,
     message_send_error: Option<String>,
-    vote_error: Option<&'static str>,
     drafts: HashMap<String, Draft>,
     restoring: HashMap<String, Outgoing>,
     draft_changes: HashMap<String, String>,
@@ -241,24 +241,22 @@ impl ChatSession {
     pub fn draft_save_completed(
         &mut self,
         result: Result<Result<(), HashMap<String, String>>, tokio::task::JoinError>,
-        notice: &mut Option<&'static str>,
-    ) {
+    ) -> Result<(), &'static str> {
         match result {
-            Ok(Ok(())) => *notice = None,
+            Ok(Ok(())) => return Ok(()),
             Ok(Err(changes)) => {
                 for (channel, body) in changes {
                     self.draft_changes.entry(channel).or_insert(body);
                 }
-                *notice = Some("Could not save Drafts for the next launch.");
             }
-            Err(_) => *notice = Some("Could not save Drafts for the next launch."),
+            Err(_) => {}
         }
+        Err("Could not save Drafts for the next launch.")
     }
 
     pub fn view(&self) -> Option<ChatView> {
         let mut view = self.selected.clone()?;
         view.message_send_error.clone_from(&self.message_send_error);
-        view.vote_error = self.vote_error;
         // Hide cached DM content until SPK confirms access to the conversation.
         if view.direct_message_peer.is_some()
             && view.history != History::Ready
@@ -267,6 +265,7 @@ impl ChatSession {
                 Some(
                     HistoryRequest::Refresh { .. }
                         | HistoryRequest::Latest
+                        | HistoryRequest::OpenDirectMessage
                         | HistoryRequest::Around(_)
                 )
             )
@@ -322,13 +321,26 @@ impl ChatSession {
             }
             return false;
         }
-        self.load(client, HistoryRequest::Refresh { load_newer: false });
+        let request = if channel.kind == "dm" {
+            HistoryRequest::OpenDirectMessage
+        } else {
+            HistoryRequest::Refresh { load_newer: false }
+        };
+        self.load(client, request);
         true
     }
 
     pub fn open_conversation_target(&mut self, client: &SpkClient, channel: &Channel) {
-        self.select(channel);
-        self.latest(client);
+        let changed = self.select(channel);
+        if channel.kind == "dm" {
+            self.load(client, HistoryRequest::OpenDirectMessage);
+            if let Some(view) = &mut self.selected {
+                view.jump = None;
+                view.opening_latest = !changed;
+            }
+        } else {
+            self.latest(client);
+        }
     }
 
     pub fn open_target(&mut self, client: &SpkClient, channel: &Channel, message_id: String) {
@@ -376,7 +388,6 @@ impl ChatSession {
             preview_images: PreviewImages::default(),
             gifs: None,
             message_send_error: None,
-            vote_error: None,
             action_pending: false,
             action_outcome: None,
             paging_forward: false,
@@ -413,7 +424,11 @@ impl ChatSession {
         self.socket = Some(socket);
         if matches!(
             self.history,
-            Some(HistoryRequest::Around(_) | HistoryRequest::Latest)
+            Some(
+                HistoryRequest::Around(_)
+                    | HistoryRequest::Latest
+                    | HistoryRequest::OpenDirectMessage
+            )
         ) && self.selected.as_ref().is_some_and(ChatView::loading)
         {
             return;
@@ -528,7 +543,9 @@ impl ChatSession {
                     }
                     Ok(page)
                 }
-                HistoryRequest::Latest => client.messages(&channel, None).await,
+                HistoryRequest::Latest | HistoryRequest::OpenDirectMessage => {
+                    client.messages(&channel, None).await
+                }
             }
         });
     }
@@ -538,6 +555,7 @@ impl ChatSession {
         client: &SpkClient,
         own_id: Option<&str>,
         result: Result<MessagePage, Failure>,
+        action_results: &mut Vec<ActionResult>,
     ) {
         if let (Some(view), Some(own_id), Ok(page)) = (&self.selected, own_id, &result) {
             self.outgoing.retain(|outgoing| {
@@ -575,6 +593,7 @@ impl ChatSession {
                         } else {
                             view.jump = None;
                             view.jump_failed = true;
+                            action_results.push(ActionResult::error("Message unavailable."));
                         }
                     }
                 }
@@ -591,7 +610,9 @@ impl ChatSession {
                 view.history = History::Ready;
                 if matches!(
                     request,
-                    HistoryRequest::Refresh { .. } | HistoryRequest::Latest
+                    HistoryRequest::Refresh { .. }
+                        | HistoryRequest::Latest
+                        | HistoryRequest::OpenDirectMessage
                 ) || matches!(view.pins, Some(Pins::Loading))
                 {
                     self.refresh_pins(client);
@@ -600,6 +621,17 @@ impl ChatSession {
             }
             Err(error) => {
                 let jump = matches!(request, HistoryRequest::Around(_));
+                if jump {
+                    action_results.push(ActionResult::error("Message unavailable."));
+                } else if matches!(request, HistoryRequest::OpenDirectMessage) {
+                    let message = match error {
+                        Failure::Http(
+                            reqwest::StatusCode::FORBIDDEN | reqwest::StatusCode::NOT_FOUND,
+                        ) => "Direct message unavailable.",
+                        _ => "Could not open the direct message. Try again.",
+                    };
+                    action_results.push(ActionResult::error(message));
+                }
                 if jump && matches!(error, Failure::Http(reqwest::StatusCode::NOT_FOUND)) {
                     view.history = History::Ready;
                     view.jump = None;
@@ -835,20 +867,21 @@ impl ChatSession {
         channel_id: String,
         question: &str,
         options: &[String],
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), PollFormError> {
         let Some(view) = self
             .selected
             .as_mut()
             .filter(|view| view.channel_id == channel_id && !view.unavailable())
         else {
-            return Err("This conversation is unavailable.");
+            return Err(PollFormError::Action("This conversation is unavailable."));
         };
-        let (question, options) = validate_poll(question, options.iter().map(String::as_str))?;
+        let (question, options) = validate_poll(question, options.iter().map(String::as_str))
+            .map_err(PollFormError::Validation)?;
         let nonce = uuid::Uuid::new_v4().to_string();
         if !self.socket.as_ref().is_some_and(|socket| {
             view.can_send() && socket.send_poll(&channel_id, question, &nonce, &options)
         }) {
-            return Err("Could not reach SPK. Try again.");
+            return Err(PollFormError::Action("Could not reach SPK. Try again."));
         }
         self.message_send_error = None;
         Ok(())
@@ -1000,6 +1033,7 @@ impl ChatSession {
                     HistoryRequest::Refresh { .. }
                         | HistoryRequest::Around(_)
                         | HistoryRequest::Latest
+                        | HistoryRequest::OpenDirectMessage
                         | HistoryRequest::Newer(_)
                 )
             ) && view.history != History::Ready
@@ -1010,7 +1044,11 @@ impl ChatSession {
                 if view.direct_message_peer.is_some()
                     && matches!(
                         self.history,
-                        Some(HistoryRequest::Refresh { .. } | HistoryRequest::Latest)
+                        Some(
+                            HistoryRequest::Refresh { .. }
+                                | HistoryRequest::Latest
+                                | HistoryRequest::OpenDirectMessage
+                        )
                     )
                 {
                     return;
