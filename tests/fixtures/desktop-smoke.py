@@ -975,6 +975,7 @@ class Desktop:
         wait_for("the saved waveform to clear", lambda: self.find_node("Source waveform") is None)
         verify_saved_sound(admin)
         self.click("Close settings", "push button")
+        wait_for("Settings to close", lambda: self.find_node("Close settings", "push button") is None)
 
     def text_positions(self, phrases):
         self.ensure_running()
