@@ -488,7 +488,6 @@ impl Spk {
                 audio,
                 audio_unavailable,
                 quality,
-                quality_failed,
                 ..
             } => panel
                 .child(
@@ -497,9 +496,6 @@ impl Spk {
                 )
                 .when(selected != *quality, |panel| {
                     panel.child(Label::new("Changing Screen Share quality…").text_xs())
-                })
-                .when(selected == *quality && quality_failed.is_some(), |panel| {
-                    panel.child(Label::new("Could not change Screen Share quality.").text_xs())
                 })
                 .child(
                     Label::new(if *audio_unavailable {

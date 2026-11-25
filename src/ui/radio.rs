@@ -277,7 +277,6 @@ impl Render for RadioPanel {
                         .child(Label::new(format!("{:.0}%", self.volume.read(cx).value().start())).text_xs())
                     )
             }))
-            .children(radio.command_error.as_ref().map(|error| Label::new(error.clone()).text_color(theme.danger)))
             .child(div().flex().gap_2()
                 .child(control_button("all-stations").small().label("All stations").selected(!self.favorites).tab_stop(true)
                     .on_click(cx.listener(|panel, _, _, cx| {

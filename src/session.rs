@@ -1363,7 +1363,7 @@ async fn watch_session(
                         if voice.radio_scope(&sidebar).is_some_and(|(current_sid, current_channel)| {
                             sid == current_sid && channel_id.as_deref().is_none_or(|channel| channel == current_channel)
                         }) => {
-                        sidebar.radio.command_error = Some(error);
+                        sidebar.action_results.push(ActionResult::error(error));
                     }
                     Frame::SoundNew => sidebar.soundboard.has_new_clip = true,
                     Frame::VoiceSound { user_id, sound_id } => {
@@ -1418,11 +1418,11 @@ async fn watch_session(
             }
             () = RadioSession::playback_changed(&mut radio.player) => {}
             Some(Ok((id, result))) = radio.tasks.join_next_with_id() => {
-                if let Err(error) = radio.complete(&mut sidebar.radio, id, result) {
+                if let Err(error) = radio.complete(&mut sidebar, id, result) {
                     if error.unauthorized() {
                         break SessionEnd::Invalidated(SESSION_EXPIRED);
                     }
-                    sidebar.radio.directory_error = Some("Could not load or update radio stations. Try again.");
+                    sidebar.radio.directory_error = Some("Could not load radio stations. Try again.");
                 }
             }
             Some(Ok((id, result))) = soundboard.tasks.join_next_with_id() => {

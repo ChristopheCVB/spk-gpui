@@ -5,7 +5,7 @@ use tokio::{
     time::Instant,
 };
 
-use super::{Command, Sidebar, VoiceProcessingSetting};
+use super::{ActionResult, Command, Sidebar, VoiceProcessingSetting};
 use crate::api::{Channel, Connection, Failure, SpkClient, VoiceModeration, VoiceSocket};
 use crate::sounds::Sound;
 use crate::voice::{
@@ -790,6 +790,9 @@ impl VoiceSession {
             })
         {
             request.quality = *quality;
+            sidebar.action_results.push(ActionResult::error(
+                "Could not change Screen Share quality.",
+            ));
             if let Some(call) = &self.call {
                 call.apply(&sidebar.voice_intent);
             }
