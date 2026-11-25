@@ -8093,7 +8093,7 @@ dependencies = [
 
 [[package]]
 name = "spk-gpui"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "apple-cf",
  "arboard",

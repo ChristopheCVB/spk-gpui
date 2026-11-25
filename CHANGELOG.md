@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.10.0](https://github.com/ChristopheCVB/spk-gpui/compare/v0.9.0...v0.10.0) (2026-11-25)
+
+
+### Features
+
+* **notifications:** show action results as in-app toasts ([#229](https://github.com/ChristopheCVB/spk-gpui/issues/229)) ([c82b822](https://github.com/ChristopheCVB/spk-gpui/commit/c82b822ce8e0cb8ea5eb78eb0955f2a1697a5dd3))
+* **sidebar:** unify channel and voice participant menus ([#214](https://github.com/ChristopheCVB/spk-gpui/issues/214)) ([ce7c1d4](https://github.com/ChristopheCVB/spk-gpui/commit/ce7c1d4564469bb3e8eba7b32bc6b629c7fa2521))
+* **soundboard:** add waveform trimming to uploads ([#231](https://github.com/ChristopheCVB/spk-gpui/issues/231)) ([b7288d8](https://github.com/ChristopheCVB/spk-gpui/commit/b7288d869ee38af2d4e44174c8087d0e9d217ae4))
+
+
+### Bug Fixes
+
+* **ui:** match workspace font sizes to SPK Web ([69fe6ca](https://github.com/ChristopheCVB/spk-gpui/commit/69fe6cab8c59038bf6dae66a74f6e31405ee2066))
+
 ## [0.9.0](https://github.com/ChristopheCVB/spk-gpui/compare/v0.8.1...v0.9.0) (2026-11-25)
 
 
