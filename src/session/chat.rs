@@ -6,7 +6,7 @@ mod images;
 mod preview_images;
 
 use actions::{ActionOutcome, PendingAction, VoteResult, change_message};
-pub use actions::{Pins, PollEditOutcome, PollEditReply};
+pub use actions::{Pins, PollEditError, PollEditOutcome, PollEditReply};
 pub use attachments::{AttachmentInput, UploadStatus};
 use attachments::{AttachmentWork, QueuedAttachment};
 pub(super) use drafts::DraftStore;
@@ -23,6 +23,7 @@ use std::{
 
 use tokio::{task::JoinSet, time::Instant};
 
+use super::ActionResult;
 use crate::api::{
     Channel, ChatMessage, Failure, MessageChange, MessagePage, ReplyRef, SpkClient, VoiceSocket,
 };
@@ -64,7 +65,6 @@ pub struct ChatView {
     pub preview_images: PreviewImages,
     pub gifs: Option<GifPickerView>,
     pub message_send_error: Option<String>,
-    pub vote_error: Option<&'static str>,
     pub action_pending: bool,
     pub action_outcome: Option<Arc<ActionOutcome>>,
     pub paging_forward: bool,
@@ -182,7 +182,6 @@ pub(super) struct ChatSession {
     selected: Option<ChatView>,
     outgoing: Vec<Outgoing>,
     message_send_error: Option<String>,
-    vote_error: Option<&'static str>,
     drafts: HashMap<String, Draft>,
     restoring: HashMap<String, Outgoing>,
     draft_changes: HashMap<String, String>,
@@ -241,24 +240,22 @@ impl ChatSession {
     pub fn draft_save_completed(
         &mut self,
         result: Result<Result<(), HashMap<String, String>>, tokio::task::JoinError>,
-        notice: &mut Option<&'static str>,
-    ) {
+    ) -> Result<(), &'static str> {
         match result {
-            Ok(Ok(())) => *notice = None,
+            Ok(Ok(())) => return Ok(()),
             Ok(Err(changes)) => {
                 for (channel, body) in changes {
                     self.draft_changes.entry(channel).or_insert(body);
                 }
-                *notice = Some("Could not save Drafts for the next launch.");
             }
-            Err(_) => *notice = Some("Could not save Drafts for the next launch."),
+            Err(_) => {}
         }
+        Err("Could not save Drafts for the next launch.")
     }
 
     pub fn view(&self) -> Option<ChatView> {
         let mut view = self.selected.clone()?;
         view.message_send_error.clone_from(&self.message_send_error);
-        view.vote_error = self.vote_error;
         // Hide cached DM content until SPK confirms access to the conversation.
         if view.direct_message_peer.is_some()
             && view.history != History::Ready
@@ -376,7 +373,6 @@ impl ChatSession {
             preview_images: PreviewImages::default(),
             gifs: None,
             message_send_error: None,
-            vote_error: None,
             action_pending: false,
             action_outcome: None,
             paging_forward: false,
@@ -538,6 +534,7 @@ impl ChatSession {
         client: &SpkClient,
         own_id: Option<&str>,
         result: Result<MessagePage, Failure>,
+        action_results: &mut Vec<ActionResult>,
     ) {
         if let (Some(view), Some(own_id), Ok(page)) = (&self.selected, own_id, &result) {
             self.outgoing.retain(|outgoing| {
@@ -575,6 +572,7 @@ impl ChatSession {
                         } else {
                             view.jump = None;
                             view.jump_failed = true;
+                            action_results.push(ActionResult::error("Message unavailable."));
                         }
                     }
                 }
@@ -600,6 +598,9 @@ impl ChatSession {
             }
             Err(error) => {
                 let jump = matches!(request, HistoryRequest::Around(_));
+                if jump {
+                    action_results.push(ActionResult::error("Message unavailable."));
+                }
                 if jump && matches!(error, Failure::Http(reqwest::StatusCode::NOT_FOUND)) {
                     view.history = History::Ready;
                     view.jump = None;
@@ -628,6 +629,9 @@ impl ChatSession {
                     view.has_more_before = false;
                     view.has_more_after = false;
                     if view.direct_message_peer.is_some() {
+                        if !jump {
+                            action_results.push(ActionResult::error("Direct message unavailable."));
+                        }
                         self.outgoing
                             .retain(|outgoing| outgoing.channel_id != view.channel_id);
                         if let Some(draft) = self.drafts.remove(&view.channel_id) {

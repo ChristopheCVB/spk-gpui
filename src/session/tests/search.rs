@@ -245,15 +245,17 @@ async fn searches_messages_and_opens_authenticated_exact_targets() {
             wait_for_sidebar(&rx, |view| !view.search.loading).await;
 
             request.respond_raw(status, &[], b"").await;
-            let finished = wait_for_sidebar(&rx, |view| view.chat_notice != Some("Opening message…")).await;
+            let finished = wait_for_sidebar(&rx, |view| {
+                view.action_results == [ActionResult::error("Message unavailable.")]
+            }).await;
             assert!(finished.chat.is_none(), "{status} must keep the alert's conversation closed");
-            assert_eq!(finished.chat_notice, Some("Message unavailable."));
+            assert_eq!(finished.chat_notice, None);
         }
 
         let unknown = MessageTarget::new("unknown", "private").unwrap();
         tx.send(Command::OpenMessageTarget(unknown)).await.unwrap();
         wait_for_sidebar(&rx, |view| view.chat_notice == Some("Opening message…")).await;
-        wait_for_sidebar(&rx, |view| view.chat_notice == Some("Message unavailable.")).await;
+        wait_for_sidebar(&rx, |view| view.action_results == [ActionResult::error("Message unavailable.")]).await;
 
         tx.send(Command::OpenConversationTarget("dm-1".into())).await.unwrap();
         let (line, request) = search.recv().await.unwrap();
@@ -302,10 +304,10 @@ async fn searches_messages_and_opens_authenticated_exact_targets() {
 
         let private_feed = link_base.join("/c/private-feed").unwrap();
         tx.send(Command::OpenConversationTarget(conversation_link(&link_base, &private_feed).unwrap().into())).await.unwrap();
-        wait_for_sidebar(&rx, |view| view.chat_notice == Some("Conversation unavailable.")).await;
+        wait_for_sidebar(&rx, |view| view.action_results == [ActionResult::error("Conversation unavailable.")]).await;
         let private_alert = link_base.join("/c/private-feed/m/hidden").unwrap();
         tx.send(Command::OpenMessageTarget(MessageTarget::parse(&link_base, &private_alert).unwrap())).await.unwrap();
-        wait_for_sidebar(&rx, |view| view.chat_notice == Some("Message unavailable.")).await;
+        wait_for_sidebar(&rx, |view| view.action_results == [ActionResult::error("Message unavailable.")]).await;
         assert!(search.is_empty(), "the session must not fetch history for an unlisted feed");
 
         tx.close();

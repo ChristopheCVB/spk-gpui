@@ -122,7 +122,7 @@ async fn profile_changes_reach_another_session_and_failed_edits_keep_the_profile
     let client = |id: &str| {
         let mut cookies = CookieStore::default();
         cookies
-            .parse(&format!("session={id}; Path=/"), &base)
+            .parse(&format!("session={id}; Path=/; Max-Age=3600"), &base)
             .unwrap();
         SpkClient::new(base.clone(), cookies).unwrap()
     };
@@ -175,8 +175,13 @@ async fn profile_changes_reach_another_session_and_failed_edits_keep_the_profile
             .send(Command::SaveNickname("Alicia".into()))
             .await
             .unwrap();
-        let own = wait_for_sidebar(&alice, |s| s.profile_edit == ProfileEdit::Saved).await;
+        let own = wait_for_sidebar(&alice, |s| s.profile.name() == "Alicia").await;
+        assert!(own.profile_edit == ProfileEdit::Idle);
         assert_eq!(own.profile.name(), "Alicia");
+        assert_eq!(
+            own.action_results,
+            [ActionResult::success("Nickname saved.")]
+        );
         let peer = wait_for_sidebar(&bob, |s| s.people() == [("alice", "Alicia")]).await;
         assert_eq!(peer.person("alice").unwrap().role, "user");
 
@@ -184,8 +189,11 @@ async fn profile_changes_reach_another_session_and_failed_edits_keep_the_profile
             .send(Command::SaveNickname("Bob".into()))
             .await
             .unwrap();
-        let own =
-            wait_for_sidebar(&alice, |s| matches!(s.profile_edit, ProfileEdit::Failed(_))).await;
+        let own = wait_for_sidebar(&alice, |s| {
+            s.profile_edit == ProfileEdit::Validation("That nickname is taken.")
+        })
+        .await;
+        assert!(own.action_results.is_empty());
         assert_eq!(own.profile.name(), "Alicia");
 
         let mut file = tempfile::NamedTempFile::new().unwrap();
@@ -196,18 +204,27 @@ async fn profile_changes_reach_another_session_and_failed_edits_keep_the_profile
             .await
             .unwrap();
         let own = wait_for_sidebar(&alice, |s| {
-            s.profile_edit == ProfileEdit::Uploaded && s.avatar(Some("alice")).is_some()
+            s.action_results
+                .contains(&ActionResult::success("Avatar updated."))
         })
         .await;
         assert_eq!(
             own.profile.avatar_key.as_deref(),
             Some("avatars/alice/new.webp")
         );
+        assert_eq!(
+            own.action_results,
+            [ActionResult::success("Avatar updated.")]
+        );
+        wait_for_sidebar(&alice, |s| s.avatar(Some("alice")).is_some()).await;
         wait_for_sidebar(&bob, |s| s.avatar(Some("alice")).is_some()).await;
 
         alice_tx.send(Command::UploadAvatar(path)).await.unwrap();
-        let own =
-            wait_for_sidebar(&alice, |s| matches!(s.profile_edit, ProfileEdit::Failed(_))).await;
+        let expected = ActionResult::error(
+            "Avatar upload failed. Choose a PNG, JPEG, WebP, or GIF up to 5 MB and try again.",
+        );
+        let own = wait_for_sidebar(&alice, |s| s.action_results.contains(&expected)).await;
+        assert_eq!(own.action_results, [expected]);
         assert_eq!(own.profile.name(), "Alicia");
         assert_eq!(
             own.profile.avatar_key.as_deref(),

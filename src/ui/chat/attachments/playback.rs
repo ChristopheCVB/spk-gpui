@@ -109,7 +109,6 @@ impl Spk {
         let output = sidebar.media_output();
         let operation = Uuid::new_v4();
         card.pending = Some(operation);
-        card.error = None;
         self.chat_attachments.playback = None;
         self.chat_attachments.media_start = Some(operation);
         cx.spawn_in(window, async move |app, cx| {
@@ -158,7 +157,7 @@ async fn run_playback(
             let audio = match result {
                 Ok(audio) => audio,
                 Err(error) => {
-                    card.error = Some(error);
+                    app.show_action_result(ActionResult::error(error), cx);
                     if video_duration.is_none() {
                         return false;
                     }
@@ -208,15 +207,16 @@ async fn run_playback(
                     return PlaybackTick::ReplaceOutput(selected, samples);
                 }
                 let (failed, finished) = playback.advance(video_duration, selected.volume);
-                if failed && let Some(card) = card {
-                    card.error = Some(BAD_OUTPUT);
+                let redraw = failed || (video_duration.is_some() && playback.started.is_some());
+                if failed {
+                    app.show_action_result(ActionResult::error(BAD_OUTPUT), cx);
                 }
                 if finished {
                     app.chat_attachments.playback = None;
                     cx.notify();
                     return PlaybackTick::Stop;
                 }
-                if failed || (video_duration.is_some() && playback.started.is_some()) {
+                if redraw {
                     cx.notify();
                 }
                 PlaybackTick::Continue
@@ -239,8 +239,8 @@ async fn run_playback(
                 return;
             };
             playback.replace_output(result, samples);
-            if let Some(card) = app.chat_attachments.cards.get_mut(&id) {
-                card.error = playback.audio.is_none().then_some(BAD_OUTPUT);
+            if playback.audio.is_none() {
+                app.show_action_result(ActionResult::error(BAD_OUTPUT), cx);
             }
             cx.notify();
         });
