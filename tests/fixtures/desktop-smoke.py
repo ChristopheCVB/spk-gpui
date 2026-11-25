@@ -725,7 +725,7 @@ class Desktop:
         self.check_disabled_menu_item("Join")
 
     def choose_sound_source(self, path):
-        self.activate_soundboard_button("Choose audio file")
+        self.click("Choose audio file", "push button")
 
         def picker():
             result = subprocess.run(["xdotool", "search", "--onlyvisible", "--name", "^Open File$"],
@@ -733,38 +733,40 @@ class Desktop:
             return result.stdout.strip()
 
         dialog = wait_for("the native GTK file chooser", picker)
-        subprocess.run(["xdotool", "windowfocus", dialog], check=True)
+        subprocess.run(["xdotool", "windowfocus", "--sync", dialog], check=True)
         self.key("ctrl+l")
-        subprocess.run(["xdotool", "type", "--clearmodifiers", "--", str(path)], check=True)
+        subprocess.run(["xdotool", "type", "--clearmodifiers", "--delay", "10", "--",
+                        f"{path.parent}/"], check=True)
+        # Let GTK resolve the folder in its location entry before submitting it.
+        time.sleep(0.3)
+        self.key("Return")
 
-        def choose_button():
+        def source_row():
             try:
                 return next((node for node in walk(Atspi.get_desktop(0))
-                             if node.get_name() == "Choose Soundboard audio"
-                             and node.get_role_name() == "push button"), None)
+                             if node.get_name() == path.name and node.get_role_name() == "table cell"), None)
             except GLib.Error:
                 return None
 
-        button = wait_for("Choose Soundboard audio in the native file chooser", choose_button)
-        bounds = button.get_component_iface().get_extents(Atspi.CoordType.SCREEN)
+        row = wait_for(f"{path.name} in the native file chooser", source_row)
+        bounds = row.get_component_iface().get_extents(Atspi.CoordType.SCREEN)
         subprocess.run(["xdotool", "mousemove", str(bounds.x + bounds.width // 2),
-                        str(bounds.y + bounds.height // 2), "click", "1"], check=True)
+                        str(bounds.y + bounds.height // 2), "click", "--repeat", "2", "1"], check=True)
         wait_for("the native file chooser to close", lambda: not picker())
         subprocess.run(["xdotool", "windowfocus", self.window], check=True)
         self.find("Source waveform")
 
     def activate_soundboard_button(self, name):
-        def enabled():
+        def activate():
             try:
                 node = self.find_node(name, "push button")
                 if node and node.get_state_set().contains(Atspi.StateType.SENSITIVE):
-                    return node
+                    action = node.get_action_iface()
+                    return action and action.do_action(0)
             except GLib.Error:
                 return None
 
-        button = wait_for(f"enabled {name} button", enabled)
-        if not button.get_action_iface().do_action(0):
-            raise RuntimeError(f"Could not activate {name}")
+        wait_for(f"{name} to accept activation", activate)
 
     def sound_timing(self, label):
         node = self.find(f"{label}: ", partial=True)
@@ -843,6 +845,7 @@ class Desktop:
     def check_soundboard_upload(self, sources, logs, admin):
         self.click("Settings", "push button")
         self.activate_soundboard_button("Soundboard")
+        self.find("No sounds yet.")
         self.choose_sound_source(sources[0])
         self.find("Source duration: 3.000 s")
         self.expect_sound_selection(0, 3)
@@ -895,7 +898,8 @@ class Desktop:
         self.replace_sound_field("Upload gain (%)", "150")
         self.click("Icon", "combo box")
         self.enter("Search icons", "entry", SOUND_ICON)
-        self.click(SOUND_ICON)
+        self.click("", "list item", within=("", "list"))
+        wait_for("the icon picker to close", lambda: self.find_node("Search icons", "entry") is None)
         self.screenshot(logs, "soundboard-waveform-dark.png")
         self.check_soundboard_preview(logs)
         self.click("Save", "push button")
@@ -1197,7 +1201,7 @@ def main(work, artifacts):
     (portal / "portals.conf").write_text("[preferred]\ndefault=gtk\n")
     subprocess.run(
         ["dbus-update-activation-environment", "DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR",
-         "XDG_CONFIG_HOME", "XDG_CURRENT_DESKTOP"],
+         "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CURRENT_DESKTOP"],
         env={**env, "XDG_CURRENT_DESKTOP": "GTK"}, check=True,
     )
     sources = sound_sources(attempt)
