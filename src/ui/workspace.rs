@@ -2308,7 +2308,10 @@ fn sidebar_participant_items(
                 VoiceModerationMenu {
                     destinations,
                     enabled: !moderation_pending,
-                    focus_fallback: Some((row_focus.clone(), channel_focus.clone())),
+                    focus_fallback: Some(ModerationFocusFallback {
+                        participant_row: row_focus.clone(),
+                        source_channel: channel_focus.clone(),
+                    }),
                 }
                 .add_items(menu, window, cx, &app, &user_id)
             });
@@ -2492,10 +2495,16 @@ fn confirm_sidebar_ban(
     });
 }
 
+#[derive(Clone)]
+struct ModerationFocusFallback {
+    participant_row: FocusHandle,
+    source_channel: FocusHandle,
+}
+
 struct VoiceModerationMenu<'a> {
     destinations: &'a [(String, String)],
     enabled: bool,
-    focus_fallback: Option<(FocusHandle, FocusHandle)>,
+    focus_fallback: Option<ModerationFocusFallback>,
 }
 
 impl VoiceModerationMenu<'_> {
@@ -2553,7 +2562,7 @@ fn voice_moderation_item(
     app: WeakEntity<Spk>,
     user_id: String,
     action: VoiceModeration,
-    focus_fallback: Option<(FocusHandle, FocusHandle)>,
+    focus_fallback: Option<ModerationFocusFallback>,
 ) -> PopupMenuItem {
     PopupMenuItem::new(label).on_click(move |_, window, cx| {
         let app = app.clone();
@@ -2564,11 +2573,11 @@ fn voice_moderation_item(
                 app.send(Command::ModerateVoice { user_id, action }, None, cx);
             });
         };
-        if let Some((row, channel)) = focus_fallback.clone() {
+        if let Some(fallback) = focus_fallback.clone() {
             // Check restored focus before sending a request that can remove the row.
             window.on_next_frame(move |window, cx| {
-                if row.contains_focused(window, cx) {
-                    channel.focus(window, cx);
+                if fallback.participant_row.contains_focused(window, cx) {
+                    fallback.source_channel.focus(window, cx);
                 }
                 dispatch(cx);
             });
