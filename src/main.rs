@@ -54,7 +54,11 @@ fn main() -> std::process::ExitCode {
                 .expect("SPK themes should be valid");
 
             let options = WindowOptions {
-                window_bounds: Some(WindowBounds::centered(size(px(1200.0), px(760.0)), cx)),
+                window_bounds: Some(WindowBounds::centered(
+                    None,
+                    size(px(1200.0), px(760.0)),
+                    cx,
+                )),
                 window_min_size: Some(size(px(560.0), px(440.0))),
                 app_id: Some(APP_ID.into()),
                 titlebar: Some(TitlebarOptions {

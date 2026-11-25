@@ -568,6 +568,7 @@ fn fixture_settings(
             path: None,
             preferred: DevicePreferences::default(),
             notice: None,
+            save_failed: false,
         },
         sounds: VoiceSounds::new(watch::channel(sounds).1),
         window_active: watch::channel(false).1,

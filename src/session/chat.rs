@@ -240,18 +240,17 @@ impl ChatSession {
     pub fn draft_save_completed(
         &mut self,
         result: Result<Result<(), HashMap<String, String>>, tokio::task::JoinError>,
-        notice: &mut Option<&'static str>,
-    ) {
+    ) -> Result<(), &'static str> {
         match result {
-            Ok(Ok(())) => *notice = None,
+            Ok(Ok(())) => return Ok(()),
             Ok(Err(changes)) => {
                 for (channel, body) in changes {
                     self.draft_changes.entry(channel).or_insert(body);
                 }
-                *notice = Some("Could not save Drafts for the next launch.");
             }
-            Err(_) => *notice = Some("Could not save Drafts for the next launch."),
+            Err(_) => {}
         }
+        Err("Could not save Drafts for the next launch.")
     }
 
     pub fn view(&self) -> Option<ChatView> {

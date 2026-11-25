@@ -326,13 +326,10 @@ pub struct Sidebar {
     pub profile: Profile,
     pub profile_edit: ProfileEdit,
     pub admin_accounts: AdminAccountsView,
-    pub account_moderation_notice: Option<&'static str>,
     pub user_status: UserStatus,
-    pub user_status_notice: Option<&'static str>,
     pub channels: Option<Vec<Channel>>,
     pub channel_admin: ChannelAdmin,
     pub connection: Connection,
-    pub notice: Option<&'static str>,
     pub load_failed: bool,
     pub chat: Option<ChatView>,
     pub search: SearchView,
@@ -348,7 +345,6 @@ pub struct Sidebar {
     pub channel_radio: HashMap<String, String>,
     switching_to: Option<VoiceDestination>,
     pub voice_notice: Option<&'static str>,
-    pub voice_moderation_notice: Option<&'static str>,
     pub voice_moderation_pending: bool,
     voice_rejoin: Option<String>,
     pub voice_intent: Intent,
@@ -362,25 +358,25 @@ pub struct Sidebar {
 }
 
 impl Sidebar {
-    fn new(profile: Profile, notice: Option<&'static str>) -> Self {
+    fn new(profile: Profile, session_save_error: Option<&'static str>) -> Self {
         Self {
             profile,
             profile_edit: ProfileEdit::Idle,
             admin_accounts: AdminAccountsView::default(),
-            account_moderation_notice: None,
             user_status: UserStatus::default(),
-            user_status_notice: None,
             channels: None,
             channel_admin: ChannelAdmin::default(),
             connection: Connection::Connecting,
-            notice,
             load_failed: false,
             chat: None,
             search: SearchView::default(),
             chat_notice: None,
             draft_notice: None,
             alerts: Vec::new(),
-            action_results: Vec::new(),
+            action_results: session_save_error
+                .into_iter()
+                .map(ActionResult::error)
+                .collect(),
             unread: Arc::default(),
             voice: None,
             radio: RadioView::default(),
@@ -389,7 +385,6 @@ impl Sidebar {
             channel_radio: HashMap::new(),
             switching_to: None,
             voice_notice: None,
-            voice_moderation_notice: None,
             voice_moderation_pending: false,
             voice_rejoin: None,
             voice_intent: Intent::default(),
@@ -711,6 +706,7 @@ async fn watch_session(
     let mut refresh = Refresh::default();
     refresh.fetch_all(client);
     let mut sidebar = Sidebar::new(profile, notice);
+    let mut session_save_error = notice;
     sidebar.user_status = settings.presence.status;
     let mut presence = PresenceReporter::default();
     let mut avatars = AvatarLoads::default();
@@ -752,6 +748,7 @@ async fn watch_session(
     let mut profiles = JoinSet::new();
     let mut account_admin = AccountAdmin::default();
     let mut draft_save_at = None;
+    let mut draft_save_failed = false;
     let end = loop {
         if commands.is_closed() {
             break SessionEnd::Closed;
@@ -812,7 +809,15 @@ async fn watch_session(
                 }
             }
             Some(result) = chat.draft_writes.join_next() => {
-                chat.draft_save_completed(result, &mut sidebar.draft_notice);
+                let saved = chat.draft_save_completed(result);
+                match saved {
+                    Ok(()) => sidebar.draft_notice = None,
+                    Err(message) if !draft_save_failed => {
+                        sidebar.action_results.push(ActionResult::error(message));
+                    }
+                    Err(_) => {}
+                }
+                draft_save_failed = saved.is_err();
             }
             Some(result) = unread.writes.join_next() => {
                 let result = result.unwrap_or(Err(Failure::Connection));
@@ -947,7 +952,9 @@ async fn watch_session(
                 Ok(Command::SignOut) => break SessionEnd::SignOut,
                 Ok(Command::SetUserStatus(status)) => {
                     sidebar.user_status = status;
-                    sidebar.user_status_notice = settings.presence.save(status).await.err();
+                    if let Err(message) = settings.presence.save(status).await {
+                        sidebar.action_results.push(ActionResult::error(message));
+                    }
                 }
                 Ok(Command::Refresh) => {
                     refresh.fetch_all(client);
@@ -1226,19 +1233,15 @@ async fn watch_session(
                 if result.as_ref().is_err_and(Failure::unauthorized) {
                     break SessionEnd::Invalidated(SESSION_EXPIRED);
                 }
-                sidebar.voice_moderation_notice = Some(match result {
-                    Ok(VoiceModeration::Move(_)) => "Move requested.",
-                    Ok(VoiceModeration::Disconnect) => "Voice participant disconnected.",
-                    Err(Failure::Http(reqwest::StatusCode::FORBIDDEN)) => {
-                        "You don’t have permission to moderate voice."
-                    }
-                    Err(Failure::Http(reqwest::StatusCode::CONFLICT)) => {
-                        "That participant is no longer in the expected voice channel."
-                    }
-                    Err(Failure::Http(reqwest::StatusCode::NOT_FOUND)) => {
-                        "That voice channel is unavailable."
-                    }
-                    Err(_) => "Could not moderate voice. Try again.",
+                sidebar.action_results.push(match result {
+                    Ok(VoiceModeration::Move(_)) => ActionResult::info("Move requested."),
+                    Ok(VoiceModeration::Disconnect) => ActionResult::success("Voice participant disconnected."),
+                    Err(error) => ActionResult::error(match error {
+                        Failure::Http(reqwest::StatusCode::FORBIDDEN) => "You don’t have permission to moderate voice.",
+                        Failure::Http(reqwest::StatusCode::CONFLICT) => "That participant is no longer in the expected voice channel.",
+                        Failure::Http(reqwest::StatusCode::NOT_FOUND) => "That voice channel is unavailable.",
+                        _ => "Could not moderate voice. Try again.",
+                    }),
                 });
             }
             event = socket.recv() => match event {
@@ -1555,7 +1558,11 @@ async fn watch_session(
                 if refresh.dirty.remove(&resource) {
                     refresh.fetch(client, resource);
                 }
-                sidebar.notice = saved.save(client).await.err();
+                let error = saved.save(client).await.err();
+                if let Some(message) = error.filter(|_| error != session_save_error) {
+                    sidebar.action_results.push(ActionResult::error(message));
+                }
+                session_save_error = error;
             }
         }
     };
@@ -1579,12 +1586,12 @@ async fn watch_session(
             }
         }
         if let Some(result) = chat.draft_writes.join_next().await {
-            chat.draft_save_completed(result, &mut sidebar.draft_notice);
+            let _ = chat.draft_save_completed(result);
         }
         if chat.drafts_to_save() {
             chat.save_drafts(store);
             if let Some(result) = chat.draft_writes.join_next().await {
-                chat.draft_save_completed(result, &mut sidebar.draft_notice);
+                let _ = chat.draft_save_completed(result);
             }
         }
     }

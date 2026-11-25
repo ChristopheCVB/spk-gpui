@@ -114,9 +114,7 @@ pub(super) struct Spk {
     workspace_focus: FocusHandle,
     settings_button_focus: FocusHandle,
     appearance: Appearance,
-    appearance_error: bool,
     density: Density,
-    density_error: bool,
     shortcuts: Shortcuts,
     sound_settings: tokio::sync::watch::Sender<SoundSettings>,
     cues: VoiceSounds,
@@ -514,9 +512,7 @@ impl Spk {
             workspace_focus,
             settings_button_focus: cx.focus_handle(),
             appearance,
-            appearance_error: false,
             density: Density::load(),
-            density_error: false,
             shortcuts,
             sound_settings,
             cues,
@@ -697,7 +693,9 @@ impl Spk {
     ) {
         let mut sounds = self.shortcuts.sound_settings();
         change(sounds.get_mut(sound));
-        self.shortcuts.set_sound_settings(sounds);
+        if let Err(error) = self.shortcuts.set_sound_settings(sounds) {
+            self.show_action_result(ActionResult::error(error.message()), cx);
+        }
         self.sound_settings.send_replace(sounds);
         cx.notify();
     }

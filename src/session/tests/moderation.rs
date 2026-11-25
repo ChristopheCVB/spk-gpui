@@ -89,7 +89,7 @@ async fn admin_voice_actions_follow_role_and_shared_presence() {
                 action: VoiceModeration::Move(destination.into()),
             };
             commands.send(move_bob("second")).await.unwrap();
-            assert_voice_moderation_notice(&views, "You don’t have permission to moderate voice.").await;
+            wait_for_voice_moderation_result(&views, ActionResult::error("You don’t have permission to moderate voice.")).await;
             advance.send(()).await.unwrap();
 
             let admin = wait_for_sidebar(&views, |view| {
@@ -100,16 +100,16 @@ async fn admin_voice_actions_follow_role_and_shared_presence() {
             assert!(admin.voice.is_none());
             assert!(admin.voice_moderation_channels("missing").is_none());
             commands.send(move_bob("first")).await.unwrap();
-            assert_voice_moderation_notice(&views, "This voice moderation action is unavailable.").await;
+            wait_for_voice_moderation_result(&views, ActionResult::error("This voice moderation action is unavailable.")).await;
             advance.send(()).await.unwrap();
 
-            for notice in [
-                "You don’t have permission to moderate voice.",
-                "That participant is no longer in the expected voice channel.",
-                "Move requested.",
+            for result in [
+                ActionResult::error("You don’t have permission to moderate voice."),
+                ActionResult::error("That participant is no longer in the expected voice channel."),
+                ActionResult::info("Move requested."),
             ] {
                 commands.send(move_bob("second")).await.unwrap();
-                let current = assert_voice_moderation_notice(&views, notice).await;
+                let current = wait_for_voice_moderation_result(&views, result).await;
                 assert_eq!(current.participants("first")[0].id, "bob");
                 assert!(current.participants("second").is_empty());
             }
@@ -122,10 +122,15 @@ async fn admin_voice_actions_follow_role_and_shared_presence() {
                 user_id: "bob".into(),
                 action: VoiceModeration::Disconnect,
             }).await.unwrap();
-            let left = wait_for_sidebar(&views, |view| {
-                view.voice_moderation_notice == Some("Voice participant disconnected.")
-                    && view.participants("second").is_empty()
-            }).await;
+            let disconnected = wait_for_voice_moderation_result(
+                &views,
+                ActionResult::success("Voice participant disconnected."),
+            ).await;
+            let left = if disconnected.participants("second").is_empty() {
+                disconnected
+            } else {
+                wait_for_sidebar(&views, |view| view.participants("second").is_empty()).await
+            };
             assert!(left.voice_moderation_channels("bob").is_none());
             advance.send(()).await.unwrap();
 
@@ -134,15 +139,21 @@ async fn admin_voice_actions_follow_role_and_shared_presence() {
             }).await;
             assert!(user.voice_moderation_channels("bob").is_none());
             commands.send(move_bob("first")).await.unwrap();
-            assert_voice_moderation_notice(&views, "You don’t have permission to moderate voice.").await;
+            wait_for_voice_moderation_result(&views, ActionResult::error("You don’t have permission to moderate voice.")).await;
             advance.send(()).await.unwrap();
         },
     ).await;
     assert!(matches!(end, SessionEnd::Closed));
 }
 
-async fn assert_voice_moderation_notice(views: &Receiver<View>, notice: &str) -> Box<Sidebar> {
-    wait_for_sidebar(views, |view| view.voice_moderation_notice == Some(notice)).await
+async fn wait_for_voice_moderation_result(
+    views: &Receiver<View>,
+    result: ActionResult,
+) -> Box<Sidebar> {
+    wait_for_sidebar(views, |view| {
+        view.action_results == std::slice::from_ref(&result)
+    })
+    .await
 }
 
 async fn moderation_request(requests: &Receiver<Request>, body: Value) -> Request {

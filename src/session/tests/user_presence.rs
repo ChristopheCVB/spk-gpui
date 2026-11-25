@@ -120,7 +120,14 @@ async fn desktop_reports_status_and_activity_and_replays_them_after_reconnect() 
             progress.recv().await.unwrap();
             for status in [UserStatus::Away, UserStatus::Busy] {
                 commands.send(Command::SetUserStatus(status)).await.unwrap();
-                wait_for_sidebar(&views, |sidebar| sidebar.user_status == status).await;
+                let sidebar =
+                    wait_for_sidebar(&views, |sidebar| sidebar.user_status == status).await;
+                assert_eq!(
+                    sidebar.action_results,
+                    [ActionResult::error(
+                        "Could not save your status for the next launch."
+                    )]
+                );
                 progress.recv().await.unwrap();
             }
             activity.send_replace(false);
