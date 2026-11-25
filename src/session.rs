@@ -896,7 +896,7 @@ async fn watch_session(
                 }
             }
             Ok(event) = chat.attachments.events.recv() => chat.attachment_event(client, event),
-            Some(Ok((result, reply, creating, has_fields))) = webhook_mutations.join_next() => {
+            Some(Ok((result, reply, operation))) = webhook_mutations.join_next() => {
                 if result.as_ref().is_err_and(Failure::unauthorized) {
                     break SessionEnd::Invalidated(SESSION_EXPIRED);
                 }
@@ -908,7 +908,7 @@ async fn watch_session(
                     refresh: &mut refresh,
                     unread: &mut unread,
                     search: &mut search,
-                }.complete(client, result, creating, has_fields);
+                }.complete(client, result, operation);
                 if let Err(WebhookError::Action(message)) = result {
                     sidebar.action_results.push(ActionResult::error(message));
                 }

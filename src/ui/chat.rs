@@ -756,15 +756,14 @@ impl Spk {
             return;
         }
         let reading_older = chat.has_more_after;
-        self.send(
+        if self.try_send(
             Command::SendChatMessage {
                 channel_id: chat.channel_id.clone(),
                 body,
             },
             None,
             cx,
-        );
-        if self.form_error.is_none() {
+        ) {
             self.chat_submitting = true;
             self.chat_draft_edited = false;
             self.suggestions[0].dismiss();

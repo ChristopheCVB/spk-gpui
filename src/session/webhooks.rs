@@ -24,7 +24,19 @@ pub enum WebhookError {
 }
 
 pub type WebhookReply = oneshot::Sender<Result<Option<WebhookUrl>, WebhookError>>;
-pub(super) type WebhookCompletion = (Result<WebhookChange, Failure>, WebhookReply, bool, bool);
+pub(super) type WebhookCompletion = (
+    Result<WebhookChange, Failure>,
+    WebhookReply,
+    WebhookOperation,
+);
+
+#[derive(Clone, Copy)]
+pub(super) enum WebhookOperation {
+    Create,
+    Edit,
+    Rotate,
+    Delete,
+}
 
 pub(super) enum WebhookChange {
     Created(Channel, WebhookUrl),
@@ -75,8 +87,12 @@ impl WebhookAction {
     }
 
     pub(super) async fn send(self, client: &SpkClient, reply: WebhookReply) -> WebhookCompletion {
-        let creating = matches!(self, Self::Create(_));
-        let has_fields = creating || matches!(self, Self::Edit { .. });
+        let operation = match &self {
+            Self::Create(_) => WebhookOperation::Create,
+            Self::Edit { .. } => WebhookOperation::Edit,
+            Self::Rotate(_) => WebhookOperation::Rotate,
+            Self::Delete(_) => WebhookOperation::Delete,
+        };
         let result = match self {
             Self::Create(settings) => client
                 .create_webhook(settings)
@@ -95,7 +111,7 @@ impl WebhookAction {
                 .await
                 .map(|()| WebhookChange::Deleted(id)),
         };
-        (result, reply, creating, has_fields)
+        (result, reply, operation)
     }
 }
 
@@ -114,13 +130,12 @@ impl MutationContext<'_> {
         self,
         client: &SpkClient,
         result: Result<WebhookChange, Failure>,
-        creating: bool,
-        has_fields: bool,
+        operation: WebhookOperation,
     ) -> Result<Option<WebhookUrl>, WebhookError> {
         let change = match result {
             Ok(change) => change,
             Err(error) => {
-                if !creating
+                if !matches!(operation, WebhookOperation::Create)
                     && matches!(
                         error,
                         Failure::Http(StatusCode::NOT_FOUND | StatusCode::FORBIDDEN)
@@ -128,7 +143,7 @@ impl MutationContext<'_> {
                 {
                     self.refresh.fetch(client, Resource::Channels);
                 }
-                if has_fields
+                if matches!(operation, WebhookOperation::Create | WebhookOperation::Edit)
                     && matches!(
                         error,
                         Failure::Http(StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY)
@@ -138,7 +153,7 @@ impl MutationContext<'_> {
                         "SPK rejected the webhook settings. Check the name and icon, then try again.",
                     ));
                 }
-                return Err(WebhookError::Action(mutation_error(error, creating)));
+                return Err(WebhookError::Action(mutation_error(error, operation)));
             }
         };
         let removed = match change {
@@ -199,7 +214,8 @@ impl MutationContext<'_> {
     }
 }
 
-fn mutation_error(error: Failure, creating: bool) -> &'static str {
+fn mutation_error(error: Failure, operation: WebhookOperation) -> &'static str {
+    let creating = matches!(operation, WebhookOperation::Create);
     match error {
         Failure::Http(StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED) if creating => {
             "This SPK server needs a version that supports Webhooks."

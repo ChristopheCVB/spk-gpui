@@ -12,7 +12,7 @@ use crate::{
     api::{Failure, SoundboardClip, SpkClient},
     voice::{
         MediaOutput,
-        soundboard::{self, SoundSource, SoundSourceError},
+        soundboard::{self, PreparedSound, SoundSource, SoundSourceError},
     },
 };
 
@@ -204,12 +204,7 @@ impl AdminSoundboard {
                 self.tasks.spawn(async move {
                     Completion::Previewed(
                         async {
-                            let clip = spawn_blocking(move || source.crop(crop))
-                                .await
-                                .map_err(|_| {
-                                    WorkError::Action("Could not prepare the selected audio.")
-                                })?
-                                .map_err(WorkError::Validation)?;
+                            let clip = prepare_crop(source, crop).await?;
                             soundboard::play(clip.wav, receiver)
                                 .await
                                 .map_err(|_| WorkError::Action("Could not preview this sound."))
@@ -357,6 +352,16 @@ impl AdminSoundboard {
     }
 }
 
+async fn prepare_crop(
+    source: Arc<SoundSource>,
+    crop: SoundboardCrop,
+) -> Result<PreparedSound, WorkError> {
+    spawn_blocking(move || source.crop(crop))
+        .await
+        .map_err(|_| WorkError::Action("Could not prepare the selected audio."))?
+        .map_err(WorkError::Validation)
+}
+
 async fn mutate(
     client: &SpkClient,
     source: Option<Arc<SoundSource>>,
@@ -366,10 +371,7 @@ async fn mutate(
         SoundboardAdminAction::Add { crop, name, icon } => {
             let name = sound_name(&name, &icon)?;
             let source = source.ok_or(WorkError::Validation(CHOOSE_AUDIO))?;
-            let clip = spawn_blocking(move || source.crop(crop))
-                .await
-                .map_err(|_| WorkError::Action("Could not prepare the selected audio."))?
-                .map_err(WorkError::Validation)?;
+            let clip = prepare_crop(source, crop).await?;
             client
                 .add_soundboard_clip(&name, &icon, clip.duration_ms, clip.wav)
                 .await?;

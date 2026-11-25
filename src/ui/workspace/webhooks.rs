@@ -306,7 +306,6 @@ impl WebhookEditor {
         if self.pending || self.url.is_some() || self.app.read(cx).signing_out {
             return;
         }
-        self.pending = true;
         self.error = None;
         let action = match (&self.form, &self.fields) {
             (WebhookForm::Create, Some(fields)) => WebhookAction::Create(fields.settings(cx)),
@@ -320,13 +319,12 @@ impl WebhookEditor {
         };
         let (reply, result) = tokio::sync::oneshot::channel();
         if !self.app.update(cx, |app, cx| {
-            app.send(Command::MutateWebhook { action, reply }, None, cx);
-            app.form_error.is_none()
+            app.try_send(Command::MutateWebhook { action, reply }, None, cx)
         }) {
-            self.pending = false;
             cx.notify();
             return;
         }
+        self.pending = true;
         cx.spawn_in(window, async move |this, cx| {
             let result = result.await;
             let _ = this.update_in(cx, |this, window, cx| {

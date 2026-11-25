@@ -605,6 +605,15 @@ impl Spk {
     }
 
     fn send(&mut self, command: Command, busy: Option<&'static str>, cx: &mut Context<Self>) {
+        self.try_send(command, busy, cx);
+    }
+
+    fn try_send(
+        &mut self,
+        command: Command,
+        busy: Option<&'static str>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         self.form_error = None;
         if matches!(command, Command::LeaveVoice | Command::SignOut) {
             self.video_stage.sidebar_watch = None;
@@ -618,7 +627,8 @@ impl Spk {
                 | Command::AddChatAttachments { .. }
                 | Command::RetryChatAttachment { .. }
         );
-        if self.commands.try_send(command).is_err() {
+        let enqueued = self.commands.try_send(command).is_ok();
+        if !enqueued {
             let message = "Could not reach the SPK connection. Try again.";
             self.form_error = Some(message);
             if matches!(self.view, View::SignedIn(_)) {
@@ -635,6 +645,7 @@ impl Spk {
             }
         }
         cx.notify();
+        enqueued
     }
 
     fn cancel_shortcut_editor(&mut self, cx: &mut Context<Self>) {
