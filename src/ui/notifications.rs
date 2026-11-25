@@ -109,8 +109,15 @@ impl Spk {
                     Notification::new()
                         .delivery(NotificationDelivery::InApp)
                         .placement(Anchor::BottomRight)
-                        .title(alert.title)
-                        .message(body)
+                        .content(move |_, _, _| {
+                            div()
+                                .flex()
+                                .flex_col()
+                                .text_sm()
+                                .child(Label::new(alert.title.clone()).font_semibold())
+                                .child(Label::new(body.clone()))
+                                .into_any_element()
+                        })
                         .action(move |_, _, cx| {
                             let app = app.clone();
                             let target = target.clone();
@@ -183,8 +190,11 @@ pub(super) fn push_action_result(result: ActionResult, window: &mut Window, cx: 
         ActionResult::Error(message) => (NotificationType::Error, message),
     };
     let id = SharedString::from(format!("{severity:?}:{message}"));
+    let message = SharedString::from(message);
     window.push_notification(
-        Notification::from((severity, message))
+        Notification::new()
+            .with_type(severity)
+            .content(move |_, _, _| Label::new(message.clone()).text_sm().into_any_element())
             .id1::<ActionResult>(id)
             .delivery(NotificationDelivery::InApp)
             .placement(Anchor::BottomRight),
