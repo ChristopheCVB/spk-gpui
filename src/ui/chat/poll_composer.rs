@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     api::PollEditOption,
     session::{
-        POLL_MAX_OPTIONS, POLL_MIN_OPTIONS, POLL_OPTION_LIMIT, POLL_QUESTION_LIMIT,
+        POLL_MAX_OPTIONS, POLL_MIN_OPTIONS, POLL_OPTION_LIMIT, POLL_QUESTION_LIMIT, PollEditError,
         PollEditOutcome, trim_poll_text, validate_poll,
     },
 };
@@ -234,7 +234,7 @@ impl PollComposer {
                     reset_votes,
                     completed,
                 },
-                Either::Left(async move { result.await.unwrap_or(Err(CONNECTION_ERROR)) }),
+                Either::Left(async move { result.await.map_err(|_| CONNECTION_ERROR) }),
             )
         } else {
             let (completed, result) = tokio::sync::oneshot::channel();
@@ -246,37 +246,48 @@ impl PollComposer {
                     completed,
                 },
                 Either::Right(async move {
-                    result
+                    Ok(result
                         .await
                         .unwrap_or(Err(CONNECTION_ERROR))
                         .map(|()| PollEditOutcome::Saved)
+                        .map_err(PollEditError::Validation))
                 }),
             )
         };
+        self.error = None;
         if self.commands.try_send(command).is_err() {
-            self.error = Some(CONNECTION_ERROR);
+            if self.message_id.is_some() {
+                notifications::push_action_result(
+                    ActionResult::error(CONNECTION_ERROR),
+                    window,
+                    cx,
+                );
+            } else {
+                self.error = Some(CONNECTION_ERROR);
+            }
             cx.notify();
             return;
         }
         self.sending = true;
-        self.error = None;
         cx.spawn_in(window, async move |form, cx| {
             let result = result.await;
-            let _ = form.update_in(cx, |form, window, cx| match result {
-                Ok(PollEditOutcome::Saved) => {
-                    window.close_dialog(cx);
-                    form.opener.focus(window, cx);
+            let _ = form.update_in(cx, |form, window, cx| {
+                form.sending = false;
+                match result {
+                    Ok(Ok(PollEditOutcome::Saved)) => {
+                        window.close_dialog(cx);
+                        form.opener.focus(window, cx);
+                    }
+                    Ok(Ok(PollEditOutcome::ConfirmVoteChange)) => {
+                        form.confirm_vote_change(window, cx);
+                    }
+                    Ok(Err(PollEditError::Validation(error))) => form.error = Some(error),
+                    Ok(Err(PollEditError::Action(_))) => {}
+                    Err(error) => {
+                        notifications::push_action_result(ActionResult::error(error), window, cx);
+                    }
                 }
-                Ok(PollEditOutcome::ConfirmVoteChange) => {
-                    form.sending = false;
-                    form.confirm_vote_change(window, cx);
-                    cx.notify();
-                }
-                Err(error) => {
-                    form.sending = false;
-                    form.error = Some(error);
-                    cx.notify();
-                }
+                cx.notify();
             });
         })
         .detach();

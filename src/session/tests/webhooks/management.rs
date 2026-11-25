@@ -1,6 +1,6 @@
 use super::*;
 use crate::api::{SearchScope, WebhookSettings};
-use crate::session::{WebhookAction, WebhookReply};
+use crate::session::{WebhookAction, WebhookError, WebhookReply};
 
 #[tokio::test]
 async fn admin_making_another_users_webhook_private_loses_access_with_other_readers() {
@@ -63,11 +63,11 @@ async fn admin_making_another_users_webhook_private_loses_access_with_other_read
 
         assert!(matches!(
             mutate(&reader, edit("feed")).await.await.unwrap(),
-            Err("You cannot manage this webhook.")
+            Err(WebhookError::Action("You cannot manage this webhook."))
         ));
         assert!(matches!(
             mutate(&admin, edit("personal")).await.await.unwrap(),
-            Err("Webhook feed unavailable.")
+            Err(WebhookError::Action("Webhook feed unavailable."))
         ));
 
         for (commands, views) in [(&admin, &admin_views), (&reader, &reader_views)] {
@@ -181,7 +181,28 @@ async fn owner_rotates_private_webhook_and_receives_only_the_replacement_url() {
             .await;
         assert!(matches!(
             failed.await.unwrap(),
-            Err("SPK denied permission to manage this webhook.")
+            Err(WebhookError::Action(
+                "SPK denied permission to manage this webhook."
+            ))
+        ));
+        wait_for_sidebar(&owner_views, |view| {
+            view.action_results
+                == [ActionResult::error(
+                    "SPK denied permission to manage this webhook.",
+                )]
+        })
+        .await;
+
+        let invalid = WebhookAction::Create(WebhookSettings {
+            name: " ".into(),
+            icon: "bell".into(),
+            private: false,
+        });
+        assert!(matches!(
+            mutate(&owner, invalid).await.await.unwrap(),
+            Err(WebhookError::Validation(
+                "Webhook names must be 1–32 characters."
+            ))
         ));
 
         let pending = mutate(&owner, rotate()).await;
@@ -189,7 +210,9 @@ async fn owner_rotates_private_webhook_and_receives_only_the_replacement_url() {
         assert!(request.body.is_empty());
         assert!(matches!(
             mutate(&owner, rotate()).await.await.unwrap(),
-            Err("A webhook change is already in progress.")
+            Err(WebhookError::Action(
+                "A webhook change is already in progress."
+            ))
         ));
         let url = format!("{base}api/hooks/feed/replacement-fixture-secret");
         request.respond(&[], &value!({"url":url}).to_string()).await;
@@ -209,7 +232,7 @@ async fn owner_rotates_private_webhook_and_receives_only_the_replacement_url() {
         request.respond(&[], &value!({"url":url}).to_string()).await;
         assert!(matches!(
             late.await.unwrap(),
-            Err("Webhook feed unavailable.")
+            Err(WebhookError::Action("Webhook feed unavailable."))
         ));
 
         owner.close();
@@ -278,7 +301,9 @@ async fn deleting_an_open_webhook_requires_acknowledgement_and_discards_stale_li
             .await;
         assert!(matches!(
             failed.await.unwrap(),
-            Err("Could not update the webhook. Refresh the feed list before trying again.")
+            Err(WebhookError::Action(
+                "Could not update the webhook. Refresh the feed list before trying again."
+            ))
         ));
         let still_open = wait_for_sidebar(&views, |view| {
             view.chat.as_ref().is_some_and(ChatView::history_ready)
@@ -340,7 +365,7 @@ fn feed(name: &str, private: bool) -> Value {
 async fn mutate(
     commands: &Sender<Command>,
     action: WebhookAction,
-) -> oneshot::Receiver<Result<Option<crate::api::WebhookUrl>, &'static str>> {
+) -> oneshot::Receiver<Result<Option<crate::api::WebhookUrl>, WebhookError>> {
     let (reply, result) = oneshot::channel();
     let reply: WebhookReply = reply;
     commands

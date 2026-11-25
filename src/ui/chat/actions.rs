@@ -214,16 +214,13 @@ impl Spk {
             message_id: form.message_id.clone(),
             action,
         };
-        form.submitted = match self.commands.try_send(command) {
-            Ok(()) => {
-                self.form_error = None;
-                true
-            }
-            Err(_) => {
-                self.form_error = Some("Could not reach the SPK connection. Try again.");
-                false
-            }
-        };
+        form.submitted = self.commands.try_send(command).is_ok();
+        if !form.submitted {
+            self.show_action_result(
+                ActionResult::error("Could not reach the SPK connection. Try again."),
+                cx,
+            );
+        }
         cx.notify();
     }
 

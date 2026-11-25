@@ -62,15 +62,15 @@ pub use {
     channel_admin::{ChannelAction, ChannelAdmin, ChannelKind},
     chat::{
         AttachmentInput, ChatImage, ChatView, Delivery, GifPickerView, Outgoing, POLL_MAX_OPTIONS,
-        POLL_MIN_OPTIONS, POLL_OPTION_LIMIT, POLL_QUESTION_LIMIT, Pins, PollEditOutcome,
-        PollEditReply, UploadStatus, image_preview, trim_poll_text, validate_poll,
+        POLL_MIN_OPTIONS, POLL_OPTION_LIMIT, POLL_QUESTION_LIMIT, Pins, PollEditError,
+        PollEditOutcome, PollEditReply, UploadStatus, image_preview, trim_poll_text, validate_poll,
     },
     presence::Participant,
     profiles::ProfileEdit,
     radio::RadioPlayback,
     soundboard_admin::{SoundboardAdminAction, SoundboardCrop},
     voice_session::VoiceView,
-    webhooks::{WebhookAction, WebhookReply},
+    webhooks::{WebhookAction, WebhookError, WebhookReply},
 };
 
 #[cfg(test)]
@@ -338,7 +338,6 @@ pub struct Sidebar {
     pub search: SearchView,
     pub chat_notice: Option<&'static str>,
     pub draft_notice: Option<&'static str>,
-    pub read_notice: Option<&'static str>,
     pub alerts: Vec<Alert>,
     pub action_results: Vec<ActionResult>,
     unread: Arc<HashMap<String, UnreadState>>,
@@ -380,7 +379,6 @@ impl Sidebar {
             search: SearchView::default(),
             chat_notice: None,
             draft_notice: None,
-            read_notice: None,
             alerts: Vec::new(),
             action_results: Vec::new(),
             unread: Arc::default(),
@@ -843,10 +841,10 @@ async fn watch_session(
                     && result.as_ref().is_err_and(|error| {
                         !matches!(error, Failure::Http(reqwest::StatusCode::NOT_FOUND))
                     });
-                chat.complete(client, sidebar.profile.id.as_deref(), result);
+                chat.complete(client, sidebar.profile.id.as_deref(), result, &mut sidebar.action_results);
                 if unverified_alert {
                     chat.close();
-                    sidebar.chat_notice = Some("Message unavailable.");
+                    sidebar.chat_notice = None;
                 }
             }
             Some(result) = chat.action_tasks.join_next() => {
@@ -854,13 +852,13 @@ async fn watch_session(
                 if result.as_ref().is_err_and(Failure::unauthorized) {
                     break SessionEnd::Invalidated(SESSION_EXPIRED);
                 }
-                chat.action_complete(client, result);
+                sidebar.action_results.extend(chat.action_complete(client, result));
             }
             Some(Ok((channel_id, message_id, result))) = chat.vote_tasks.join_next() => {
                 if result.as_ref().is_err_and(Failure::unauthorized) {
                     break SessionEnd::Invalidated(SESSION_EXPIRED);
                 }
-                chat.vote_complete(client, &channel_id, &message_id, result);
+                sidebar.action_results.extend(chat.vote_complete(client, &channel_id, &message_id, result));
             }
             Some(Ok(result)) = chat.preview_tasks.join_next() => chat.preview_complete(result),
             Some(result) = chat.gifs.browsing.join_next() => {
@@ -875,7 +873,7 @@ async fn watch_session(
                 if result.as_ref().is_err_and(Failure::unauthorized) {
                     break SessionEnd::Invalidated(SESSION_EXPIRED);
                 }
-                chat.gifs.favorites_complete(client, result);
+                sidebar.action_results.extend(chat.gifs.favorites_complete(client, result));
             }
             Some(Ok(result)) = chat.gifs.previews.join_next() => chat.gifs.preview_complete(result),
             Some(Ok(result)) = chat.staged_gif_preview.join_next() => chat.staged_gif_preview_complete(result),
@@ -893,7 +891,7 @@ async fn watch_session(
                 }
             }
             Ok(event) = chat.attachments.events.recv() => chat.attachment_event(client, event),
-            Some(Ok((result, reply, creating))) = webhook_mutations.join_next() => {
+            Some(Ok((result, reply, creating, has_fields))) = webhook_mutations.join_next() => {
                 if result.as_ref().is_err_and(Failure::unauthorized) {
                     break SessionEnd::Invalidated(SESSION_EXPIRED);
                 }
@@ -905,7 +903,10 @@ async fn watch_session(
                     refresh: &mut refresh,
                     unread: &mut unread,
                     search: &mut search,
-                }.complete(client, result, creating);
+                }.complete(client, result, creating, has_fields);
+                if let Err(WebhookError::Action(message)) = result {
+                    sidebar.action_results.push(ActionResult::error(message));
+                }
                 let _ = reply.send(result);
             }
             Some(result) = direct_message_opens.join_next() => {
@@ -920,7 +921,10 @@ async fn watch_session(
                         refresh.fetch(client, Resource::Channels);
                     }
                     Err(error) if error.unauthorized() => break SessionEnd::Invalidated(SESSION_EXPIRED),
-                    Err(_) => sidebar.chat_notice = Some("Could not open the direct message. Try again."),
+                    Err(_) => {
+                        sidebar.chat_notice = None;
+                        sidebar.action_results.push(ActionResult::error("Could not open the direct message. Try again."));
+                    }
                 }
             }
             _ = sleep_until(rejoin_at.unwrap_or_else(Instant::now)), if rejoin_at.is_some() => {}
@@ -976,15 +980,20 @@ async fn watch_session(
                 }
                 Ok(Command::MutateWebhook { action, reply }) => {
                     if !webhook_mutations.is_empty() {
-                        let _ = reply.send(Err("A webhook change is already in progress."));
+                        let message = "A webhook change is already in progress.";
+                        sidebar.action_results.push(ActionResult::error(message));
+                        let _ = reply.send(Err(WebhookError::Action(message)));
                     } else {
                         match action.validated(&sidebar) {
                             Ok(action) => {
                                 let client = client.clone();
                                 webhook_mutations.spawn(async move { action.send(&client, reply).await });
                             }
-                            Err(message) => {
-                                let _ = reply.send(Err(message));
+                            Err(error) => {
+                                if let WebhookError::Action(message) = error {
+                                    sidebar.action_results.push(ActionResult::error(message));
+                                }
+                                let _ = reply.send(Err(error));
                             }
                         }
                     }
@@ -1002,7 +1011,7 @@ async fn watch_session(
                         ChatNavigation::open_chat(&mut chat_navigation, &mut chat, client, channel);
                         sidebar.chat_notice = None;
                     } else {
-                        sidebar.chat_notice = Some("Webhook feed unavailable.");
+                        sidebar.action_results.push(ActionResult::error("Webhook feed unavailable."));
                     }
                 }
                 Ok(Command::OpenDirectMessage(id)) => {
@@ -1011,7 +1020,8 @@ async fn watch_session(
                         sidebar.chat_notice = None;
                         ChatNavigation::open_chat(&mut chat_navigation, &mut chat, client, channel);
                     } else {
-                        sidebar.chat_notice = Some("Direct message unavailable.");
+                        sidebar.chat_notice = None;
+                        sidebar.action_results.push(ActionResult::error("Direct message unavailable."));
                     }
                 }
                 Ok(Command::StartDirectMessage(user_id)) => {
@@ -1020,7 +1030,8 @@ async fn watch_session(
                     }
                     direct_message_opens = JoinSet::new();
                     if !sidebar.can_start_direct_message(&user_id) {
-                        sidebar.chat_notice = Some("Direct message unavailable.");
+                        sidebar.chat_notice = None;
+                        sidebar.action_results.push(ActionResult::error("Direct message unavailable."));
                     } else if let Some(channel) = sidebar.direct_message(&user_id) {
                         ChatNavigation::open_chat(&mut chat_navigation, &mut chat, client, channel);
                         sidebar.chat_notice = None;
@@ -1041,19 +1052,19 @@ async fn watch_session(
                 Ok(Command::RetryChatHistory) => chat.retry_history(client),
                 Ok(Command::ReadVisibleChat(channel_id)) => {
                     if matches!(sidebar.connection, Connection::Online) && chat.should_read(&channel_id) {
-                        unread.mark(&mut sidebar, channel_id, Mark::Visible);
+                        unread.mark(channel_id, Mark::Visible);
                     }
                 }
                 Ok(Command::MarkChatRead(channel_id)) => {
                     if sidebar.channels.iter().flatten().any(|channel| {
                         channel.id == channel_id && channel.is_conversation()
                     }) {
-                        unread.mark(&mut sidebar, channel_id, Mark::Read);
+                        unread.mark(channel_id, Mark::Read);
                     }
                 }
                 Ok(Command::MarkChatUnread { channel_id, message_id }) => {
                     if let Some(request) = chat.start_mark_unread(&channel_id, &message_id) {
-                        unread.mark(&mut sidebar, channel_id, Mark::Unread(message_id, request));
+                        unread.mark(channel_id, Mark::Unread(message_id, request));
                     }
                 },
                 Ok(Command::JumpToChatMessage { .. } | Command::LoadLatestMessages)
@@ -1135,7 +1146,7 @@ async fn watch_session(
                 }
                 Ok(Command::MarkChatSendDelivered(nonce)) => chat.mark_send_delivered(&nonce),
                 Ok(Command::MutateChatMessage { channel_id, message_id, action }) => {
-                    chat.mutate(client, &sidebar, &channel_id, message_id, action);
+                    chat.mutate(client, &mut sidebar, &channel_id, message_id, action);
                 }
                 Ok(Command::EditChatPoll { channel_id, message_id, question, options, reset_votes, completed }) => {
                     let result = chat.prepare_poll_edit(
@@ -1144,7 +1155,12 @@ async fn watch_session(
                     match result {
                         Ok(Some(action)) => chat.start_message_action(client, &channel_id, message_id, action, Some(completed)),
                         Ok(None) => { let _ = completed.send(Ok(PollEditOutcome::ConfirmVoteChange)); }
-                        Err(error) => { let _ = completed.send(Err(error)); }
+                        Err(error) => {
+                            if let PollEditError::Action(message) = error {
+                                sidebar.action_results.push(ActionResult::error(message));
+                            }
+                            let _ = completed.send(Err(error));
+                        }
                     }
                 }
                 Ok(Command::RetryChatPins(channel_id)) => chat.retry_pins(client, &channel_id),
@@ -1510,11 +1526,12 @@ async fn watch_session(
                     if presence_loaded && search::open_chat_target(&mut sidebar, &mut chat, client, channel, message.as_deref()) {
                         chat_navigation = from_alert.then_some(ChatNavigation::OpeningAlert);
                     } else {
-                        sidebar.chat_notice = Some(if message.is_some() {
+                        sidebar.chat_notice = None;
+                        sidebar.action_results.push(ActionResult::error(if message.is_some() {
                             "Message unavailable."
                         } else {
                             "Conversation unavailable."
-                        });
+                        }));
                         chat_navigation = None;
                     }
                 }
