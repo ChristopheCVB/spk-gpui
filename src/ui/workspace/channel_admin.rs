@@ -74,7 +74,7 @@ impl Spk {
         can_move_up: bool,
         can_move_down: bool,
         cx: &Context<Self>,
-    ) -> impl IntoElement {
+    ) -> ChannelActions {
         ChannelActions {
             id: channel.id.clone(),
             name: channel_name(channel).to_owned(),
@@ -153,8 +153,7 @@ impl Spk {
     }
 }
 
-#[derive(IntoElement)]
-struct ChannelActions {
+pub(super) struct ChannelActions {
     id: String,
     name: String,
     kind: ChannelKind,
@@ -163,8 +162,8 @@ struct ChannelActions {
     app: WeakEntity<Spk>,
 }
 
-impl RenderOnce for ChannelActions {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+impl ChannelActions {
+    pub(super) fn render(self, menu: SidebarRowMenu) -> AnyElement {
         let Self {
             id,
             name,
@@ -173,17 +172,13 @@ impl RenderOnce for ChannelActions {
             can_move_down,
             app,
         } = self;
-        let focus = window
-            .use_keyed_state("channel-actions-focus", cx, |_, cx| cx.focus_handle())
-            .read(cx)
-            .clone();
-        tool_button(
+        let focus = menu.focus();
+        let button = tool_button(
             "channel-actions",
             IconName::Ellipsis,
             format!("Actions for {name}"),
-        )
-        .track_focus(&focus)
-        .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, cx| {
+        );
+        menu.render(button, true, Anchor::TopRight, move |menu, _, cx| {
             let editable = app.upgrade().is_some_and(|app| {
                 matches!(&app.read(cx).view, View::SignedIn(sidebar)
                     if sidebar.is_admin() && !sidebar.channel_admin.pending)
