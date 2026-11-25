@@ -100,6 +100,13 @@ fn render_message<'a, 'b>(
         styled_for,
         &mut edits,
     );
+    apply_edits(source, edits)
+}
+
+pub(crate) fn apply_edits(source: &str, mut edits: Vec<(Range<usize>, String)>) -> Cow<'_, str> {
+    if edits.is_empty() {
+        return Cow::Borrowed(source);
+    }
     edits.sort_by_key(|(range, _)| (range.start, Reverse(range.end)));
     let mut result = String::with_capacity(source.len());
     let mut offset = 0;
@@ -180,13 +187,7 @@ fn find_edits<'a>(
                     if i < end {
                         continue;
                     }
-                    let escaped = text.as_bytes()[..i]
-                        .iter()
-                        .rev()
-                        .take_while(|&&b| b == b'\\')
-                        .count()
-                        % 2
-                        != 0;
+                    let escaped = markdown_escaped(&text[..i]);
                     let start = range.start + i;
                     if ch == "|" {
                         let Some(width) = spoiler_marker_width(&text[i..]) else {
@@ -280,7 +281,17 @@ fn find_edits<'a>(
     }
 }
 
-fn escape_markdown(text: &str) -> String {
+pub(crate) fn markdown_escaped(prefix: &str) -> bool {
+    prefix
+        .bytes()
+        .rev()
+        .take_while(|&byte| byte == b'\\')
+        .count()
+        % 2
+        != 0
+}
+
+pub(crate) fn escape_markdown(text: &str) -> String {
     let mut result = String::new();
     for ch in text.chars() {
         if ch.is_ascii_punctuation() {
@@ -406,7 +417,7 @@ pub(crate) fn safe_link(raw: &str) -> Option<url::Url> {
     matches!(url.scheme(), "https" | "http" | "mailto").then_some(url)
 }
 
-fn parse_options() -> ParseOptions {
+pub(crate) fn parse_options() -> ParseOptions {
     let mut options = ParseOptions::gfm();
     options.constructs.html_flow = false;
     options.constructs.html_text = false;

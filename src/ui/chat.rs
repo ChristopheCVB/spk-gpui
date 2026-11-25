@@ -2,6 +2,7 @@ mod actions;
 mod attachments;
 pub(super) mod editor;
 mod embed;
+mod emoji;
 mod gifs;
 mod history;
 mod images;
@@ -1192,6 +1193,7 @@ impl Spk {
         id: &'static str,
         message_id: &str,
         body: &str,
+        emoji: emoji::MessageEmoji,
         sidebar: &Sidebar,
         max_width: Pixels,
         cx: &Context<Self>,
@@ -1226,7 +1228,10 @@ impl Spk {
         } else {
             (source.clone(), Vec::new())
         };
-        let mut extensions = MarkdownExtensions::default().plugin(MessageMention);
+        let display = emoji.display_markdown(&display);
+        let mut extensions = MarkdownExtensions::default()
+            .plugin(MessageMention)
+            .plugin(emoji);
         if !spoilers.is_empty() {
             let definitions = crate::chat_markdown::spoiler_link_definitions(body);
             let contents = spoilers
@@ -1311,6 +1316,7 @@ impl Spk {
             "message-body",
             &message_id,
             &body,
+            emoji::MessageEmoji::new(emoji::emoji_only(&body)),
             sidebar,
             measured_or_viewport_width(self.chat_content_width.get()),
             cx,
@@ -1323,6 +1329,7 @@ impl Spk {
                     "embed-description",
                     &message_id,
                     description,
+                    emoji::MessageEmoji::new(false),
                     sidebar,
                     measured_or_viewport_width(self.webhook_content_width.get()),
                     cx,
