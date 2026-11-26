@@ -830,9 +830,7 @@ class Desktop:
             reduced = self.bounds("Radio stations")
             if not 0 < reduced.height < results.height:
                 raise RuntimeError("Radio should shrink the station list at 560 × 440")
-            if self.bounds("Media Output", "combo box").y + footer.height > 432:
-                field = self.bounds(search, "entry")
-                self.click_at(field.x - 4, field.y, 5)
+            self.tab_to("Media Output", "combo box")
 
             def footer_visible():
                 picker = self.bounds("Media Output", "combo box")

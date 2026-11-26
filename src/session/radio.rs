@@ -1,5 +1,6 @@
 use std::future::pending;
 
+use reqwest::StatusCode;
 use tokio::task::{AbortHandle, Id, JoinSet};
 use uuid::Uuid;
 
@@ -108,7 +109,7 @@ impl RadioSession {
             self.player = None;
             sidebar.radio.station = None;
         }
-        // SPK sends the room's RadioState when the voice socket is ready.
+        // SPK sends the Voice Channel's RadioState when the voice socket is ready.
         sidebar.radio.can_control_channel =
             self.revision.is_some() && voice.active_socket_sid(sidebar).is_some();
         let preferences = &sidebar.voice_intent.preferred;
@@ -300,6 +301,11 @@ impl RadioSession {
                         favorites.sort_by_cached_key(|station| station.name.to_lowercase());
                     }
                     Err(error) if error.unauthorized() => return Err(error),
+                    Err(Failure::Http(StatusCode::CONFLICT)) => {
+                        sidebar.action_results.push(ActionResult::error(
+                            "Radio Favorites are full. Remove a Favorite before adding another.",
+                        ));
+                    }
                     Err(_) => sidebar.action_results.push(ActionResult::error(
                         "Could not update radio Favorites. Try again.",
                     )),

@@ -2,6 +2,7 @@ use super::*;
 
 const STATION: &str = "23456789-1111-4ccc-8aaa-123456789abc";
 const UNAVAILABLE_STATION: &str = "23456789-1111-4ccc-8aaa-123456789abe";
+const EXTRA_STATION: &str = "23456789-1111-4ccc-8aaa-123456789abf";
 
 fn station(name: &str) -> Value {
     value!({
@@ -26,6 +27,10 @@ pub(super) async fn respond(line: &str, request: Request, favorite: &mut bool) {
         }
         line if line == format!("PUT /api/radio/favorites/{UNAVAILABLE_STATION} HTTP/1.1") => {
             request.respond_raw("404 Not Found", &[], b"{}").await;
+            return;
+        }
+        line if line == format!("PUT /api/radio/favorites/{EXTRA_STATION} HTTP/1.1") => {
+            request.respond_raw("409 Conflict", &[], b"{}").await;
             return;
         }
         line if line == format!("PUT /api/radio/favorites/{STATION} HTTP/1.1") => {
@@ -365,6 +370,23 @@ async fn channel_radio_uses_shared_station_and_local_controls() {
                         .is_some_and(|favorites| favorites.len() == 1)
                 })
                 .await;
+                commands
+                    .send(Command::SetRadioFavorite {
+                        id: EXTRA_STATION.into(),
+                        saved: true,
+                    })
+                    .await
+                    .unwrap();
+                let full = wait_for_sidebar(&views, |s| {
+                    s.action_results
+                        == [ActionResult::error(
+                            "Radio Favorites are full. Remove a Favorite before adding another.",
+                        )]
+                })
+                .await;
+                let favorites = full.radio.favorites.as_ref().unwrap();
+                assert_eq!(favorites.len(), 1);
+                assert_eq!(favorites[0].id, STATION);
                 commands
                     .send(Command::SelectRadio(STATION.into()))
                     .await

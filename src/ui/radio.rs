@@ -29,6 +29,7 @@ struct RadioPanel {
     favorites: bool,
     station_scroll: ScrollHandle,
     panel_scroll: ScrollHandle,
+    media_output_focus: FocusHandle,
 }
 
 pub(super) fn radio_panel(
@@ -67,13 +68,23 @@ pub(super) fn radio_panel(
             cx.notify();
         })
         .detach();
+        let panel_scroll = ScrollHandle::new();
+        let media_output_focus = cx.focus_handle();
+        let scroll = panel_scroll.clone();
+        window
+            .on_focus_in(&media_output_focus, cx, move |window, _| {
+                scroll.scroll_to_bottom();
+                window.refresh();
+            })
+            .detach();
         RadioPanel {
             spk,
             query,
             volume,
             favorites: false,
             station_scroll: ScrollHandle::new(),
-            panel_scroll: ScrollHandle::new(),
+            panel_scroll,
+            media_output_focus,
         }
     });
     let focus = panel.read(cx).query.focus_handle(cx);
@@ -196,35 +207,99 @@ impl RadioPanel {
                     })),
             )
     }
-}
 
-impl Render for RadioPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let View::SignedIn(sidebar) = &self.spk.read(cx).view else {
-            return div();
-        };
-        if !sidebar
-            .voice
-            .as_ref()
-            .is_some_and(|voice| voice.is_participating())
-        {
-            return div().child(Label::new("Join a voice channel to use Radio."));
-        }
+    fn player(&self, sidebar: &Sidebar, cx: &Context<Self>) -> Option<Div> {
         let theme = cx.theme();
-        let padding = px(12.0);
         let radio = &sidebar.radio;
         let playback_action = radio.local_action();
-        let status = if playback_action == Some(RadioAction::Resume) {
-            "Paused for you"
-        } else if sidebar.voice_intent.mute.deafened {
-            "Deafened"
-        } else if playback_action == Some(RadioAction::Retry) {
-            "Stream unavailable. Retry or choose another."
-        } else if radio.playback == RadioPlayback::Playing {
-            "Playing"
-        } else {
-            "Connecting…"
-        };
+        radio
+            .station
+            .as_ref()
+            .zip(playback_action)
+            .map(|(station, action)| {
+                let status =
+                    playback_status(action, radio.playback, sidebar.voice_intent.mute.deafened);
+                let action_icon = match action {
+                    RadioAction::Pause => IconName::Pause,
+                    RadioAction::Resume => IconName::Play,
+                    RadioAction::Retry => IconName::RotateCw,
+                };
+                let volume_percent = format!("{:.0}%", self.volume.read(cx).value().start());
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_shrink_0()
+                    .gap(px(12.0))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .child(Label::new(station.name.clone()).font_semibold().truncate())
+                            .child(
+                                Label::new(status)
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                icon_label_button(
+                                    control_button("playback").small(),
+                                    action_icon,
+                                    action.label(),
+                                )
+                                .tab_stop(true)
+                                .on_click(cx.listener(
+                                    move |panel, _, _, cx| panel.send(action.command(), cx),
+                                )),
+                            )
+                            .child(
+                                icon_label_button(
+                                    control_button("stop").ghost().small(),
+                                    IconName::Square,
+                                    "Stop for everyone",
+                                )
+                                .tab_stop(true)
+                                .disabled(!radio.can_control_channel)
+                                .on_click(
+                                    cx.listener(|panel, _, _, cx| {
+                                        panel.send(Command::StopRadio, cx)
+                                    }),
+                                ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .flex()
+                                    .justify_between()
+                                    .child(Label::new("Volume (only you)").text_xs())
+                                    .child(
+                                        Label::new(volume_percent)
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground),
+                                    ),
+                            )
+                            .child(
+                                Slider::new(&self.volume)
+                                    .w_full()
+                                    .tab_stop(true)
+                                    .accessibility_label("Radio volume (only you)"),
+                            ),
+                    )
+            })
+    }
+
+    fn station_results(&self, sidebar: &Sidebar, cx: &Context<Self>) -> Stateful<Div> {
+        let theme = cx.theme();
+        let radio = &sidebar.radio;
         let entries = if self.favorites {
             &radio.favorites
         } else {
@@ -265,89 +340,8 @@ impl Render for RadioPanel {
             .or_else(|| {
                 status_message.map(|text| Label::new(text).text_color(theme.muted_foreground))
             });
-
-        let player =
-            radio
-                .station
-                .as_ref()
-                .zip(playback_action)
-                .map(|(station, action)| {
-                    let action_icon = match action {
-                        RadioAction::Pause => IconName::Pause,
-                        RadioAction::Resume => IconName::Play,
-                        RadioAction::Retry => IconName::RotateCw,
-                    };
-                    let volume_percent = format!("{:.0}%", self.volume.read(cx).value().start());
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_shrink_0()
-                        .gap(px(12.0))
-                        .child(
-                            div()
-                                .min_w_0()
-                                .child(Label::new(station.name.clone()).font_semibold().truncate())
-                                .child(
-                                    Label::new(status)
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .justify_between()
-                                .gap_2()
-                                .child(
-                                    icon_label_button(
-                                        control_button("playback").small(),
-                                        action_icon,
-                                        action.label(),
-                                    )
-                                    .tab_stop(true)
-                                    .on_click(cx.listener(
-                                        move |panel, _, _, cx| panel.send(action.command(), cx),
-                                    )),
-                                )
-                                .child(
-                                    icon_label_button(
-                                        control_button("stop").ghost().small(),
-                                        IconName::Square,
-                                        "Stop for everyone",
-                                    )
-                                    .tab_stop(true)
-                                    .disabled(!radio.can_control_channel)
-                                    .on_click(cx.listener(
-                                        |panel, _, _, cx| panel.send(Command::StopRadio, cx),
-                                    )),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .justify_between()
-                                        .child(Label::new("Volume (only you)").text_xs())
-                                        .child(
-                                            Label::new(volume_percent)
-                                                .text_xs()
-                                                .text_color(theme.muted_foreground),
-                                        ),
-                                )
-                                .child(
-                                    Slider::new(&self.volume)
-                                        .w_full()
-                                        .tab_stop(true)
-                                        .accessibility_label("Radio volume (only you)"),
-                                ),
-                        )
-                });
         let has_feedback = feedback.is_some();
-        let results = div()
+        div()
             .id("stations")
             .role(Role::Group)
             .aria_label("Radio stations")
@@ -366,8 +360,24 @@ impl Render for RadioPanel {
                         scroll: self.station_scroll.clone(),
                         content: self.station_row(station, sidebar, cx).into_any_element(),
                     }),
-            );
+            )
+    }
+}
 
+impl Render for RadioPanel {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let View::SignedIn(sidebar) = &self.spk.read(cx).view else {
+            return div();
+        };
+        if !sidebar
+            .voice
+            .as_ref()
+            .is_some_and(|voice| voice.is_participating())
+        {
+            return div().child(Label::new("Join a voice channel to use Radio."));
+        }
+        let theme = cx.theme();
+        let padding = px(12.0);
         let panel = div()
             .id("channel-radio")
             .flex()
@@ -382,10 +392,10 @@ impl Render for RadioPanel {
                     .child(themed_icon(IconName::Radio, theme.primary, 16.0))
                     .child(Label::new("Channel Radio").font_semibold()),
             )
-            .when(radio.station.is_none(), |body| {
+            .when(sidebar.radio.station.is_none(), |body| {
                 body.child(Label::new("Find a station to play in this channel.").flex_shrink_0().text_color(theme.muted_foreground))
             })
-            .children(player)
+            .children(self.player(sidebar, cx))
             .child(div().flex_shrink_0().h(px(1.0)).bg(theme.border))
             .child(div().flex().flex_shrink_0().gap_2()
                 .child(control_button("all-stations").ghost().small().label("All stations").selected(!self.favorites).tab_stop(true)
@@ -409,7 +419,7 @@ impl Render for RadioPanel {
                         .on_click(cx.listener(|panel, _, _, cx| panel.search(cx)))
                 ))
             )
-            .child(media_results(&self.station_scroll, results).h(px(240.0)).min_h(px(52.0)))
+            .child(media_results(&self.station_scroll, self.station_results(sidebar, cx)).h(px(240.0)).min_h(px(52.0)))
             .child(
                 Button::new("radio-browser").link().xsmall().px_0()
                     .w_full().flex_shrink_0()
@@ -418,7 +428,8 @@ impl Render for RadioPanel {
                     .on_click(|_, _, cx| cx.open_url("https://www.radio-browser.info/")),
             )
             .child(
-                div().flex().flex_col().flex_shrink_0().gap_1()
+                div().id("radio-media-output").track_focus(&self.media_output_focus)
+                    .flex().flex_col().flex_shrink_0().gap_1()
                     .mx(-padding).px(padding).pt_2()
                     .border_t_1().border_color(theme.border)
                     .child(Label::new("Media Output").text_xs().text_color(theme.muted_foreground))
@@ -430,5 +441,32 @@ impl Render for RadioPanel {
             .w_full()
             .child(panel)
             .child(overlay_scrollbar(&self.panel_scroll))
+    }
+}
+
+fn playback_status(action: RadioAction, playback: RadioPlayback, deafened: bool) -> &'static str {
+    if deafened {
+        "Deafened"
+    } else if action == RadioAction::Resume {
+        "Paused for you"
+    } else if action == RadioAction::Retry {
+        "Stream unavailable. Retry or choose another."
+    } else if playback == RadioPlayback::Playing {
+        "Playing"
+    } else {
+        "Connecting…"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RadioAction, RadioPlayback, playback_status};
+
+    #[test]
+    fn paused_radio_reports_when_the_listener_is_deafened() {
+        assert_eq!(
+            playback_status(RadioAction::Resume, RadioPlayback::Idle, true),
+            "Deafened"
+        );
     }
 }
