@@ -22,7 +22,7 @@ use super::{
 };
 use crate::{
     api::{AccountRole, Channel, Connection, VoiceModeration},
-    session::{AdminAccountAction, ChannelKind, Participant, VoiceView},
+    session::{AdminAccountAction, ChannelKind, Participant, RadioAction, VoiceView},
     voice::video::CameraStatus,
 };
 use sidebar_row_menu::SidebarRowMenu;
@@ -1204,6 +1204,16 @@ impl Spk {
         let can_join = sidebar.can_join_voice(&id);
         let participants = sidebar.participants(&id);
         let participant_count = participants.len();
+        let joined = call.is_some_and(|voice| voice.channel_id == id && voice.is_participating());
+        let radio_station = if joined {
+            sidebar
+                .radio
+                .station
+                .as_ref()
+                .map(|station| station.name.as_str())
+        } else {
+            sidebar.channel_radio.get(&id).map(String::as_str)
+        };
         let join_label = if sidebar.voice.is_some() {
             format!("Switch to {name}")
         } else {
@@ -1300,14 +1310,32 @@ impl Spk {
                             })),
                     )
                     .child(ellipsis)
-                    .children(sidebar.channel_radio.get(&channel.id).map(|station| {
+                    .children(radio_station.map(|station| {
+                        if let Some(action) = sidebar.radio.local_action().filter(|_| joined) {
+                            return tool_button(
+                                "radio-station",
+                                IconName::Radio,
+                                format!("{} Radio: {station}", action.label()),
+                            )
+                            .flex_shrink_0()
+                            .selected(action == RadioAction::Pause)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.send(action.command(), None, cx);
+                            }))
+                            .into_any_element();
+                        }
+                        let label = format!("Radio selected: {station}");
                         div()
                             .id("radio-station")
                             .role(Role::Image)
-                            .aria_label(format!("Radio playing {station}"))
+                            .aria_label(label.clone())
+                            .tooltip(move |window, cx| {
+                                floating_tooltip(Tooltip::new(label.clone()), cx).build(window, cx)
+                            })
                             .flex_shrink_0()
                             .px_1()
                             .child(themed_icon(IconName::Radio, theme.primary, 14.0))
+                            .into_any_element()
                     }))
                     .children(call.and_then(|call| {
                         self.leave_voice("leave", call, switching_here, false, cx)

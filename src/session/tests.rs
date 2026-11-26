@@ -356,6 +356,7 @@ enum SidebarSnapshot {
     VoiceReplaced,
     FailPresenceOnce,
     DelayUserPresence,
+    ControlledRadioDirectory,
     VoiceModeration {
         role: &'static str,
         channel: Option<&'static str>,
@@ -404,7 +405,7 @@ async fn voice_session_with_limit(
     let socket_endpoint = format!("ws://{}/_ws", sockets.local_addr().unwrap());
     let (command_tx, commands) = async_channel::unbounded();
     let (views, view_rx) = async_channel::unbounded();
-    let (token_requests, requests) = async_channel::unbounded();
+    let (controlled_requests, requests) = async_channel::unbounded();
     let (update_snapshots, updated) = watch::channel(SidebarSnapshot::Initial);
 
     let http = async move {
@@ -435,6 +436,7 @@ async fn voice_session_with_limit(
                     SidebarSnapshot::Initial
                     | SidebarSnapshot::AccountAdmin { .. }
                     | SidebarSnapshot::FailPresenceOnce
+                    | SidebarSnapshot::ControlledRadioDirectory
                     | SidebarSnapshot::DelayUserPresence => "[]",
                     SidebarSnapshot::VoiceModeration {
                         channel: Some(channel),
@@ -514,7 +516,7 @@ async fn voice_session_with_limit(
                 }
                 line if line.contains(" /api/invites") || line.contains(" /api/admin/users") => {
                     assert_eq!(request.header("cookie"), Some("session=fixture"));
-                    token_requests.send(request).await.unwrap();
+                    controlled_requests.send(request).await.unwrap();
                     continue;
                 }
 
@@ -522,21 +524,28 @@ async fn voice_session_with_limit(
                 "GET /api/users/presence HTTP/1.1"
                     if matches!(snapshot, SidebarSnapshot::DelayUserPresence) =>
                 {
-                    token_requests.send(request).await.unwrap();
+                    controlled_requests.send(request).await.unwrap();
                     continue;
                 }
                 "GET /api/users/presence HTTP/1.1" => "{}",
+                line if line.contains(" /api/radio/")
+                    && matches!(snapshot, SidebarSnapshot::ControlledRadioDirectory) =>
+                {
+                    assert_eq!(request.header("cookie"), Some("session=fixture"));
+                    controlled_requests.send(request).await.unwrap();
+                    continue;
+                }
                 line if line.contains(" /api/radio/") => {
                     radio::respond(line, request, &mut radio_favorite).await;
                     continue;
                 }
                 line if line.starts_with("GET /api/sounds") => {
                     assert_eq!(request.header("cookie"), Some("session=fixture"));
-                    token_requests.send(request).await.unwrap();
+                    controlled_requests.send(request).await.unwrap();
                     continue;
                 }
                 "POST /api/voice/token HTTP/1.1" => {
-                    token_requests.send(request).await.unwrap();
+                    controlled_requests.send(request).await.unwrap();
                     continue;
                 }
                 "POST /api/admin/voice/move HTTP/1.1"
@@ -546,7 +555,7 @@ async fn voice_session_with_limit(
                         payload.get("channelId").is_some(),
                         line == "POST /api/admin/voice/move HTTP/1.1",
                     );
-                    token_requests.send(request).await.unwrap();
+                    controlled_requests.send(request).await.unwrap();
                     continue;
                 }
                 _ => panic!("unexpected request: {line}"),

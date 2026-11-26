@@ -1,9 +1,6 @@
 use super::{VoiceButtonGroup, VoiceControls, voice_action_button, voice_popover};
-use crate::ui::{
-    radio::{RadioAction, radio_panel},
-    soundboard::soundboard_panel,
-    *,
-};
+use crate::session::RadioAction;
+use crate::ui::{radio::radio_panel, soundboard::soundboard_panel, *};
 
 type MediaPanel = fn(Entity<Spk>, u8, &mut Window, &mut App) -> (AnyView, FocusHandle);
 
@@ -39,10 +36,7 @@ impl Spk {
         cx: &Context<Self>,
     ) -> [impl IntoElement + use<>; 2] {
         let radio = MediaControl::Radio {
-            action: RadioAction::for_primary(
-                sidebar.radio.station.is_some(),
-                sidebar.radio.enabled,
-            ),
+            action: sidebar.radio.local_action(),
             volume: sidebar.radio.volume,
         };
         let soundboard = MediaControl::Soundboard {
@@ -146,7 +140,7 @@ impl RenderOnce for MediaButton {
         );
         let dot_color = cx.theme().primary;
         let popover = if primary.is_some() {
-            floating_popover(id, cx).w(width)
+            floating_popover(id, cx).w(width).p_0()
         } else {
             voice_popover(id, width, cx, move |_| {
                 voice_action_button(
@@ -195,10 +189,7 @@ impl RenderOnce for MediaButton {
     }
 }
 
-pub(in crate::ui) fn media_results(
-    scroll: &ScrollHandle,
-    results: Stateful<Div>,
-) -> impl IntoElement + use<> {
+pub(in crate::ui) fn media_results(scroll: &ScrollHandle, results: Stateful<Div>) -> Div {
     div()
         .relative()
         .child(
