@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.0](https://github.com/ChristopheCVB/spk-gpui/compare/v0.10.0...v0.11.0) (2026-11-26)
+
+
+### Features
+
+* refine desktop sidebar and composer ([#232](https://github.com/ChristopheCVB/spk-gpui/issues/232)) ([784213a](https://github.com/ChristopheCVB/spk-gpui/commit/784213a0a2166dee3b8c846f966105a4984563e6))
+
 ## [0.10.0](https://github.com/ChristopheCVB/spk-gpui/compare/v0.9.0...v0.10.0) (2026-11-25)
 
 
