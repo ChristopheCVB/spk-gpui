@@ -727,10 +727,13 @@ class Desktop:
         wait_for("the station star to be a separate Tab stop",
                  lambda: self.focused(add, "push button"))
         self.key("space")
-        self.find(remove, "push button")
+        wait_for("focus to stay on the star after adding a Favorite",
+                 lambda: self.focused(remove, "push button"))
         self.absent("Stop for everyone", "push button")
 
-        self.tab_to(station, "push button")
+        self.key("shift+Tab")
+        wait_for("Shift+Tab to return to the station",
+                 lambda: self.focused(station, "push button"))
         self.key("Return")
         self.find("Stop for everyone", "push button")
         slider = self.bounds("Radio volume (only you)", "slider")

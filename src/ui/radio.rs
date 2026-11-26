@@ -171,27 +171,19 @@ impl RadioPanel {
                     ),
             )
             .child(
-                tool_button(
-                    if favorite {
-                        "remove-favorite"
-                    } else {
-                        "add-favorite"
-                    },
-                    IconName::Star,
-                    favorite_label,
-                )
-                .selected(favorite)
-                .disabled(radio.favorites.is_none() || radio.loading_favorites)
-                .when(favorite, |button| button.bg(cx.theme().accent))
-                .on_click(cx.listener(move |panel, _, _, cx| {
-                    panel.send(
-                        Command::SetRadioFavorite {
-                            id: id_for_favorite.clone(),
-                            saved: !favorite,
-                        },
-                        cx,
-                    )
-                })),
+                tool_button("favorite", IconName::Star, favorite_label)
+                    .selected(favorite)
+                    .disabled(radio.favorites.is_none() || radio.loading_favorites)
+                    .when(favorite, |button| button.text_color(cx.theme().primary))
+                    .on_click(cx.listener(move |panel, _, _, cx| {
+                        panel.send(
+                            Command::SetRadioFavorite {
+                                id: id_for_favorite.clone(),
+                                saved: !favorite,
+                            },
+                            cx,
+                        )
+                    })),
             )
     }
 }
@@ -400,12 +392,12 @@ impl Render for RadioPanel {
             .child(
                 div().flex().flex_shrink_0().items_center().justify_between().gap_2()
                     .child(
-                        Button::new("radio-browser").link().small().px_0()
+                        Button::new("radio-browser").link().xsmall().px_0()
                             .label("Stations from Radio Browser")
                             .tab_stop(true)
                             .on_click(|_, _, cx| cx.open_url("https://www.radio-browser.info/")),
                     )
-                    .child(div().w(px(128.0)).min_w_0()
+                    .child(div().w(px(136.0)).min_w_0()
                         .child(Label::new("Media Output").text_xs().text_color(theme.muted_foreground))
                         .child(device_picker(sidebar, DeviceKind::MediaOutput, &self.spk))),
             );
