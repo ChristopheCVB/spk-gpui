@@ -406,17 +406,14 @@ impl VoiceSession {
             .then_some((self.call.as_ref()?.sid(), voice.channel_id.as_str()))
     }
 
+    pub(super) fn active_socket_sid<'a>(&'a self, sidebar: &Sidebar) -> Option<&'a str> {
+        self.socket.as_ref()?;
+        self.active_call_sid(sidebar)
+    }
+
     pub(super) fn active_socket(&self, sidebar: &Sidebar) -> Option<(VoiceSocket, String)> {
-        let (sid, _) = self.radio_scope(sidebar)?;
-        sidebar.voice.as_ref()?.is_participating().then(|| {
-            (
-                self.socket
-                    .as_ref()
-                    .expect("scope has a voice socket")
-                    .clone(),
-                sid.to_owned(),
-            )
-        })
+        let sid = self.active_socket_sid(sidebar)?;
+        Some((self.socket.as_ref()?.clone(), sid.to_owned()))
     }
 
     pub(super) fn set_radio_listening(&self, sidebar: &mut Sidebar, listening: bool) {
