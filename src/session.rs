@@ -67,7 +67,7 @@ pub use {
     },
     presence::Participant,
     profiles::ProfileEdit,
-    radio::RadioPlayback,
+    radio::{RadioAction, RadioPlayback},
     soundboard_admin::{
         SoundboardAdminAction, SoundboardCrop, SoundboardPreview, SoundboardTrim,
         SoundboardWaveform,

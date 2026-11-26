@@ -120,12 +120,14 @@ async fn channel_radio_uses_shared_station_and_local_controls() {
                 );
             },
             async |commands, views| {
-                wait_for_sidebar(&views, |s| {
+                let outside = wait_for_sidebar(&views, |s| {
                     s.channel_radio
                         .get("second")
                         .is_some_and(|name| name == "Peer station")
                 })
                 .await;
+                assert!(!outside.radio.can_control_channel);
+                assert_eq!(outside.radio.local_action(), None);
                 join_test_voice(&commands, &views).await;
                 commands.send(Command::RadioFavorites).await.unwrap();
                 wait_for_sidebar(&views, |s| s.radio.favorites.is_some()).await;
@@ -180,6 +182,19 @@ async fn channel_radio_uses_shared_station_and_local_controls() {
                     .send(Command::SelectRadio(STATION.into()))
                     .await
                     .unwrap();
+                let unavailable =
+                    wait_for_sidebar(&views, |s| s.radio.playback == RadioPlayback::Unavailable)
+                        .await;
+                assert!(unavailable.radio.can_control_channel);
+                assert_eq!(unavailable.radio.local_action(), Some(RadioAction::Retry));
+                commands
+                    .send(unavailable.radio.local_action().unwrap().command())
+                    .await
+                    .unwrap();
+                let retrying =
+                    wait_for_sidebar(&views, |s| s.radio.playback == RadioPlayback::Connecting)
+                        .await;
+                assert_eq!(retrying.radio.local_action(), Some(RadioAction::Pause));
                 wait_for_sidebar(&views, |s| s.radio.playback == RadioPlayback::Unavailable).await;
                 commands.send(Command::StopRadio).await.unwrap();
                 let failed_stop = wait_for_sidebar(&views, |s| {
@@ -187,6 +202,7 @@ async fn channel_radio_uses_shared_station_and_local_controls() {
                 })
                 .await;
                 assert_eq!(failed_stop.radio.playback, RadioPlayback::Unavailable);
+                assert_eq!(failed_stop.radio.local_action(), Some(RadioAction::Retry));
                 assert_eq!(
                     failed_stop.radio.station.as_ref().unwrap().name,
                     "Shared jazz"
@@ -199,10 +215,13 @@ async fn channel_radio_uses_shared_station_and_local_controls() {
                 })
                 .await;
                 assert_eq!(paused.radio.station.as_ref().unwrap().name, "Shared jazz");
-                assert!(!paused.radio.enabled);
-                commands.send(Command::ListenToRadio).await.unwrap();
+                assert_eq!(paused.radio.local_action(), Some(RadioAction::Resume));
+                commands
+                    .send(paused.radio.local_action().unwrap().command())
+                    .await
+                    .unwrap();
                 wait_for_sidebar(&views, |s| {
-                    s.radio.enabled && s.radio.playback == RadioPlayback::Unavailable
+                    s.radio.local_action() == Some(RadioAction::Retry)
                 })
                 .await;
                 commands
@@ -221,6 +240,8 @@ async fn channel_radio_uses_shared_station_and_local_controls() {
                 commands.send(Command::LeaveVoice).await.unwrap();
                 let left = wait_for_sidebar(&views, |s| s.voice.is_none()).await;
                 assert!(left.radio.station.is_none());
+                assert!(!left.radio.can_control_channel);
+                assert_eq!(left.radio.local_action(), None);
                 assert_eq!(left.radio.playback, RadioPlayback::Idle);
             },
         )
