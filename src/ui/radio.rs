@@ -37,9 +37,17 @@ pub(super) fn radio_panel(
     window: &mut Window,
     cx: &mut App,
 ) -> (AnyView, FocusHandle) {
+    let previous_query = match &spk.read(cx).view {
+        View::SignedIn(sidebar) => sidebar.radio.search_query.clone(),
+        _ => String::new(),
+    };
     let panel = cx.new(|cx: &mut Context<RadioPanel>| {
         cx.observe(&spk, |_, _, cx| cx.notify()).detach();
-        let query = cx.new(|cx| InputState::new(window, cx).placeholder("Search stations"));
+        let query = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Search stations")
+                .default_value(previous_query)
+        });
         cx.subscribe(&query, |panel, _, event, cx| {
             if !panel.favorites && matches!(event, InputEvent::PressEnter { .. }) {
                 panel.search(cx);
@@ -159,6 +167,8 @@ impl RadioPanel {
                                     .child(
                                         Label::new(if station.available == Some(false) {
                                             "Unavailable".to_owned()
+                                        } else if self.favorites && station.available.is_none() {
+                                            "Availability unknown".to_owned()
                                         } else {
                                             format!("{} · {}", station.country, station.codec)
                                         })
@@ -173,7 +183,11 @@ impl RadioPanel {
             .child(
                 tool_button("favorite", IconName::Star, favorite_label)
                     .selected(favorite)
-                    .disabled(radio.favorites.is_none() || radio.loading_favorites)
+                    .disabled(
+                        radio.favorites.is_none()
+                            || radio.loading_favorites
+                            || radio.saving_favorite,
+                    )
                     .when(favorite, |button| button.text_color(cx.theme().primary))
                     .on_click(cx.listener(move |panel, _, _, cx| {
                         panel.send(
@@ -219,10 +233,10 @@ impl Render for RadioPanel {
         } else {
             &radio.stations
         };
-        let display_loading = if self.favorites {
-            radio.loading_favorites
+        let error = if self.favorites {
+            radio.favorites_error
         } else {
-            radio.searching
+            radio.search_error
         };
         let query = self.query.read(cx).value().trim().to_lowercase();
         let stations = entries
@@ -230,6 +244,30 @@ impl Render for RadioPanel {
             .flatten()
             .filter(|station| !self.favorites || station.name.to_lowercase().contains(&query))
             .collect::<Vec<_>>();
+        let status_message = if self.favorites {
+            if radio.loading_favorites {
+                Some("Loading Favorites…")
+            } else if radio.saving_favorite {
+                Some("Updating Favorites…")
+            } else if radio.favorites.as_ref().is_some_and(Vec::is_empty) {
+                Some("No saved stations.")
+            } else if radio.favorites.is_some() && stations.is_empty() {
+                Some("No Favorites match.")
+            } else {
+                None
+            }
+        } else if radio.searching {
+            Some("Searching…")
+        } else if radio.stations.as_ref().is_some_and(Vec::is_empty) {
+            Some("No stations found.")
+        } else {
+            None
+        };
+        let feedback = error
+            .map(|text| Label::new(text).text_color(theme.danger))
+            .or_else(|| {
+                status_message.map(|text| Label::new(text).text_color(theme.muted_foreground))
+            });
 
         let player =
             radio
@@ -311,23 +349,7 @@ impl Render for RadioPanel {
                                 ),
                         )
                 });
-        let feedback = radio
-            .directory_error
-            .map(|error| (error, theme.danger))
-            .or_else(|| {
-                let message = if display_loading {
-                    "Loading…"
-                } else if entries.is_some() && stations.is_empty() {
-                    if self.favorites {
-                        "No Favorites match."
-                    } else {
-                        "No stations found."
-                    }
-                } else {
-                    return None;
-                };
-                Some((message, theme.muted_foreground))
-            });
+        let has_feedback = feedback.is_some();
         let results = div()
             .id("stations")
             .role(Role::Group)
@@ -336,14 +358,14 @@ impl Render for RadioPanel {
             .flex_col()
             .h_full()
             .gap(px(4.0))
-            .children(feedback.map(|(message, color)| Label::new(message).text_color(color)))
+            .children(feedback)
             .children(
                 stations
                     .into_iter()
                     .enumerate()
                     .map(|(index, station)| MediaResult {
                         id: station.id.clone().into(),
-                        index: index + usize::from(feedback.is_some()),
+                        index: index + usize::from(has_feedback),
                         scroll: self.station_scroll.clone(),
                         content: self.station_row(station, sidebar, cx).into_any_element(),
                     }),
@@ -375,7 +397,8 @@ impl Render for RadioPanel {
                     })))
                 .child(icon_label_button(control_button("favorites").ghost().small(), IconName::Star, "Favorites").selected(self.favorites).tab_stop(true)
                     .on_click(cx.listener(|panel, _, _, cx| {
-                        let load = matches!(&panel.spk.read(cx).view, View::SignedIn(sidebar) if sidebar.radio.favorites.is_none());
+                        let load = matches!(&panel.spk.read(cx).view, View::SignedIn(sidebar)
+                            if sidebar.radio.favorites.is_none() && sidebar.radio.favorites_error.is_none());
                         panel.favorites = true;
                         if load { panel.send(Command::RadioFavorites, cx); }
                         cx.notify();
