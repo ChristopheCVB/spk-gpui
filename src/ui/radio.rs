@@ -5,45 +5,19 @@ use super::{
     },
     *,
 };
-use crate::{api::RadioStation, session::RadioPlayback};
+use crate::{
+    api::RadioStation,
+    session::{RadioAction, RadioPlayback},
+};
 use gpui_kit::component::Disableable;
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState, SliderValue};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum RadioAction {
-    Pause,
-    Resume,
-    Retry,
-}
-
 impl RadioAction {
-    pub(super) fn for_primary(station_selected: bool, enabled: bool) -> Option<Self> {
-        station_selected.then_some(if enabled { Self::Pause } else { Self::Resume })
-    }
-
-    pub(super) fn for_sidebar(sidebar: &Sidebar) -> Option<Self> {
-        let radio = &sidebar.radio;
-        Self::for_primary(radio.station.is_some(), radio.enabled).map(|action| {
-            if action == Self::Pause && radio.playback == RadioPlayback::Unavailable {
-                Self::Retry
-            } else {
-                action
-            }
-        })
-    }
-
     pub(super) fn label(self) -> &'static str {
         match self {
             Self::Pause => "Pause",
             Self::Resume => "Resume",
             Self::Retry => "Retry",
-        }
-    }
-
-    pub(super) fn command(self) -> Command {
-        match self {
-            Self::Pause => Command::PauseRadio,
-            Self::Resume | Self::Retry => Command::ListenToRadio,
         }
     }
 }
@@ -151,10 +125,7 @@ impl RadioPanel {
                     .flex_1()
                     .min_w_0()
                     .tab_stop(true)
-                    .disabled(
-                        station.available == Some(false)
-                            || !matches!(sidebar.connection, crate::api::Connection::Online),
-                    )
+                    .disabled(station.available == Some(false) || !radio.can_control_channel)
                     .accessibility_label(select_label)
                     .on_click(cx.listener(move |panel, _, _, cx| {
                         panel.send(Command::SelectRadio(id.clone()), cx)
@@ -221,13 +192,13 @@ impl Render for RadioPanel {
         }
         let theme = cx.theme();
         let radio = &sidebar.radio;
-        let playback_action = RadioAction::for_sidebar(sidebar);
+        let playback_action = radio.local_action();
         let status = if playback_action == Some(RadioAction::Resume) {
             "Paused for you"
-        } else if playback_action == Some(RadioAction::Retry) {
-            "Stream unavailable. Retry or choose another."
         } else if sidebar.voice_intent.mute.deafened {
             "Deafened"
+        } else if playback_action == Some(RadioAction::Retry) {
+            "Stream unavailable. Retry or choose another."
         } else if radio.playback == RadioPlayback::Playing {
             "Playing"
         } else {
@@ -303,7 +274,7 @@ impl Render for RadioPanel {
                         )
                         .child(
                             control_button("stop").ghost().small().label("Stop for everyone").tab_stop(true)
-                                .disabled(!matches!(sidebar.connection, crate::api::Connection::Online))
+                                .disabled(!radio.can_control_channel)
                                 .on_click(cx.listener(|panel, _, _, cx| panel.send(Command::StopRadio, cx))),
                         )
                     )
@@ -351,23 +322,5 @@ impl Render for RadioPanel {
                 div().child(Label::new("Media Output").text_xs())
                     .child(device_picker(sidebar, DeviceKind::MediaOutput, &self.spk)),
             )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{Command, RadioAction};
-
-    #[test]
-    fn primary_radio_action_toggles_listening_when_a_station_is_selected() {
-        assert!(RadioAction::for_primary(false, true).is_none());
-        assert!(matches!(
-            RadioAction::for_primary(true, true).map(RadioAction::command),
-            Some(Command::PauseRadio)
-        ));
-        assert!(matches!(
-            RadioAction::for_primary(true, false).map(RadioAction::command),
-            Some(Command::ListenToRadio)
-        ));
     }
 }

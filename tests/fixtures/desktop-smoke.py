@@ -792,6 +792,8 @@ class Desktop:
         self.find(soul, button)
         if self.find(search, "entry").get_text_iface().get_text(0, -1) != "Smoke":
             raise RuntimeError("Radio did not reopen with the query for its retained results")
+        wait_for("the Favorites refresh to enable the star", lambda: self.find(remove, button)
+                 .get_state_set().contains(Atspi.StateType.SENSITIVE))
         self.click(remove, button)
         self.find(add, button)
         self.click("Favorites", button)

@@ -11,6 +11,22 @@ use crate::{
 
 pub use crate::voice::radio::RadioPlayback;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RadioAction {
+    Pause,
+    Resume,
+    Retry,
+}
+
+impl RadioAction {
+    pub fn command(self) -> Command {
+        match self {
+            Self::Pause => Command::PauseRadio,
+            Self::Resume | Self::Retry => Command::ListenToRadio,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct RadioView {
     pub station: Option<RadioStation>,
@@ -20,7 +36,8 @@ pub struct RadioView {
     pub searching: bool,
     pub loading_favorites: bool,
     pub saving_favorite: bool,
-    pub enabled: bool,
+    enabled: bool,
+    pub can_control_channel: bool,
     pub volume: u8,
     pub playback: RadioPlayback,
     pub search_error: Option<&'static str>,
@@ -38,11 +55,25 @@ impl Default for RadioView {
             loading_favorites: false,
             saving_favorite: false,
             enabled: true,
+            can_control_channel: false,
             volume: 100,
             playback: RadioPlayback::Idle,
             search_error: None,
             favorites_error: None,
         }
+    }
+}
+
+impl RadioView {
+    pub fn local_action(&self) -> Option<RadioAction> {
+        self.station.as_ref()?;
+        Some(if !self.enabled {
+            RadioAction::Resume
+        } else if self.playback == RadioPlayback::Unavailable {
+            RadioAction::Retry
+        } else {
+            RadioAction::Pause
+        })
     }
 }
 
@@ -73,6 +104,7 @@ impl RadioSession {
             self.player = None;
             sidebar.radio.station = None;
         }
+        sidebar.radio.can_control_channel = voice.active_socket_sid(sidebar).is_some();
         let preferences = &sidebar.voice_intent.preferred;
         sidebar.radio.volume = preferences.radio_volume.min(200);
         let output = MediaOutput {
