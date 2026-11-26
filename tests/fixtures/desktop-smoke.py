@@ -690,6 +690,86 @@ class Desktop:
         self.click("Leave voice", "menu item")
         self.find(f"Join {FIRST_VOICE}", "push button")
 
+    def check_radio_keyboard(self, logs):
+        search = "Search radio stations"
+        options = "Radio options"
+        station = "Play Smoke Jazz for everyone"
+        add = "Add Smoke Jazz to Favorites"
+        remove = "Remove Smoke Jazz from Favorites"
+        credit = "Stations from Radio Browser"
+        stage = ("Voice controls", "tool bar")
+
+        def open_radio(opener, within=None):
+            self.tab_to(opener, "push button", within=within)
+            self.key("Return")
+            wait_for("initial Channel Radio search focus", lambda: self.focused(search, "entry"))
+
+        def close_radio(opener, within=None):
+            self.key("Escape")
+            wait_for("focus to return to the Channel Radio opener",
+                     lambda: self.focused(opener, "push button", within=within))
+            self.absent(search, "entry")
+
+        self.click(f"Join {FIRST_VOICE}", "push button")
+        self.click("smoke-target", "push button", partial=True)
+        open_radio("Channel Radio")
+        self.find("Find a station to play in this channel.")
+        close_radio("Channel Radio")
+
+        self.click(f"Show {FIRST_VOICE} voice channel", "push button")
+        open_radio(options, within=stage)
+        self.key("ctrl+a")
+        subprocess.run(["xdotool", "type", "--clearmodifiers", "--", "Smoke"], check=True)
+        self.key("Return")
+        self.find(station, "push button")
+        self.tab_to(station, "push button")
+        self.key("Tab")
+        wait_for("the station star to be a separate Tab stop",
+                 lambda: self.focused(add, "push button"))
+        self.key("space")
+        self.find(remove, "push button")
+        self.absent("Stop for everyone", "push button")
+
+        self.tab_to(station, "push button")
+        self.key("Return")
+        self.find("Stop for everyone", "push button")
+        slider = self.bounds("Radio volume (only you)", "slider")
+        volume = self.bounds("Volume (only you)")
+        if slider.y < volume.y + volume.height or slider.width < 250:
+            raise RuntimeError("Radio volume should be a full-width slider below its label")
+        self.find("Media Output", "combo box")
+        self.external_link("https://www.radio-browser.info/", lambda: self.click(credit, "link"))
+        results = self.bounds("Radio stations")
+        if not 238 <= results.height <= 242:
+            raise RuntimeError(f"Radio stations should be about 240 px high, got {results.height}")
+        self.screenshot(logs, "radio-all-stations-dark.png")
+        self.click("Favorites", "push button")
+        self.find(remove, "push button")
+        self.screenshot(logs, "radio-favorites-dark.png")
+        close_radio(options, within=stage)
+
+        geometry = subprocess.check_output(
+            ["xdotool", "getwindowgeometry", "--shell", self.window], text=True,
+        )
+        normal = re.findall(r"^(?:WIDTH|HEIGHT)=(\d+)$", geometry, re.MULTILINE)
+        try:
+            subprocess.run(["xdotool", "windowsize", "--sync", self.window, "560", "440"], check=True)
+            open_radio(options, within=stage)
+            self.find(station, "push button")
+            reduced = self.bounds("Radio stations")
+            footer = self.bounds("Media Output", "combo box")
+            if not 0 < reduced.height < results.height or footer.y + footer.height > 440:
+                raise RuntimeError("Radio should shrink the station list and fit the footer at 560 × 440")
+            self.screenshot(logs, "radio-minimum-dark.png")
+            self.click("Stop for everyone", "push button")
+            self.find("Find a station to play in this channel.")
+            close_radio(options, within=stage)
+        finally:
+            subprocess.run(["xdotool", "windowsize", "--sync", self.window, *normal], check=True)
+        self.click(f"Show {FIRST_VOICE} voice channel", "push button")
+        self.click("Leave voice", "push button", within=stage)
+        self.find(f"Join {FIRST_VOICE}", "push button")
+
     def check_admin_menus(self, logs, admin, server, check_settings):
         person = "Smoke Reader"
 
@@ -1545,6 +1625,7 @@ def main(work, artifacts):
                 desktop.sign_in(EMAIL, "Smoke Reader")
                 desktop.check(post_live_alert, logs)
                 desktop.check_reader_menus(logs)
+                desktop.check_radio_keyboard(logs)
                 desktop.check_incoming_toast(logs, send_message, alerts, reader)
                 desktop.check_upload_recovery()
                 desktop.check_sidebar_resize_retries_save(Path(env["XDG_CONFIG_HOME"]) / "spk-gpui")

@@ -54,6 +54,7 @@ struct RadioPanel {
     volume: Entity<SliderState>,
     favorites: bool,
     station_scroll: ScrollHandle,
+    panel_scroll: ScrollHandle,
 }
 
 pub(super) fn radio_panel(
@@ -90,6 +91,7 @@ pub(super) fn radio_panel(
             volume,
             favorites: false,
             station_scroll: ScrollHandle::new(),
+            panel_scroll: ScrollHandle::new(),
         }
     });
     let focus = panel.read(cx).query.focus_handle(cx);
@@ -134,7 +136,8 @@ impl RadioPanel {
         };
         div()
             .flex()
-            .gap_1()
+            .flex_shrink_0()
+            .gap(px(4.0))
             .items_center()
             .child(
                 Button::new("select")
@@ -142,6 +145,9 @@ impl RadioPanel {
                     .selected(selected)
                     .flex_1()
                     .min_w_0()
+                    .h_auto()
+                    .px_2()
+                    .py(px(6.0))
                     .tab_stop(true)
                     .disabled(
                         station.available == Some(false)
@@ -156,16 +162,40 @@ impl RadioPanel {
                             .min_w_0()
                             .w_full()
                             .flex()
-                            .flex_col()
-                            .child(Label::new(station.name.clone()).truncate())
+                            .items_center()
+                            .gap_2()
                             .child(
-                                Label::new(if station.available == Some(false) {
-                                    "Unavailable".to_owned()
+                                Icon::new(if selected {
+                                    IconName::Radio
                                 } else {
-                                    format!("{} · {}", station.country, station.codec)
+                                    IconName::Play
                                 })
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground),
+                                .size(ACTION_ICON_SIZE)
+                                .flex_shrink_0()
+                                .when(selected, |icon| icon.text_color(cx.theme().primary)),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .child(
+                                        Label::new(station.name.clone())
+                                            .line_height(px(20.0))
+                                            .truncate(),
+                                    )
+                                    .child(
+                                        Label::new(if station.available == Some(false) {
+                                            "Unavailable".to_owned()
+                                        } else {
+                                            format!("{} · {}", station.country, station.codec)
+                                        })
+                                        .text_xs()
+                                        .line_height(px(16.0))
+                                        .text_color(cx.theme().muted_foreground)
+                                        .truncate(),
+                                    ),
                             ),
                     ),
             )
@@ -221,11 +251,6 @@ impl Render for RadioPanel {
         } else {
             "Connecting…"
         };
-        let reserved_height = if radio.station.is_some() {
-            365.0
-        } else {
-            275.0
-        };
         let entries = if self.favorites {
             &radio.favorites
         } else {
@@ -243,47 +268,152 @@ impl Render for RadioPanel {
             .filter(|station| !self.favorites || station.name.to_lowercase().contains(&query))
             .collect::<Vec<_>>();
 
-        div()
+        let player =
+            radio
+                .station
+                .as_ref()
+                .zip(playback_action)
+                .map(|(station, action)| {
+                    let action_icon = match action {
+                        RadioAction::Pause => IconName::Pause,
+                        RadioAction::Resume => IconName::Play,
+                        RadioAction::Retry => IconName::RotateCw,
+                    };
+                    let volume_percent = format!("{:.0}%", self.volume.read(cx).value().start());
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_shrink_0()
+                        .gap(px(12.0))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .child(Label::new(station.name.clone()).font_semibold().truncate())
+                                .child(
+                                    Label::new(status)
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .justify_between()
+                                .gap_2()
+                                .child(
+                                    icon_label_button(
+                                        control_button("playback").small(),
+                                        action_icon,
+                                        action.label(),
+                                    )
+                                    .tab_stop(true)
+                                    .on_click(cx.listener(
+                                        move |panel, _, _, cx| panel.send(action.command(), cx),
+                                    )),
+                                )
+                                .child(
+                                    icon_label_button(
+                                        control_button("stop").ghost().small(),
+                                        IconName::Square,
+                                        "Stop for everyone",
+                                    )
+                                    .tab_stop(true)
+                                    .disabled(!matches!(
+                                        sidebar.connection,
+                                        crate::api::Connection::Online
+                                    ))
+                                    .on_click(cx.listener(
+                                        |panel, _, _, cx| panel.send(Command::StopRadio, cx),
+                                    )),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .justify_between()
+                                        .child(Label::new("Volume (only you)").text_xs())
+                                        .child(
+                                            Label::new(volume_percent)
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground),
+                                        ),
+                                )
+                                .child(
+                                    Slider::new(&self.volume)
+                                        .w_full()
+                                        .tab_stop(true)
+                                        .accessibility_label("Radio volume (only you)"),
+                                ),
+                        )
+                });
+        let feedback = radio
+            .directory_error
+            .map(|error| (error, theme.danger))
+            .or_else(|| {
+                let message = if display_loading {
+                    "Loading…"
+                } else if entries.is_some() && stations.is_empty() {
+                    if self.favorites {
+                        "No Favorites match."
+                    } else {
+                        "No stations found."
+                    }
+                } else {
+                    return None;
+                };
+                Some((message, theme.muted_foreground))
+            });
+        let results = div()
+            .id("stations")
+            .role(Role::Group)
+            .aria_label("Radio stations")
             .flex()
             .flex_col()
-            .gap_2()
+            .h_full()
+            .gap(px(4.0))
+            .children(feedback.map(|(message, color)| Label::new(message).text_color(color)))
+            .children(
+                stations
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, station)| MediaResult {
+                        id: station.id.clone().into(),
+                        index: index + usize::from(feedback.is_some()),
+                        scroll: self.station_scroll.clone(),
+                        content: self.station_row(station, sidebar, cx).into_any_element(),
+                    }),
+            );
+
+        let panel = div()
+            .id("channel-radio")
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .max_h(window.viewport_size().height - px(40.0))
+            .overflow_y_scroll()
+            .track_scroll(&self.panel_scroll)
             .child(
-                div().flex().items_center().gap_2()
+                div().flex().flex_shrink_0().items_center().gap_2()
                     .child(themed_icon(IconName::Radio, theme.primary, 16.0))
                     .child(Label::new("Channel Radio").font_semibold()),
             )
             .when(radio.station.is_none(), |body| {
-                body.child(Label::new("Find a station to play in this channel.").text_color(theme.muted_foreground))
+                body.child(Label::new("Find a station to play in this channel.").flex_shrink_0().text_color(theme.muted_foreground))
             })
-            .children(radio.station.as_ref().zip(playback_action).map(|(station, action)| {
-                div().flex().flex_col().gap_2()
-                    .child(Label::new(station.name.clone()).font_semibold().truncate())
-                    .child(Label::new(status).text_xs().text_color(theme.muted_foreground))
-                    .child(div().flex().gap_2()
-                        .child(
-                            control_button("playback").small().label(action.label())
-                                .tab_stop(true)
-                                .on_click(cx.listener(move |panel, _, _, cx| panel.send(action.command(), cx))),
-                        )
-                        .child(
-                            control_button("stop").ghost().small().label("Stop for everyone").tab_stop(true)
-                                .disabled(!matches!(sidebar.connection, crate::api::Connection::Online))
-                                .on_click(cx.listener(|panel, _, _, cx| panel.send(Command::StopRadio, cx))),
-                        )
-                    )
-                    .child(div().flex().items_center().gap_2()
-                        .child(Label::new("Volume (only you)").text_xs())
-                        .child(Slider::new(&self.volume).flex_1().tab_stop(true).accessibility_label("Radio volume (only you)"))
-                        .child(Label::new(format!("{:.0}%", self.volume.read(cx).value().start())).text_xs())
-                    )
-            }))
-            .child(div().flex().gap_2()
-                .child(control_button("all-stations").small().label("All stations").selected(!self.favorites).tab_stop(true)
+            .children(player)
+            .child(div().flex_shrink_0().h(px(1.0)).bg(theme.border))
+            .child(div().flex().flex_shrink_0().gap_2()
+                .child(control_button("all-stations").ghost().small().label("All stations").selected(!self.favorites).tab_stop(true)
                     .on_click(cx.listener(|panel, _, _, cx| {
                         panel.favorites = false;
                         cx.notify();
                     })))
-                .child(icon_label_button(control_button("favorites"), IconName::Star, "Favorites").selected(self.favorites).tab_stop(true)
+                .child(icon_label_button(control_button("favorites").ghost().small(), IconName::Star, "Favorites").selected(self.favorites).tab_stop(true)
                     .on_click(cx.listener(|panel, _, _, cx| {
                         let load = matches!(&panel.spk.read(cx).view, View::SignedIn(sidebar) if sidebar.radio.favorites.is_none());
                         panel.favorites = true;
@@ -291,34 +421,32 @@ impl Render for RadioPanel {
                         cx.notify();
                     })))
             )
-            .child(div().flex().gap_2()
+            .child(div().flex().flex_shrink_0().gap_2()
                 .child(Input::new(&self.query).flex_1().min_w_0().aria_label(if self.favorites { "Filter Favorites" } else { "Search radio stations" }))
                 .when(!self.favorites, |row| row.child(
                     tool_button("search", IconName::Search, "Find stations").primary()
                         .on_click(cx.listener(|panel, _, _, cx| panel.search(cx)))
                 ))
             )
-            .children(radio.directory_error.map(|error| Label::new(error).text_color(theme.danger)))
-            .when(display_loading, |body| body.child(Label::new("Loading…").text_color(theme.muted_foreground)))
-            .when(!display_loading && entries.is_some() && stations.is_empty(), |body| {
-                body.child(Label::new(if self.favorites { "No Favorites match." } else { "No stations found." })
-                    .text_color(theme.muted_foreground))
-            })
-            .child(media_results(
-                &self.station_scroll,
-                div().id("stations").flex().flex_col()
-                    .max_h((window.viewport_size().height - px(reserved_height)).min(px(224.0)))
-                    .children(stations.into_iter().enumerate().map(|(index, station)| MediaResult {
-                        id: station.id.clone().into(),
-                        index,
-                        scroll: self.station_scroll.clone(),
-                        content: self.station_row(station, sidebar, cx).into_any_element(),
-                    })),
-            ))
+            .child(media_results(&self.station_scroll, results).h(px(240.0)).min_h(px(52.0)))
             .child(
-                div().child(Label::new("Media Output").text_xs())
-                    .child(device_picker(sidebar, DeviceKind::MediaOutput, &self.spk)),
-            )
+                div().flex().flex_shrink_0().items_center().justify_between().gap_2()
+                    .child(
+                        Button::new("radio-browser").link().small().px_0()
+                            .label("Stations from Radio Browser")
+                            .tab_stop(true)
+                            .on_click(|_, _, cx| cx.open_url("https://www.radio-browser.info/")),
+                    )
+                    .child(div().w(px(128.0)).min_w_0()
+                        .child(Label::new("Media Output").text_xs().text_color(theme.muted_foreground))
+                        .child(device_picker(sidebar, DeviceKind::MediaOutput, &self.spk))),
+            );
+
+        div()
+            .relative()
+            .w_full()
+            .child(panel)
+            .child(overlay_scrollbar(&self.panel_scroll))
     }
 }
 

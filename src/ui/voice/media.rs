@@ -146,7 +146,7 @@ impl RenderOnce for MediaButton {
         );
         let dot_color = cx.theme().primary;
         let popover = if primary.is_some() {
-            floating_popover(id, cx).w(width)
+            floating_popover(id, cx).w(width).p(px(12.0))
         } else {
             voice_popover(id, width, cx, move |_| {
                 voice_action_button(
@@ -195,10 +195,7 @@ impl RenderOnce for MediaButton {
     }
 }
 
-pub(in crate::ui) fn media_results(
-    scroll: &ScrollHandle,
-    results: Stateful<Div>,
-) -> impl IntoElement + use<> {
+pub(in crate::ui) fn media_results(scroll: &ScrollHandle, results: Stateful<Div>) -> Div {
     div()
         .relative()
         .child(
