@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/ChristopheCVB/spk-gpui/compare/v0.11.0...v0.12.0) (2026-11-26)
+
+
+### Features
+
+* **radio:** polish desktop Channel Radio ([#238](https://github.com/ChristopheCVB/spk-gpui/issues/238)) ([2c927a5](https://github.com/ChristopheCVB/spk-gpui/commit/2c927a537928f45978b59a5f2896a0af6a862d75))
+
 ## [0.11.0](https://github.com/ChristopheCVB/spk-gpui/compare/v0.10.0...v0.11.0) (2026-11-26)
 
 
