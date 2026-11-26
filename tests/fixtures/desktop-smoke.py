@@ -796,13 +796,25 @@ class Desktop:
         self.screenshot(logs, "radio-favorites-dark.png")
         close_radio(options, within=stage)
 
+        if self.find_node("Close search", "push button"):
+            self.click("Close search", "push button")
+
+        def options_in_minimum_window():
+            bounds = self.bounds(options, "push button", within=stage)
+            return (
+                0 <= bounds.x < bounds.x + bounds.width <= 560
+                and 0 <= bounds.y < bounds.y + bounds.height <= 440
+            )
+
         geometry = subprocess.check_output(
             ["xdotool", "getwindowgeometry", "--shell", self.window], text=True,
         )
         normal = re.findall(r"^(?:WIDTH|HEIGHT)=(\d+)$", geometry, re.MULTILINE)
         try:
             subprocess.run(["xdotool", "windowsize", "--sync", self.window, "560", "440"], check=True)
-            open_radio(options, within=stage)
+            wait_for("Radio options to settle inside the resized window", options_in_minimum_window)
+            self.click(options, "push button", within=stage)
+            wait_for("initial Channel Radio search focus", lambda: self.focused(search, "entry"))
             self.find(station, "push button")
             reduced = self.bounds("Radio stations")
             footer = self.bounds("Media Output", "combo box")
@@ -812,10 +824,9 @@ class Desktop:
             self.click("Stop for everyone", "push button")
             self.find("Find a station to play in this channel.")
             close_radio(options, within=stage)
+            self.click("Leave voice", "push button", within=stage)
         finally:
             subprocess.run(["xdotool", "windowsize", "--sync", self.window, *normal], check=True)
-        self.click(f"Show {FIRST_VOICE} voice channel", "push button")
-        self.click("Leave voice", "push button", within=stage)
         self.find(f"Join {FIRST_VOICE}", "push button")
 
     def check_radio_search(self):
