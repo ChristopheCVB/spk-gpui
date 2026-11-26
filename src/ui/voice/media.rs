@@ -140,7 +140,7 @@ impl RenderOnce for MediaButton {
         );
         let dot_color = cx.theme().primary;
         let popover = if primary.is_some() {
-            floating_popover(id, cx).w(width).p(px(12.0))
+            floating_popover(id, cx).w(width).p_0()
         } else {
             voice_popover(id, width, cx, move |_| {
                 voice_action_button(

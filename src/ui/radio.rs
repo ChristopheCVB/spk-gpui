@@ -211,6 +211,7 @@ impl Render for RadioPanel {
             return div().child(Label::new("Join a voice channel to use Radio."));
         }
         let theme = cx.theme();
+        let padding = px(12.0);
         let radio = &sidebar.radio;
         let playback_action = radio.local_action();
         let status = if playback_action == Some(RadioAction::Resume) {
@@ -371,8 +372,9 @@ impl Render for RadioPanel {
             .id("channel-radio")
             .flex()
             .flex_col()
-            .gap(px(12.0))
-            .max_h(window.viewport_size().height - px(40.0))
+            .p(padding)
+            .gap(padding)
+            .max_h(window.viewport_size().height - px(16.0))
             .overflow_y_scroll()
             .track_scroll(&self.panel_scroll)
             .child(
@@ -409,16 +411,18 @@ impl Render for RadioPanel {
             )
             .child(media_results(&self.station_scroll, results).h(px(240.0)).min_h(px(52.0)))
             .child(
-                div().flex().flex_shrink_0().items_center().justify_between().gap_2()
-                    .child(
-                        Button::new("radio-browser").link().xsmall().px_0()
-                            .label("Stations from Radio Browser")
-                            .tab_stop(true)
-                            .on_click(|_, _, cx| cx.open_url("https://www.radio-browser.info/")),
-                    )
-                    .child(div().w(px(136.0)).min_w_0()
-                        .child(Label::new("Media Output").text_xs().text_color(theme.muted_foreground))
-                        .child(device_picker(sidebar, DeviceKind::MediaOutput, &self.spk))),
+                Button::new("radio-browser").link().xsmall().px_0()
+                    .w_full().flex_shrink_0()
+                    .label("Stations from Radio Browser")
+                    .tab_stop(true)
+                    .on_click(|_, _, cx| cx.open_url("https://www.radio-browser.info/")),
+            )
+            .child(
+                div().flex().flex_col().flex_shrink_0().gap_1()
+                    .mx(-padding).px(padding).pt_2()
+                    .border_t_1().border_color(theme.border)
+                    .child(Label::new("Media Output").text_xs().text_color(theme.muted_foreground))
+                    .child(device_picker(sidebar, DeviceKind::MediaOutput, &self.spk)),
             );
 
         div()

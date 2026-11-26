@@ -792,7 +792,11 @@ class Desktop:
         volume = self.bounds("Volume (only you)")
         if slider.y < volume.y + volume.height or slider.width < 250:
             raise RuntimeError("Radio volume should be a full-width slider below its label")
-        self.find("Media Output", "combo box")
+        credit_row = self.bounds(credit, "link")
+        footer = self.bounds("Media Output", "combo box")
+        if (footer.y <= credit_row.y + credit_row.height or footer.width < 290
+                or credit_row.width != footer.width or credit_row.x != footer.x):
+            raise RuntimeError("Radio Browser and Media Output should occupy separate full-width rows")
         self.external_link("https://www.radio-browser.info/", lambda: self.click(credit, "link"))
         results = self.bounds("Radio stations")
         if not 238 <= results.height <= 242:
@@ -824,9 +828,17 @@ class Desktop:
             wait_for("initial Channel Radio search focus", lambda: self.focused(search, "entry"))
             self.find(station, "push button")
             reduced = self.bounds("Radio stations")
-            footer = self.bounds("Media Output", "combo box")
-            if not 0 < reduced.height < results.height or footer.y + footer.height > 440:
-                raise RuntimeError("Radio should shrink the station list and fit the footer at 560 × 440")
+            if not 0 < reduced.height < results.height:
+                raise RuntimeError("Radio should shrink the station list at 560 × 440")
+            if self.bounds("Media Output", "combo box").y + footer.height > 432:
+                field = self.bounds(search, "entry")
+                self.click_at(field.x - 4, field.y, 5)
+
+            def footer_visible():
+                picker = self.bounds("Media Output", "combo box")
+                return 0 <= picker.y < picker.y + picker.height <= 432
+
+            wait_for("the Media Output row to be reachable at 560 × 440", footer_visible)
             self.screenshot(logs, "radio-minimum-dark.png")
             self.click("Stop for everyone", "push button")
             self.find("Find a station to play in this channel.")
