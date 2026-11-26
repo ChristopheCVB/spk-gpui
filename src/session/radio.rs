@@ -65,6 +65,10 @@ impl Default for RadioView {
 }
 
 impl RadioView {
+    pub fn can_set_favorite(&self) -> bool {
+        self.favorites.is_some() && !self.loading_favorites && !self.saving_favorite
+    }
+
     pub fn local_action(&self) -> Option<RadioAction> {
         self.station.as_ref()?;
         Some(if !self.enabled {
@@ -104,7 +108,9 @@ impl RadioSession {
             self.player = None;
             sidebar.radio.station = None;
         }
-        sidebar.radio.can_control_channel = voice.active_socket_sid(sidebar).is_some();
+        // SPK sends the room's RadioState when the voice socket is ready.
+        sidebar.radio.can_control_channel =
+            self.revision.is_some() && voice.active_socket_sid(sidebar).is_some();
         let preferences = &sidebar.voice_intent.preferred;
         sidebar.radio.volume = preferences.radio_volume.min(200);
         let output = MediaOutput {
@@ -193,11 +199,7 @@ impl RadioSession {
             Command::RadioFavorites if !sidebar.radio.loading_favorites => {
                 self.load_favorites(&mut sidebar.radio, client);
             }
-            Command::SetRadioFavorite { id, saved }
-                if !sidebar.radio.loading_favorites
-                    && !sidebar.radio.saving_favorite
-                    && sidebar.radio.favorites.is_some() =>
-            {
+            Command::SetRadioFavorite { id, saved } if sidebar.radio.can_set_favorite() => {
                 sidebar.radio.saving_favorite = true;
                 self.tasks.spawn(async move {
                     let result = client.set_radio_favorite(&id, saved).await;
@@ -205,7 +207,10 @@ impl RadioSession {
                 });
             }
             Command::SelectRadio(_) | Command::StopRadio => {
-                let Some((socket, sid)) = voice.active_socket(sidebar) else {
+                let Some((socket, sid)) = voice
+                    .active_socket(sidebar)
+                    .filter(|_| sidebar.radio.can_control_channel)
+                else {
                     sidebar.action_results.push(ActionResult::error(
                         "Radio controls are offline. Wait for reconnection.",
                     ));

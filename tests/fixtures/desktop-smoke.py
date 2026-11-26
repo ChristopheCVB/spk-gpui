@@ -755,22 +755,29 @@ class Desktop:
                      lambda: self.focused(opener, "push button", within=within))
             self.absent(search, "entry")
 
+        def tab_through_station_actions():
+            wait_for("the station to be selectable", lambda: self.find(station, "push button")
+                     .get_state_set().contains(Atspi.StateType.SENSITIVE))
+            wait_for("the star to be enabled", lambda: self.find(add, "push button")
+                     .get_state_set().contains(Atspi.StateType.SENSITIVE))
+            self.tab_to(station, "push button")
+            self.key("Tab")
+            wait_for("the station star to be a separate Tab stop",
+                     lambda: self.focused(add, "push button"))
+
         self.click(f"Join {FIRST_VOICE}", "push button")
         self.click("smoke-target", "push button", partial=True)
         open_radio("Channel Radio")
         self.find("Find a station to play in this channel.")
+        self.key("ctrl+a")
+        subprocess.run(["xdotool", "type", "--clearmodifiers", "--", "Smoke"], check=True)
+        self.key("Return")
+        tab_through_station_actions()
         close_radio("Channel Radio")
 
         self.click(f"Show {FIRST_VOICE} voice channel", "push button")
         open_radio(options, within=stage)
-        self.key("ctrl+a")
-        subprocess.run(["xdotool", "type", "--clearmodifiers", "--", "Smoke"], check=True)
-        self.key("Return")
-        self.find(station, "push button")
-        self.tab_to(station, "push button")
-        self.key("Tab")
-        wait_for("the station star to be a separate Tab stop",
-                 lambda: self.focused(add, "push button"))
+        tab_through_station_actions()
         self.key("space")
         wait_for("focus to stay on the star after adding a Favorite",
                  lambda: self.focused(remove, "push button"))
@@ -864,7 +871,7 @@ class Desktop:
         self.click("All stations", button)
         self.find(jazz, button)
         self.find(soul, button)
-        if self.find(search, "entry").get_text_iface().get_text(0, -1) != "Soul":
+        if Atspi.Text.get_text(self.find(search, "entry"), 0, -1) != "Soul":
             raise RuntimeError("Switching Radio tabs discarded the shared input")
         self.click("Favorites", button)
         self.find("No Favorites match.")
@@ -873,7 +880,7 @@ class Desktop:
         self.click("Radio options", button)
         self.find(jazz, button)
         self.find(soul, button)
-        if self.find(search, "entry").get_text_iface().get_text(0, -1) != "Smoke":
+        if Atspi.Text.get_text(self.find(search, "entry"), 0, -1) != "Smoke":
             raise RuntimeError("Radio did not reopen with the query for its retained results")
         wait_for("the Favorites refresh to enable the star", lambda: self.find(remove, button)
                  .get_state_set().contains(Atspi.StateType.SENSITIVE))

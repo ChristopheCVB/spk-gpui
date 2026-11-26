@@ -183,11 +183,7 @@ impl RadioPanel {
             .child(
                 tool_button("favorite", IconName::Star, favorite_label)
                     .selected(favorite)
-                    .disabled(
-                        radio.favorites.is_none()
-                            || radio.loading_favorites
-                            || radio.saving_favorite,
-                    )
+                    .disabled(!radio.can_set_favorite())
                     .when(favorite, |button| button.text_color(cx.theme().primary))
                     .on_click(cx.listener(move |panel, _, _, cx| {
                         panel.send(
