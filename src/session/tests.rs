@@ -356,6 +356,7 @@ enum SidebarSnapshot {
     VoiceReplaced,
     FailPresenceOnce,
     DelayUserPresence,
+    ControlledRadioDirectory,
     VoiceModeration {
         role: &'static str,
         channel: Option<&'static str>,
@@ -435,6 +436,7 @@ async fn voice_session_with_limit(
                     SidebarSnapshot::Initial
                     | SidebarSnapshot::AccountAdmin { .. }
                     | SidebarSnapshot::FailPresenceOnce
+                    | SidebarSnapshot::ControlledRadioDirectory
                     | SidebarSnapshot::DelayUserPresence => "[]",
                     SidebarSnapshot::VoiceModeration {
                         channel: Some(channel),
@@ -526,6 +528,13 @@ async fn voice_session_with_limit(
                     continue;
                 }
                 "GET /api/users/presence HTTP/1.1" => "{}",
+                line if line.contains(" /api/radio/")
+                    && matches!(snapshot, SidebarSnapshot::ControlledRadioDirectory) =>
+                {
+                    assert_eq!(request.header("cookie"), Some("session=fixture"));
+                    token_requests.send(request).await.unwrap();
+                    continue;
+                }
                 line if line.contains(" /api/radio/") => {
                     radio::respond(line, request, &mut radio_favorite).await;
                     continue;

@@ -40,6 +40,14 @@ WEB_REPO = "https://github.com/meeehdi-dev/spk.git"
 WEB_REVISION = "43613954d119eae4fd30e25a1f969b4327c58e89"
 R2_SIGNER = "server/utils/r2sign.ts"
 R2_ORIGIN = b"https://${c.accountId}.r2.cloudflarestorage.com"
+RADIO_DIRECTORY = "server/utils/radioApi.ts"
+RADIO_STATIONS = [
+    {"id": f"23456789-1111-4ccc-8aaa-123456789ab{index}", "name": f"Smoke {name}",
+     "country": country, "codec": codec, "url": "https://radio.example.invalid/smoke.mp3"}
+    for index, (name, country, codec) in enumerate(
+        (("Jazz", "FR", "MP3"), ("Soul", "US", "AAC"), ("News", "GB", "MP3")),
+    )
+]
 EMAIL = "reader@spk.test"
 ADMIN_EMAIL = "author@spk.test"
 PASSWORD = "fixture-password-42"
@@ -98,9 +106,40 @@ def service(args, log, cwd, env, stdin=None):
                 process.wait()
 
 
-def replace_signer(web, staging, content):
+def replace_web_file(web, path, staging, content):
     staging.write_bytes(content)
-    staging.replace(web / R2_SIGNER)
+    staging.replace(web / path)
+
+
+def radio_directory_source():
+    # Leave SPK's authenticated endpoints, Favorites database, and voice commands in place.
+    return f"""import type {{ RadioStation }} from '../../shared/utils/radio'
+const stations: RadioStation[] = {json.dumps(RADIO_STATIONS)}
+export const isStationId = (id: unknown): id is string =>
+  typeof id === 'string' && /^[0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}}$/i.test(id)
+export const searchRadioStations = async (query: string) =>
+  stations.filter(station => station.name.toLowerCase().includes(query.trim().toLowerCase()))
+export async function getRadioStation(id: string) {{
+  const station = stations.find(station => station.id === id)
+  if (!station) throw new Error('Unknown fixture station')
+  return station
+}}
+export const getRadioStationSummaries = async (ids: string[]) =>
+  stations.filter(station => ids.includes(station.id)).map(({{ id, name, country, codec }}) =>
+    ({{ id, name, country, codec }}))
+export const countRadioClick = async (_id: string) => {{}}
+""".encode()
+
+
+@contextmanager
+def radio_directory(web, attempt):
+    original = (web / RADIO_DIRECTORY).read_bytes()
+    staging = attempt / "radioApi.ts"
+    replace_web_file(web, RADIO_DIRECTORY, staging, radio_directory_source())
+    try:
+        yield
+    finally:
+        replace_web_file(web, RADIO_DIRECTORY, staging, original)
 
 
 def web_checkout(work, logs, attempt):
@@ -121,17 +160,23 @@ def web_checkout(work, logs, attempt):
         ["git", "-C", web, "rev-parse", "--verify", "HEAD"],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
     ).stdout.strip()
-    if changes:
-        if revision != WEB_REVISION or changes != f" M {R2_SIGNER}\n".encode():
+    for change in changes.decode().splitlines():
+        if revision != WEB_REVISION or change not in (f" M {R2_SIGNER}", f" M {RADIO_DIRECTORY}"):
             raise RuntimeError(f"Pinned SPK Web checkout has local changes: {web}")
-        original = subprocess.check_output(["git", "-C", web, "show", f"HEAD:{R2_SIGNER}"])
-        # Recover only the routing substitution, including the last attempt's ephemeral port.
-        patched = re.escape(original).replace(
-            re.escape(R2_ORIGIN), rb"http://127\.0\.0\.1:[1-9][0-9]{0,4}",
-        )
-        if original.count(R2_ORIGIN) != 1 or not re.fullmatch(patched, (web / R2_SIGNER).read_bytes()):
+        path = change[3:]
+        original = subprocess.check_output(["git", "-C", web, "show", f"HEAD:{path}"])
+        content = (web / path).read_bytes()
+        if path == R2_SIGNER:
+            # Recover the routing substitution, including the last attempt's ephemeral port.
+            patched = re.escape(original).replace(
+                re.escape(R2_ORIGIN), rb"http://127\.0\.0\.1:[1-9][0-9]{0,4}",
+            )
+            known_patch = original.count(R2_ORIGIN) == 1 and re.fullmatch(patched, content)
+        else:
+            known_patch = content == radio_directory_source()
+        if not known_patch:
             raise RuntimeError(f"Pinned SPK Web checkout has local changes: {web}")
-        replace_signer(web, attempt / "r2sign.ts", original)
+        replace_web_file(web, path, attempt / Path(path).name, original)
     if revision != WEB_REVISION:
         subprocess.run(["git", "-C", web, "fetch", "--depth=1", "origin", WEB_REVISION], check=True)
         subprocess.run(["git", "-C", web, "checkout", "--detach", WEB_REVISION], check=True)
@@ -204,7 +249,7 @@ def sound_storage(web, directory, log):
         thread = Thread(target=storage.serve_forever, daemon=True)
         # Keep the real presign and save handlers. Only their fixture object-store origin changes.
         staging = directory / "r2sign.ts"
-        replace_signer(web, staging, original.replace(R2_ORIGIN, origin.encode()))
+        replace_web_file(web, R2_SIGNER, staging, original.replace(R2_ORIGIN, origin.encode()))
         thread.start()
         try:
             yield {
@@ -216,7 +261,7 @@ def sound_storage(web, directory, log):
         finally:
             storage.shutdown()
             thread.join()
-            replace_signer(web, staging, original)
+            replace_web_file(web, R2_SIGNER, staging, original)
 
 
 def sound_sources(directory):
@@ -689,6 +734,72 @@ class Desktop:
         self.open_voice_channel_menu(FIRST_VOICE, "Leave voice")
         self.click("Leave voice", "menu item")
         self.find(f"Join {FIRST_VOICE}", "push button")
+
+    def check_radio_search(self):
+        button = "push button"
+        search = "Search radio stations"
+        favorites = "Filter Favorites"
+        jazz = "Play Smoke Jazz for everyone"
+        soul = "Play Smoke Soul for everyone"
+        add = "Add Smoke Jazz to Favorites"
+        remove = "Remove Smoke Jazz from Favorites"
+
+        def query(field, value):
+            self.click(field, "entry")
+            self.key("ctrl+a")
+            subprocess.run(["xdotool", "type", "--clearmodifiers", "--", value], check=True)
+
+        self.click(f"Join {FIRST_VOICE}", button)
+        self.find(f"Switch to {SECOND_VOICE}", button)
+        self.click("Radio options", button)
+        self.click("Favorites", button)
+        self.find("No saved stations.")
+        self.click("All stations", button)
+        query(search, " x ")
+        self.key("Return")
+        self.find("Search must contain 2–100 characters.")
+        query(search, "Missing")
+        self.click("Find stations", button)
+        self.find("No stations found.")
+        query(search, "Smoke")
+        self.absent(jazz, button)
+        self.find("No stations found.")
+        self.key("Return")
+        self.find(jazz, button)
+        self.find(soul, button)
+        self.click(add, button)
+        self.find(remove, button)
+        self.click("Favorites", button)
+        self.find(jazz, button)
+        self.absent(soul, button)
+        query(favorites, "  JAZZ  ")
+        self.find(jazz, button)
+        query(favorites, "Soul")
+        self.find("No Favorites match.")
+        self.key("Return")
+        self.find("No Favorites match.")
+        self.click("All stations", button)
+        self.find(jazz, button)
+        self.find(soul, button)
+        if self.find(search, "entry").get_text_iface().get_text(0, -1) != "Soul":
+            raise RuntimeError("Switching Radio tabs discarded the shared input")
+        self.click("Favorites", button)
+        self.find("No Favorites match.")
+        self.key("Escape")
+        wait_for("Channel Radio to close", lambda: self.find_node(favorites, "entry") is None)
+        self.click("Radio options", button)
+        self.find(jazz, button)
+        self.find(soul, button)
+        if self.find(search, "entry").get_text_iface().get_text(0, -1) != "Smoke":
+            raise RuntimeError("Radio did not reopen with the query for its retained results")
+        self.click(remove, button)
+        self.find(add, button)
+        self.click("Favorites", button)
+        self.find("No saved stations.")
+        self.key("Escape")
+        self.open_voice_channel_menu(FIRST_VOICE, "Leave voice")
+        self.click("Leave voice", "menu item")
+        self.find(f"Join {FIRST_VOICE}", button)
 
     def check_admin_menus(self, logs, admin, server, check_settings):
         person = "Smoke Reader"
@@ -1529,6 +1640,7 @@ def main(work, artifacts):
     Atspi.init()
     with ((logs / "sound-storage.log").open("w") as storage_log,
           sound_storage(web, attempt / "sound-storage", storage_log) as r2,
+          radio_directory(web, attempt),
           livekit_server(attempt, logs / "livekit.log") as (signaling, key, secret),
           silent_audio(attempt, logs / "pulse.log", env)):
         livekit = f"ws://127.0.0.1:{signaling}"
@@ -1545,6 +1657,7 @@ def main(work, artifacts):
                 desktop.sign_in(EMAIL, "Smoke Reader")
                 desktop.check(post_live_alert, logs)
                 desktop.check_reader_menus(logs)
+                desktop.check_radio_search()
                 desktop.check_incoming_toast(logs, send_message, alerts, reader)
                 desktop.check_upload_recovery()
                 desktop.check_sidebar_resize_retries_save(Path(env["XDG_CONFIG_HOME"]) / "spk-gpui")

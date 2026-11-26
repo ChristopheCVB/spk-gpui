@@ -1433,11 +1433,8 @@ async fn watch_session(
             }
             () = RadioSession::playback_changed(&mut radio.player) => {}
             Some(Ok((id, result))) = radio.tasks.join_next_with_id() => {
-                if let Err(error) = radio.complete(&mut sidebar, id, result) {
-                    if error.unauthorized() {
-                        break SessionEnd::Invalidated(SESSION_EXPIRED);
-                    }
-                    sidebar.radio.directory_error = Some("Could not load radio stations. Try again.");
+                if radio.complete(&mut sidebar, client, id, result).is_err_and(|error| error.unauthorized()) {
+                    break SessionEnd::Invalidated(SESSION_EXPIRED);
                 }
             }
             Some(Ok((id, result))) = soundboard.tasks.join_next_with_id() => {

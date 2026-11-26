@@ -14,28 +14,34 @@ pub use crate::voice::radio::RadioPlayback;
 #[derive(Clone)]
 pub struct RadioView {
     pub station: Option<RadioStation>,
+    pub search_query: String,
     pub stations: Option<Vec<RadioStation>>,
     pub favorites: Option<Vec<RadioStation>>,
     pub searching: bool,
     pub loading_favorites: bool,
+    pub saving_favorite: bool,
     pub enabled: bool,
     pub volume: u8,
     pub playback: RadioPlayback,
-    pub directory_error: Option<&'static str>,
+    pub search_error: Option<&'static str>,
+    pub favorites_error: Option<&'static str>,
 }
 
 impl Default for RadioView {
     fn default() -> Self {
         Self {
             station: None,
+            search_query: String::new(),
             stations: None,
             favorites: None,
             searching: false,
             loading_favorites: false,
+            saving_favorite: false,
             enabled: true,
             volume: 100,
             playback: RadioPlayback::Idle,
-            directory_error: None,
+            search_error: None,
+            favorites_error: None,
         }
     }
 }
@@ -54,6 +60,7 @@ pub(super) struct RadioSession {
     pub(super) player: Option<RadioPlayer>,
     player_device: Option<Device>,
     search: Option<AbortHandle>,
+    refresh_favorites_after_write: bool,
     pub tasks: JoinSet<RadioResult>,
 }
 
@@ -134,28 +141,32 @@ impl RadioSession {
                 if let Some(previous) = self.search.take() {
                     previous.abort();
                 }
+                let radio = &mut sidebar.radio;
                 let query = query.trim().to_owned();
-                sidebar.radio.stations = None;
-                sidebar.radio.directory_error = None;
-                sidebar.radio.searching = (2..=100).contains(&query.encode_utf16().count());
-                if sidebar.radio.searching {
+                radio.search_query = query.clone();
+                radio.stations = None;
+                radio.search_error = None;
+                radio.searching = (2..=100).contains(&query.encode_utf16().count());
+                if radio.searching {
                     self.search = Some(self.tasks.spawn(async move {
                         RadioResult::Search(client.radio_stations(&query).await)
                     }));
                 } else {
-                    sidebar.radio.directory_error = Some("Search must contain 2–100 characters.");
+                    radio.search_error = Some("Search must contain 2–100 characters.");
                 }
             }
+            Command::RadioFavorites if sidebar.radio.saving_favorite => {
+                self.refresh_favorites_after_write = true;
+            }
             Command::RadioFavorites if !sidebar.radio.loading_favorites => {
-                sidebar.radio.loading_favorites = true;
-                sidebar.radio.directory_error = None;
-                self.tasks
-                    .spawn(async move { RadioResult::Favorites(client.radio_favorites().await) });
+                self.load_favorites(&mut sidebar.radio, client);
             }
             Command::SetRadioFavorite { id, saved }
-                if !sidebar.radio.loading_favorites && sidebar.radio.favorites.is_some() =>
+                if !sidebar.radio.loading_favorites
+                    && !sidebar.radio.saving_favorite
+                    && sidebar.radio.favorites.is_some() =>
             {
-                sidebar.radio.loading_favorites = true;
+                sidebar.radio.saving_favorite = true;
                 self.tasks.spawn(async move {
                     let result = client.set_radio_favorite(&id, saved).await;
                     RadioResult::Favorite(id, result)
@@ -202,9 +213,17 @@ impl RadioSession {
         }
     }
 
+    fn load_favorites(&mut self, radio: &mut RadioView, client: SpkClient) {
+        radio.loading_favorites = true;
+        radio.favorites_error = None;
+        self.tasks
+            .spawn(async move { RadioResult::Favorites(client.radio_favorites().await) });
+    }
+
     pub fn complete(
-        &self,
+        &mut self,
         sidebar: &mut Sidebar,
+        client: &SpkClient,
         id: Id,
         result: RadioResult,
     ) -> Result<(), Failure> {
@@ -214,29 +233,43 @@ impl RadioSession {
                 if self.search.as_ref().is_some_and(|search| search.id() == id) =>
             {
                 radio.searching = false;
-                radio.stations = Some(result?);
+                match result {
+                    Ok(stations) => radio.stations = Some(stations),
+                    Err(error) if error.unauthorized() => return Err(error),
+                    Err(_) => {
+                        radio.search_error = Some("Could not search radio stations. Try again.")
+                    }
+                }
             }
             RadioResult::Search(_) => {}
             RadioResult::Favorites(result) => {
                 radio.loading_favorites = false;
-                radio.favorites = Some(result?);
-            }
-            RadioResult::Favorite(id, result) => {
-                radio.loading_favorites = false;
-                let favorite = match result {
-                    Ok(favorite) => favorite,
+                match result {
+                    Ok(favorites) => radio.favorites = Some(favorites),
                     Err(error) if error.unauthorized() => return Err(error),
                     Err(_) => {
-                        sidebar.action_results.push(ActionResult::error(
-                            "Could not update radio Favorites. Try again.",
-                        ));
-                        return Ok(());
+                        radio.favorites_error =
+                            Some("Could not load Favorites. Reopen Radio to try again.");
                     }
-                };
-                let favorites = radio.favorites.get_or_insert_default();
-                favorites.retain(|station| station.id != id);
-                favorites.extend(favorite);
-                favorites.sort_by_cached_key(|station| station.name.to_lowercase());
+                }
+            }
+            RadioResult::Favorite(id, result) => {
+                radio.saving_favorite = false;
+                match result {
+                    Ok(favorite) => {
+                        let favorites = radio.favorites.get_or_insert_default();
+                        favorites.retain(|station| station.id != id);
+                        favorites.extend(favorite);
+                        favorites.sort_by_cached_key(|station| station.name.to_lowercase());
+                    }
+                    Err(error) if error.unauthorized() => return Err(error),
+                    Err(_) => sidebar.action_results.push(ActionResult::error(
+                        "Could not update radio Favorites. Try again.",
+                    )),
+                }
+                if std::mem::take(&mut self.refresh_favorites_after_write) {
+                    self.load_favorites(radio, client.clone());
+                }
             }
             RadioResult::Sent(sid, result) => {
                 if result.is_err() && self.scope.as_deref() == Some(&sid) {

@@ -42,6 +42,166 @@ pub(super) async fn respond(line: &str, request: Request, favorite: &mut bool) {
 }
 
 #[tokio::test]
+async fn channel_radio_keeps_only_the_latest_search_and_scopes_directory_errors() {
+    let (first_search_received, first_search_ready) = tokio::sync::oneshot::channel();
+    let (latest_search_visible, stale_search_can_finish) = tokio::sync::oneshot::channel();
+    let end = voice_session(
+        Call::start_for_test,
+        async |sockets, requests, snapshots| {
+            snapshots.send_replace(SidebarSnapshot::ControlledRadioDirectory);
+            let mut socket = accept_async(sockets.accept().await.unwrap().0)
+                .await
+                .unwrap();
+            let first = requests.recv().await.unwrap();
+            assert_eq!(first.line, "GET /api/radio/stations?q=First HTTP/1.1");
+            first_search_received.send(()).unwrap();
+            let latest = requests.recv().await.unwrap();
+            assert_eq!(latest.line, "GET /api/radio/stations?q=Latest HTTP/1.1");
+            latest
+                .respond(&[], &value!([station("Latest")]).to_string())
+                .await;
+            stale_search_can_finish.await.unwrap();
+            first
+                .respond(&[], &value!([station("Stale")]).to_string())
+                .await;
+            let favorites = requests.recv().await.unwrap();
+            assert_eq!(favorites.line, "GET /api/radio/favorites HTTP/1.1");
+            favorites
+                .respond_raw("503 Service Unavailable", &[], b"{}")
+                .await;
+            let failure = requests.recv().await.unwrap();
+            assert_eq!(failure.line, "GET /api/radio/stations?q=Failure HTTP/1.1");
+            failure
+                .respond_raw("503 Service Unavailable", &[], b"{}")
+                .await;
+            while socket.next().await.is_some() {}
+        },
+        async |commands, views| {
+            commands
+                .send(Command::SearchRadio("First".into()))
+                .await
+                .unwrap();
+            first_search_ready.await.unwrap();
+            commands
+                .send(Command::SearchRadio("Latest".into()))
+                .await
+                .unwrap();
+            wait_for_sidebar(&views, |s| {
+                s.radio
+                    .stations
+                    .as_ref()
+                    .is_some_and(|stations| stations[0].name == "Latest")
+            })
+            .await;
+            latest_search_visible.send(()).unwrap();
+            commands.send(Command::RadioFavorites).await.unwrap();
+            wait_for_sidebar(&views, |s| s.radio.loading_favorites).await;
+            let state = wait_for_sidebar(&views, |s| !s.radio.loading_favorites).await;
+            assert_eq!(state.radio.stations.as_ref().unwrap()[0].name, "Latest");
+            assert!(
+                state.radio.search_error.is_none(),
+                "a Favorites load failure must leave the search view intact"
+            );
+            assert_eq!(
+                state.radio.favorites_error,
+                Some("Could not load Favorites. Reopen Radio to try again.")
+            );
+            commands
+                .send(Command::SearchRadio("Failure".into()))
+                .await
+                .unwrap();
+            let state = wait_for_sidebar(&views, |s| s.radio.search_error.is_some()).await;
+            assert_eq!(
+                state.radio.search_error,
+                Some("Could not search radio stations. Try again.")
+            );
+            assert!(state.radio.favorites_error.is_some());
+        },
+    )
+    .await;
+    assert!(matches!(end, SessionEnd::Closed));
+}
+
+#[tokio::test]
+async fn channel_radio_keeps_a_failed_removal_and_refreshes_after_the_pending_write() {
+    let (write_received, write_pending) = tokio::sync::oneshot::channel();
+    let (reopen_processed, fail_write) = tokio::sync::oneshot::channel();
+    let end = voice_session(
+        Call::start_for_test,
+        async |sockets, requests, snapshots| {
+            snapshots.send_replace(SidebarSnapshot::ControlledRadioDirectory);
+            let mut socket = accept_async(sockets.accept().await.unwrap().0)
+                .await
+                .unwrap();
+            let confirmed = value!([station("Saved jazz")]).to_string();
+            let initial = requests.recv().await.unwrap();
+            assert_eq!(initial.line, "GET /api/radio/favorites HTTP/1.1");
+            initial.respond(&[], &confirmed).await;
+            let write = requests.recv().await.unwrap();
+            assert_eq!(
+                write.line,
+                format!("DELETE /api/radio/favorites/{STATION} HTTP/1.1")
+            );
+            write_received.send(()).unwrap();
+            fail_write.await.unwrap();
+            write
+                .respond_raw("503 Service Unavailable", &[], b"{}")
+                .await;
+            let refresh = requests.recv().await.unwrap();
+            assert_eq!(refresh.line, "GET /api/radio/favorites HTTP/1.1");
+            refresh.respond(&[], &confirmed).await;
+            while socket.next().await.is_some() {}
+        },
+        async |commands, views| {
+            commands.send(Command::RadioFavorites).await.unwrap();
+            wait_for_sidebar(&views, |s| s.radio.favorites.is_some()).await;
+            let remove = || Command::SetRadioFavorite {
+                id: STATION.into(),
+                saved: false,
+            };
+            commands.send(remove()).await.unwrap();
+            write_pending.await.unwrap();
+            commands.send(remove()).await.unwrap();
+            commands.send(Command::RadioFavorites).await.unwrap();
+            commands
+                .send(Command::SearchRadio("x".repeat(101)))
+                .await
+                .unwrap();
+            let state = wait_for_sidebar(&views, |s| s.radio.search_error.is_some()).await;
+            assert_eq!(
+                state.radio.search_error,
+                Some("Search must contain 2–100 characters.")
+            );
+            assert!(state.radio.saving_favorite);
+            assert_eq!(
+                state.radio.favorites.as_ref().unwrap()[0].name,
+                "Saved jazz"
+            );
+            reopen_processed.send(()).unwrap();
+            let failed = wait_for_sidebar(&views, |s| {
+                s.action_results
+                    == [ActionResult::error(
+                        "Could not update radio Favorites. Try again.",
+                    )]
+            })
+            .await;
+            assert_eq!(
+                failed.radio.favorites.as_ref().unwrap()[0].name,
+                "Saved jazz"
+            );
+            assert!(failed.radio.loading_favorites);
+            let refreshed = wait_for_sidebar(&views, |s| !s.radio.loading_favorites).await;
+            assert_eq!(
+                refreshed.radio.favorites.as_ref().unwrap()[0].name,
+                "Saved jazz"
+            );
+        },
+    )
+    .await;
+    assert!(matches!(end, SessionEnd::Closed));
+}
+
+#[tokio::test]
 async fn channel_radio_uses_shared_station_and_local_controls() {
     let end =
         voice_session(
@@ -161,7 +321,7 @@ async fn channel_radio_uses_shared_station_and_local_controls() {
                         .as_ref()
                         .is_some_and(Vec::is_empty)
                 );
-                assert!(failed_favorite.radio.directory_error.is_none());
+                assert!(failed_favorite.radio.favorites_error.is_none());
                 commands
                     .send(Command::SetRadioFavorite {
                         id: STATION.into(),
