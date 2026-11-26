@@ -203,6 +203,7 @@ async fn channel_radio_keeps_a_failed_removal_and_refreshes_after_the_pending_wr
 
 #[tokio::test]
 async fn channel_radio_uses_shared_station_and_local_controls() {
+    let (pre_ready_checked, send_initial_state) = oneshot::channel();
     let end =
         voice_session(
             Call::start_for_test,
@@ -217,6 +218,17 @@ async fn channel_radio_uses_shared_station_and_local_controls() {
             }).to_string())).await.unwrap();
                 let join = establish_voice(&requests, &mut socket).await;
                 let sid = &join["sid"];
+                send_initial_state.await.unwrap();
+                socket
+                    .send(Message::text(
+                        value!({
+                            "type":"voice:radio:state","sid":sid,"channelId":"first",
+                            "revision":0,"station":null,
+                        })
+                        .to_string(),
+                    ))
+                    .await
+                    .unwrap();
                 assert_eq!(
                     receive_voice_frame(&mut socket).await,
                     value!({"type":"voice:radio:set","sid": sid,"stationId":STATION})
@@ -288,7 +300,22 @@ async fn channel_radio_uses_shared_station_and_local_controls() {
                 .await;
                 assert!(!outside.radio.can_control_channel);
                 assert_eq!(outside.radio.local_action(), None);
-                join_test_voice(&commands, &views).await;
+                request_first_voice(&commands, &views).await;
+                let joined = wait_for_sidebar(&views, shows_alice_speaking).await;
+                assert!(!joined.radio.can_control_channel);
+                commands
+                    .send(Command::SelectRadio(STATION.into()))
+                    .await
+                    .unwrap();
+                wait_for_sidebar(&views, |s| {
+                    s.action_results
+                        == [ActionResult::error(
+                            "Radio controls are offline. Wait for reconnection.",
+                        )]
+                })
+                .await;
+                pre_ready_checked.send(()).unwrap();
+                wait_for_sidebar(&views, |s| s.radio.can_control_channel).await;
                 commands.send(Command::RadioFavorites).await.unwrap();
                 wait_for_sidebar(&views, |s| s.radio.favorites.is_some()).await;
                 commands
